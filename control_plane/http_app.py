@@ -41,6 +41,9 @@ from control_plane import (
     route_binding_external_reconcile as control_plane_route_binding_external_reconcile,
 )
 from control_plane import route_binding_reconcile as control_plane_route_binding_reconcile
+from control_plane import (
+    route_binding_refresh_controller as control_plane_route_binding_refresh_controller,
+)
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
 from control_plane import live_target_runtime as control_plane_live_target_runtime
@@ -130,6 +133,7 @@ from control_plane.contracts.every_code_work_request import (
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
+    complete_launchplane_mutation_reservation,
 )
 from control_plane.provider_operations import (
     DurableProviderMutationAdapter,
@@ -520,6 +524,8 @@ from control_plane.storage.product_authority_bundle import ProductAuthorityBundl
 from control_plane.storage.postgres import (
     DbOnlyMutationPreflightResult,
     DbOnlyMutationRequest,
+    MutationReservationCompletionResult,
+    MutationReservationResult,
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
     RouteBindingReconcileWriteResult,
@@ -654,6 +660,8 @@ _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/ap
 _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE = "/v1/route-bindings/external/reconcile"
 _ROUTE_BINDING_RECONCILE_ROUTE = "/v1/route-bindings/reconcile"
+_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE = "/v1/route-bindings/odoo-testing/controller/run-once"
+_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT = 25
 _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/apply"
 _PRODUCT_PREVIEW_TLS_APPLY_ROUTE = "/v1/product-profiles/preview-tls/apply"
@@ -1811,6 +1819,33 @@ class RouteBindingReconcileEnvelope(BaseModel):
         return self
 
 
+class OdooTestingRouteBindingRefreshEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    reason: str = ""
+    confirmation: str = ""
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "OdooTestingRouteBindingRefreshEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Odoo testing route binding refresh schema version")
+        self.reason = self.reason.strip()
+        self.confirmation = self.confirmation.strip()
+        if not self.reason:
+            raise ValueError("Odoo testing route binding refresh requires a reason")
+        if self.mode == "apply" and (
+            self.confirmation != "APPLY ODOO TESTING ROUTE BINDING REFRESH"
+        ):
+            raise ValueError(
+                "Odoo testing route binding refresh apply requires exact confirmation text"
+            )
+        if self.mode == "dry-run" and self.confirmation:
+            raise ValueError("Odoo testing route binding refresh dry-run rejects confirmation")
+        return self
+
+
 class ExternalRouteBindingReconcileEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1959,6 +1994,37 @@ class _RouteBindingMutationStore(_RouteBindingReconcileStore, Protocol):
         replacement_record: EnvironmentRouteBindingRecord,
         mutation: DbOnlyMutationRequest,
     ) -> RouteBindingReconcileWriteResult: ...
+
+
+class _RouteBindingRefreshControllerReadStore(
+    control_plane_route_binding_refresh_controller.RouteBindingRefreshControllerStore,
+    Protocol,
+): ...
+
+
+class _RouteBindingRefreshControllerStore(
+    _RouteBindingRefreshControllerReadStore,
+    _RouteBindingMutationStore,
+    Protocol,
+):
+    def reserve_mutation(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        lease_owner: str,
+        lease_seconds: int = 300,
+        reconciliation_key: str = "",
+        provider_target_key: str = "",
+    ) -> MutationReservationResult: ...
+
+    def complete_mutation_reservation(
+        self,
+        *,
+        completion: LaunchplaneIdempotencyRecord,
+    ) -> MutationReservationCompletionResult: ...
 
 
 class _ExternalRouteBindingMutationStore(_ExternalRouteBindingReconcileStore, Protocol):
@@ -2272,6 +2338,42 @@ def require_route_binding_mutation_store(record_store: object) -> _RouteBindingM
             f"{missing_summary}"
         )
     return cast(_RouteBindingMutationStore, route_binding_store)
+
+
+def require_route_binding_refresh_controller_read_store(
+    record_store: object,
+) -> _RouteBindingRefreshControllerReadStore:
+    route_binding_store = require_route_binding_reconcile_store(record_store)
+    if not callable(getattr(route_binding_store, "list_product_profile_records", None)):
+        raise TypeError(
+            "Launchplane record store does not support Odoo testing route binding refresh "
+            "target discovery: list_product_profile_records"
+        )
+    return cast(_RouteBindingRefreshControllerReadStore, route_binding_store)
+
+
+def require_route_binding_refresh_controller_store(
+    record_store: object,
+) -> _RouteBindingRefreshControllerStore:
+    route_binding_store = require_route_binding_refresh_controller_read_store(record_store)
+    required_methods = (
+        "prepare_db_only_mutation",
+        "reserve_mutation",
+        "complete_mutation_reservation",
+        "reconcile_route_binding_record",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(route_binding_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support atomic Odoo testing route binding "
+            f"refresh: {missing_summary}"
+        )
+    return cast(_RouteBindingRefreshControllerStore, route_binding_store)
 
 
 def require_external_route_binding_mutation_store(
@@ -12923,6 +13025,404 @@ def create_launchplane_fastapi_app(
             ),
         )
 
+    async def run_odoo_testing_route_binding_refresh(
+        request: Request,
+        refresh_request: OdooTestingRouteBindingRefreshEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        controller_action = (
+            "route_binding.odoo_testing_refresh.apply"
+            if refresh_request.mode == "apply"
+            else "route_binding.odoo_testing_refresh.plan"
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=controller_action,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot run the Odoo testing route binding refresh controller.",
+            )
+        if refresh_request.mode == "apply" and not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message=(
+                    "Odoo testing route binding refresh apply requires an Idempotency-Key header."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            _,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=False,
+        )
+        try:
+            controller_store = require_route_binding_refresh_controller_read_store(record_store)
+            mutation_store = (
+                require_route_binding_refresh_controller_store(record_store)
+                if refresh_request.mode == "apply"
+                else None
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+
+        try:
+            controller_plan = control_plane_route_binding_refresh_controller.plan_odoo_testing_route_binding_refresh(
+                record_store=controller_store,
+                evaluated_at=utc_now_timestamp(),
+                target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
+            )
+        except (
+            control_plane_route_binding_refresh_controller.RouteBindingRefreshTargetLimitExceeded
+        ) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="route_binding_refresh_target_limit_exceeded",
+                message=str(error),
+            ) from error
+        except (
+            control_plane_route_binding_refresh_controller.RouteBindingRefreshTargetInvariantError
+        ) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="route_binding_refresh_target_invalid",
+                message=str(error),
+            ) from error
+        binding_action = (
+            "route_binding.apply" if refresh_request.mode == "apply" else "route_binding.read"
+        )
+        for outcome in controller_plan.outcomes:
+            ensure_route_binding_allowed(
+                identity=identity,
+                trace_id=trace_id,
+                action=binding_action,
+                product=outcome.product,
+                context_name=outcome.context,
+                instance_name=outcome.instance,
+                message=("Workflow cannot refresh a discovered Odoo testing route binding."),
+            )
+
+        controller_reservation: LaunchplaneIdempotencyRecord | None = None
+        if refresh_request.mode == "apply":
+            if mutation_store is None:
+                raise RuntimeError(
+                    "Odoo testing route binding refresh apply requires a mutation store."
+                )
+            preflight = mutation_store.prepare_db_only_mutation(
+                scope=idempotency_scope(identity),
+                route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint=payload_fingerprint,
+            )
+            if preflight.status not in {"missing", "released"}:
+                if preflight.record is None:
+                    raise RuntimeError(
+                        "Odoo testing route binding refresh preflight requires evidence."
+                    )
+                if preflight.status == "replayed":
+                    return replay_idempotent_response(
+                        trace_id=trace_id,
+                        stored_record=preflight.record,
+                        route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                    )
+                if preflight.status == "conflict":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different "
+                            "Launchplane request payload on this route."
+                        ),
+                    )
+                if preflight.status == "in_progress":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_in_progress",
+                        message=(
+                            "A matching Odoo testing route-binding refresh is already "
+                            "running. Retry with the same Idempotency-Key."
+                        ),
+                    )
+                if preflight.status == "reconcile_required":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_reconciliation_required",
+                        message=(
+                            "The prior Odoo testing route-binding refresh requires "
+                            "reconciliation before retry."
+                        ),
+                    )
+                raise RuntimeError(
+                    "Unsupported Odoo testing route-binding refresh preflight status: "
+                    f"{preflight.status}"
+                )
+            reservation_result = mutation_store.reserve_mutation(
+                scope=idempotency_scope(identity),
+                route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint=payload_fingerprint,
+                lease_owner=f"{trace_id}:controller",
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+            )
+            if reservation_result.status == "acquired":
+                controller_reservation = reservation_result.record
+            elif reservation_result.status == "replayed":
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=reservation_result.record,
+                    route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                )
+            elif reservation_result.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            elif reservation_result.status in {"in_progress", "target_busy"}:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching Odoo testing route-binding refresh is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            elif reservation_result.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The prior Odoo testing route-binding refresh requires "
+                        "reconciliation before retry."
+                    ),
+                )
+            else:
+                raise RuntimeError(
+                    "Unsupported Odoo testing route-binding refresh reservation status: "
+                    f"{reservation_result.status}"
+                )
+
+        result_outcomes: list[dict[str, object]] = []
+        for outcome in controller_plan.outcomes:
+            outcome_payload = outcome.model_dump(mode="json", exclude_none=True)
+            outcome_payload.pop("reconcile_plan", None)
+            if refresh_request.mode == "dry-run" or outcome.status != "planned_refresh":
+                result_outcomes.append(outcome_payload)
+                continue
+            reconcile_plan = outcome.reconcile_plan
+            if (
+                reconcile_plan is None
+                or reconcile_plan.current_record is None
+                or reconcile_plan.record is None
+                or reconcile_plan.operation != "refresh"
+            ):
+                outcome_payload["status"] = "conflict"
+                outcome_payload["findings"] = [
+                    {
+                        "code": "route_binding_refresh_plan_invalid",
+                        "detail": (
+                            "Odoo testing refresh controller received a non-refresh plan for "
+                            "an enrolled binding."
+                        ),
+                    }
+                ]
+                result_outcomes.append(outcome_payload)
+                continue
+            if mutation_store is None:
+                raise RuntimeError(
+                    "Odoo testing route binding refresh apply requires a mutation store."
+                )
+            binding_key = reconcile_plan.current_record.binding_key
+            binding_token = hashlib.sha256(binding_key.encode("utf-8")).hexdigest()[:16]
+            binding_idempotency_key = f"{normalized_key}:{binding_token}"
+            binding_response_payload: dict[str, object] = {
+                "status": "accepted",
+                "trace_id": trace_id,
+                "records": {
+                    "product": outcome.product,
+                    "context": outcome.context,
+                    "instance": outcome.instance,
+                    "route_binding_status": "refreshed",
+                },
+                "result": outcome_payload,
+            }
+            mutation_result = mutation_store.reconcile_route_binding_record(
+                expected_record=reconcile_plan.current_record,
+                replacement_record=reconcile_plan.record,
+                mutation=DbOnlyMutationRequest(
+                    scope=idempotency_scope(identity),
+                    route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                    idempotency_key=binding_idempotency_key,
+                    request_fingerprint=idempotency_request_fingerprint(
+                        route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                        payload={
+                            "controller_request_fingerprint": payload_fingerprint,
+                            "binding_key": binding_key,
+                            "current_record_sha256": outcome.current_record_sha256,
+                            "candidate_record_sha256": outcome.candidate_record_sha256,
+                        },
+                    ),
+                    lease_owner=f"{trace_id}:{binding_token}",
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    response_payload=binding_response_payload,
+                    lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+                ),
+            )
+            if mutation_result.status == "refreshed":
+                outcome_payload["status"] = "refreshed"
+            elif mutation_result.status == "unchanged":
+                outcome_payload["status"] = "unchanged"
+            elif mutation_result.status == "replayed":
+                outcome_payload["status"] = "replayed"
+            else:
+                outcome_payload["status"] = "conflict"
+                outcome_payload["findings"] = [
+                    {
+                        "code": f"route_binding_refresh_{mutation_result.status}",
+                        "detail": (
+                            "The route binding changed or another refresh owns the current "
+                            "mutation. Read current authority and retry after it settles with "
+                            "a new Idempotency-Key."
+                        ),
+                    }
+                ]
+            result_outcomes.append(outcome_payload)
+
+        attention_statuses = {"blocked", "conflict"}
+        response_status = (
+            "empty"
+            if not result_outcomes
+            else (
+                "attention"
+                if any(
+                    str(outcome.get("status") or "") in attention_statuses
+                    for outcome in result_outcomes
+                )
+                else "ok"
+            )
+        )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "route_binding_refresh_status": response_status,
+                "route_binding_refresh_target_count": len(result_outcomes),
+            },
+            result={
+                "status": response_status,
+                "mode": refresh_request.mode,
+                "evaluated_at": controller_plan.evaluated_at,
+                "target_count": len(result_outcomes),
+                "unchanged_count": sum(
+                    1 for outcome in result_outcomes if outcome.get("status") == "unchanged"
+                ),
+                "planned_refresh_count": sum(
+                    1 for outcome in result_outcomes if outcome.get("status") == "planned_refresh"
+                ),
+                "refreshed_count": sum(
+                    1 for outcome in result_outcomes if outcome.get("status") == "refreshed"
+                ),
+                "replayed_count": sum(
+                    1 for outcome in result_outcomes if outcome.get("status") == "replayed"
+                ),
+                "blocked_count": sum(
+                    1 for outcome in result_outcomes if outcome.get("status") == "blocked"
+                ),
+                "conflict_count": sum(
+                    1 for outcome in result_outcomes if outcome.get("status") == "conflict"
+                ),
+                "outcomes": result_outcomes,
+            },
+        )
+        if refresh_request.mode == "apply":
+            if mutation_store is None or controller_reservation is None:
+                raise RuntimeError(
+                    "Odoo testing route binding refresh apply requires a parent reservation."
+                )
+            completion_result = mutation_store.complete_mutation_reservation(
+                completion=complete_launchplane_mutation_reservation(
+                    controller_reservation,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    completed_at=utc_now_timestamp(),
+                    response_payload=response.model_dump(mode="json", exclude_none=True),
+                )
+            )
+            if completion_result.status == "completed":
+                return response
+            if completion_result.status == "replayed":
+                if completion_result.record is None:
+                    raise RuntimeError(
+                        "Replayed Odoo testing route-binding refresh requires evidence."
+                    )
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=completion_result.record,
+                    route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                )
+            if completion_result.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if completion_result.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The Odoo testing route-binding refresh requires reconciliation "
+                        "before retry."
+                    ),
+                )
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_completion_conflict",
+                message=(
+                    "The Odoo testing route-binding refresh could not complete its parent "
+                    "reservation. Retry with the same Idempotency-Key."
+                ),
+            )
+        return response
+
     async def apply_ingress_route(
         request: Request,
         route_request: NpmplusIngressApplyEnvelope,
@@ -16821,6 +17321,24 @@ def create_launchplane_fastapi_app(
         status_code=202,
         operation_id="reconcile_route_binding",
         summary="Dry-run or apply one provider-neutral route-binding reconcile",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+        run_odoo_testing_route_binding_refresh,
+        methods=["POST"],
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        status_code=202,
+        operation_id="run_odoo_testing_route_binding_refresh",
+        summary="Plan or apply bounded Odoo testing route-binding evidence refresh",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

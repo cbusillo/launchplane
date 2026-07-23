@@ -147,6 +147,20 @@ cleanup scope so the store is always closed.
     creates and current-row refreshes. Filesystem-backed service apply fails
     closed because it cannot provide that atomic boundary; filesystem storage
     remains available for explicit local rehearsal.
+  - `POST /v1/route-bindings/odoo-testing/controller/run-once`, requiring the
+    service-scoped `route_binding.odoo_testing_refresh.plan` or
+    `route_binding.odoo_testing_refresh.apply` action and then exact-instance
+    `route_binding.read` or `route_binding.apply` authority for every discovered
+    target. The request contains no product/context/instance selectors. The
+    service selects at most 25 DB-backed Odoo profile lanes whose instance is
+    exactly `testing` and whose matching binding is active and service-owned.
+    It never creates bindings, never selects external authority, and cannot
+    select production. All target authorization completes before writes; apply
+    first reserves the parent controller key, then serializes due evidence
+    refreshes through the existing per-binding PostgreSQL CAS/idempotency
+    boundary, and compare-and-completes the parent response after the child loop.
+    Dry-run is stateless. Apply requires an `Idempotency-Key` and exact
+    confirmation text.
   - `POST /v1/route-bindings/external/reconcile`, requiring exclusively
     instance-scoped `route_binding.external.plan` for `dry-run` and
     `route_binding.external.apply` for `apply`. The request supplies only the
