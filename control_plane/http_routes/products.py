@@ -6,6 +6,9 @@ from fastapi import Depends, Path, Query
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import product_context_audit as control_plane_product_context_audit
+from control_plane import (
+    product_operational_readiness_service as control_plane_product_operational_readiness_service,
+)
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane.agent_context_service import (
     AgentContextPayload,
@@ -23,6 +26,7 @@ from control_plane.contracts.product_environment_read_model import (
     ProductSiteOverview,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_operational_readiness import ProductOperationalReadiness
 from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactSet,
     ProtectedArtifactStore,
@@ -125,6 +129,14 @@ class ProductEnvironmentResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     environment: ProductEnvironmentDetail
+
+
+class ProductOperationalReadinessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    readiness: ProductOperationalReadiness
 
 
 class RepoProductMappingResponse(BaseModel):
@@ -875,6 +887,77 @@ def register_product_environment_read_routes(
             environment=environment_detail,
         )
 
+    def read_product_operational_readiness(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        action: Annotated[str, Query(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        artifact_id: Annotated[str, Query()] = "",
+    ) -> ProductOperationalReadinessResponse:
+        trace_id = common.next_trace_id()
+        try:
+            readiness_store = control_plane_product_operational_readiness_service.require_product_operational_readiness_store(
+                record_store
+            )
+            profile, lane = (
+                control_plane_product_operational_readiness_service.resolve_product_operational_readiness_lane(
+                    record_store=readiness_store,
+                    product=product,
+                    context=context,
+                    instance=instance,
+                )
+            )
+        except control_plane_product_operational_readiness_service.ProductOperationalReadinessStoreCapabilityError as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if not common.authorization_allows(
+            identity=identity,
+            action="product_environment.read",
+            product=profile.product,
+            context=lane.context,
+            target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
+        ):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read operational readiness for the requested lane.",
+            )
+        try:
+            readiness = control_plane_product_operational_readiness_service.build_product_operational_readiness_service_result(
+                record_store=readiness_store,
+                profile=profile,
+                lane=lane,
+                identity=identity,
+                requested_action=action,
+                requested_artifact_id=artifact_id,
+                generated_at=utc_now_timestamp(),
+            )
+        except ValueError as error:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=str(error),
+            ) from error
+        return ProductOperationalReadinessResponse(
+            trace_id=trace_id,
+            readiness=readiness,
+        )
+
     def list_product_profiles(
         identity: Annotated[
             LaunchplaneIdentity | None,
@@ -973,6 +1056,15 @@ def register_product_environment_read_routes(
         response_model=ProductEnvironmentResponse,
         operation_id="read_product_environment",
         summary="Read one product environment",
+        responses=error_responses,
+    )
+    app.add_api_route(
+        ("/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness"),
+        read_product_operational_readiness,
+        methods=["GET"],
+        response_model=ProductOperationalReadinessResponse,
+        operation_id="read_product_operational_readiness",
+        summary="Read exact operational enrollment readiness",
         responses=error_responses,
     )
     app.add_api_route(

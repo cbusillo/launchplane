@@ -384,6 +384,10 @@ class FastApiReadRouteRegistrarTests(unittest.TestCase):
                 ("GET", "/v1/products/{product}/activity"),
                 ("GET", "/v1/products/{product}/environments"),
                 ("GET", "/v1/products/{product}/environments/{environment}"),
+                (
+                    "GET",
+                    "/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness",
+                ),
                 ("GET", "/v1/product-profiles"),
                 ("POST", "/v1/product-profiles"),
             ],

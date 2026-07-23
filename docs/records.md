@@ -840,6 +840,45 @@ appear only in `driver_extensions.odoo`; generic-web, VeriReel, and future
 drivers do not receive misleading Odoo defaults at the shared model's top
 level.
 
+## Product Operational Readiness Projection
+
+Operational readiness is a read-only projection over existing Launchplane
+records; it is not a new persisted record family. One request addresses an
+exact product, context, instance, authorization action, and optional exact
+artifact ID. The projection composes:
+
+- product-profile lane ownership and the driver action's declared readiness
+  requirements;
+- the single active DB-backed authorization policy and the authenticated
+  GitHub Actions caller's exact managed-rule match, including immutable
+  repository and reusable-workflow identity;
+- provider-target and provider-neutral route-binding records;
+- expected runtime-environment keys and managed-secret binding metadata;
+- the requested artifact manifest, current deployment/health/runtime identity,
+  and the existing product topology projection.
+
+Overall and per-dimension states are `ready`, `blocked`, `stale`, `missing`, or
+`unsupported`, with non-ready states winning over ready evidence. Missing or
+ambiguous active policy, a different instance grant, mutable workflow identity,
+missing expected config, disabled bindings, absent artifact/deployment records,
+stale route authority, or topology warnings all fail closed. Driver actions
+without declared readiness requirements return `unsupported` rather than
+borrowing requirements from another action.
+
+The matching workflow grant is not considered exact merely because normal
+policy matching allows the request. Its product, context, instance, action,
+caller workflow, and reusable workflow selectors must each be singleton exact
+values for the requested tuple. Wildcards, sibling lanes, additional products or
+contexts, extra actions, and additional mutable workflow refs keep authorization
+readiness blocked.
+
+The projection reads managed-secret binding keys and status only. It does not
+read secret versions or decrypt values. Runtime-environment values,
+managed-secret IDs, secret plaintext/ciphertext, provider target IDs, provider
+evidence maps, internal hosts, certificate references, and raw identity claims
+remain outside the response. Production lanes use the same generic projection;
+missing production records remain non-ready and never trigger a write.
+
 ## Public Ingress Incident Records
 
 Public ingress incidents are Launchplane-owned lifecycle records under

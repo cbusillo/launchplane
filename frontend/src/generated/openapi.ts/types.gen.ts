@@ -306,6 +306,7 @@ export type DriverActionDescriptor = {
     output_schema: {
         [key: string]: unknown;
     };
+    readiness_requirements: Array<'provider_target' | 'route_binding' | 'runtime_environment' | 'managed_secrets' | 'artifact' | 'deployment' | 'topology'>;
     route_path: string;
     safety: 'read' | 'safe_write' | 'mutation' | 'destructive';
     scope: 'global' | 'context' | 'instance' | 'preview';
@@ -1391,6 +1392,76 @@ export type ProductOdooStableBootstrapPolicy = {
     require_logo_verification: boolean;
 };
 
+export type ProductOperationalReadiness = {
+    action: ProductOperationalReadinessAction;
+    caller: ProductOperationalReadinessCaller;
+    context: string;
+    dimensions: Array<ProductOperationalReadinessDimension>;
+    display_name: string;
+    driver_id: string;
+    generated_at: string;
+    instance: string;
+    non_ready_dimensions: Array<'product_lane' | 'action' | 'authorization' | 'provider_target' | 'route_binding' | 'runtime_environment' | 'managed_secrets' | 'artifact' | 'deployment' | 'topology'>;
+    product: string;
+    ready: boolean;
+    repository: string;
+    schema_version: number;
+    state: 'ready' | 'blocked' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductOperationalReadinessAction = {
+    action_id: string;
+    label: string;
+    method: string;
+    readiness_requirements: Array<'provider_target' | 'route_binding' | 'runtime_environment' | 'managed_secrets' | 'artifact' | 'deployment' | 'topology'>;
+    requested_action: string;
+    route_path: string;
+    safety: string;
+    scope: string;
+    supported: boolean;
+};
+
+export type ProductOperationalReadinessCaller = {
+    identity_type: 'github_actions' | 'github_human' | 'terminal_agent' | 'local_operator' | 'local_admin';
+    job_workflow_ref: string;
+    repository: string;
+    repository_id: string;
+    repository_owner_id: string;
+    workflow_ref: string;
+};
+
+export type ProductOperationalReadinessDimension = {
+    details: Array<string>;
+    dimension: 'product_lane' | 'action' | 'authorization' | 'provider_target' | 'route_binding' | 'runtime_environment' | 'managed_secrets' | 'artifact' | 'deployment' | 'topology';
+    evidence: Array<ProductOperationalReadinessEvidence>;
+    owner_record_type: string;
+    remediation: ProductOperationalReadinessRemediation | null;
+    required: boolean;
+    state: 'ready' | 'blocked' | 'stale' | 'missing' | 'unsupported';
+    summary: string;
+};
+
+export type ProductOperationalReadinessEvidence = {
+    freshness_status: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+    record_id: string;
+    record_type: string;
+    recorded_at: string;
+    revision: number | null;
+};
+
+export type ProductOperationalReadinessRemediation = {
+    action: string;
+    method: string;
+    route_path: string;
+    summary: string;
+};
+
+export type ProductOperationalReadinessResponse = {
+    readiness: ProductOperationalReadiness;
+    status: 'ok';
+    trace_id: string;
+};
+
 export type ProductOverviewResponse = {
     product: ProductSiteOverview;
     status: 'ok';
@@ -2353,6 +2424,41 @@ export type ReadProductActivityResponses = {
 };
 
 export type ReadProductActivityResponse = ReadProductActivityResponses[keyof ReadProductActivityResponses];
+
+export type ReadProductOperationalReadinessData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+        context: string;
+        instance: string;
+    };
+    query: {
+        action: string;
+        artifact_id?: string;
+    };
+    url: '/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness';
+};
+
+export type ReadProductOperationalReadinessErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadProductOperationalReadinessError = ReadProductOperationalReadinessErrors[keyof ReadProductOperationalReadinessErrors];
+
+export type ReadProductOperationalReadinessResponses = {
+    200: ProductOperationalReadinessResponse;
+};
+
+export type ReadProductOperationalReadinessResponse = ReadProductOperationalReadinessResponses[keyof ReadProductOperationalReadinessResponses];
 
 export type ListProductEnvironmentsData = {
     body?: never;

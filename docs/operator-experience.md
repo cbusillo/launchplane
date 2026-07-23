@@ -244,6 +244,7 @@ The first product/site read endpoints are:
 - `GET /v1/products/{product}/environments`
 - `GET /v1/products/{product}/environments/{environment}`
 - `GET /v1/products/{product}/environments/{environment}/config-status`
+- `GET /v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness?action={authz_action}&artifact_id={artifact_id}`
 
 These endpoints are profile and driver driven. A standard `generic-web` site
 should appear in the read model from Launchplane records alone: product profile,
@@ -272,6 +273,29 @@ configured, missing, and disabled states are derived from Launchplane records.
 The response includes key names, binding metadata, status, source, and freshness
 only. It never includes runtime values, managed secret IDs, secret plaintext, or
 ciphertext.
+
+Operational enrollment readiness is a separate exact-lane, exact-action read.
+It requires `product_environment.read` for the requested product, context, and
+instance, then evaluates the authenticated GitHub Actions caller against the
+single active DB-backed authorization policy using the same managed,
+instance-scoped semantics as durable operations. A ready authorization result
+requires the captured managed rule itself to use singleton exact product,
+context, instance, action, caller-workflow, and immutable reusable-workflow
+selectors; a broader rule remains blocked even when it happens to allow the
+current request. Supported driver actions
+declare which provider-target, route-binding, runtime-environment,
+managed-secret binding, artifact, deployment, and topology dimensions are
+required. Overall and per-dimension results use `ready`, `blocked`, `stale`,
+`missing`, or `unsupported`; every non-ready result names its owning Launchplane
+record class or supported service remediation. Runtime values, managed-secret
+IDs, secret material, provider credentials, provider evidence maps, and raw
+OIDC claims are never returned.
+
+The endpoint is read-only. Missing production enrollment remains a truthful
+blocked or missing result and does not create a route, grant, provider target,
+deployment, secret, or scheduler target. An exact artifact ID is required only
+when the selected driver action declares artifact readiness; Launchplane reads
+the persisted manifest and never rebuilds or infers it.
 
 ## Promotion Safety
 

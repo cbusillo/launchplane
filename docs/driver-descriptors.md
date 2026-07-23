@@ -37,7 +37,11 @@ The descriptor contracts live in
   promotion, artifact publish, preview lifecycle, or post-deploy settings.
 - `DriverActionDescriptor`: read-only action metadata, route path, method,
   authorization action, operator visibility, scope, safety level, and records the
-  action can write.
+  action can write. Instance actions may also declare generic operational
+  readiness requirements such as provider target, route binding, runtime
+  environment, managed-secret bindings, artifact, deployment, and topology.
+  An empty readiness requirement set means the action does not yet support the
+  operational-readiness endpoint; it must not be treated as implicitly ready.
 - `DriverSettingGroupDescriptor`: setting/status groups the UI can render later
   without knowing product-specific storage internals.
 - `DriverContextView`: context or context/instance read model composed from
