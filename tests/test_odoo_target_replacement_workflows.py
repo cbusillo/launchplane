@@ -10,7 +10,7 @@ _LAUNCHPLANE_REQUEST = (
     "cbusillo/launchplane/.github/actions/launchplane-request@"
     "adcf937c6aef14e02478724040852d1d2a82a850"
 )
-_WORKER_SHA = "0b083ad040ee8d907166abe18bea99930d9a2481"
+_WORKER_SHA = "480c9280b1ae3610f05547192783da2230dc7ff5"
 
 
 class OdooTargetReplacementWorkflowTests(unittest.TestCase):
