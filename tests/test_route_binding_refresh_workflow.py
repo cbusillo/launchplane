@@ -8,9 +8,61 @@ from tests.support.workflows import SELF_HOSTED_RUNNER, load_workflow
 
 class RouteBindingRefreshWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.workflow = load_workflow(".github/workflows/odoo-testing-route-binding-refresh.yml")
         self.worker = load_workflow(
             ".github/workflows/reusable-odoo-testing-route-binding-refresh.yml"
         )
+
+    def test_wrapper_schedules_apply_and_defaults_manual_dispatch_to_dry_run(self) -> None:
+        trigger = self.workflow.data["on"]
+        assert isinstance(trigger, dict)
+        self.assertEqual(set(trigger), {"schedule", "workflow_dispatch"})
+        schedule = trigger["schedule"]
+        assert isinstance(schedule, list)
+        self.assertEqual(schedule, [{"cron": "37 */6 * * *"}])
+        dispatch = trigger["workflow_dispatch"]
+        assert isinstance(dispatch, dict)
+        inputs = dispatch["inputs"]
+        assert isinstance(inputs, dict)
+        self.assertEqual(set(inputs), {"mode", "reason"})
+        mode_input = inputs["mode"]
+        assert isinstance(mode_input, dict)
+        self.assertEqual(mode_input["default"], "dry-run")
+        self.assertEqual(mode_input["options"], ["dry-run", "apply"])
+
+    def test_wrapper_calls_immutable_worker_without_target_inputs(self) -> None:
+        self.assertEqual(
+            self.workflow.permissions,
+            {"contents": "read", "id-token": "write"},
+        )
+        self.assertEqual(set(self.workflow.jobs), {"refresh"})
+        self.assertEqual(
+            self.workflow.job_uses("refresh"),
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-odoo-testing-route-binding-refresh.yml@"
+            "f73e4616a6cbca2329ec6adaa0c76e4b3b3daf4b",
+        )
+        self.assertEqual(
+            self.workflow.job_permissions("refresh"),
+            {"contents": "read", "id-token": "write"},
+        )
+        forwarded_inputs = self.workflow.job("refresh")["with"]
+        assert isinstance(forwarded_inputs, dict)
+        self.assertEqual(set(forwarded_inputs), {"mode", "reason", "idempotency_key"})
+        forwarded_mode = forwarded_inputs["mode"]
+        assert isinstance(forwarded_mode, str)
+        self.assertIn("github.event_name == 'schedule'", forwarded_mode)
+        self.assertIn("'apply'", forwarded_mode)
+
+        trigger = self.workflow.data["on"]
+        assert isinstance(trigger, dict)
+        dispatch = trigger["workflow_dispatch"]
+        assert isinstance(dispatch, dict)
+        inputs = dispatch["inputs"]
+        assert isinstance(inputs, dict)
+        self.assertNotIn("product", inputs)
+        self.assertNotIn("context", inputs)
+        self.assertNotIn("instance", inputs)
 
     def test_worker_is_testing_only_service_controller_transport(self) -> None:
         trigger = self.worker.data["on"]

@@ -53,6 +53,9 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/product-health-monitoring.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml"}
     ),
+    Path(".github/workflows/odoo-testing-route-binding-refresh.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-odoo-testing-route-binding-refresh.yml"}
+    ),
 }
 
 
@@ -109,6 +112,12 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     ),
     "cbusillo/launchplane/.github/workflows/reusable-route-binding-reconcile.yml": (
         ActionClassification("First-party same-repository", "route authority reconciliation")
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-odoo-testing-route-binding-refresh.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "testing route-binding evidence refresh",
+        )
     ),
     "cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml": (
         ActionClassification(

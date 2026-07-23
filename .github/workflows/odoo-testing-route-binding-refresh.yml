@@ -1,0 +1,46 @@
+---
+name: Odoo Testing Route Binding Refresh
+
+"on":
+  schedule:
+    - cron: "37 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Plan or apply the testing-only route-binding refresh.
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+      reason:
+        description: Reason recorded with the Launchplane request.
+        required: true
+        default: Manual testing route-binding evidence refresh.
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: launchplane-odoo-testing-route-binding-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-testing-route-binding-refresh.yml@f73e4616a6cbca2329ec6adaa0c76e4b3b3daf4b # main
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      mode: >-
+        ${{ github.event_name == 'schedule' && 'apply' || inputs.mode }}
+      reason: >-
+        ${{ github.event_name == 'schedule' &&
+        'Scheduled testing route-binding evidence refresh.' || inputs.reason }}
+      idempotency_key: >-
+        odoo-testing-route-binding-refresh:${{ github.run_id }}:${{
+        github.run_attempt }}:${{ github.event_name == 'schedule' &&
+        'apply' || inputs.mode }}
