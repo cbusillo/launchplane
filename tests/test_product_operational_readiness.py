@@ -41,6 +41,7 @@ from tests.support.artifact_manifests import artifact_manifest_v2
 
 
 _ARTIFACT_ID = "artifact-example-odoo-0123456789abcdef"
+_REPLACEMENT_ARTIFACT_ID = "artifact-example-odoo-fedcba9876543210"
 _ACTION = "odoo_target_replacement_plan.read"
 _WORKFLOW_REF = "example/example-odoo/.github/workflows/replace.yml@refs/heads/main"
 _JOB_WORKFLOW_REF = (
@@ -299,6 +300,8 @@ def _inputs() -> ProductOperationalReadinessInputs:
         ),
         topology=_topology(),
         requested_artifact_id=_ARTIFACT_ID,
+        expected_current_artifact_id=_ARTIFACT_ID,
+        current_inventory_artifact_id=_ARTIFACT_ID,
         artifact_manifest=artifact_manifest,
         generated_at="2026-07-23T09:05:00Z",
     )
@@ -322,6 +325,76 @@ class ProductOperationalReadinessTests(unittest.TestCase):
         self.assertNotIn("ciphertext", payload)
         self.assertNotIn("subject", payload)
 
+    def test_replacement_artifact_is_independent_from_current_deployment(self) -> None:
+        inputs = _inputs()
+        replacement_manifest = artifact_manifest_v2(
+            artifact_id=_REPLACEMENT_ARTIFACT_ID,
+            image_repository="ghcr.io/example/example-odoo",
+        )
+
+        readiness = build_product_operational_readiness(
+            replace(
+                inputs,
+                requested_artifact_id=_REPLACEMENT_ARTIFACT_ID,
+                artifact_manifest=replacement_manifest,
+            )
+        )
+
+        self.assertTrue(readiness.ready)
+        self.assertEqual(readiness.state, "ready")
+        states = {dimension.dimension: dimension.state for dimension in readiness.dimensions}
+        self.assertEqual(states["artifact"], "ready")
+        self.assertEqual(states["deployment"], "ready")
+
+    def test_stale_current_artifact_snapshot_blocks_readiness(self) -> None:
+        readiness = build_product_operational_readiness(
+            replace(
+                _inputs(),
+                expected_current_artifact_id="artifact-example-odoo-stale",
+            )
+        )
+
+        deployment = next(
+            dimension for dimension in readiness.dimensions if dimension.dimension == "deployment"
+        )
+        self.assertEqual(deployment.state, "blocked")
+        self.assertFalse(readiness.ready)
+
+    def test_missing_inventory_blocks_expected_current_artifact_readiness(self) -> None:
+        readiness = build_product_operational_readiness(
+            replace(
+                _inputs(),
+                current_inventory_artifact_id=None,
+            )
+        )
+
+        deployment = next(
+            dimension for dimension in readiness.dimensions if dimension.dimension == "deployment"
+        )
+        self.assertEqual(deployment.state, "missing")
+        self.assertEqual(deployment.owner_record_type, "environment_inventory")
+        self.assertFalse(readiness.ready)
+
+    def test_candidate_artifact_must_match_product_image_repository(self) -> None:
+        replacement_manifest = artifact_manifest_v2(
+            artifact_id=_REPLACEMENT_ARTIFACT_ID,
+            image_repository="ghcr.io/example/other-product",
+        )
+
+        readiness = build_product_operational_readiness(
+            replace(
+                _inputs(),
+                requested_artifact_id=_REPLACEMENT_ARTIFACT_ID,
+                artifact_manifest=replacement_manifest,
+            )
+        )
+
+        artifact = next(
+            dimension for dimension in readiness.dimensions if dimension.dimension == "artifact"
+        )
+        self.assertEqual(artifact.state, "blocked")
+        self.assertFalse(readiness.ready)
+
     def test_wrong_instance_authorization_blocks_otherwise_ready_lane(self) -> None:
         inputs = replace(_inputs(), active_policy_records=(_policy_record(instance="prod"),))
 
@@ -335,6 +408,47 @@ class ProductOperationalReadinessTests(unittest.TestCase):
             if dimension.dimension == "authorization"
         )
         self.assertEqual(authorization.state, "blocked")
+
+    def test_top_level_workflow_without_reusable_identity_is_blocked(self) -> None:
+        inputs = replace(
+            _inputs(),
+            identity=replace(_identity(), job_workflow_ref=""),
+        )
+
+        readiness = build_product_operational_readiness(inputs)
+
+        authorization = next(
+            dimension
+            for dimension in readiness.dimensions
+            if dimension.dimension == "authorization"
+        )
+        self.assertEqual(authorization.state, "blocked")
+        self.assertFalse(readiness.ready)
+
+    def test_singleton_mutable_reusable_identity_is_blocked(self) -> None:
+        mutable_job_workflow_ref = (
+            "example/launchplane/.github/workflows/reusable-target-replacement.yml@refs/heads/main"
+        )
+        inputs = replace(
+            _inputs(),
+            identity=replace(
+                _identity(),
+                job_workflow_ref=mutable_job_workflow_ref,
+            ),
+            active_policy_records=(
+                _policy_record(rule_overrides={"job_workflow_refs": [mutable_job_workflow_ref]}),
+            ),
+        )
+
+        readiness = build_product_operational_readiness(inputs)
+
+        authorization = next(
+            dimension
+            for dimension in readiness.dimensions
+            if dimension.dimension == "authorization"
+        )
+        self.assertEqual(authorization.state, "blocked")
+        self.assertFalse(readiness.ready)
 
     def test_overbroad_managed_rule_selectors_never_report_exact_readiness(self) -> None:
         cases: tuple[tuple[str, dict[str, object]], ...] = (

@@ -8,6 +8,11 @@ from pydantic import Field, model_validator
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
 )
+from control_plane.contracts.artifact_identity import (
+    ArtifactIdentityManifest,
+    artifact_manifest_matches_image_repository,
+)
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
 )
@@ -16,6 +21,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     build_odoo_stable_target_replacement_operation_id,
 )
 from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
 from control_plane.drivers.dispatch import (
@@ -52,7 +58,19 @@ class OdooTargetReplacementApplyOperationActiveError(ValueError):
         self.operation = operation
 
 
+class OdooTargetReplacementApplyCurrentArtifactChangedError(ValueError):
+    pass
+
+
 class OdooTargetReplacementApplyOperationStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory: ...
+
+    def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
+
     def write_odoo_stable_target_replacement_operation_record(
         self, record: OdooStableTargetReplacementOperationRecord
     ) -> object: ...
@@ -134,6 +152,12 @@ def enqueue_odoo_target_replacement_apply_operation(
             existing_operation
         )
 
+    _validate_target_replacement_apply_artifact_authority(
+        operation_store=operation_store,
+        replacement_request=request.replacement,
+        context=context,
+    )
+
     operation = build_odoo_target_replacement_apply_operation_record(
         replacement_request=request.replacement,
         context=context,
@@ -175,6 +199,9 @@ def odoo_target_replacement_apply_operation_store(
     record_store: object,
 ) -> OdooTargetReplacementApplyOperationStore:
     required_methods = (
+        "read_product_profile_record",
+        "read_environment_inventory",
+        "read_artifact_manifest",
         "write_odoo_stable_target_replacement_operation_record",
         "create_odoo_stable_target_replacement_operation_record_if_no_active_lane",
         "read_odoo_stable_target_replacement_operation_record",
@@ -185,6 +212,57 @@ def odoo_target_replacement_apply_operation_store(
     raise click.ClickException(
         "Odoo stable target replacement operations require Launchplane operation-record storage."
     )
+
+
+def _validate_target_replacement_apply_artifact_authority(
+    *,
+    operation_store: OdooTargetReplacementApplyOperationStore,
+    replacement_request: OdooStableTargetReplacementApplyRequest,
+    context: str,
+) -> None:
+    try:
+        inventory = operation_store.read_environment_inventory(
+            context_name=context,
+            instance_name=replacement_request.instance,
+        )
+    except FileNotFoundError:
+        inventory = None
+    current_artifact_id = (
+        inventory.artifact_identity.artifact_id
+        if inventory is not None and inventory.artifact_identity is not None
+        else ""
+    )
+    expected_current_artifact_id = replacement_request.expected_current_artifact_id
+    if expected_current_artifact_id and (
+        inventory is None or current_artifact_id != expected_current_artifact_id
+    ):
+        raise OdooTargetReplacementApplyCurrentArtifactChangedError(
+            "Current inventory artifact changed after operational readiness preflight."
+        )
+    artifact_id = replacement_request.artifact_id or current_artifact_id
+    source_git_ref = replacement_request.source_git_ref or (
+        inventory.source_git_ref if inventory is not None else ""
+    )
+    if not artifact_id or not source_git_ref:
+        raise ValueError(
+            "Odoo target replacement apply requires exact artifact and source evidence."
+        )
+    try:
+        manifest = operation_store.read_artifact_manifest(artifact_id)
+    except FileNotFoundError as error:
+        raise ValueError("Odoo target replacement artifact manifest was not found.") from error
+    profile = operation_store.read_product_profile_record(replacement_request.product)
+    if not artifact_manifest_matches_image_repository(
+        manifest,
+        expected_repository=profile.image.repository,
+    ):
+        raise ValueError(
+            "Odoo target replacement artifact image repository does not match product profile."
+        )
+    if manifest.source_commit != source_git_ref:
+        raise ValueError(
+            "Odoo target replacement source ref does not match stored artifact manifest."
+        )
 
 
 def find_odoo_target_replacement_apply_operation_by_idempotency_key(

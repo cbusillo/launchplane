@@ -2439,6 +2439,7 @@ export type ReadProductOperationalReadinessData = {
     query: {
         action: string;
         artifact_id?: string;
+        expected_current_artifact_id?: string;
     };
     url: '/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness';
 };

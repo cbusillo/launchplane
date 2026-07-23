@@ -2242,9 +2242,11 @@ remain out of this readiness view.
 `GET /v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness`
 is the action-specific operational enrollment preflight. Query parameter
 `action` is the exact driver authorization action; `artifact_id` names the
-exact persisted artifact when the action declares artifact readiness. The route
-first requires `product_environment.read` for the exact product/context/instance
-tuple. It then reads exactly one active DB-backed authz policy and requires the
+exact persisted candidate when the action declares artifact readiness.
+`expected_current_artifact_id` optionally binds the caller's environment read to
+the deployment artifact observed by the readiness projection. The route first
+requires `product_environment.read` for the exact product/context/instance tuple.
+It then reads exactly one active DB-backed authz policy and requires the
 authenticated GitHub Actions caller to match exactly one managed rule for the
 requested action and lane. Ready workflow authorization also requires numeric
 repository identities, an exact caller workflow ref, and an exact reusable
@@ -2264,6 +2266,15 @@ owning record class or a supported service remediation without exposing secret
 values, managed-secret IDs, provider credentials/evidence, provider target IDs,
 raw identity claims, or runtime values. The endpoint performs no writes or
 provider calls; absent production enrollment remains a non-ready result.
+Artifact readiness validates the exact candidate artifact named by the caller
+and requires its image repository to match the product profile. Deployment
+readiness independently validates the current lane deployment, health, runtime
+identity, and freshness. A persisted replacement candidate is not required to
+equal the artifact already deployed, while `expected_current_artifact_id`
+requires current inventory authority and detects a lane change between the
+environment read and readiness check. Latest-deployment fallback may inform an
+ordinary product read, but it cannot satisfy this fenced target-replacement
+preflight without current inventory.
 
 `GET /v1/products/{product}/environments/{environment}/promotion-status` is the
 product-owned browser authority for generic-web production promotion. It exposes

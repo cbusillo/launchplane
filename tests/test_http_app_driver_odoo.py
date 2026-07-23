@@ -18,6 +18,11 @@ from control_plane.contracts.odoo_instance_override_record import (
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimePlan
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    DeploymentEvidence,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -4530,9 +4535,30 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
             profile_payload["lanes"] = tuple(lanes)
-        store.write_product_profile_record(
-            LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        store.write_product_profile_record(profile)
+        manifest = artifact_manifest_v2(
+            artifact_id="artifact-cm-testing",
+            image_repository=profile.image.repository,
         )
+        store.write_artifact_manifest(manifest)
+        for lane in profile.lanes:
+            store.write_environment_inventory(
+                EnvironmentInventory(
+                    context=lane.context,
+                    instance=lane.instance,
+                    artifact_identity=ArtifactIdentityReference(artifact_id=manifest.artifact_id),
+                    source_git_ref=manifest.source_commit,
+                    deploy=DeploymentEvidence(
+                        status="pass",
+                        target_type="compose",
+                        target_name=f"{profile.product}-{lane.instance}",
+                        deploy_mode="test",
+                    ),
+                    updated_at="2026-07-23T12:00:00Z",
+                    deployment_record_id=f"deployment-{profile.product}-{lane.instance}",
+                )
+            )
         return store
 
     def _store_with_non_odoo_profile(self, state_dir: Path) -> FilesystemRecordStore:
@@ -4553,8 +4579,11 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
         verify_health: bool = False,
         verify_canonical: bool = False,
         verify_logo: bool = False,
+        artifact_id: str = "",
+        source_git_ref: str = "",
+        expected_current_artifact_id: str = "",
     ) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "product": product,
             "replacement": {
                 "product": product,
@@ -4566,6 +4595,14 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
                 "verify_logo": verify_logo,
             },
         }
+        replacement = cast(dict[str, object], payload["replacement"])
+        if artifact_id:
+            replacement["artifact_id"] = artifact_id
+        if source_git_ref:
+            replacement["source_git_ref"] = source_git_ref
+        if expected_current_artifact_id:
+            replacement["expected_current_artifact_id"] = expected_current_artifact_id
+        return payload
 
     async def test_odoo_target_replacement_apply_enqueues_operation_without_execution(
         self,
@@ -4586,6 +4623,7 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
                     verify_health=True,
                     verify_canonical=True,
                     verify_logo=True,
+                    expected_current_artifact_id="artifact-cm-testing",
                 ),
                 idempotency_key="apply-cm-testing",
             )
@@ -4608,6 +4646,10 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_operation.phase, "created")
             self.assertTrue(stored_operation.request.verify_health)
             self.assertFalse(stored_operation.request.allow_empty_data)
+            self.assertEqual(
+                stored_operation.request.expected_current_artifact_id,
+                "artifact-cm-testing",
+            )
             self.assertEqual(stored_operation.started_at, "")
             self.assertEqual(stored_operation.finished_at, "")
             self.assertEqual(stored_operation.deployment_record_id, "")
@@ -4619,6 +4661,99 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
                 stored_operation.authorization.managed_rule_id,
                 "cm-target-replacement",
             )
+
+    async def test_odoo_target_replacement_apply_rejects_stale_current_artifact(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(expected_current_artifact_id="artifact-before-environment-read"),
+                idempotency_key="apply-stale-current-artifact",
+            )
+            operations = store.list_odoo_stable_target_replacement_operation_records()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "odoo_target_replacement_current_artifact_changed",
+        )
+        self.assertEqual(operations, ())
+
+    async def test_odoo_target_replacement_apply_rejects_foreign_artifact_before_enqueue(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            foreign_manifest = artifact_manifest_v2(
+                artifact_id="artifact-foreign",
+                image_repository="ghcr.io/cbusillo/other-product",
+            )
+            store.write_artifact_manifest(foreign_manifest)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(
+                    artifact_id=foreign_manifest.artifact_id,
+                    source_git_ref=foreign_manifest.source_commit,
+                    expected_current_artifact_id="artifact-cm-testing",
+                ),
+                idempotency_key="apply-foreign-artifact",
+            )
+            operations = store.list_odoo_stable_target_replacement_operation_records()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(operations, ())
+
+    async def test_explicit_artifact_without_expected_current_preserves_legacy_enqueue(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            store.write_product_profile_record(profile)
+            manifest = artifact_manifest_v2(
+                artifact_id="artifact-explicit",
+                image_repository=profile.image.repository,
+            )
+            store.write_artifact_manifest(manifest)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(
+                    artifact_id=manifest.artifact_id,
+                    source_git_ref=manifest.source_commit,
+                ),
+                idempotency_key="apply-explicit-no-current-snapshot",
+            )
+
+        self.assertEqual(response.status_code, 202)
 
     async def test_testing_instance_grant_denies_prod_in_shared_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

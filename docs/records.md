@@ -1145,8 +1145,11 @@ state/
   bootstrap operation boundary for the guarded `recreate-in-place` replacement
   path: the service stores the apply request, `Idempotency-Key`, request
   fingerprint, caller idempotency scope, status/phase, deployment-record id
-  when available, final apply result, and terminal error. Reusing the same key
-  with the same request and caller identity replays the existing operation;
+  when available, final apply result, and terminal error. The request preserves
+  the expected current artifact separately from an optional replacement
+  candidate so enqueue and worker execution can reject a stale lane snapshot.
+  Reusing the same key with the same request and caller identity replays the
+  existing operation;
   reusing it for a different request is rejected; an active `pending` or
   `running` operation blocks another apply for the same product/context/instance
   through a storage-owned lane reservation. Filesystem reservations wait briefly

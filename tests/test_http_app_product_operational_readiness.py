@@ -243,6 +243,9 @@ class FastApiProductOperationalReadinessTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(tuple(route), ("get",))
         self.assertEqual(route["get"]["operationId"], "read_product_operational_readiness")
+        parameters = {parameter["name"]: parameter for parameter in route["get"]["parameters"]}
+        self.assertIn("expected_current_artifact_id", parameters)
+        self.assertFalse(parameters["expected_current_artifact_id"]["required"])
         self.assertEqual(
             route["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/ProductOperationalReadinessResponse",

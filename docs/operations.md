@@ -1575,6 +1575,21 @@ service resolves DB-backed records and managed Dokploy secrets inside the normal
 runtime boundary. The local CLI form is for operator debugging from an already
 trusted runtime with `LAUNCHPLANE_DATABASE_URL` configured.
 
+The reusable target-replacement plan and apply workers first read
+`GET /v1/products/{product}/environments/{environment}` and derive the exact
+context plus current artifact from Launchplane records. They then call the
+action-specific operational-readiness route with their own OIDC identity and
+upload the redacted environment/readiness evidence. Plan payload generation and
+apply operation creation occur only after an exact `ready` result. Apply uses a
+complete explicit `artifact_id`/`source_git_ref` pair when supplied; otherwise it
+pins both values from the current environment record before enqueue. Both
+workers also carry the environment's current artifact as a separate expected
+snapshot; the plan route, apply enqueue path, and operation worker fail closed
+if that lane artifact changes. Candidate artifacts must use the product
+profile's recorded image repository. The worker contracts must land before the
+dispatch wrappers pin them to a reviewed full commit SHA; until that follow-up
+pin lands, the staged reusable files are not an operator entrypoint.
+
 The plan reads the product profile, Launchplane Dokploy target/id records,
 current inventory, live Dokploy target payload, domains, volume env keys, latest
 deployment, and expected runtime identity. It does not create, delete, deploy,

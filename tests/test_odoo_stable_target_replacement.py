@@ -639,6 +639,51 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertTrue(plan.current_target.runtime_identity_present)
         self.assertEqual(plan.current_target.domain_hosts, ("cm-testing.shinycomputers.com",))
 
+    def test_build_plan_blocks_when_current_artifact_changed_after_preflight(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "cm-testing",
+                    "env": "\n".join(
+                        (
+                            "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                            "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                            "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        )
+                    ),
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+        ):
+            plan = build_odoo_stable_target_replacement_plan(
+                control_plane_root=Path("."),
+                record_store=_Store(
+                    target_record=_target_record(),
+                    target_id_record=_target_id_record(),
+                    inventory=_inventory(),
+                ),
+                request=OdooStableTargetReplacementRequest(
+                    product="odoo-tenant-cm",
+                    instance="testing",
+                    expected_current_artifact_id="artifact-cm-before-read",
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(plan.plan_status, "blocked")
+        self.assertIn(
+            "Current inventory artifact changed after operational readiness preflight.",
+            plan.blockers,
+        )
+
     def test_build_plan_blocks_without_target_records(self) -> None:
         plan = build_odoo_stable_target_replacement_plan(
             control_plane_root=Path("."),
@@ -2211,6 +2256,96 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     ),
                     dokploy_request=cast(DokployRequest, _request),
                 )
+
+    def test_apply_refuses_artifact_from_another_product_repository(self) -> None:
+        foreign_manifest = _artifact_manifest(artifact_id="artifact-foreign")
+        foreign_manifest.image.repository = "ghcr.io/cbusillo/other-product"
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+            artifact_manifests=(_artifact_manifest(), foreign_manifest),
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "cm-testing",
+                    "env": "\n".join(
+                        (
+                            "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                            "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                            "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        )
+                    ),
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+        ):
+            with self.assertRaisesRegex(click.ClickException, "does not match product profile"):
+                execute_odoo_stable_target_replacement_apply(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=OdooStableTargetReplacementApplyRequest(
+                        product="odoo-tenant-cm",
+                        instance="testing",
+                        artifact_id="artifact-foreign",
+                        source_git_ref="abc1234",
+                    ),
+                    dokploy_request=cast(DokployRequest, _request),
+                )
+
+    def test_apply_rechecks_expected_current_artifact_before_provider_effects(self) -> None:
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+        )
+        provider_effects: list[str] = []
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "cm-testing",
+                    "env": "\n".join(
+                        (
+                            "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                            "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                            "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        )
+                    ),
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+        ):
+            with self.assertRaisesRegex(click.ClickException, "ready replacement plan"):
+                execute_odoo_stable_target_replacement_apply(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=OdooStableTargetReplacementApplyRequest(
+                        product="odoo-tenant-cm",
+                        instance="testing",
+                        expected_current_artifact_id="artifact-before-worker-claim",
+                    ),
+                    dokploy_request=cast(DokployRequest, _request),
+                    provider_effect_checkpoint=provider_effects.append,
+                )
+
+        self.assertEqual(provider_effects, [])
 
     def test_apply_refuses_blocked_plan(self) -> None:
         with self.assertRaises(click.ClickException):

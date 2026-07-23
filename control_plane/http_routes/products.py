@@ -895,6 +895,7 @@ def register_product_environment_read_routes(
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         artifact_id: Annotated[str, Query()] = "",
+        expected_current_artifact_id: Annotated[str, Query()] = "",
     ) -> ProductOperationalReadinessResponse:
         trace_id = common.next_trace_id()
         try:
@@ -944,6 +945,7 @@ def register_product_environment_read_routes(
                 identity=identity,
                 requested_action=action,
                 requested_artifact_id=artifact_id,
+                expected_current_artifact_id=expected_current_artifact_id,
                 generated_at=utc_now_timestamp(),
             )
         except ValueError as error:

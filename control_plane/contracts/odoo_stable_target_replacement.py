@@ -17,12 +17,14 @@ class OdooStableTargetReplacementRequest(BaseModel):
     allow_empty_data: bool = False
     data_source_mode: Literal["existing", "empty", "upstream_restore"] = "existing"
     confirmation: str = ""
+    expected_current_artifact_id: str = ""
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooStableTargetReplacementRequest":
         self.product = self.product.strip()
         self.instance = self.instance.strip().lower()
         self.confirmation = self.confirmation.strip().lower()
+        self.expected_current_artifact_id = self.expected_current_artifact_id.strip()
         if not self.product:
             raise ValueError("Odoo stable target replacement requires product.")
         if not self.instance:
