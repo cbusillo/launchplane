@@ -399,6 +399,9 @@ testing-first external route-binding set.
 testing-lane ingress inspection and reviewed no-op audit authority. The
 `LAUNCHPLANE_AUTHZ_ODOO_TESTING_ROUTE_BINDING_REFRESH_MANAGED_SET_JSON` owns the
 testing-only refresh controller and its exact-instance binding grants. The
+`LAUNCHPLANE_AUTHZ_ODOO_TESTING_TARGET_REPLACEMENT_MANAGED_SET_JSON` owns the
+separate exact-instance testing read, plan, and apply grants used by the pinned
+Odoo target-replacement workers. The
 `Manage Launchplane Authorization` wrapper selects one of those explicit
 secrets and forwards it into the reusable worker, whose OIDC-minting job remains
 gated by the `launchplane-authz-admin` environment. Never replace the unreadable
