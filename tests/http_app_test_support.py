@@ -18,7 +18,11 @@ from control_plane.contracts.agent_write_intent import (
     build_agent_write_intent_record_id,
     evaluate_agent_write_intent,
 )
-from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
@@ -1722,10 +1726,21 @@ def _seed_product_environment_read_records(database_url: str) -> None:
                 instance_name="prod",
                 actor="test",
             )
+        previous_record = store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="launchplane-authz-policy-product-environment-read-test-previous",
+                source="test",
+                updated_at="2026-05-02T22:34:00Z",
+                policy=LaunchplaneAuthzPolicy(schema_version=2),
+            )
+        )
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
+                "schema_version": 2,
                 "github_actions": [
                     {
+                        "managed_set_id": "test.product-environment-read",
+                        "managed_rule_id": "example-site.read",
                         "repository": "every/verireel",
                         "workflow_refs": [
                             "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
@@ -1735,16 +1750,41 @@ def _seed_product_environment_read_records(database_url: str) -> None:
                         "contexts": ["launchplane"],
                         "actions": ["product_environment.read"],
                     }
-                ]
+                ],
             }
         )
-        store.seed_authz_policy_if_absent(
-            LaunchplaneAuthzPolicyRecord(
-                record_id="launchplane-authz-policy-product-environment-read-test",
-                source="test",
-                updated_at="2026-05-02T22:35:00Z",
-                policy=policy,
-            )
+        policy_sha256 = authz_policy_sha256(policy)
+        replacement_record = LaunchplaneAuthzPolicyRecord(
+            revision=previous_record.revision + 1,
+            record_id=build_authz_policy_record_id(
+                revision=previous_record.revision + 1,
+                policy_sha256=policy_sha256,
+            ),
+            source="test",
+            updated_at="2026-05-02T22:35:00Z",
+            policy_sha256=policy_sha256,
+            policy=policy,
+            audit={
+                "operation": "managed_rule_set_reconcile",
+                "managed_set_id": "test.product-environment-read",
+                "previous_policy_record_id": previous_record.record_id,
+                "diff": {
+                    "managed_set_id": "test.product-environment-read",
+                    "previous_record_id": previous_record.record_id,
+                    "changes": [
+                        {
+                            "managed_rule_id": "example-site.read",
+                            "change": "added",
+                            "previous_principal_type": None,
+                            "desired_principal_type": "github_actions",
+                        }
+                    ],
+                },
+            },
+        )
+        store.compare_and_write_authz_policy_record(
+            expected_record=previous_record,
+            replacement_record=replacement_record,
         )
     finally:
         store.close()

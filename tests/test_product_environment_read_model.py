@@ -9,6 +9,7 @@ import unittest
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
 )
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -46,6 +47,7 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.service_auth import LaunchplaneAuthzPolicy
 from tests.support.artifact_manifests import artifact_manifest_v2
 
 
@@ -323,7 +325,120 @@ class _PublicIngressObservationsOnlyStore(_PreviewRecordStore):
         return tuple(records)
 
 
+def _managed_github_rule(
+    *,
+    managed_rule_id: str,
+    products: tuple[str, ...],
+    actions: tuple[str, ...] = ("product_profile.read",),
+    managed_set_id: str = "test.product-activity",
+) -> dict[str, object]:
+    return {
+        "managed_set_id": managed_set_id,
+        "managed_rule_id": managed_rule_id,
+        "repository": "every/product-operator",
+        "repository_id": "1001",
+        "repository_owner_id": "2001",
+        "products": products,
+        "contexts": ("*",),
+        "actions": actions,
+    }
+
+
+def _authz_policy(*rules: dict[str, object]) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "schema_version": 2,
+            "github_actions": rules,
+        }
+    )
+
+
+def _authz_record(
+    *,
+    record_id: str,
+    revision: int,
+    status: str,
+    updated_at: str,
+    policy: LaunchplaneAuthzPolicy,
+    audit: dict[str, object] | None = None,
+    source: str = "test-policy",
+) -> LaunchplaneAuthzPolicyRecord:
+    return LaunchplaneAuthzPolicyRecord.model_validate(
+        {
+            "record_id": record_id,
+            "revision": revision,
+            "status": status,
+            "source": source,
+            "updated_at": updated_at,
+            "policy": policy,
+            "audit": audit or {},
+        }
+    )
+
+
+def _managed_authz_audit(
+    *,
+    previous_record_id: str,
+    changes: tuple[dict[str, object], ...],
+    managed_set_id: str = "test.product-activity",
+) -> dict[str, object]:
+    return {
+        "operation": "managed_rule_set_reconcile",
+        "managed_set_id": managed_set_id,
+        "previous_policy_record_id": previous_record_id,
+        "diff": {
+            "managed_set_id": managed_set_id,
+            "previous_record_id": previous_record_id,
+            "changes": changes,
+        },
+    }
+
+
+def _default_authz_activity_records() -> tuple[LaunchplaneAuthzPolicyRecord, ...]:
+    previous_record = _authz_record(
+        record_id="authz-policy-1",
+        revision=1,
+        status="superseded",
+        updated_at="2026-05-02T12:59:00Z",
+        policy=_authz_policy(),
+    )
+    current_record = _authz_record(
+        record_id="authz-policy-2",
+        revision=2,
+        status="active",
+        updated_at="2026-05-02T13:00:00Z",
+        policy=_authz_policy(
+            _managed_github_rule(
+                managed_rule_id="example-site.read",
+                products=("example-site",),
+            )
+        ),
+        audit=_managed_authz_audit(
+            previous_record_id=previous_record.record_id,
+            changes=(
+                {
+                    "managed_rule_id": "example-site.read",
+                    "change": "added",
+                    "previous_principal_type": None,
+                    "desired_principal_type": "github_actions",
+                },
+            ),
+        ),
+    )
+    return (current_record, previous_record)
+
+
 class _ActivityRecordStore(_PreviewRecordStore):
+    def __init__(
+        self,
+        profile: LaunchplaneProductProfileRecord,
+        previews: tuple[PreviewRecord, ...],
+        *,
+        authz_records: tuple[LaunchplaneAuthzPolicyRecord, ...] | None = None,
+    ) -> None:
+        super().__init__(profile, previews)
+        self._authz_records = authz_records or _default_authz_activity_records()
+
     def list_deployment_records(
         self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
     ) -> tuple[object, ...]:
@@ -418,18 +533,10 @@ class _ActivityRecordStore(_PreviewRecordStore):
     def list_authz_policy_records(
         self, *, status: str = "", limit: int | None = None
     ) -> tuple[object, ...]:
-        return (
-            SimpleNamespace(
-                record_id="authz-policy-1",
-                status="active",
-                source="test-policy",
-                updated_at="2026-05-02T13:00:00Z",
-                policy=SimpleNamespace(
-                    github_actions=(SimpleNamespace(products=("example-site",)),),
-                    github_humans=(),
-                ),
-            ),
+        records = tuple(
+            record for record in self._authz_records if not status or record.status == status
         )
+        return records[:limit] if limit is not None else records
 
 
 class _ManyDeploymentActivityRecordStore(_PreviewRecordStore):
@@ -1459,6 +1566,617 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             {link.record_id for event in activity.events for link in event.records},
         )
         self.assertEqual(activity.events[0].event_type, "authz_policy")
+
+    def test_product_activity_authz_grant_uses_managed_mutation_delta(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False, preview_context="")
+        )
+        previous_record = _authz_record(
+            record_id="authz-policy-grant-1",
+            revision=1,
+            status="superseded",
+            updated_at="2026-05-02T12:59:00Z",
+            policy=_authz_policy(),
+        )
+        current_record = _authz_record(
+            record_id="authz-policy-grant-2",
+            revision=2,
+            status="active",
+            updated_at="2026-05-02T13:00:00Z",
+            policy=_authz_policy(
+                _managed_github_rule(
+                    managed_rule_id="example-site.read",
+                    products=("example-site",),
+                )
+            ),
+            audit=_managed_authz_audit(
+                previous_record_id=previous_record.record_id,
+                changes=(
+                    {
+                        "managed_rule_id": "example-site.read",
+                        "change": "added",
+                        "previous_principal_type": None,
+                        "desired_principal_type": "github_actions",
+                    },
+                ),
+            ),
+            source="managed-authz",
+        )
+        store = _ActivityRecordStore(
+            profile,
+            (),
+            authz_records=(current_record, previous_record),
+        )
+
+        activity = build_product_activity_read_model(
+            record_store=store,
+            product=profile.product,
+        )
+
+        authz_events = tuple(
+            event for event in activity.events if event.event_type == "authz_policy"
+        )
+        self.assertEqual(len(authz_events), 1)
+        event = authz_events[0]
+        self.assertEqual(event.action_id, "authz_policy.grant")
+        self.assertEqual(event.title, "Example Site authorization granted")
+        self.assertIn("managed-authz", event.summary)
+        self.assertIn("example-site.read", event.summary)
+
+    def test_product_activity_authz_removal_uses_previous_policy_rule(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False, preview_context="")
+        )
+        previous_record = _authz_record(
+            record_id="authz-policy-remove-1",
+            revision=1,
+            status="superseded",
+            updated_at="2026-05-02T12:59:00Z",
+            policy=_authz_policy(
+                _managed_github_rule(
+                    managed_rule_id="example-site.read",
+                    products=("example-site",),
+                )
+            ),
+        )
+        current_record = _authz_record(
+            record_id="authz-policy-remove-2",
+            revision=2,
+            status="active",
+            updated_at="2026-05-02T13:00:00Z",
+            policy=_authz_policy(),
+            audit=_managed_authz_audit(
+                previous_record_id=previous_record.record_id,
+                changes=(
+                    {
+                        "managed_rule_id": "example-site.read",
+                        "change": "removed",
+                        "previous_principal_type": "github_actions",
+                        "desired_principal_type": None,
+                    },
+                ),
+            ),
+            source="managed-authz",
+        )
+        store = _ActivityRecordStore(
+            profile,
+            (),
+            authz_records=(current_record, previous_record),
+        )
+
+        activity = build_product_activity_read_model(
+            record_store=store,
+            product=profile.product,
+        )
+
+        authz_events = tuple(
+            event for event in activity.events if event.event_type == "authz_policy"
+        )
+        self.assertEqual(len(authz_events), 1)
+        event = authz_events[0]
+        self.assertEqual(event.action_id, "authz_policy.remove")
+        self.assertEqual(event.title, "Example Site authorization removed")
+        self.assertIn("managed-authz", event.summary)
+        self.assertIn("example-site.read", event.summary)
+
+    def test_product_activity_authz_resolves_rule_id_within_managed_set(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False, preview_context="")
+        )
+        previous_record = _authz_record(
+            record_id="authz-policy-managed-set-1",
+            revision=1,
+            status="superseded",
+            updated_at="2026-05-02T12:59:00Z",
+            policy=_authz_policy(
+                _managed_github_rule(
+                    managed_set_id="target.manager",
+                    managed_rule_id="shared.read",
+                    products=("example-site",),
+                ),
+                _managed_github_rule(
+                    managed_set_id="other.manager",
+                    managed_rule_id="shared.read",
+                    products=("other-site",),
+                ),
+            ),
+        )
+        current_record = _authz_record(
+            record_id="authz-policy-managed-set-2",
+            revision=2,
+            status="active",
+            updated_at="2026-05-02T13:00:00Z",
+            policy=_authz_policy(
+                _managed_github_rule(
+                    managed_set_id="other.manager",
+                    managed_rule_id="shared.read",
+                    products=("other-site",),
+                )
+            ),
+            audit=_managed_authz_audit(
+                managed_set_id="target.manager",
+                previous_record_id=previous_record.record_id,
+                changes=(
+                    {
+                        "managed_rule_id": "shared.read",
+                        "change": "removed",
+                        "previous_principal_type": "github_actions",
+                        "desired_principal_type": None,
+                    },
+                ),
+            ),
+            source="managed-authz",
+        )
+
+        activity = build_product_activity_read_model(
+            record_store=_ActivityRecordStore(
+                profile,
+                (),
+                authz_records=(current_record, previous_record),
+            ),
+            product=profile.product,
+        )
+
+        authz_events = tuple(
+            event for event in activity.events if event.event_type == "authz_policy"
+        )
+        self.assertEqual(len(authz_events), 1)
+        self.assertEqual(authz_events[0].action_id, "authz_policy.remove")
+
+    def test_product_activity_authz_matches_products_by_principal_semantics(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False, preview_context="")
+        )
+        previous_record = _authz_record(
+            record_id="authz-policy-principals-1",
+            revision=1,
+            status="superseded",
+            updated_at="2026-05-02T12:59:00Z",
+            policy=_authz_policy(),
+        )
+        current_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_actions": [
+                    {
+                        **_managed_github_rule(
+                            managed_set_id="test.principals",
+                            managed_rule_id="actions.wildcard",
+                            products=("example-*",),
+                        )
+                    }
+                ],
+                "github_humans": [
+                    {
+                        "managed_set_id": "test.principals",
+                        "managed_rule_id": "human.exact",
+                        "logins": ["operator"],
+                        "products": ["example-site"],
+                        "actions": ["product_profile.read"],
+                    },
+                    {
+                        "managed_set_id": "test.principals",
+                        "managed_rule_id": "human.wildcard",
+                        "logins": ["operator"],
+                        "products": ["example-*"],
+                        "actions": ["product_profile.read"],
+                    },
+                    {
+                        "managed_set_id": "test.principals",
+                        "managed_rule_id": "human.global",
+                        "logins": ["operator"],
+                        "actions": ["product_profile.read"],
+                    },
+                ],
+                "terminal_agents": [
+                    {
+                        "managed_set_id": "test.principals",
+                        "managed_rule_id": "agent.exact",
+                        "subjects": ["agent:test"],
+                        "products": ["example-site"],
+                        "actions": ["product_profile.read"],
+                    },
+                    {
+                        "managed_set_id": "test.principals",
+                        "managed_rule_id": "agent.wildcard",
+                        "subjects": ["agent:test"],
+                        "products": ["example-*"],
+                        "actions": ["product_profile.read"],
+                    },
+                    {
+                        "managed_set_id": "test.principals",
+                        "managed_rule_id": "agent.global",
+                        "subjects": ["agent:test"],
+                        "actions": ["product_profile.read"],
+                    },
+                ],
+                "local_operators": [
+                    {
+                        "managed_set_id": "test.principals",
+                        "managed_rule_id": "operator.wildcard",
+                        "subjects": ["operator:test"],
+                        "products": ["example-*"],
+                        "actions": ["product_profile.read"],
+                    }
+                ],
+                "local_admins": [
+                    {
+                        "managed_set_id": "test.principals",
+                        "managed_rule_id": "admin.wildcard",
+                        "subjects": ["admin:test"],
+                        "products": ["*"],
+                        "actions": ["product_profile.read"],
+                    }
+                ],
+            }
+        )
+        changes: list[dict[str, object]] = []
+        for principal_type, managed_rule_id in (
+            ("github_actions", "actions.wildcard"),
+            ("github_humans", "human.exact"),
+            ("github_humans", "human.wildcard"),
+            ("github_humans", "human.global"),
+            ("terminal_agents", "agent.exact"),
+            ("terminal_agents", "agent.wildcard"),
+            ("terminal_agents", "agent.global"),
+            ("local_operators", "operator.wildcard"),
+            ("local_admins", "admin.wildcard"),
+        ):
+            changes.append(
+                {
+                    "managed_rule_id": managed_rule_id,
+                    "change": "added",
+                    "previous_principal_type": None,
+                    "desired_principal_type": principal_type,
+                }
+            )
+        current_record = _authz_record(
+            record_id="authz-policy-principals-2",
+            revision=2,
+            status="active",
+            updated_at="2026-05-02T13:00:00Z",
+            policy=current_policy,
+            audit=_managed_authz_audit(
+                managed_set_id="test.principals",
+                previous_record_id=previous_record.record_id,
+                changes=tuple(changes),
+            ),
+            source="managed-authz",
+        )
+
+        activity = build_product_activity_read_model(
+            record_store=_ActivityRecordStore(
+                profile,
+                (),
+                authz_records=(current_record, previous_record),
+            ),
+            product=profile.product,
+        )
+
+        authz_events = tuple(
+            event for event in activity.events if event.event_type == "authz_policy"
+        )
+        self.assertEqual(len(authz_events), 1)
+        summary = authz_events[0].summary
+        for managed_rule_id in (
+            "actions.wildcard",
+            "human.exact",
+            "human.global",
+            "agent.exact",
+            "agent.global",
+            "operator.wildcard",
+            "admin.wildcard",
+        ):
+            self.assertIn(managed_rule_id, summary)
+        self.assertNotIn("human.wildcard", summary)
+        self.assertNotIn("agent.wildcard", summary)
+
+    def test_product_activity_authz_does_not_guess_missing_previous_record(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False, preview_context="")
+        )
+        adjacent_record = _authz_record(
+            record_id="authz-policy-adjacent",
+            revision=1,
+            status="superseded",
+            updated_at="2026-05-02T12:59:00Z",
+            policy=_authz_policy(
+                _managed_github_rule(
+                    managed_rule_id="example-site.read",
+                    products=("example-site",),
+                )
+            ),
+        )
+        current_record = _authz_record(
+            record_id="authz-policy-missing-previous",
+            revision=3,
+            status="active",
+            updated_at="2026-05-02T13:00:00Z",
+            policy=_authz_policy(),
+            audit=_managed_authz_audit(
+                previous_record_id="authz-policy-not-returned",
+                changes=(
+                    {
+                        "managed_rule_id": "example-site.read",
+                        "change": "removed",
+                        "previous_principal_type": "github_actions",
+                        "desired_principal_type": None,
+                    },
+                ),
+            ),
+            source="managed-authz",
+        )
+
+        activity = build_product_activity_read_model(
+            record_store=_ActivityRecordStore(
+                profile,
+                (),
+                authz_records=(current_record, adjacent_record),
+            ),
+            product=profile.product,
+        )
+
+        self.assertFalse(any(event.event_type == "authz_policy" for event in activity.events))
+
+    def test_product_activity_authz_requires_managed_set_id(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False, preview_context="")
+        )
+        previous_record = _authz_record(
+            record_id="authz-policy-missing-set-1",
+            revision=1,
+            status="superseded",
+            updated_at="2026-05-02T12:59:00Z",
+            policy=_authz_policy(),
+        )
+        current_record = _authz_record(
+            record_id="authz-policy-missing-set-2",
+            revision=2,
+            status="active",
+            updated_at="2026-05-02T13:00:00Z",
+            policy=_authz_policy(
+                _managed_github_rule(
+                    managed_rule_id="example-site.read",
+                    products=("example-site",),
+                )
+            ),
+            audit={
+                "operation": "managed_rule_set_reconcile",
+                "previous_policy_record_id": previous_record.record_id,
+                "diff": {
+                    "previous_record_id": previous_record.record_id,
+                    "changes": [
+                        {
+                            "managed_rule_id": "example-site.read",
+                            "change": "added",
+                            "previous_principal_type": None,
+                            "desired_principal_type": "github_actions",
+                        }
+                    ],
+                },
+            },
+            source="managed-authz",
+        )
+
+        activity = build_product_activity_read_model(
+            record_store=_ActivityRecordStore(
+                profile,
+                (),
+                authz_records=(current_record, previous_record),
+            ),
+            product=profile.product,
+        )
+
+        self.assertFalse(any(event.event_type == "authz_policy" for event in activity.events))
+
+    def test_product_activity_authz_update_requires_named_previous_record(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False, preview_context="")
+        )
+        adjacent_record = _authz_record(
+            record_id="authz-policy-update-adjacent",
+            revision=1,
+            status="superseded",
+            updated_at="2026-05-02T12:59:00Z",
+            policy=_authz_policy(),
+        )
+        current_record = _authz_record(
+            record_id="authz-policy-update-missing-previous",
+            revision=3,
+            status="active",
+            updated_at="2026-05-02T13:00:00Z",
+            policy=_authz_policy(
+                _managed_github_rule(
+                    managed_rule_id="example-site.read",
+                    products=("example-site",),
+                    actions=("product_profile.read", "product_environment.read"),
+                )
+            ),
+            audit=_managed_authz_audit(
+                previous_record_id="authz-policy-update-not-returned",
+                changes=(
+                    {
+                        "managed_rule_id": "example-site.read",
+                        "change": "updated",
+                        "previous_principal_type": "github_actions",
+                        "desired_principal_type": "github_actions",
+                    },
+                ),
+            ),
+            source="managed-authz",
+        )
+
+        activity = build_product_activity_read_model(
+            record_store=_ActivityRecordStore(
+                profile,
+                (),
+                authz_records=(current_record, adjacent_record),
+            ),
+            product=profile.product,
+        )
+
+        self.assertFalse(any(event.event_type == "authz_policy" for event in activity.events))
+
+    def test_product_activity_excludes_unrelated_multi_product_rule_update(self) -> None:
+        previous_record = _authz_record(
+            record_id="authz-policy-multi-1",
+            revision=1,
+            status="superseded",
+            updated_at="2026-05-02T12:59:00Z",
+            policy=_authz_policy(
+                _managed_github_rule(
+                    managed_rule_id="shared.read",
+                    products=("example-site",),
+                )
+            ),
+        )
+        current_record = _authz_record(
+            record_id="authz-policy-multi-2",
+            revision=2,
+            status="active",
+            updated_at="2026-05-02T13:00:00Z",
+            policy=_authz_policy(
+                _managed_github_rule(
+                    managed_rule_id="shared.read",
+                    products=("example-site", "other-site"),
+                )
+            ),
+            audit=_managed_authz_audit(
+                previous_record_id=previous_record.record_id,
+                changes=(
+                    {
+                        "managed_rule_id": "shared.read",
+                        "change": "updated",
+                        "previous_principal_type": "github_actions",
+                        "desired_principal_type": "github_actions",
+                    },
+                ),
+            ),
+            source="managed-authz",
+        )
+        records = (current_record, previous_record)
+        example_profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False, preview_context="")
+        )
+        other_profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(
+                product="other-site",
+                preview_enabled=False,
+                preview_context="",
+                testing_context="other-site-prod",
+                prod_context="other-site-prod",
+            )
+        )
+
+        example_activity = build_product_activity_read_model(
+            record_store=_ActivityRecordStore(
+                example_profile,
+                (),
+                authz_records=records,
+            ),
+            product=example_profile.product,
+        )
+        other_activity = build_product_activity_read_model(
+            record_store=_ActivityRecordStore(
+                other_profile,
+                (),
+                authz_records=records,
+            ),
+            product=other_profile.product,
+        )
+
+        self.assertFalse(
+            any(event.event_type == "authz_policy" for event in example_activity.events)
+        )
+        other_authz_events = tuple(
+            event for event in other_activity.events if event.event_type == "authz_policy"
+        )
+        self.assertEqual(len(other_authz_events), 1)
+        self.assertEqual(other_authz_events[0].action_id, "authz_policy.grant")
+
+    def test_product_activity_legacy_authz_uses_adjacent_snapshot_comparison(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False, preview_context="")
+        )
+        first_record = _authz_record(
+            record_id="authz-policy-legacy-1",
+            revision=1,
+            status="superseded",
+            updated_at="2026-05-02T12:58:00Z",
+            policy=_authz_policy(
+                _managed_github_rule(
+                    managed_rule_id="shared.read",
+                    products=("example-site",),
+                )
+            ),
+        )
+        unrelated_record = _authz_record(
+            record_id="authz-policy-legacy-2",
+            revision=2,
+            status="superseded",
+            updated_at="2026-05-02T12:59:00Z",
+            policy=_authz_policy(
+                _managed_github_rule(
+                    managed_rule_id="shared.read",
+                    products=("example-site", "other-site"),
+                )
+            ),
+            source="legacy-unrelated",
+        )
+        changed_record = _authz_record(
+            record_id="authz-policy-legacy-3",
+            revision=3,
+            status="active",
+            updated_at="2026-05-02T13:00:00Z",
+            policy=_authz_policy(
+                _managed_github_rule(
+                    managed_rule_id="shared.read",
+                    products=("example-site", "other-site"),
+                    actions=("product_profile.read", "product_environment.read"),
+                )
+            ),
+            source="legacy-product-change",
+        )
+        store = _ActivityRecordStore(
+            profile,
+            (),
+            authz_records=(changed_record, unrelated_record, first_record),
+        )
+
+        activity = build_product_activity_read_model(
+            record_store=store,
+            product=profile.product,
+        )
+
+        authz_events = tuple(
+            event for event in activity.events if event.event_type == "authz_policy"
+        )
+        self.assertEqual(len(authz_events), 1)
+        event = authz_events[0]
+        self.assertEqual(event.action_id, "authz_policy.legacy_change")
+        self.assertEqual(event.title, "Example Site authorization changed (legacy record)")
+        self.assertIn("legacy-product-change", event.summary)
+        self.assertNotIn("legacy-unrelated", event.summary)
 
     def test_product_activity_read_model_keeps_preview_history_when_previews_disabled(
         self,
