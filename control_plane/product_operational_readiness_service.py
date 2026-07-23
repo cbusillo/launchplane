@@ -4,6 +4,7 @@ from typing import Protocol, cast
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.product_environment_read_model import (
     ProductEnvironmentReadModelStore,
@@ -28,6 +29,10 @@ from control_plane.service_auth import LaunchplaneIdentity
 class ProductOperationalReadinessStore(ProductEnvironmentReadModelStore, Protocol):
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
 
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory: ...
+
 
 class ProductOperationalReadinessStoreCapabilityError(RuntimeError):
     pass
@@ -42,6 +47,7 @@ _PRODUCT_OPERATIONAL_READINESS_STORE_METHODS = (
     "list_public_ingress_incident_records",
     "list_authz_policy_records",
     "read_artifact_manifest",
+    "read_environment_inventory",
 )
 
 
@@ -89,6 +95,7 @@ def build_product_operational_readiness_service_result(
     identity: LaunchplaneIdentity,
     requested_action: str,
     requested_artifact_id: str,
+    expected_current_artifact_id: str,
     generated_at: str,
 ) -> ProductOperationalReadiness:
     normalized_action = requested_action.strip()
@@ -112,6 +119,10 @@ def build_product_operational_readiness_service_result(
         record_store=record_store,
         artifact_id=requested_artifact_id,
     )
+    current_inventory_artifact_id = _read_current_inventory_artifact_id(
+        record_store=record_store,
+        lane=lane,
+    )
     return build_product_operational_readiness(
         ProductOperationalReadinessInputs(
             profile=profile,
@@ -125,6 +136,8 @@ def build_product_operational_readiness_service_result(
             managed_secrets=config_status.managed_secrets,
             topology=topology,
             requested_artifact_id=requested_artifact_id.strip(),
+            expected_current_artifact_id=expected_current_artifact_id.strip(),
+            current_inventory_artifact_id=current_inventory_artifact_id,
             artifact_manifest=artifact_manifest,
             generated_at=generated_at,
         )
@@ -174,3 +187,18 @@ def _read_artifact_manifest(
         return record_store.read_artifact_manifest(normalized_artifact_id)
     except FileNotFoundError:
         return None
+
+
+def _read_current_inventory_artifact_id(
+    *,
+    record_store: ProductOperationalReadinessStore,
+    lane: ProductLaneProfile,
+) -> str | None:
+    try:
+        inventory = record_store.read_environment_inventory(
+            context_name=lane.context,
+            instance_name=lane.instance,
+        )
+    except FileNotFoundError:
+        return None
+    return inventory.artifact_identity.artifact_id if inventory.artifact_identity else ""

@@ -6,7 +6,10 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.authz_grant_service import is_immutable_job_workflow_ref
-from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.artifact_identity import (
+    ArtifactIdentityManifest,
+    artifact_manifest_matches_image_repository,
+)
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.data_provenance import FreshnessStatus
 from control_plane.contracts.driver_descriptor import (
@@ -156,6 +159,8 @@ class ProductOperationalReadinessInputs:
     managed_secrets: tuple[ProductManagedSecretConfigStatusItem, ...]
     topology: ProductEnvironmentTopology
     requested_artifact_id: str
+    expected_current_artifact_id: str
+    current_inventory_artifact_id: str | None
     artifact_manifest: ArtifactIdentityManifest | None
     generated_at: str
 
@@ -629,6 +634,15 @@ def _artifact_dimension(
             summary="The resolved artifact manifest does not match the requested artifact ID.",
             owner_record_type="artifact_manifest",
         )
+    if not artifact_manifest_matches_image_repository(
+        manifest,
+        expected_repository=inputs.profile.image.repository,
+    ):
+        return _blocked_dimension(
+            dimension="artifact",
+            summary="The requested artifact does not belong to the product image repository.",
+            owner_record_type="artifact_manifest",
+        )
     return ProductOperationalReadinessDimension(
         dimension="artifact",
         state="ready",
@@ -660,13 +674,29 @@ def _deployment_dimension(
             summary="The deployment record does not match the requested lane.",
             owner_record_type="deployment_record",
         )
+    expected_current_artifact_id = inputs.expected_current_artifact_id.strip()
+    if expected_current_artifact_id and inputs.current_inventory_artifact_id is None:
+        return _missing_dimension(
+            dimension="deployment",
+            summary="Launchplane has no current environment inventory for this lane.",
+            owner_record_type="environment_inventory",
+        )
+    if (
+        expected_current_artifact_id
+        and inputs.current_inventory_artifact_id != expected_current_artifact_id
+    ):
+        return _blocked_dimension(
+            dimension="deployment",
+            summary="The current inventory artifact changed after the caller read the lane.",
+            owner_record_type="environment_inventory",
+        )
     deployed_artifact_id = (
         deployment.artifact_identity.artifact_id if deployment.artifact_identity is not None else ""
     )
-    if inputs.requested_artifact_id and deployed_artifact_id != inputs.requested_artifact_id:
+    if expected_current_artifact_id and deployed_artifact_id != expected_current_artifact_id:
         return _blocked_dimension(
             dimension="deployment",
-            summary="The current deployment does not record the exact requested artifact.",
+            summary="The current deployment artifact changed after the caller read the lane.",
             owner_record_type="deployment_record",
         )
     health = deployment.destination_health

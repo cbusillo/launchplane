@@ -29918,6 +29918,11 @@
                         "title": "Data Source Mode",
                         "type": "string"
                       },
+                      "expected_current_artifact_id": {
+                        "default": "",
+                        "title": "Expected Current Artifact Id",
+                        "type": "string"
+                      },
                       "health_timeout_seconds": {
                         "anyOf": [
                           {
@@ -30132,6 +30137,11 @@
                           "upstream_restore"
                         ],
                         "title": "Data Source Mode",
+                        "type": "string"
+                      },
+                      "expected_current_artifact_id": {
+                        "default": "",
+                        "title": "Expected Current Artifact Id",
                         "type": "string"
                       },
                       "instance": {
@@ -42629,6 +42639,16 @@
             "schema": {
               "default": "",
               "title": "Artifact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_current_artifact_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Expected Current Artifact Id",
               "type": "string"
             }
           },

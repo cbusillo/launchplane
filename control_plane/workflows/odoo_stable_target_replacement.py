@@ -11,7 +11,10 @@ from control_plane import odoo_instance_overrides as control_plane_odoo_instance
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.artifact_identity import (
+    ArtifactIdentityManifest,
+    artifact_manifest_matches_image_repository,
+)
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -1001,6 +1004,11 @@ def build_odoo_stable_target_replacement_plan(
             inventory.artifact_identity.artifact_id if inventory.artifact_identity else ""
         )
         expected_source_git_ref = inventory.source_git_ref
+    if (
+        request.expected_current_artifact_id
+        and expected_artifact_id != request.expected_current_artifact_id
+    ):
+        blockers.append("Current inventory artifact changed after operational readiness preflight.")
     expected_target_name = (
         target_record.target_name
         if isinstance(target_record, DokployTargetRecord) and target_record.target_name
@@ -1052,6 +1060,7 @@ def execute_odoo_stable_target_replacement_apply(
             allow_empty_data=request.allow_empty_data,
             data_source_mode=request.data_source_mode,
             confirmation=request.confirmation,
+            expected_current_artifact_id=request.expected_current_artifact_id,
         ),
         dokploy_request=dokploy_request,
     )
@@ -1084,6 +1093,13 @@ def execute_odoo_stable_target_replacement_apply(
             "Odoo target replacement apply requires source_git_ref or inventory source git ref evidence."
         )
     artifact_manifest = record_store.read_artifact_manifest(artifact_id)
+    if not artifact_manifest_matches_image_repository(
+        artifact_manifest,
+        expected_repository=profile.image.repository,
+    ):
+        raise click.ClickException(
+            "Odoo target replacement artifact image repository does not match product profile."
+        )
     if artifact_manifest.source_commit != source_git_ref:
         raise click.ClickException(
             "Odoo target replacement apply source ref does not match stored artifact manifest. "

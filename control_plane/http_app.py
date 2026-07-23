@@ -406,6 +406,7 @@ from control_plane.odoo_target_replacement_plan_http import (
 from control_plane.odoo_target_replacement_apply_http import (
     ODOO_TARGET_REPLACEMENT_APPLY_ROUTE as _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
     OdooTargetReplacementApplyEnvelope,
+    OdooTargetReplacementApplyCurrentArtifactChangedError,
     OdooTargetReplacementApplyIdempotencyKeyReusedError,
     OdooTargetReplacementApplyOperationActiveError,
     OdooTargetReplacementApplyProductMismatchError,
@@ -6725,6 +6726,13 @@ def create_launchplane_fastapi_app(
                 created_at=created_at,
                 authorization=operation_authorization,
             )
+        except OdooTargetReplacementApplyCurrentArtifactChangedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="odoo_target_replacement_current_artifact_changed",
+                message=str(error),
+            ) from error
         except OdooTargetReplacementApplyIdempotencyKeyReusedError as error:
             raise _launchplane_http_error(
                 status_code=409,

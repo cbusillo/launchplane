@@ -271,3 +271,13 @@ class ArtifactIdentityManifest(BaseModel):
                 "artifact manifest schema_version 2 requires typed dependency provenance instead of openupgrade_inputs"
             )
         return self
+
+
+def artifact_manifest_matches_image_repository(
+    manifest: ArtifactIdentityManifest,
+    *,
+    expected_repository: str,
+) -> bool:
+    normalized_expected = expected_repository.strip().rstrip("/")
+    normalized_observed = manifest.image.repository.strip().rstrip("/")
+    return bool(normalized_expected and normalized_observed == normalized_expected)

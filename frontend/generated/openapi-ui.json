@@ -1249,6 +1249,16 @@
             }
           },
           {
+            "in": "query",
+            "name": "expected_current_artifact_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Expected Current Artifact Id",
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,

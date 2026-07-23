@@ -1,0 +1,376 @@
+---
+name: Reusable Odoo Target Replacement Plan
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Odoo product profile key.
+        required: true
+        type: string
+      instance:
+        description: Stable Odoo instance to inspect.
+        required: true
+        type: string
+      strategy:
+        description: Future replacement strategy to plan around.
+        required: true
+        type: string
+      allow_empty_data:
+        description: Allow missing Odoo volume env keys.
+        required: true
+        type: boolean
+      data_source_mode:
+        description: Prelaunch rebuild data authority for resettable targets.
+        required: true
+        type: string
+      confirmation:
+        description: Confirmation phrase for lane prelaunch rebuild policy.
+        required: false
+        default: ""
+        type: string
+      launchplane_url:
+        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: Optional GitHub OIDC audience.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    env:
+      PRODUCT: ${{ inputs.product }}
+      INSTANCE: ${{ inputs.instance }}
+      STRATEGY: ${{ inputs.strategy }}
+      ALLOW_EMPTY_DATA: ${{ inputs.allow_empty_data }}
+      DATA_SOURCE_MODE: ${{ inputs.data_source_mode }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - name: Validate runtime inputs
+        id: environment_request
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${PRODUCT:?Missing product input}"
+          : "${INSTANCE:?Missing instance input}"
+          : "${STRATEGY:?Missing strategy input}"
+          case "$STRATEGY" in
+            recreate-in-place | replace-and-cutover)
+              ;;
+            *)
+              echo 'Unsupported strategy input.' >&2
+              exit 1
+              ;;
+          esac
+          case "$DATA_SOURCE_MODE" in
+            existing | empty | upstream_restore)
+              ;;
+            *)
+              echo 'Unsupported data_source_mode input.' >&2
+              exit 1
+              ;;
+          esac
+          if [ "$ALLOW_EMPTY_DATA" != "true" ] && [ "$ALLOW_EMPTY_DATA" != "false" ]; then
+            echo 'allow_empty_data resolved to an invalid value.' >&2
+            exit 1
+          fi
+          for scalar in PRODUCT INSTANCE STRATEGY DATA_SOURCE_MODE CONFIRMATION; do
+            case "${!scalar}" in
+              *$'\n'* | *$'\r'*)
+                echo "${scalar} must be a single-line value." >&2
+                exit 1
+                ;;
+            esac
+          done
+          mkdir -p .launchplane
+          encoded_product="$(jq -rn --arg value "$PRODUCT" '$value | @uri')"
+          encoded_instance="$(jq -rn --arg value "$INSTANCE" '$value | @uri')"
+          printf 'route_path=/v1/products/%s/environments/%s\n' \
+            "$encoded_product" "$encoded_instance" >>"$GITHUB_OUTPUT"
+
+      - name: Read product environment authority
+        id: environment
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: >-
+            ${{ inputs.launchplane_audience || vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: ${{ steps.environment_request.outputs.route_path }}
+          expected-status: "200"
+          fail-result-paths: ""
+          log-response-body: "false"
+          response-output-file: .launchplane/product-environment.json
+
+      - name: Summarize product environment evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          environment_file=.launchplane/product-environment.json
+          evidence_file=.launchplane/product-environment-evidence.json
+          if [ ! -f "$environment_file" ]; then
+            exit 0
+          fi
+          jq '
+            (.environment.target.artifact_manifest // null) as $artifact |
+            {
+              trace_id: (.trace_id // ""),
+              environment: {
+                product: (.environment.product // ""),
+                environment: (.environment.environment // ""),
+                context: (.environment.context // ""),
+                trust_state: (.environment.trust_state // "missing"),
+                target: {
+                  artifact_manifest: (
+                    if $artifact == null then null else {
+                      artifact_id: ($artifact.artifact_id // ""),
+                      source_commit: ($artifact.source_commit // "")
+                    } end
+                  ),
+                  trust_state: (.environment.target.trust_state // "missing")
+                },
+                public_ingress: {
+                  status: (.environment.public_ingress.status // "missing"),
+                  trust_state: (
+                    .environment.public_ingress.trust_state // "missing"
+                  )
+                },
+                topology: {
+                  trust_state: (.environment.topology.trust_state // "missing")
+                }
+              }
+            }
+          ' "$environment_file" >"$evidence_file"
+
+      - name: Resolve readiness request from records
+        id: authority
+        env:
+          ENVIRONMENT_STATUS_CODE: ${{ steps.environment.outputs.status-code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          environment_file=.launchplane/product-environment.json
+          if [ "$ENVIRONMENT_STATUS_CODE" != "200" ]; then
+            echo "Product environment read failed with HTTP ${ENVIRONMENT_STATUS_CODE}." >&2
+            exit 1
+          fi
+          resolved_product="$(jq -er '.environment.product | strings | select(length > 0)' "$environment_file")"
+          resolved_instance="$(jq -er '.environment.environment | strings | select(length > 0)' "$environment_file")"
+          resolved_context="$(jq -er '.environment.context | strings | select(length > 0)' "$environment_file")"
+          artifact_id="$(
+            jq -r \
+              '.environment.target.artifact_manifest.artifact_id // "" | strings' \
+              "$environment_file"
+          )"
+          if [ "$resolved_product" != "$PRODUCT" ] || [ "$resolved_instance" != "$INSTANCE" ]; then
+            echo 'Launchplane returned a different product environment than requested.' >&2
+            exit 1
+          fi
+          for value in "$resolved_context" "$artifact_id"; do
+            case "$value" in
+              *$'\n'* | *$'\r'*)
+                echo 'Launchplane environment authority must use single-line values.' >&2
+                exit 1
+                ;;
+            esac
+          done
+          encoded_product="$(jq -rn --arg value "$resolved_product" '$value | @uri')"
+          encoded_context="$(jq -rn --arg value "$resolved_context" '$value | @uri')"
+          encoded_instance="$(jq -rn --arg value "$resolved_instance" '$value | @uri')"
+          encoded_action="$(jq -rn --arg value 'odoo_target_replacement_plan.read' '$value | @uri')"
+          encoded_artifact="$(jq -rn --arg value "$artifact_id" '$value | @uri')"
+          route_path="/v1/products/${encoded_product}/contexts/${encoded_context}/instances/${encoded_instance}/operational-readiness?action=${encoded_action}&artifact_id=${encoded_artifact}&expected_current_artifact_id=${encoded_artifact}"
+          {
+            printf 'artifact_id=%s\n' "$artifact_id"
+            printf 'context=%s\n' "$resolved_context"
+            printf 'current_artifact_id=%s\n' "$artifact_id"
+            printf 'readiness_route_path=%s\n' "$route_path"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Read target replacement readiness
+        id: readiness
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: >-
+            ${{ inputs.launchplane_audience || vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: ${{ steps.authority.outputs.readiness_route_path }}
+          expected-status: "200"
+          fail-result-paths: ""
+          log-response-body: "false"
+          response-output-file: .launchplane/operational-readiness.json
+
+      - name: Enforce target replacement readiness
+        env:
+          ARTIFACT_ID: ${{ steps.authority.outputs.artifact_id }}
+          CONTEXT: ${{ steps.authority.outputs.context }}
+          READINESS_STATUS_CODE: ${{ steps.readiness.outputs.status-code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          readiness_file=.launchplane/operational-readiness.json
+          if [ "$READINESS_STATUS_CODE" != "200" ]; then
+            echo "Operational readiness failed with HTTP ${READINESS_STATUS_CODE}." >&2
+            exit 1
+          fi
+          if ! jq -e \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg instance "$INSTANCE" \
+            --arg artifact_id "$ARTIFACT_ID" \
+            '
+              .product == $product and
+              .context == $context and
+              .instance == $instance and
+              .action.requested_action == "odoo_target_replacement_plan.read" and
+              .action.route_path == "/v1/drivers/odoo/target-replacement-plan" and
+              .action.supported == true and
+              .state == "ready" and
+              .ready == true and
+              (.non_ready_dimensions | length) == 0 and
+              ([
+                .dimensions[] |
+                select(.dimension == "artifact" and .state == "ready") |
+                .evidence[]? |
+                select(
+                  .record_type == "artifact_manifest" and
+                  .record_id == $artifact_id
+                )
+              ] | length) == 1
+            ' \
+            "$readiness_file" >/dev/null; then
+            echo 'Launchplane did not report exact target replacement plan readiness.' >&2
+            jq -c \
+              '{
+                state,
+                ready,
+                non_ready_dimensions,
+                dimensions: [
+                  .dimensions[] |
+                  select(.state != "ready") |
+                  {
+                    dimension,
+                    state,
+                    summary,
+                    details: (.details[:10]),
+                    remediation
+                  }
+                ]
+              }' \
+              "$readiness_file" >&2
+            exit 1
+          fi
+
+      - name: Upload readiness evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: odoo-target-replacement-plan-readiness
+          path: |
+            .launchplane/product-environment-evidence.json
+            .launchplane/operational-readiness.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Write target replacement plan payload
+        id: request
+        env:
+          CURRENT_ARTIFACT_ID: ${{ steps.authority.outputs.current_artifact_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg instance "$INSTANCE" \
+            --arg strategy "$STRATEGY" \
+            --arg data_source_mode "$DATA_SOURCE_MODE" \
+            --arg confirmation "$CONFIRMATION" \
+            --arg expected_current_artifact_id "$CURRENT_ARTIFACT_ID" \
+            --argjson allow_empty_data "$ALLOW_EMPTY_DATA" \
+            '{
+              schema_version: 1,
+              product: $product,
+              replacement: {
+                schema_version: 1,
+                product: $product,
+                instance: $instance,
+                strategy: $strategy,
+                allow_empty_data: $allow_empty_data,
+                data_source_mode: $data_source_mode,
+                confirmation: $confirmation,
+                expected_current_artifact_id: $expected_current_artifact_id
+              }
+            }' > .launchplane/odoo-target-replacement-plan-payload.json
+
+          idempotency_key="$({
+            printf '%s' \
+              "odoo-target-replacement-plan:${PRODUCT}:${INSTANCE}:" \
+              "${STRATEGY}:${ALLOW_EMPTY_DATA}:${DATA_SOURCE_MODE}:" \
+              "${CONFIRMATION}:${CURRENT_ARTIFACT_ID}:" \
+              "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          })"
+          echo "idempotency_key=${idempotency_key}" >>"$GITHUB_OUTPUT"
+
+      - name: Build replacement plan
+        id: launchplane
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: >-
+            ${{ inputs.launchplane_audience || vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/drivers/odoo/target-replacement-plan
+          payload-file: .launchplane/odoo-target-replacement-plan-payload.json
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          response-output-file: odoo-target-replacement-plan.json
+
+      - name: Verify replacement plan response
+        env:
+          PLAN_STATUS_CODE: ${{ steps.launchplane.outputs.status-code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq . odoo-target-replacement-plan.json
+          if [ "$PLAN_STATUS_CODE" != "202" ]; then
+            echo "Odoo replacement plan failed: HTTP ${PLAN_STATUS_CODE}." >&2
+            exit 1
+          fi
+          if [ "$(jq -r '.status' odoo-target-replacement-plan.json)" != "accepted" ]; then
+            echo 'Launchplane Odoo target replacement plan was not accepted.' >&2
+            exit 1
+          fi
+          if [ "$(jq -r '.result.plan_status // ""' odoo-target-replacement-plan.json)" \
+            != "ready" ]; then
+            echo 'Launchplane Odoo target replacement plan is blocked.' >&2
+            jq -c \
+              '{
+                plan_status: (.result.plan_status // "missing"),
+                blockers: ((.result.blockers // [])[:10]),
+                warnings: ((.result.warnings // [])[:10])
+              }' \
+              odoo-target-replacement-plan.json >&2
+            exit 1
+          fi
+
+      - name: Upload replacement plan
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: odoo-target-replacement-plan
+          path: odoo-target-replacement-plan.json
+          if-no-files-found: ignore

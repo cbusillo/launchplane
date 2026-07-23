@@ -103,12 +103,15 @@ async def _get_product_operational_readiness(
     instance: str = "testing",
     action: str = "odoo_target_replacement_plan.read",
     artifact_id: str = "artifact-example-odoo-0123456789abcdef",
+    expected_current_artifact_id: str = "",
     authorization: str = "Bearer valid-token",
 ) -> Response:
     headers = {"Authorization": authorization} if authorization else {}
     query = {"action": action}
     if artifact_id:
         query["artifact_id"] = artifact_id
+    if expected_current_artifact_id:
+        query["expected_current_artifact_id"] = expected_current_artifact_id
     return await http_get(
         app,
         (

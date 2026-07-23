@@ -3,6 +3,7 @@ from typing import Literal, cast
 from pydantic import model_validator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.artifact_identity import artifact_manifest_matches_image_repository
 from control_plane.drivers.dispatch import (
     _ProductRouteEnvelope,
     _validate_driver_envelope_product,
@@ -72,8 +73,10 @@ def validate_odoo_artifact_publish_product_evidence(
     expected_repository = product_profile.image.repository.strip().rstrip("/")
     if not expected_repository:
         raise ValueError("Odoo artifact publish requires a product profile image repository.")
-    observed_repository = request.publish.manifest.image.repository.strip().rstrip("/")
-    if observed_repository != expected_repository:
+    if not artifact_manifest_matches_image_repository(
+        request.publish.manifest,
+        expected_repository=expected_repository,
+    ):
         raise ValueError(
             "Odoo artifact publish evidence image repository does not match product profile."
         )
