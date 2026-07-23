@@ -14,7 +14,11 @@ from control_plane.drivers.dispatch import (
     _ProductRouteEnvelope,
     _validate_driver_envelope_product,
 )
-from control_plane.drivers.registry import read_driver_descriptor
+from control_plane.odoo_product_driver_http import (
+    OdooProductMismatchError,
+    OdooRouteDependencyError,
+    resolve_odoo_product_route,
+)
 from control_plane.workflows.odoo_preview_runtime import (
     ODOO_PREVIEW_REQUIRED_ENV_KEYS,
     OdooPreviewApplyInputsResult,
@@ -30,7 +34,6 @@ from control_plane.workflows.odoo_preview_runtime import (
 
 ODOO_PREVIEW_APPLY_ROUTE = "/v1/drivers/odoo/preview-apply"
 ODOO_PREVIEW_APPLY_INPUTS_ROUTE = "/v1/drivers/odoo/preview-apply-inputs"
-ODOO_DRIVER_ID = "odoo"
 ODOO_PREVIEW_PLAN_TTL_SECONDS = 30 * 60
 
 
@@ -80,35 +83,17 @@ class OdooPreviewApplyInputsEnvelope(_ProductRouteEnvelope):
         return self
 
 
-def _product_profile_uses_odoo_driver(profile: LaunchplaneProductProfileRecord) -> bool:
-    profile_driver_id = profile.driver_id.strip()
-    if profile_driver_id == ODOO_DRIVER_ID:
-        return True
-    try:
-        descriptor = read_driver_descriptor(profile_driver_id)
-    except FileNotFoundError:
-        return False
-    return descriptor.base_driver_id == ODOO_DRIVER_ID
-
-
 def resolve_odoo_preview_apply_profile(
     *,
     record_store: object,
     product: str,
 ) -> LaunchplaneProductProfileRecord:
-    read_profile = getattr(record_store, "read_product_profile_record", None)
-    if not callable(read_profile):
-        raise ValueError("Product driver validation requires product profile storage.")
     try:
-        profile = read_profile(product.strip())
-    except FileNotFoundError as error:
+        profile = resolve_odoo_product_route(record_store=record_store, product=product)
+    except OdooRouteDependencyError as error:
         raise OdooPreviewApplyRouteDependencyError from error
-    if not isinstance(profile, LaunchplaneProductProfileRecord):
-        profile = LaunchplaneProductProfileRecord.model_validate(profile)
-    if not _product_profile_uses_odoo_driver(profile):
-        raise OdooPreviewApplyProductMismatchError(
-            "Product is not configured for the requested Odoo driver route."
-        )
+    except OdooProductMismatchError as error:
+        raise OdooPreviewApplyProductMismatchError from error
     preview_profile = profile.preview
     if not preview_profile.enabled or not preview_profile.context.strip():
         raise OdooPreviewApplyProductMismatchError(

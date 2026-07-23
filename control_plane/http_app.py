@@ -4987,9 +4987,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        authorization_product = (
-            product_profile.product if product_profile is not None else publish_request.product
-        )
+        authorization_product = product_profile.product
         if not native_routes._native_driver_route_authorization_allows(
             endpoint=write_odoo_artifact_publish,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
@@ -5586,6 +5584,8 @@ def create_launchplane_fastapi_app(
             product_profile = resolve_odoo_post_deploy_product_route(
                 record_store=record_store,
                 product=post_deploy_request.product,
+                context=post_deploy_request.post_deploy.context,
+                instance=post_deploy_request.post_deploy.instance,
             )
         except OdooPostDeployRouteDependencyError:
             return driver_route_dependency_not_found_response(
@@ -5607,9 +5607,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        authorization_product = (
-            product_profile.product if product_profile is not None else post_deploy_request.product
-        )
+        authorization_product = product_profile.product
         if not native_routes._native_driver_route_authorization_allows(
             endpoint=write_odoo_post_deploy,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
@@ -5740,9 +5738,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        authorization_product = (
-            product_profile.product if product_profile is not None else maintenance_request.product
-        )
+        authorization_product = product_profile.product
         if not native_routes._native_driver_route_authorization_allows(
             endpoint=write_odoo_app_maintenance,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
@@ -5874,9 +5870,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        authorization_product = (
-            product_profile.product if product_profile is not None else override_request.product
-        )
+        authorization_product = product_profile.product
         if not native_routes._native_driver_route_authorization_allows(
             endpoint=write_odoo_config_parameter_override,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
@@ -6006,9 +6000,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        authorization_product = (
-            product_profile.product if product_profile is not None else override_request.product
-        )
+        authorization_product = product_profile.product
         if not native_routes._native_driver_route_authorization_allows(
             endpoint=write_odoo_website_bootstrap_override,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
@@ -6138,9 +6130,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        authorization_product = (
-            product_profile.product if product_profile is not None else backup_gate_request.product
-        )
+        authorization_product = product_profile.product
         if not native_routes._native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_backup_gate,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
@@ -6811,8 +6801,8 @@ def create_launchplane_fastapi_app(
             product_profile = resolve_odoo_prod_rollback_product_route(
                 record_store=record_store,
                 product=rollback_request.product,
-                context="",
-                instance="",
+                context=rollback_request.rollback.context,
+                instance=rollback_request.rollback.instance,
             )
         except OdooProdRollbackRouteDependencyError:
             return driver_route_dependency_not_found_response(
@@ -6834,9 +6824,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        authorization_product = (
-            product_profile.product if product_profile is not None else rollback_request.product
-        )
+        authorization_product = product_profile.product
         if not native_routes._native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_rollback,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
@@ -6945,6 +6933,11 @@ def create_launchplane_fastapi_app(
             product_profile = resolve_odoo_prod_promotion_product_route(
                 record_store=record_store,
                 product=promotion_request.product,
+                context=promotion_request.promotion.context,
+                instances=(
+                    promotion_request.promotion.from_instance,
+                    promotion_request.promotion.to_instance,
+                ),
             )
         except OdooProdPromotionRouteDependencyError:
             return driver_route_dependency_not_found_response(
@@ -6966,9 +6959,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        authorization_product = (
-            product_profile.product if product_profile is not None else promotion_request.product
-        )
+        authorization_product = product_profile.product
         if not native_routes._native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_promotion,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
@@ -7082,6 +7073,11 @@ def create_launchplane_fastapi_app(
             product_profile = resolve_odoo_prod_promotion_product_route(
                 record_store=record_store,
                 product=inputs_request.product,
+                context=inputs_request.inputs.context,
+                instances=(
+                    inputs_request.inputs.from_instance,
+                    inputs_request.inputs.to_instance,
+                ),
             )
         except OdooProdPromotionRouteDependencyError:
             return driver_route_dependency_not_found_response(
@@ -7103,9 +7099,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        authorization_product = (
-            product_profile.product if product_profile is not None else inputs_request.product
-        )
+        authorization_product = product_profile.product
         if not native_routes._native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_promotion_inputs,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
@@ -7221,6 +7215,11 @@ def create_launchplane_fastapi_app(
             product_profile = resolve_odoo_prod_promotion_product_route(
                 record_store=record_store,
                 product=run_request.product,
+                context=run_request.run.context,
+                instances=(
+                    run_request.run.from_instance,
+                    run_request.run.to_instance,
+                ),
             )
         except OdooProdPromotionRouteDependencyError:
             return driver_route_dependency_not_found_response(
@@ -7242,9 +7241,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        authorization_product = (
-            product_profile.product if product_profile is not None else run_request.product
-        )
+        authorization_product = product_profile.product
         if not native_routes._native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_promotion_run,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,

@@ -52,6 +52,7 @@ from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
     _merge_required_odoo_install_modules,
+    _read_lane,
     build_odoo_stable_target_replacement_plan,
     execute_odoo_stable_target_replacement_apply,
     _target_health_url,
@@ -208,6 +209,21 @@ def _profile_with_runtime_secret(
             )
         }
     )
+
+
+class OdooStableTargetReplacementLaneTests(unittest.TestCase):
+    def test_legacy_profile_with_ambiguous_instance_fails_closed(self) -> None:
+        profile = _profile().model_copy(
+            update={
+                "lanes": (
+                    ProductLaneProfile(instance="prod", context="cm"),
+                    ProductLaneProfile(instance="prod", context="cm-website"),
+                )
+            }
+        )
+
+        with self.assertRaisesRegex(click.ClickException, "multiple stable lanes"):
+            _read_lane(profile=profile, instance="prod")
 
 
 def _verification_result() -> OdooVerificationResult:

@@ -219,9 +219,10 @@ def _promotion_record_id(*, context: str, from_instance: str, to_instance: str) 
 
 
 def _resolve_product_profile_key(*, product: str, context: str) -> str:
+    del context
     normalized_product = product.strip()
     if not normalized_product or normalized_product == "odoo":
-        return f"odoo-tenant-{context}"
+        raise ValueError("Odoo prod promotion requires a product-specific DB-backed profile key.")
     return normalized_product
 
 

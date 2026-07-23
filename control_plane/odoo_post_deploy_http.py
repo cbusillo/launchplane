@@ -16,7 +16,11 @@ from control_plane.drivers.dispatch import (
     _ProductRouteEnvelope,
     _validate_driver_envelope_product,
 )
-from control_plane.drivers.registry import read_driver_descriptor
+from control_plane.odoo_product_driver_http import (
+    OdooProductMismatchError,
+    OdooRouteDependencyError,
+    resolve_odoo_product_route,
+)
 from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployRequest,
     execute_odoo_post_deploy,
@@ -26,7 +30,6 @@ from control_plane.workflows.odoo_post_deploy import (
 ODOO_POST_DEPLOY_ROUTE = "/v1/drivers/odoo/post-deploy"
 ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE = "/v1/drivers/odoo/config-parameter-override"
 ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE = "/v1/drivers/odoo/website-bootstrap-override"
-ODOO_DRIVER_ID = "odoo"
 
 
 class OdooPostDeployProductMismatchError(ValueError):
@@ -144,33 +147,18 @@ def resolve_odoo_post_deploy_product_route(
     product: str,
     context: str = "",
     instance: str = "",
-) -> LaunchplaneProductProfileRecord | None:
-    normalized_product = product.strip()
-    if normalized_product == ODOO_DRIVER_ID:
-        return None
-    read_profile = getattr(record_store, "read_product_profile_record", None)
-    if not callable(read_profile):
-        raise ValueError("Product driver validation requires product profile storage.")
+) -> LaunchplaneProductProfileRecord:
     try:
-        profile = read_profile(normalized_product)
-    except FileNotFoundError as error:
+        return resolve_odoo_product_route(
+            record_store=record_store,
+            product=product,
+            context=context,
+            instance=instance,
+        )
+    except OdooRouteDependencyError as error:
         raise OdooPostDeployRouteDependencyError from error
-    if not isinstance(profile, LaunchplaneProductProfileRecord):
-        profile = LaunchplaneProductProfileRecord.model_validate(profile)
-    if not _product_profile_uses_odoo_driver(profile):
-        raise OdooPostDeployProductMismatchError(
-            "Product is not configured for the requested Odoo driver route."
-        )
-    if context.strip() or instance.strip():
-        for lane in profile.lanes:
-            if (not context.strip() or lane.context.strip() == context.strip()) and (
-                not instance.strip() or lane.instance.strip() == instance.strip()
-            ):
-                return profile
-        raise OdooPostDeployProductMismatchError(
-            "Product profile does not own the requested Odoo driver lane."
-        )
-    return profile
+    except OdooProductMismatchError as error:
+        raise OdooPostDeployProductMismatchError from error
 
 
 def execute_odoo_post_deploy_result(
@@ -190,17 +178,6 @@ def execute_odoo_post_deploy_result(
         )
     }
     return records, cast(dict[str, object], driver_result.model_dump(mode="json"))
-
-
-def _product_profile_uses_odoo_driver(profile: LaunchplaneProductProfileRecord) -> bool:
-    profile_driver_id = profile.driver_id.strip()
-    if profile_driver_id == ODOO_DRIVER_ID:
-        return True
-    try:
-        descriptor = read_driver_descriptor(profile_driver_id)
-    except FileNotFoundError:
-        return False
-    return descriptor.base_driver_id == ODOO_DRIVER_ID
 
 
 def write_odoo_config_parameter_override_result(

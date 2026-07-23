@@ -70,7 +70,12 @@ Action safety levels are intentionally coarse:
 
 The v1 registry is in code at `control_plane/drivers/registry.py`. It contains
 the reusable generic-web base descriptor plus ingress, Odoo, and VeriReel
-descriptors, and composes driver views from existing storage repository methods:
+descriptors. Base descriptors remain generic discovery and route metadata; they
+do not claim real product contexts. Context and instance views derive their
+product descriptor exclusively from DB-backed product profiles and owned lanes,
+then materialize the declared driver's inherited capabilities, settings, and
+actions exactly once. The read model composes those descriptors with existing
+storage repository methods:
 
 - `LaunchplaneLaneSummary` for stable lane state.
 - `LaunchplanePreviewSummary` for preview lifecycle state.
@@ -421,13 +426,19 @@ Target-replacement replay is scoped to the authenticated caller identity, and
 storage reserves the product/context/instance lane before the worker starts so
 concurrent apply requests cannot launch duplicate replacements.
 
-Driver action routes are owned by the base driver contract. The service accepts
-any product key on Odoo and VeriReel action envelopes, then authorizes the call
-against that product and verifies the product profile's `driver_id` or driver
-descriptor `base_driver_id` matches the requested base driver before dispatching
-the workflow. This keeps product repos on stable Launchplane routes while
-allowing new Odoo- or VeriReel-shaped products to be added by product profile and
-authz records instead of code forks.
+Driver action routes are owned by the base driver contract. Odoo action
+envelopes must name a product-specific DB-backed profile key; the base `odoo`
+descriptor id is discovery metadata and is never runtime product authority. The
+service verifies the profile uses the Odoo driver and owns every requested
+context/instance lane before authorization or dispatch. This keeps Odoo product
+repos on stable Launchplane routes while allowing new Odoo-shaped products to be
+added by product profile and authz records instead of code forks. VeriReel's
+canonical-product and profile-derived route behavior remains documented
+separately below.
+
+Stable instance names are unique within one product profile. If multiple
+profiles claim the same context/instance lane, route admission and context-view
+materialization fail closed instead of selecting one owner by ordering.
 
 Preview lifecycle cleanup also follows the product profile's driver boundary.
 VeriReel-shaped products use the VeriReel cleanup executor, while products whose

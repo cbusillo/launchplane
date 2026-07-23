@@ -298,8 +298,12 @@ def execute_odoo_prod_rollback(
     *,
     control_plane_root: Path,
     record_store: object,
+    product: str,
     request: OdooProdRollbackRequest,
 ) -> OdooProdRollbackResult:
+    normalized_product = product.strip()
+    if not normalized_product or normalized_product == "odoo":
+        raise click.ClickException("Odoo prod rollback requires a DB-backed product profile key.")
     typed_record_store = _require_record_store(record_store)
     source_tuple: ReleaseTupleRecord | None = None
     if request.artifact_id:
@@ -340,7 +344,7 @@ def execute_odoo_prod_rollback(
             control_plane_root=control_plane_root,
             record_store=typed_record_store,
             request=OdooStableTargetReplacementApplyRequest(
-                product=f"odoo-tenant-{request.context}",
+                product=normalized_product,
                 instance=request.instance,
                 artifact_id=rollback_source.artifact_id,
                 source_git_ref=rollback_source.source_git_ref,

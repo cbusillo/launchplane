@@ -8,7 +8,11 @@ from control_plane.drivers.dispatch import (
     _ProductRouteEnvelope,
     _validate_driver_envelope_product,
 )
-from control_plane.drivers.registry import read_driver_descriptor
+from control_plane.odoo_product_driver_http import (
+    OdooProductMismatchError,
+    OdooRouteDependencyError,
+    resolve_odoo_product_route,
+)
 from control_plane.workflows.odoo_prod_promotion_inputs import (
     OdooProdPromotionInputsRequest,
     OdooProdPromotionInputsResult,
@@ -32,7 +36,6 @@ from control_plane.workflows.odoo_prod_promotion_run import (
 ODOO_PROD_PROMOTION_INPUTS_ROUTE = "/v1/drivers/odoo/prod-promotion-inputs"
 ODOO_PROD_PROMOTION_RUN_ROUTE = "/v1/drivers/odoo/prod-promotion-run"
 ODOO_PROD_PROMOTION_ROUTE = "/v1/drivers/odoo/prod-promotion"
-ODOO_DRIVER_ID = "odoo"
 
 
 class OdooProdPromotionProductMismatchError(ValueError):
@@ -77,24 +80,20 @@ def resolve_odoo_prod_promotion_product_route(
     *,
     record_store: object,
     product: str,
-) -> LaunchplaneProductProfileRecord | None:
-    normalized_product = product.strip()
-    if normalized_product == ODOO_DRIVER_ID:
-        return None
-    read_profile = getattr(record_store, "read_product_profile_record", None)
-    if not callable(read_profile):
-        raise ValueError("Product driver validation requires product profile storage.")
+    context: str,
+    instances: tuple[str, ...],
+) -> LaunchplaneProductProfileRecord:
     try:
-        profile = read_profile(normalized_product)
-    except FileNotFoundError as error:
-        raise OdooProdPromotionRouteDependencyError from error
-    if not isinstance(profile, LaunchplaneProductProfileRecord):
-        profile = LaunchplaneProductProfileRecord.model_validate(profile)
-    if not _product_profile_uses_odoo_driver(profile):
-        raise OdooProdPromotionProductMismatchError(
-            "Product is not configured for the requested Odoo driver route."
+        return resolve_odoo_product_route(
+            record_store=record_store,
+            product=product,
+            context=context,
+            instances=instances,
         )
-    return profile
+    except OdooRouteDependencyError as error:
+        raise OdooProdPromotionRouteDependencyError from error
+    except OdooProductMismatchError as error:
+        raise OdooProdPromotionProductMismatchError from error
 
 
 def resolve_odoo_prod_promotion_inputs_result(
@@ -169,17 +168,6 @@ def should_store_prod_promotion_idempotency(driver_result: dict[str, object]) ->
     if driver_result_contains_status(driver_result, "blocked"):
         return False
     return not driver_result_contains_status(driver_result, "fail")
-
-
-def _product_profile_uses_odoo_driver(profile: LaunchplaneProductProfileRecord) -> bool:
-    profile_driver_id = profile.driver_id.strip()
-    if profile_driver_id == ODOO_DRIVER_ID:
-        return True
-    try:
-        descriptor = read_driver_descriptor(profile_driver_id)
-    except FileNotFoundError:
-        return False
-    return descriptor.base_driver_id == ODOO_DRIVER_ID
 
 
 def _prod_promotion_inputs_records(

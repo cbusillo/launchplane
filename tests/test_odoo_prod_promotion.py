@@ -129,6 +129,28 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                 backup_record_id="backup-gate-new-site-prod-1",
             )
 
+    def test_promotion_execution_rejects_base_or_missing_product_profile_key(self) -> None:
+        for product in ("", "odoo"):
+            with (
+                self.subTest(product=product),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "product-specific DB-backed profile key",
+                ),
+            ):
+                execute_odoo_prod_promotion(
+                    control_plane_root=Path("/control-plane"),
+                    state_dir=Path("/state"),
+                    database_url=None,
+                    record_store=Mock(),
+                    request=OdooProdPromotionRequest(
+                        product=product,
+                        context="test-context",
+                        artifact_id="artifact-test",
+                        backup_record_id="backup-test",
+                    ),
+                )
+
     def test_promotion_delegates_deployment_to_target_replacement(self) -> None:
         record_store = Mock()
         record_store.read_artifact_manifest.return_value = _artifact_manifest()
@@ -152,6 +174,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                 database_url="postgresql://launchplane.example/db",
                 record_store=record_store,
                 request=OdooProdPromotionRequest(
+                    product="odoo-tenant-cm",
                     context="cm",
                     artifact_id="artifact-cm-new",
                     backup_record_id="backup-gate-cm-prod-1",
@@ -200,6 +223,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                 database_url="postgresql://launchplane.example/db",
                 record_store=record_store,
                 request=OdooProdPromotionRequest(
+                    product="odoo-tenant-cm",
                     context="cm",
                     artifact_id="artifact-cm-new",
                     backup_record_id="backup-gate-cm-prod-1",

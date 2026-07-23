@@ -2062,6 +2062,24 @@ def _semantic_path_has_context(key: str) -> bool:
 def _python_call_candidates(node: ast.Call) -> list[tuple[int, str, object]]:
     candidates: list[tuple[int, str, object]] = []
     function_name = _call_name(node.func)
+    if function_name.rsplit(".", 1)[-1] == "DriverDescriptor":
+        for keyword in node.keywords:
+            if keyword.arg != "context_patterns":
+                continue
+            value = _literal_value(keyword.value)
+            if value is None:
+                continue
+            candidates.extend(
+                (
+                    getattr(keyword.value, "lineno", node.lineno),
+                    key,
+                    item,
+                )
+                for key, item in _flatten_python_literal(
+                    value,
+                    prefix="DriverDescriptor.context",
+                )
+            )
     if function_name in {"click.option", "option"}:
         option_names = [
             value

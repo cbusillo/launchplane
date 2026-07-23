@@ -210,6 +210,7 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             result = execute_odoo_prod_rollback(
                 control_plane_root=Path("/control-plane"),
                 record_store=record_store,
+                product="odoo-tenant-opw",
                 request=OdooProdRollbackRequest(context="opw"),
             )
 
@@ -240,6 +241,32 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(final_promotion.rollback.status, "pass")
         self.assertEqual(final_promotion.rollback_health.status, "pass")
 
+    def test_rollback_preserves_authorized_product_profile_key(self) -> None:
+        record_store = self._record_store()
+
+        with patch(
+            "control_plane.workflows.odoo_prod_rollback.execute_odoo_stable_target_replacement_apply",
+            return_value=_replacement_result(),
+        ) as replacement_apply:
+            execute_odoo_prod_rollback(
+                control_plane_root=Path("/control-plane"),
+                record_store=record_store,
+                product="test-odoo-partner",
+                request=OdooProdRollbackRequest(context="opw"),
+            )
+
+        replacement_request = replacement_apply.call_args.kwargs["request"]
+        self.assertEqual(replacement_request.product, "test-odoo-partner")
+
+    def test_rollback_rejects_base_driver_product(self) -> None:
+        with self.assertRaisesRegex(click.ClickException, "DB-backed product profile key"):
+            execute_odoo_prod_rollback(
+                control_plane_root=Path("/control-plane"),
+                record_store=self._record_store(),
+                product="odoo",
+                request=OdooProdRollbackRequest(context="opw"),
+            )
+
     def test_explicit_artifact_rolls_back_without_testing_tuple_match(self) -> None:
         record_store = self._record_store()
         record_store.read_artifact_manifest.return_value = _previous_prod_artifact_manifest()
@@ -253,6 +280,7 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             result = execute_odoo_prod_rollback(
                 control_plane_root=Path("/control-plane"),
                 record_store=record_store,
+                product="odoo-tenant-opw",
                 request=OdooProdRollbackRequest(
                     context="opw",
                     artifact_id="artifact-opw-previous-prod",
@@ -265,7 +293,9 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         record_store.read_release_tuple_record.assert_not_called()
         replacement_request = replacement_apply.call_args.kwargs["request"]
         self.assertEqual(replacement_request.artifact_id, "artifact-opw-previous-prod")
-        self.assertEqual(replacement_request.source_git_ref, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        self.assertEqual(
+            replacement_request.source_git_ref, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
         final_promotion = record_store.write_promotion_record.call_args_list[-1].args[0]
         self.assertEqual(
             final_promotion.rollback.snapshot_name, "artifact:artifact-opw-previous-prod"
@@ -281,6 +311,7 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             execute_odoo_prod_rollback(
                 control_plane_root=Path("/control-plane"),
                 record_store=record_store,
+                product="odoo-tenant-opw",
                 request=OdooProdRollbackRequest(
                     context="opw",
                     artifact_id="artifact-opw-other",
@@ -306,6 +337,7 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             result = execute_odoo_prod_rollback(
                 control_plane_root=Path("/control-plane"),
                 record_store=record_store,
+                product="odoo-tenant-opw",
                 request=OdooProdRollbackRequest(context="opw"),
             )
 

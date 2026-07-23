@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from fnmatch import fnmatchcase
 from typing import Literal, Protocol, cast
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -487,7 +486,7 @@ ODOO_DRIVER = DriverDescriptor(
     description=(
         "Odoo artifact, deploy, preview, backup, promotion, rollback, and settings driver."
     ),
-    context_patterns=("cm", "opw"),
+    context_patterns=(),
     provider_boundary=PROVIDER_BOUNDARY_NOTE,
     capabilities=(
         DriverCapabilityDescriptor(
@@ -726,7 +725,7 @@ VERIREEL_DRIVER = DriverDescriptor(
     label="VeriReel",
     product="verireel",
     description="VeriReel stable-lane and preview lifecycle driver.",
-    context_patterns=("verireel", "verireel-testing"),
+    context_patterns=(),
     provider_boundary=PROVIDER_BOUNDARY_NOTE,
     capabilities=(
         DriverCapabilityDescriptor(
@@ -966,11 +965,6 @@ def read_driver_descriptor(driver_id: str) -> DriverDescriptor:
     raise FileNotFoundError(f"No Launchplane driver descriptor found for {driver_id!r}.")
 
 
-def _driver_matches_context(*, descriptor: DriverDescriptor, context_name: str) -> bool:
-    normalized_context = context_name.strip()
-    return any(fnmatchcase(normalized_context, pattern) for pattern in descriptor.context_patterns)
-
-
 def _product_profile_lanes(profile: LaunchplaneProductProfileRecord) -> tuple[str, ...]:
     contexts = {lane.context.strip() for lane in profile.lanes if lane.context.strip()}
     if profile.preview.enabled and profile.preview.context.strip():
@@ -978,10 +972,20 @@ def _product_profile_lanes(profile: LaunchplaneProductProfileRecord) -> tuple[st
     return tuple(sorted(contexts))
 
 
-def _product_profile_matches_context(
-    *, profile: LaunchplaneProductProfileRecord, context_name: str
+def _product_profile_matches_target(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    context_name: str,
+    instance_name: str,
 ) -> bool:
     normalized_context = context_name.strip()
+    normalized_instance = instance_name.strip()
+    if normalized_instance:
+        return any(
+            lane.context.strip() == normalized_context
+            and lane.instance.strip() == normalized_instance
+            for lane in profile.lanes
+        )
     return normalized_context in _product_profile_lanes(profile)
 
 
@@ -994,8 +998,12 @@ def _descriptor_for_product_profile(
             "base_driver_id": descriptor.driver_id,
             "label": profile.display_name,
             "product": profile.product,
-            "description": f"{profile.display_name} generic-web lifecycle.",
+            "description": (
+                f"{profile.display_name} lifecycle through the {descriptor.label} driver."
+            ),
             "context_patterns": _product_profile_lanes(profile),
+            "capabilities": effective_driver_capabilities(descriptor),
+            "setting_groups": effective_driver_setting_groups(descriptor),
         }
     )
 
@@ -1011,21 +1019,50 @@ def effective_driver_actions(descriptor: DriverDescriptor) -> tuple[DriverAction
     return tuple(actions_by_id.values())
 
 
+def effective_driver_capabilities(
+    descriptor: DriverDescriptor,
+) -> tuple[DriverCapabilityDescriptor, ...]:
+    capabilities_by_id: dict[str, DriverCapabilityDescriptor] = {}
+    if descriptor.base_driver_id:
+        base_descriptor = read_driver_descriptor(descriptor.base_driver_id)
+        capabilities_by_id.update(
+            (capability.capability_id, capability)
+            for capability in effective_driver_capabilities(base_descriptor)
+        )
+    capabilities_by_id.update(
+        (capability.capability_id, capability) for capability in descriptor.capabilities
+    )
+    return tuple(capabilities_by_id.values())
+
+
+def effective_driver_setting_groups(
+    descriptor: DriverDescriptor,
+) -> tuple[DriverSettingGroupDescriptor, ...]:
+    setting_groups_by_id: dict[str, DriverSettingGroupDescriptor] = {}
+    if descriptor.base_driver_id:
+        base_descriptor = read_driver_descriptor(descriptor.base_driver_id)
+        setting_groups_by_id.update(
+            (setting_group.group_id, setting_group)
+            for setting_group in effective_driver_setting_groups(base_descriptor)
+        )
+    setting_groups_by_id.update(
+        (setting_group.group_id, setting_group) for setting_group in descriptor.setting_groups
+    )
+    return tuple(setting_groups_by_id.values())
+
+
 def _profile_uses_driver(
     *, profile: LaunchplaneProductProfileRecord, descriptor: DriverDescriptor
 ) -> bool:
-    profile_driver_id = profile.driver_id.strip()
-    if profile_driver_id == descriptor.driver_id:
-        return True
-    try:
-        return read_driver_descriptor(profile_driver_id).base_driver_id == descriptor.driver_id
-    except FileNotFoundError:
-        return False
+    return profile.driver_id.strip() == descriptor.driver_id
 
 
-def _product_profile_descriptors(
-    *, record_store: object, descriptor: DriverDescriptor, context_name: str
-) -> tuple[DriverDescriptor, ...]:
+def _product_profile_target_owners(
+    *,
+    record_store: object,
+    context_name: str,
+    instance_name: str,
+) -> tuple[LaunchplaneProductProfileRecord, ...]:
     list_profiles = _list_product_profile_records_method(record_store)
     if list_profiles is None:
         return ()
@@ -1034,10 +1071,39 @@ def _product_profile_descriptors(
     except FileNotFoundError:
         return ()
     return tuple(
+        profile
+        for profile in profiles
+        if _product_profile_matches_target(
+            profile=profile,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+    )
+
+
+def _product_profile_descriptors(
+    *,
+    record_store: object,
+    descriptor: DriverDescriptor,
+    context_name: str,
+    instance_name: str,
+) -> tuple[DriverDescriptor, ...]:
+    list_profiles = _list_product_profile_records_method(record_store)
+    if list_profiles is None:
+        return ()
+    try:
+        profiles = list_profiles(driver_id=descriptor.driver_id)
+    except FileNotFoundError:
+        return ()
+    return tuple(
         _descriptor_for_product_profile(descriptor=descriptor, profile=profile)
         for profile in profiles
         if _profile_uses_driver(profile=profile, descriptor=descriptor)
-        and _product_profile_matches_context(profile=profile, context_name=context_name)
+        and _product_profile_matches_target(
+            profile=profile,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
     )
 
 
@@ -1357,18 +1423,24 @@ def build_driver_context_view(
     instance_name: str = "",
 ) -> DriverContextView:
     drivers: list[DriverView] = []
-    for descriptor in _DESCRIPTORS:
-        matched_descriptors: tuple[DriverDescriptor, ...]
-        if _driver_matches_context(descriptor=descriptor, context_name=context_name):
-            matched_descriptors = (descriptor,)
-        else:
-            matched_descriptors = _product_profile_descriptors(
+    owners = _product_profile_target_owners(
+        record_store=record_store,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    matched_descriptors: tuple[DriverDescriptor, ...] = ()
+    if len(owners) == 1:
+        matched_descriptors = tuple(
+            matched_descriptor
+            for descriptor in _DESCRIPTORS
+            for matched_descriptor in _product_profile_descriptors(
                 record_store=record_store,
                 descriptor=descriptor,
                 context_name=context_name,
+                instance_name=instance_name,
             )
-        if not matched_descriptors:
-            continue
+        )
+    if len(matched_descriptors) == 1:
         for matched_descriptor in matched_descriptors:
             lane_summary = _read_lane_summary(
                 record_store=record_store,

@@ -50,7 +50,7 @@ def resolve_odoo_artifact_publish_product_route(
     product: str,
     context: str,
     instance: str,
-) -> LaunchplaneProductProfileRecord | None:
+) -> LaunchplaneProductProfileRecord:
     try:
         return resolve_odoo_product_route(
             record_store=record_store,
@@ -66,11 +66,9 @@ def resolve_odoo_artifact_publish_product_route(
 
 def validate_odoo_artifact_publish_product_evidence(
     *,
-    product_profile: LaunchplaneProductProfileRecord | None,
+    product_profile: LaunchplaneProductProfileRecord,
     request: OdooArtifactPublishEnvelope,
 ) -> None:
-    if product_profile is None:
-        return
     expected_repository = product_profile.image.repository.strip().rstrip("/")
     if not expected_repository:
         raise ValueError("Odoo artifact publish requires a product profile image repository.")
