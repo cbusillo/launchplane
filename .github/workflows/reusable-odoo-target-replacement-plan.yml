@@ -213,6 +213,7 @@ jobs:
           expected-status: "200"
           fail-result-paths: ""
           log-response-body: "false"
+          response-output-path: readiness
           response-output-file: .launchplane/operational-readiness.json
 
       - name: Enforce target replacement readiness

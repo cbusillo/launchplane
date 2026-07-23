@@ -27,6 +27,7 @@ from control_plane.contracts.product_topology_read_model import (
     ProductObservedTlsDomain,
     ProductObservedTopology,
     ProductProviderRecordedTopology,
+    ProductTopologyWarning,
     ProductTopologyIngress,
     ProductTopologyPlacement,
     ProductTopologyTlsOwnership,
@@ -324,6 +325,154 @@ class ProductOperationalReadinessTests(unittest.TestCase):
         self.assertNotIn("secret_id", payload)
         self.assertNotIn("ciphertext", payload)
         self.assertNotIn("subject", payload)
+
+    def test_provider_target_uses_own_record_instead_of_lane_provenance(self) -> None:
+        inputs = _inputs()
+        lane_summary = inputs.lane_summary
+        assert lane_summary is not None
+        missing_provenance = DataProvenance(
+            source_kind="record",
+            freshness_status="missing",
+            detail="Raw storage summary has not been enriched.",
+        )
+
+        readiness = build_product_operational_readiness(
+            replace(
+                inputs,
+                lane_summary=lane_summary.model_copy(update={"provenance": missing_provenance}),
+            )
+        )
+
+        provider_target = next(
+            dimension
+            for dimension in readiness.dimensions
+            if dimension.dimension == "provider_target"
+        )
+        self.assertEqual(provider_target.state, "ready")
+        self.assertEqual(provider_target.evidence[0].freshness_status, "recorded")
+
+    def test_warning_severity_controls_route_and_topology_readiness(self) -> None:
+        cases = (
+            (
+                ProductTopologyWarning(
+                    code="external_ingress_internals_unsupported",
+                    scope="ingress",
+                    severity="warning",
+                    detail="External ingress internals are outside Launchplane authority.",
+                ),
+                "ready",
+                "ready",
+            ),
+            (
+                ProductTopologyWarning(
+                    code="placement_divergence",
+                    scope="placement",
+                    severity="error",
+                    detail="Recorded placement does not match current authority.",
+                ),
+                "blocked",
+                "blocked",
+            ),
+            (
+                ProductTopologyWarning(
+                    code="public_ingress_failure",
+                    scope="observation",
+                    severity="error",
+                    detail="The current public ingress observation failed.",
+                ),
+                "ready",
+                "blocked",
+            ),
+        )
+        for warning, expected_route_state, expected_topology_state in cases:
+            with self.subTest(warning=warning.code, severity=warning.severity):
+                inputs = _inputs()
+                topology = inputs.topology.model_copy(update={"warnings": (warning,)})
+
+                readiness = build_product_operational_readiness(replace(inputs, topology=topology))
+
+                dimensions = {dimension.dimension: dimension for dimension in readiness.dimensions}
+                self.assertEqual(dimensions["route_binding"].state, expected_route_state)
+                self.assertEqual(dimensions["topology"].state, expected_topology_state)
+                if warning.scope != "observation":
+                    self.assertIn(warning.code, dimensions["route_binding"].details)
+                self.assertIn(warning.code, dimensions["topology"].details)
+
+    def test_deployment_and_topology_keep_runtime_identity_ownership_separate(self) -> None:
+        inputs = _inputs()
+        lane_summary = inputs.lane_summary
+        assert lane_summary is not None
+        deployment = lane_summary.latest_deployment
+        assert deployment is not None
+        unchecked_health = deployment.destination_health.model_copy(
+            update={
+                "verified": False,
+                "urls": (),
+                "timeout_seconds": None,
+                "status": "skipped",
+                "runtime_identity_status": "unchecked",
+            }
+        )
+        topology = inputs.topology.model_copy(
+            update={
+                "observed": inputs.topology.observed.model_copy(
+                    update={
+                        "placement": ProductObservedPlacement(
+                            runtime_identity_status="unchecked",
+                            trust_state="missing",
+                        )
+                    }
+                )
+            }
+        )
+        self.assertEqual(topology.trust_state, "recorded")
+        self.assertEqual(topology.observed.ingress.trust_state, "verified")
+
+        readiness = build_product_operational_readiness(
+            replace(
+                inputs,
+                lane_summary=lane_summary.model_copy(
+                    update={
+                        "latest_deployment": deployment.model_copy(
+                            update={"destination_health": unchecked_health}
+                        )
+                    }
+                ),
+                topology=topology,
+            )
+        )
+
+        dimensions = {dimension.dimension: dimension for dimension in readiness.dimensions}
+        self.assertEqual(dimensions["deployment"].state, "blocked")
+        self.assertIn(
+            "runtime_identity_status:unchecked",
+            dimensions["deployment"].details,
+        )
+        self.assertEqual(dimensions["topology"].state, "ready")
+
+    def test_stale_passing_deployment_remains_stale(self) -> None:
+        inputs = _inputs()
+        lane_summary = inputs.lane_summary
+        assert lane_summary is not None
+
+        readiness = build_product_operational_readiness(
+            replace(
+                inputs,
+                lane_summary=lane_summary.model_copy(
+                    update={
+                        "provenance": lane_summary.provenance.model_copy(
+                            update={"freshness_status": "stale"}
+                        )
+                    }
+                ),
+            )
+        )
+
+        deployment = next(
+            dimension for dimension in readiness.dimensions if dimension.dimension == "deployment"
+        )
+        self.assertEqual(deployment.state, "stale")
+        self.assertFalse(readiness.ready)
 
     def test_replacement_artifact_is_independent_from_current_deployment(self) -> None:
         inputs = _inputs()

@@ -12,6 +12,7 @@ from control_plane.contracts.artifact_identity import (
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.data_provenance import FreshnessStatus
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.driver_descriptor import (
     DriverActionDescriptor,
     DriverActionReadinessRequirement,
@@ -446,21 +447,16 @@ def _provider_target_dimension(
             summary="The provider-target record does not match the requested lane.",
             owner_record_type="provider_target_record",
         )
-    freshness_state = _freshness_readiness_state(lane_summary.provenance.freshness_status)
     return ProductOperationalReadinessDimension(
         dimension="provider_target",
-        state=freshness_state,
-        summary=(
-            "Launchplane has current provider-target authority for this lane."
-            if freshness_state == "ready"
-            else "Provider-target evidence is not current for this lane."
-        ),
+        state="ready",
+        summary="Launchplane has recorded provider-target authority for this lane.",
         owner_record_type="provider_target_record",
         evidence=(
             ProductOperationalReadinessEvidence(
                 record_type="provider_target_record",
                 recorded_at=target.updated_at,
-                freshness_status=lane_summary.provenance.freshness_status,
+                freshness_status="recorded",
             ),
         ),
     )
@@ -482,17 +478,24 @@ def _route_binding_dimension(
             summary="The provider-neutral route-binding record is disabled.",
             owner_record_type="environment_route_binding_record",
         )
-    warnings = tuple(
+    blocking_warnings = tuple(
         warning.code
         for warning in inputs.topology.warnings
+        if warning.severity == "error"
         if warning.scope in {"authority", "placement", "domains", "ingress", "tls"}
     )
-    if warnings:
+    advisory_warnings = tuple(
+        warning.code
+        for warning in inputs.topology.warnings
+        if warning.severity == "warning"
+        if warning.scope in {"authority", "placement", "domains", "ingress", "tls"}
+    )
+    if blocking_warnings:
         return _blocked_dimension(
             dimension="route_binding",
             summary="Recorded route authority does not match the requested lane topology.",
             owner_record_type="environment_route_binding_record",
-            details=warnings,
+            details=blocking_warnings,
         )
     state = _freshness_readiness_state(provider_recorded.trust_state)
     return ProductOperationalReadinessDimension(
@@ -511,6 +514,7 @@ def _route_binding_dimension(
                 freshness_status=provider_recorded.trust_state,
             ),
         ),
+        details=advisory_warnings,
     )
 
 
@@ -699,14 +703,8 @@ def _deployment_dimension(
             summary="The current deployment artifact changed after the caller read the lane.",
             owner_record_type="deployment_record",
         )
-    health = deployment.destination_health
-    runtime_identity_required = inputs.lane.odoo_data_policy.requires_runtime_identity
-    if (
-        deployment.deploy.status != "pass"
-        or not health.verified
-        or health.status != "pass"
-        or (runtime_identity_required and health.runtime_identity_status != "match")
-    ):
+    blocking_details = _deployment_blocking_details(inputs=inputs, deployment=deployment)
+    if blocking_details:
         return _blocked_dimension(
             dimension="deployment",
             summary="Current deployment, health, or runtime-identity evidence is not passing.",
@@ -718,6 +716,7 @@ def _deployment_dimension(
                     recorded_at=deployment.deploy.finished_at,
                 ),
             ),
+            details=blocking_details,
         )
     freshness = lane_summary.provenance.freshness_status if lane_summary is not None else "missing"
     state = _freshness_readiness_state(freshness)
@@ -741,25 +740,42 @@ def _deployment_dimension(
     )
 
 
+def _deployment_blocking_details(
+    *,
+    inputs: ProductOperationalReadinessInputs,
+    deployment: DeploymentRecord,
+) -> tuple[str, ...]:
+    details: list[str] = []
+    if deployment.deploy.status != "pass":
+        details.append(f"deploy_status:{deployment.deploy.status}")
+    health = deployment.destination_health
+    if not health.verified:
+        details.append("health_unverified")
+    if health.status != "pass":
+        details.append(f"health_status:{health.status}")
+    if (
+        inputs.lane.odoo_data_policy.requires_runtime_identity
+        and health.runtime_identity_status != "match"
+    ):
+        details.append(f"runtime_identity_status:{health.runtime_identity_status}")
+    return tuple(details)
+
+
 def _topology_dimension(
     inputs: ProductOperationalReadinessInputs,
 ) -> ProductOperationalReadinessDimension:
-    warnings = tuple(warning.code for warning in inputs.topology.warnings)
-    if warnings:
+    blocking_warnings = tuple(
+        warning.code for warning in inputs.topology.warnings if warning.severity == "error"
+    )
+    advisory_warnings = tuple(
+        warning.code for warning in inputs.topology.warnings if warning.severity == "warning"
+    )
+    if blocking_warnings:
         return _blocked_dimension(
             dimension="topology",
             summary="Current route, runtime, HTTP, or TLS topology evidence has warnings.",
             owner_record_type="product_environment_topology",
-            details=warnings,
-        )
-    if (
-        inputs.lane.odoo_data_policy.requires_runtime_identity
-        and inputs.topology.observed.placement.runtime_identity_status != "match"
-    ):
-        return _blocked_dimension(
-            dimension="topology",
-            summary="Observed topology does not prove the expected runtime identity.",
-            owner_record_type="public_ingress_observation_record",
+            details=blocking_warnings,
         )
     state = _freshness_readiness_state(inputs.topology.trust_state)
     return ProductOperationalReadinessDimension(
@@ -783,6 +799,7 @@ def _topology_dimension(
                 freshness_status=inputs.topology.observed.trust_state,
             ),
         ),
+        details=advisory_warnings,
     )
 
 

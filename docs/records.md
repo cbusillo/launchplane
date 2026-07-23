@@ -861,9 +861,19 @@ Overall and per-dimension states are `ready`, `blocked`, `stale`, `missing`, or
 `unsupported`, with non-ready states winning over ready evidence. Missing or
 ambiguous active policy, a different instance grant, mutable workflow identity,
 missing expected config, disabled bindings, absent artifact/deployment records,
-stale route authority, or topology warnings all fail closed. Driver actions
+stale route authority, or error-severity topology warnings all fail closed.
+Warning-severity topology findings remain visible as bounded dimension details
+without turning an otherwise current lane into a blocked result. Driver actions
 without declared readiness requirements return `unsupported` rather than
 borrowing requirements from another action.
+
+Provider-target authority is classified from the exact mutable provider-target
+record rather than deployment or inventory freshness. Deployment readiness uses
+the same enriched lane snapshot for current-inventory fencing and deployment
+freshness, while deployment health/runtime identity remains owned by the
+deployment dimension. The topology dimension owns route, public ingress, and
+TLS warnings and does not duplicate a deployment-health failure as a second
+topology failure.
 
 The matching workflow grant is not considered exact merely because normal
 policy matching allows the request. Its product, context, instance, action,
