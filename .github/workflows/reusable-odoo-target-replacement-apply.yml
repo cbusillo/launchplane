@@ -270,6 +270,14 @@ jobs:
           fi
           artifact_id="${REQUESTED_ARTIFACT_ID:-$current_artifact_id}"
           source_git_ref="${REQUESTED_SOURCE_GIT_REF:-$current_source_git_ref}"
+          if [ -z "$current_artifact_id" ]; then
+            echo 'The lane is missing an exact current artifact identity.' >&2
+            exit 1
+          fi
+          if [ -z "$artifact_id" ] || [ -z "$source_git_ref" ]; then
+            echo 'The selected artifact is missing immutable identity evidence.' >&2
+            exit 1
+          fi
           for value in "$resolved_context" "$artifact_id" "$source_git_ref"; do
             case "$value" in
               *$'\n'* | *$'\r'*)
@@ -306,15 +314,14 @@ jobs:
           expected-status: "200"
           fail-result-paths: ""
           log-response-body: "false"
+          response-output-path: readiness
           response-output-file: .launchplane/operational-readiness.json
 
       - name: Enforce target replacement readiness
         env:
           ARTIFACT_ID: ${{ steps.authority.outputs.artifact_id }}
           CONTEXT: ${{ steps.authority.outputs.context }}
-          CURRENT_ARTIFACT_ID: ${{ steps.authority.outputs.current_artifact_id }}
           READINESS_STATUS_CODE: ${{ steps.readiness.outputs.status-code }}
-          SOURCE_GIT_REF: ${{ steps.authority.outputs.source_git_ref }}
         shell: bash
         run: |
           set -euo pipefail
@@ -370,15 +377,6 @@ jobs:
               "$readiness_file" >&2
             exit 1
           fi
-          if [ -z "$SOURCE_GIT_REF" ]; then
-            echo 'The selected artifact is missing an immutable source commit.' >&2
-            exit 1
-          fi
-          if [ -z "$CURRENT_ARTIFACT_ID" ]; then
-            echo 'The lane is missing an exact current artifact identity.' >&2
-            exit 1
-          fi
-
       - name: Upload readiness evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

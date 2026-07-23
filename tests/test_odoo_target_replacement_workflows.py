@@ -207,6 +207,7 @@ class OdooTargetReplacementWorkflowTests(unittest.TestCase):
             readiness.with_values["route-path"],
             "${{ steps.authority.outputs.readiness_route_path }}",
         )
+        self.assertEqual(readiness.with_values["response-output-path"], "readiness")
         self.assertLess(environment.index, readiness.index)
         self.assertLess(readiness.index, enforce.index)
         self.assertLess(enforce.index, payload.index)
@@ -248,6 +249,11 @@ class OdooTargetReplacementWorkflowTests(unittest.TestCase):
         self.assertEqual(environment.with_values["method"], "GET")
         self.assertEqual(readiness.uses, _LAUNCHPLANE_REQUEST)
         self.assertEqual(readiness.with_values["method"], "GET")
+        self.assertEqual(
+            readiness.with_values["route-path"],
+            "${{ steps.authority.outputs.readiness_route_path }}",
+        )
+        self.assertEqual(readiness.with_values["response-output-path"], "readiness")
         self.assertLess(environment.index, readiness.index)
         self.assertLess(readiness.index, enforce.index)
         self.assertLess(enforce.index, payload.index)
@@ -291,6 +297,18 @@ class OdooTargetReplacementWorkflowTests(unittest.TestCase):
             'source_git_ref="${REQUESTED_SOURCE_GIT_REF:-$current_source_git_ref}"',
             apply_authority.run,
         )
+        self.assertIn('if [ -z "$current_artifact_id" ]', apply_authority.run)
+        self.assertIn(
+            'if [ -z "$artifact_id" ] || [ -z "$source_git_ref" ]',
+            apply_authority.run,
+        )
+        apply_enforce = self.apply.step_named("apply", "Enforce target replacement readiness")
+        self.assertIsNotNone(apply_enforce)
+        assert apply_enforce is not None
+        self.assertNotIn(
+            "The lane is missing an exact current artifact identity.",
+            apply_enforce.run,
+        )
 
         plan_payload = self.plan.step_named("plan", "Write target replacement plan payload")
         apply_payload = self.apply.step_named("apply", "Write replacement request payload")
@@ -317,10 +335,13 @@ class OdooTargetReplacementWorkflowTests(unittest.TestCase):
             with self.subTest(workflow=workflow.label):
                 upload = workflow.step_named(job_id, "Upload readiness evidence")
                 enforce = workflow.step_named(job_id, "Enforce target replacement readiness")
+                readiness = workflow.step_named(job_id, "Read target replacement readiness")
                 self.assertIsNotNone(upload)
                 self.assertIsNotNone(enforce)
+                self.assertIsNotNone(readiness)
                 assert upload is not None
                 assert enforce is not None
+                assert readiness is not None
                 self.assertEqual(upload.data["if"], "always()")
                 self.assertEqual(upload.with_values["retention-days"], 14)
                 evidence_paths = upload.with_values["path"]
@@ -328,6 +349,10 @@ class OdooTargetReplacementWorkflowTests(unittest.TestCase):
                 assert isinstance(evidence_paths, str)
                 self.assertIn("product-environment-evidence.json", evidence_paths)
                 self.assertNotIn("product-environment.json\n", evidence_paths)
+                self.assertEqual(
+                    readiness.with_values["response-output-path"],
+                    "readiness",
+                )
                 self.assertIn("details: (.details[:10])", enforce.run)
                 self.assertNotIn("jq .", enforce.run)
 

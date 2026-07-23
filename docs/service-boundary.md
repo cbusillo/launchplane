@@ -2266,11 +2266,18 @@ owning record class or a supported service remediation without exposing secret
 values, managed-secret IDs, provider credentials/evidence, provider target IDs,
 raw identity claims, or runtime values. The endpoint performs no writes or
 provider calls; absent production enrollment remains a non-ready result.
+The response envelope stores the projection under `readiness`; trusted workflow
+clients that persist a bounded evidence file select that member rather than
+treating envelope metadata as readiness fields. Error-severity topology findings
+block readiness, while warning-severity findings remain visible as details.
 Artifact readiness validates the exact candidate artifact named by the caller
 and requires its image repository to match the product profile. Deployment
 readiness independently validates the current lane deployment, health, runtime
-identity, and freshness. A persisted replacement candidate is not required to
-equal the artifact already deployed, while `expected_current_artifact_id`
+identity, and freshness from one enriched lane snapshot. Provider-target
+authority is classified from the exact provider-target record instead of
+borrowing deployment/inventory freshness. A persisted replacement candidate is
+not required to equal the artifact already deployed, while
+`expected_current_artifact_id`
 requires current inventory authority and detects a lane change between the
 environment read and readiness check. Latest-deployment fallback may inform an
 ordinary product read, but it cannot satisfy this fenced target-replacement

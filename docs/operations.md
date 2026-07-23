@@ -1582,8 +1582,9 @@ The reusable target-replacement plan and apply workers first read
 `GET /v1/products/{product}/environments/{environment}` and derive the exact
 context plus current artifact from Launchplane records. They then call the
 action-specific operational-readiness route with their own OIDC identity and
-upload the redacted environment/readiness evidence. Plan payload generation and
-apply operation creation occur only after an exact `ready` result. Apply uses a
+select the typed `readiness` member for the bounded evidence artifact and exact
+gate check. Plan payload generation and apply operation creation occur only
+after an exact `ready` result. Apply uses a
 complete explicit `artifact_id`/`source_git_ref` pair when supplied; otherwise it
 pins both values from the current environment record before enqueue. Both
 workers also carry the environment's current artifact as a separate expected

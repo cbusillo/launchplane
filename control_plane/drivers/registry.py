@@ -1166,7 +1166,7 @@ def _freshness_status(
     return ("verified" if verified else "recorded"), _format_timestamp(stale_at)
 
 
-def _lane_provenance(summary: LaunchplaneLaneSummary) -> DataProvenance:
+def build_lane_summary_provenance(summary: LaunchplaneLaneSummary) -> DataProvenance:
     if summary.inventory is not None:
         status, stale_after = _freshness_status(
             recorded_at=summary.inventory.updated_at,
@@ -1291,7 +1291,7 @@ def _read_lane_summary(
             context_name=context_name,
             instance_name=instance_name,
         )
-        return summary.model_copy(update={"provenance": _lane_provenance(summary)})
+        return summary.model_copy(update={"provenance": build_lane_summary_provenance(summary)})
 
     inventory = None
     read_inventory = _read_environment_inventory_method(record_store)
@@ -1369,7 +1369,7 @@ def _read_lane_summary(
         latest_backup_gate=latest_backup_gate,
         odoo_instance_override=odoo_instance_override,
     )
-    return summary.model_copy(update={"provenance": _lane_provenance(summary)})
+    return summary.model_copy(update={"provenance": build_lane_summary_provenance(summary)})
 
 
 def _inventory_is_older_than_deployment(

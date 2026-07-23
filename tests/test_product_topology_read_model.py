@@ -431,6 +431,12 @@ class ProductTopologyReadModelTests(unittest.TestCase):
         )
         warning_codes = {warning.code for warning in topology.warnings}
         self.assertIn("external_ingress_internals_unsupported", warning_codes)
+        external_visibility_warning = next(
+            warning
+            for warning in topology.warnings
+            if warning.code == "external_ingress_internals_unsupported"
+        )
+        self.assertEqual(external_visibility_warning.severity, "warning")
         self.assertNotIn("public_ingress_observation_missing", warning_codes)
         self.assertNotIn("stale_public_ingress_observation", warning_codes)
         self.assertNotIn("public_runtime_identity_unverified", warning_codes)

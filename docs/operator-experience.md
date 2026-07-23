@@ -291,6 +291,14 @@ record class or supported service remediation. Runtime values, managed-secret
 IDs, secret material, provider credentials, provider evidence maps, and raw
 OIDC claims are never returned.
 
+Readiness treats error-severity topology findings as blockers. Advisory warnings
+such as the intentionally limited visibility into externally managed ingress
+remain visible in dimension details without blocking a lane whose recorded
+authority and public observations otherwise pass. Provider-target authority,
+deployment evidence, route authority, and observed topology each derive state
+from their own owning evidence rather than inheriting an uninitialized aggregate
+lane status.
+
 The endpoint is read-only. Missing production enrollment remains a truthful
 blocked or missing result and does not create a route, grant, provider target,
 deployment, secret, or scheduler target. An exact artifact ID is required only
