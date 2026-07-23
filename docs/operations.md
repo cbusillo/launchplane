@@ -1586,9 +1586,10 @@ pins both values from the current environment record before enqueue. Both
 workers also carry the environment's current artifact as a separate expected
 snapshot; the plan route, apply enqueue path, and operation worker fail closed
 if that lane artifact changes. Candidate artifacts must use the product
-profile's recorded image repository. The worker contracts must land before the
-dispatch wrappers pin them to a reviewed full commit SHA; until that follow-up
-pin lands, the staged reusable files are not an operator entrypoint.
+profile's recorded image repository. The dispatch wrappers are the operator
+entrypoints and pin those reviewed reusable workers to a full commit SHA. When
+worker behavior changes, land and validate the reusable contracts first, then
+advance the wrapper pin in a separate reviewed change.
 
 The plan reads the product profile, Launchplane Dokploy target/id records,
 current inventory, live Dokploy target payload, domains, volume env keys, latest

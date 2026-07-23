@@ -49,96 +49,16 @@ concurrency:
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
-    env:
-      PRODUCT: ${{ inputs.product }}
-      INSTANCE: ${{ inputs.instance }}
-      STRATEGY: ${{ inputs.strategy }}
-      ALLOW_EMPTY_DATA: ${{ inputs.allow_empty_data }}
-      DATA_SOURCE_MODE: ${{ inputs.data_source_mode }}
-      CONFIRMATION: ${{ inputs.confirmation }}
-    steps:
-      - name: Validate runtime inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${PRODUCT:?Missing product input}"
-          : "${INSTANCE:?Missing instance input}"
-          : "${STRATEGY:?Missing strategy input}"
-          for scalar in PRODUCT INSTANCE STRATEGY DATA_SOURCE_MODE CONFIRMATION; do
-            case "${!scalar}" in
-              *$'\n'*)
-                echo "${scalar} must be a single-line value." >&2
-                exit 1
-                ;;
-            esac
-          done
-
-      - name: Write target replacement plan payload
-        id: request
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .launchplane
-          jq -n \
-            --arg product "$PRODUCT" \
-            --arg instance "$INSTANCE" \
-            --arg strategy "$STRATEGY" \
-            --arg data_source_mode "$DATA_SOURCE_MODE" \
-            --arg confirmation "$CONFIRMATION" \
-            --argjson allow_empty_data "$ALLOW_EMPTY_DATA" \
-            '{
-              schema_version: 1,
-              product: $product,
-              replacement: {
-                schema_version: 1,
-                product: $product,
-                instance: $instance,
-                strategy: $strategy,
-                allow_empty_data: $allow_empty_data,
-                data_source_mode: $data_source_mode,
-                confirmation: $confirmation
-              }
-            }' > .launchplane/odoo-target-replacement-plan-payload.json
-
-          idempotency_key="$({
-            printf '%s' \
-              "odoo-target-replacement-plan:${PRODUCT}:${INSTANCE}:" \
-              "${STRATEGY}:${ALLOW_EMPTY_DATA}:${DATA_SOURCE_MODE}:" \
-              "${CONFIRMATION}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
-          })"
-          echo "idempotency_key=${idempotency_key}" >>"$GITHUB_OUTPUT"
-
-      - name: Build replacement plan
-        id: launchplane
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
-        with:
-          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
-          route-path: /v1/drivers/odoo/target-replacement-plan
-          payload-file: .launchplane/odoo-target-replacement-plan-payload.json
-          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
-          response-output-file: odoo-target-replacement-plan.json
-
-      - name: Verify replacement plan response
-        shell: bash
-        run: |
-          set -euo pipefail
-          jq . odoo-target-replacement-plan.json
-          if [ "${{ steps.launchplane.outputs.status-code }}" != "202" ]; then
-            echo \
-              "Odoo replacement plan failed: ${{ steps.launchplane.outputs.status-code }}." \
-              >&2
-            exit 1
-          fi
-          if [ "$(jq -r '.status' odoo-target-replacement-plan.json)" != "accepted" ]; then
-            echo 'Launchplane Odoo target replacement plan was not accepted.' >&2
-            exit 1
-          fi
-
-      - name: Upload replacement plan
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: odoo-target-replacement-plan
-          path: odoo-target-replacement-plan.json
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-plan.yml@0b083ad040ee8d907166abe18bea99930d9a2481 # main
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      product: ${{ inputs.product }}
+      instance: ${{ inputs.instance }}
+      strategy: ${{ inputs.strategy }}
+      allow_empty_data: ${{ inputs.allow_empty_data }}
+      data_source_mode: ${{ inputs.data_source_mode }}
+      confirmation: ${{ inputs.confirmation }}
+      launchplane_url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      launchplane_audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}

@@ -10,12 +10,126 @@ _LAUNCHPLANE_REQUEST = (
     "cbusillo/launchplane/.github/actions/launchplane-request@"
     "adcf937c6aef14e02478724040852d1d2a82a850"
 )
+_WORKER_SHA = "0b083ad040ee8d907166abe18bea99930d9a2481"
 
 
 class OdooTargetReplacementWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.plan_wrapper = load_workflow(".github/workflows/odoo-target-replacement-plan.yml")
+        self.apply_wrapper = load_workflow(".github/workflows/odoo-target-replacement-apply.yml")
         self.plan = load_workflow(".github/workflows/reusable-odoo-target-replacement-plan.yml")
         self.apply = load_workflow(".github/workflows/reusable-odoo-target-replacement-apply.yml")
+
+    def test_dispatch_wrappers_pin_reviewed_reusable_workers(self) -> None:
+        plan_contract = {
+            "product": {"required": True, "type": "string"},
+            "instance": {"required": True, "type": "string"},
+            "strategy": {
+                "required": True,
+                "type": "choice",
+                "options": ["recreate-in-place", "replace-and-cutover"],
+            },
+            "allow_empty_data": {"required": True, "default": False, "type": "boolean"},
+            "data_source_mode": {
+                "required": True,
+                "type": "choice",
+                "options": ["existing", "empty", "upstream_restore"],
+            },
+            "confirmation": {"required": False, "default": "", "type": "string"},
+        }
+        apply_contract = {
+            "product": {"required": True, "type": "string"},
+            "instance": {"required": True, "type": "string"},
+            "strategy": {
+                "required": True,
+                "type": "choice",
+                "options": ["recreate-in-place"],
+            },
+            "artifact_id": {"required": False, "default": "", "type": "string"},
+            "source_git_ref": {"required": False, "default": "", "type": "string"},
+            "allow_empty_data": {"required": True, "default": False, "type": "boolean"},
+            "data_source_mode": {
+                "required": True,
+                "type": "choice",
+                "options": ["existing", "empty", "upstream_restore"],
+            },
+            "confirmation": {"required": False, "default": "", "type": "string"},
+            "verify_health": {"required": True, "default": True, "type": "boolean"},
+            "verify_canonical": {"required": True, "default": True, "type": "boolean"},
+            "verify_logo": {"required": True, "default": True, "type": "boolean"},
+            "no_cache": {"required": True, "default": False, "type": "boolean"},
+            "timeout_seconds": {"required": False, "default": "", "type": "string"},
+            "health_timeout_seconds": {
+                "required": False,
+                "default": "",
+                "type": "string",
+            },
+        }
+        expected = (
+            (
+                self.plan_wrapper,
+                "plan",
+                "reusable-odoo-target-replacement-plan.yml",
+                plan_contract,
+            ),
+            (
+                self.apply_wrapper,
+                "apply",
+                "reusable-odoo-target-replacement-apply.yml",
+                apply_contract,
+            ),
+        )
+        for workflow, job_id, worker_name, dispatch_contract in expected:
+            with self.subTest(workflow=workflow.label):
+                trigger = workflow.data["on"]
+                self.assertIsInstance(trigger, dict)
+                assert isinstance(trigger, dict)
+                self.assertEqual(set(trigger), {"workflow_dispatch"})
+                dispatch = trigger["workflow_dispatch"]
+                self.assertIsInstance(dispatch, dict)
+                assert isinstance(dispatch, dict)
+                inputs = dispatch["inputs"]
+                self.assertIsInstance(inputs, dict)
+                assert isinstance(inputs, dict)
+                actual_contract = {}
+                for name, definition in inputs.items():
+                    self.assertIsInstance(definition, dict)
+                    assert isinstance(definition, dict)
+                    actual_contract[name] = {
+                        key: definition[key]
+                        for key in ("required", "default", "type", "options")
+                        if key in definition
+                    }
+                self.assertEqual(actual_contract, dispatch_contract)
+                self.assertEqual(set(workflow.jobs), {job_id})
+                self.assertEqual(
+                    workflow.job_uses(job_id),
+                    f"cbusillo/launchplane/.github/workflows/{worker_name}@{_WORKER_SHA}",
+                )
+                self.assertEqual(
+                    workflow.job_permissions(job_id),
+                    {"contents": "read", "id-token": "write"},
+                )
+                self.assertEqual(workflow.steps(job_id), ())
+                forwarded = workflow.job(job_id)["with"]
+                self.assertIsInstance(forwarded, dict)
+                assert isinstance(forwarded, dict)
+                expected_forwarded = {
+                    name: f"${{{{ inputs.{name} }}}}" for name in dispatch_contract
+                }
+                expected_forwarded.update(
+                    {
+                        "launchplane_url": "${{ vars.LAUNCHPLANE_PUBLIC_URL }}",
+                        "launchplane_audience": "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",
+                    }
+                )
+                self.assertEqual(
+                    forwarded,
+                    expected_forwarded,
+                )
+                text = Path(workflow.path).read_text(encoding="utf-8")
+                self.assertNotIn("launchplane-request@", text)
+                self.assertNotIn("runs-on:", text)
 
     def test_workers_are_reusable_oidc_jobs(self) -> None:
         expected_inputs = {
