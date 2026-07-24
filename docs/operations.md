@@ -408,6 +408,9 @@ the primary managed-set secret. The
 `LAUNCHPLANE_AUTHZ_ODOO_OPW_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON` owns the
 separate exact-instance OPW production inspection and enrollment grants so the
 operator can reconcile that lane without replacing another unreadable managed
+set. `LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON` owns
+additional exact-instance Odoo production inspection and enrollment grants
+without expanding the OPW-specific set or replacing another unreadable managed
 set. The
 `Manage Launchplane Authorization` wrapper selects one of those explicit
 secrets and forwards it into the reusable worker, whose OIDC-minting job remains
