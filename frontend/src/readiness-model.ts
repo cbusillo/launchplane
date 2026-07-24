@@ -37,7 +37,6 @@ export function buildOperationalReadinessRequest(
     detail.target.artifact_manifest?.artifact_id.trim() ?? "";
   const currentArtifactId =
     detail.target.expected_runtime_identity?.artifact_id.trim() ?? "";
-  const artifactId = persistedArtifactId || currentArtifactId;
   return {
     path: {
       product: detail.product,
@@ -46,7 +45,7 @@ export function buildOperationalReadinessRequest(
     },
     query: {
       action: action.authz_action.trim(),
-      ...(artifactId ? { artifact_id: artifactId } : {}),
+      ...(persistedArtifactId ? { artifact_id: persistedArtifactId } : {}),
       ...(currentArtifactId
         ? {
             expected_current_artifact_id: currentArtifactId,
