@@ -1610,6 +1610,15 @@ current inventory, live Dokploy target payload, domains, volume env keys, latest
 deployment, and expected runtime identity. It does not create, delete, deploy,
 or change routes.
 
+After a target-replacement apply deploys and the Odoo health, canonical, and
+logo probes pass, lanes whose Odoo data policy requires runtime identity perform
+a separate bounded JSON health readback. This second probe may use the full lane
+health timeout so a stale old container can drain before the new deployment
+identity appears. A missing, malformed, mismatched, or unreachable identity
+marks the deployment failed and leaves current inventory and release tuples
+unchanged. A successful record carries `runtime_identity_status=match` plus the
+bounded observed identity copied into environment inventory.
+
 For an already-tracked Dokploy compose target, use `Dokploy Target Setup` with
 `operation=reconcile-compose-domain` to reconcile the provider domain route
 without creating or adopting the target again. The service reads the

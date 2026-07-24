@@ -37,7 +37,9 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
+    HealthcheckEvidence,
 )
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
@@ -56,6 +58,11 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     build_odoo_stable_target_replacement_plan,
     execute_odoo_stable_target_replacement_apply,
     _target_health_url,
+    _verify_required_runtime_identity_evidence,
+)
+from control_plane.workflows.runtime_identity_health import (
+    HealthcheckPass,
+    RuntimeIdentityHealthcheckError,
 )
 from control_plane.workflows.odoo_verification import (
     OdooVerificationEvidence,
@@ -240,6 +247,14 @@ def _verification_result() -> OdooVerificationResult:
     )
 
 
+def _matching_runtime_identity_healthcheck(
+    *, expected_runtime_identity: RuntimeIdentity, **_: object
+) -> HealthcheckPass:
+    return HealthcheckPass(
+        payload={"runtime_identity": expected_runtime_identity.model_dump(mode="json")}
+    )
+
+
 def _opw_profile_with_prelaunch_policy(*, enabled: bool) -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
         product="odoo-tenant-opw",
@@ -384,6 +399,143 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             _merge_required_odoo_install_modules("cm_website, disable_odoo_online, website"),
             "launchplane_settings,disable_odoo_online,cm_website,website",
         )
+
+    def test_required_runtime_identity_evidence_records_exact_match(self) -> None:
+        expected_runtime_identity = RuntimeIdentity(
+            product="odoo-tenant-cm",
+            context="cm",
+            instance="testing",
+            deployment_record_id="deployment-current",
+            artifact_id="artifact-current",
+            source_git_ref="abc1234",
+        )
+
+        with patch(
+            "control_plane.workflows.odoo_stable_target_replacement.wait_for_runtime_identity_healthcheck_with_retry",
+            side_effect=_matching_runtime_identity_healthcheck,
+        ):
+            evidence = _verify_required_runtime_identity_evidence(
+                health_url="https://cm-testing.example.com/launchplane/health",
+                timeout_seconds=30,
+                expected_runtime_identity=expected_runtime_identity,
+            )
+
+        self.assertEqual(evidence.status, "pass")
+        self.assertEqual(evidence.runtime_identity_status, "match")
+        self.assertEqual(evidence.observed_runtime_identity, expected_runtime_identity)
+
+    def test_required_runtime_identity_evidence_fails_closed_on_mismatch(self) -> None:
+        expected_runtime_identity = RuntimeIdentity(
+            product="odoo-tenant-cm",
+            context="cm",
+            instance="testing",
+            deployment_record_id="deployment-current",
+            artifact_id="artifact-current",
+            source_git_ref="abc1234",
+        )
+        observed_runtime_identity = expected_runtime_identity.model_copy(
+            update={"deployment_record_id": "deployment-stale"}
+        )
+
+        with patch(
+            "control_plane.workflows.odoo_stable_target_replacement.wait_for_runtime_identity_healthcheck_with_retry",
+            side_effect=RuntimeIdentityHealthcheckError(
+                "runtime identity mismatch",
+                healthcheck_pass=HealthcheckPass(
+                    payload={"runtime_identity": observed_runtime_identity.model_dump(mode="json")}
+                ),
+            ),
+        ):
+            evidence = _verify_required_runtime_identity_evidence(
+                health_url="https://cm-testing.example.com/launchplane/health",
+                timeout_seconds=30,
+                expected_runtime_identity=expected_runtime_identity,
+            )
+
+        self.assertEqual(evidence.status, "fail")
+        self.assertEqual(evidence.runtime_identity_status, "mismatch")
+        self.assertIn("deployment_record_id", evidence.runtime_identity_detail)
+        self.assertEqual(evidence.observed_runtime_identity, observed_runtime_identity)
+
+    def test_required_runtime_identity_evidence_records_unverifiable_timeout(self) -> None:
+        expected_runtime_identity = RuntimeIdentity(
+            product="odoo-tenant-cm",
+            context="cm",
+            instance="testing",
+            deployment_record_id="deployment-current",
+            artifact_id="artifact-current",
+            source_git_ref="abc1234",
+        )
+
+        with patch(
+            "control_plane.workflows.odoo_stable_target_replacement.wait_for_runtime_identity_healthcheck_with_retry",
+            side_effect=RuntimeIdentityHealthcheckError("healthcheck timed out"),
+        ):
+            evidence = _verify_required_runtime_identity_evidence(
+                health_url="https://cm-testing.example.com/launchplane/health",
+                timeout_seconds=30,
+                expected_runtime_identity=expected_runtime_identity,
+            )
+
+        self.assertEqual(evidence.status, "fail")
+        self.assertEqual(evidence.runtime_identity_status, "unverifiable")
+        self.assertIn("healthcheck timed out", evidence.runtime_identity_detail)
+
+    def test_apply_rejects_disabled_health_when_runtime_identity_is_required(self) -> None:
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "cm-testing",
+                    "env": "\n".join(
+                        (
+                            "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                            "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                            "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        )
+                    ),
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env"
+            ) as update_env,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
+            ) as trigger_deployment,
+        ):
+            with self.assertRaisesRegex(
+                click.ClickException,
+                "requires health verification when the lane requires runtime identity",
+            ):
+                execute_odoo_stable_target_replacement_apply(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=OdooStableTargetReplacementApplyRequest(
+                        product="odoo-tenant-cm",
+                        instance="testing",
+                        verify_health=False,
+                    ),
+                    dokploy_request=cast(DokployRequest, _request),
+                )
+
+        self.assertEqual(store.deployment_records, [])
+        self.assertEqual(store.environment_inventories, [])
+        update_env.assert_not_called()
+        trigger_deployment.assert_not_called()
 
     def test_build_plan_allows_issue_backed_opw_upstream_restore_policy(self) -> None:
         with (
@@ -1016,6 +1168,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
                 return_value=_verification_result(),
             ) as verify_readiness,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.wait_for_runtime_identity_healthcheck_with_retry",
+                side_effect=_matching_runtime_identity_healthcheck,
+            ) as verify_runtime_identity,
         ):
             ensure_domain.side_effect = _ensure_domain
             wait_deploy.side_effect = _wait_for_deploy
@@ -1232,6 +1388,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             final_deployment.runtime_identity.deployment_record_id,
             final_deployment.record_id,
         )
+        self.assertEqual(final_deployment.destination_health.status, "pass")
+        self.assertEqual(final_deployment.destination_health.runtime_identity_status, "match")
+        assert final_deployment.destination_health.observed_runtime_identity is not None
+        self.assertEqual(
+            final_deployment.destination_health.observed_runtime_identity.deployment_record_id,
+            final_deployment.record_id,
+        )
+        verify_runtime_identity.assert_called_once()
         self.assertEqual(len(store.environment_inventories), 1)
         self.assertEqual(
             store.environment_inventories[0].deployment_record_id,
@@ -1253,7 +1417,22 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "cm_website",
             ),
         )
+        profile = _profile()
+        profile = profile.model_copy(
+            update={
+                "lanes": (
+                    profile.lanes[0].model_copy(
+                        update={
+                            "odoo_data_policy": ProductOdooLaneDataPolicy(
+                                requires_runtime_identity=False
+                            )
+                        }
+                    ),
+                )
+            }
+        )
         store = _Store(
+            profile=profile,
             target_record=_target_record(),
             target_id_record=_target_id_record(),
             inventory=_inventory(),
@@ -1336,6 +1515,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
                 return_value=_verification_result(),
             ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.wait_for_runtime_identity_healthcheck_with_retry"
+            ) as verify_runtime_identity,
         ):
             result = execute_odoo_stable_target_replacement_apply(
                 control_plane_root=Path("."),
@@ -1366,7 +1548,158 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         assert final_deployment.runtime_identity is not None
         self.assertEqual(final_deployment.runtime_identity.artifact_id, "artifact-cm-fresh")
         self.assertEqual(final_deployment.runtime_identity.source_git_ref, "feed123")
+        self.assertEqual(final_deployment.destination_health.runtime_identity_status, "unchecked")
+        verify_runtime_identity.assert_not_called()
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")
+
+    def test_apply_fails_required_runtime_identity_failures_before_inventory(self) -> None:
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+        )
+        persisted_env = ""
+        rendered_compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
+            domain_hosts=("cm-testing.shinycomputers.com",),
+            runtime_port=8069,
+        )
+        observed_runtime_identity = RuntimeIdentity(
+            product="odoo-tenant-cm",
+            context="cm",
+            instance="testing",
+            deployment_record_id="deployment-stale",
+            artifact_id="artifact-cm-testing",
+            source_git_ref="abc1234",
+        )
+        mismatched_evidence = HealthcheckEvidence(
+            verified=True,
+            urls=("https://cm-testing.shinycomputers.com/launchplane/health",),
+            timeout_seconds=120,
+            status="fail",
+            runtime_identity_status="mismatch",
+            runtime_identity_detail="Runtime identity mismatched fields: deployment_record_id",
+            observed_runtime_identity=observed_runtime_identity,
+        )
+        unverifiable_evidence = HealthcheckEvidence(
+            verified=True,
+            urls=("https://cm-testing.shinycomputers.com/launchplane/health",),
+            timeout_seconds=120,
+            status="fail",
+            runtime_identity_status="unverifiable",
+            runtime_identity_detail="socket timed out",
+        )
+
+        def _fetch_target_payload(**_: object) -> JsonValue:
+            return {
+                "name": "cm-testing",
+                "sourceType": "raw",
+                "composePath": "docker-compose.yml",
+                "composeFile": rendered_compose_file,
+                "env": persisted_env
+                or "\n".join(
+                    (
+                        "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                        "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                        "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                    )
+                ),
+            }
+
+        def _update_env(*, env_text: str, **_: object) -> None:
+            nonlocal persisted_env
+            persisted_env = env_text
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                side_effect=_fetch_target_payload,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.ensure_compose_web_domain_route"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.fetch_dokploy_converted_compose_file",
+                return_value=rendered_compose_file,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.update_dokploy_target_env",
+                side_effect=_update_env,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.trigger_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.wait_for_target_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="cm",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
+                return_value=_verification_result(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement._verify_required_runtime_identity_evidence",
+                side_effect=(mismatched_evidence, unverifiable_evidence),
+            ) as verify_runtime_identity,
+        ):
+            results = tuple(
+                execute_odoo_stable_target_replacement_apply(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=OdooStableTargetReplacementApplyRequest(
+                        product="odoo-tenant-cm", instance="testing"
+                    ),
+                    dokploy_request=cast(DokployRequest, _request),
+                )
+                for _ in range(2)
+            )
+
+        self.assertTrue(all(result.deploy_status == "fail" for result in results))
+        self.assertTrue(all(result.health_status == "fail" for result in results))
+        self.assertTrue(
+            all(
+                "runtime identity verification failed" in result.error_message.lower()
+                for result in results
+            )
+        )
+        self.assertEqual(store.environment_inventories, [])
+        self.assertEqual(store.release_tuples, [])
+        failed_deployments = [
+            record for record in store.deployment_records if record.deploy.status == "fail"
+        ]
+        self.assertEqual(
+            [record.destination_health.runtime_identity_status for record in failed_deployments],
+            ["mismatch", "unverifiable"],
+        )
+        self.assertEqual(
+            failed_deployments[0].destination_health.observed_runtime_identity,
+            observed_runtime_identity,
+        )
+        self.assertIsNone(failed_deployments[1].destination_health.observed_runtime_identity)
+        self.assertEqual(verify_runtime_identity.call_count, 2)
 
     def test_apply_persists_post_deploy_failure_evidence(self) -> None:
         store = _Store(
@@ -1797,6 +2130,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     evidence=OdooVerificationEvidence(),
                 ),
             ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.wait_for_runtime_identity_healthcheck_with_retry",
+                side_effect=_matching_runtime_identity_healthcheck,
+            ),
         ):
             result = execute_odoo_stable_target_replacement_apply(
                 control_plane_root=Path("."),
@@ -2195,6 +2532,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
                 return_value=_verification_result(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.wait_for_runtime_identity_healthcheck_with_retry",
+                side_effect=_matching_runtime_identity_healthcheck,
             ),
         ):
             result = execute_odoo_stable_target_replacement_apply(

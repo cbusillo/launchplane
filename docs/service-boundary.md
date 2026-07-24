@@ -2550,10 +2550,13 @@ Launchplane. Prod rollback reads DB-backed release tuples, artifact manifests,
 and current promotion/inventory records, then delegates the provider mutation to
 stable target replacement. That shared executor deploys the selected
 artifact-backed image, injects runtime identity, runs post-deploy maintenance,
-verifies health/canonical/logo evidence, and writes deployment/release-tuple
-evidence. The rollback wrapper only adds rollback provenance to inventory and
-the current prod promotion record. Local Odoo runtime commands remain in
-`odoo-devkit`; these drivers are for remote control-plane execution only.
+verifies health/canonical/logo evidence, reads required runtime identity back
+from the lane-owned health endpoint, and writes deployment/release-tuple
+evidence only when that identity matches. Failed required identity evidence does
+not advance current inventory. The rollback wrapper only adds rollback
+provenance to inventory and the current prod promotion record. Local Odoo
+runtime commands remain in `odoo-devkit`; these drivers are for remote
+control-plane execution only.
 
 Privileged product rollback actions should use a narrow delegated-worker runtime
 contract when they require network reach or host authority that does not belong

@@ -114,7 +114,9 @@ class RuntimeIdentityHealthTests(unittest.TestCase):
         attempts = iter(
             (
                 HealthcheckPass(payload={"status": "ok"}),
-                HealthcheckPass(payload={"runtime_identity": {"deployment_record_id": "deployment-123"}}),
+                HealthcheckPass(
+                    payload={"runtime_identity": {"deployment_record_id": "deployment-123"}}
+                ),
                 HealthcheckPass(payload={"runtime_identity": identity.model_dump(mode="json")}),
             )
         )
@@ -171,6 +173,42 @@ class RuntimeIdentityHealthTests(unittest.TestCase):
             result.payload,
             {"runtime_identity": expected_identity.model_dump(mode="json")},
         )
+        self.assertEqual(sleeps, [1])
+
+    def test_wait_for_runtime_identity_healthcheck_retries_raw_timeout(self) -> None:
+        expected_identity = RuntimeIdentity(
+            product="sellyouroutboard",
+            context="sellyouroutboard-prod",
+            instance="production",
+            deployment_record_id="deployment-new",
+            artifact_id="artifact-a",
+            source_git_ref="abc123",
+        )
+        matching_pass = HealthcheckPass(
+            payload={"runtime_identity": expected_identity.model_dump(mode="json")}
+        )
+        attempts: list[BaseException | HealthcheckPass] = [
+            TimeoutError("socket timed out"),
+            matching_pass,
+        ]
+        sleeps: list[float] = []
+
+        def wait_once(**_kwargs: object) -> HealthcheckPass:
+            result = attempts.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        result = wait_for_runtime_identity_healthcheck_with_retry(
+            url="https://example.com/health",
+            timeout_seconds=30,
+            expected_runtime_identity=expected_identity,
+            sleep=sleeps.append,
+            monotonic=lambda: 0,
+            wait_once=wait_once,
+        )
+
+        self.assertIs(result, matching_pass)
         self.assertEqual(sleeps, [1])
 
     def test_wait_for_runtime_identity_healthcheck_timeout_keeps_last_mismatch(
