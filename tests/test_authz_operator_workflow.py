@@ -37,6 +37,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 "odoo-testing-route-binding-refresh",
                 "odoo-testing-target-replacement",
                 "odoo-opw-preview-feedback",
+                "odoo-opw-production-enrollment",
             ],
         )
         expected_jobs = {
@@ -67,6 +68,10 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             "reconcile-odoo-opw-preview-feedback": (
                 "${{ inputs.managed_set == 'odoo-opw-preview-feedback' }}",
                 "${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_OPW_PREVIEW_FEEDBACK_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-odoo-opw-production-enrollment": (
+                "${{ inputs.managed_set == 'odoo-opw-production-enrollment' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_OPW_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON }}",
             ),
         }
         self.assertEqual(set(self.dispatch_workflow.jobs), set(expected_jobs))

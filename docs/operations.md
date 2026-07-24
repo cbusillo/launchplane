@@ -405,6 +405,10 @@ Odoo target-replacement workers. The
 `LAUNCHPLANE_AUTHZ_ODOO_OPW_PREVIEW_FEEDBACK_MANAGED_SET_JSON` owns the isolated
 OPW preview feedback writer grant without requiring operators to read or replace
 the primary managed-set secret. The
+`LAUNCHPLANE_AUTHZ_ODOO_OPW_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON` owns the
+separate exact-instance OPW production inspection and enrollment grants so the
+operator can reconcile that lane without replacing another unreadable managed
+set. The
 `Manage Launchplane Authorization` wrapper selects one of those explicit
 secrets and forwards it into the reusable worker, whose OIDC-minting job remains
 gated by the `launchplane-authz-admin` environment. Never replace the unreadable
