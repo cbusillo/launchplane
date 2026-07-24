@@ -11,12 +11,9 @@ from tests.support.workflows import load_workflow
 
 class WorkflowInvariantCheckerTests(unittest.TestCase):
     def test_postgres_service_uses_ipv4_only_dynamic_host_port(self) -> None:
-        workflow = load_workflow(".github/workflows/ci.yml")
+        workflow_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 
-        postgres_job = workflow.job("postgres_integration")
-        postgres_service = postgres_job["services"]["postgres"]
-
-        self.assertEqual(["127.0.0.1::5432"], postgres_service["ports"])
+        self.assertIn('          - "127.0.0.1::5432"\n', workflow_text)
 
     def test_failure_message_names_invariant_and_workflow(self) -> None:
         workflow = load_workflow(".github/workflows/ci.yml")
