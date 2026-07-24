@@ -90,6 +90,8 @@ def wait_for_runtime_identity_healthcheck_with_retry(
             last_detail = f"http {error.code}"
         except URLError as error:
             last_detail = str(error.reason)
+        except (TimeoutError, OSError) as error:
+            last_detail = str(error)
         else:
             last_healthcheck_pass = healthcheck_pass
             status, detail, _observed = health_payload_runtime_identity_status(

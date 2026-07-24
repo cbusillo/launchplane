@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Literal, Protocol
@@ -41,6 +42,11 @@ from control_plane.workflows.odoo_verification import (
     default_odoo_health_url,
     is_legacy_derived_odoo_health_url,
     verify_odoo_stable_readiness,
+)
+from control_plane.workflows.runtime_identity_health import (
+    RuntimeIdentityHealthcheckError,
+    healthcheck_evidence_with_runtime_identity,
+    wait_for_runtime_identity_healthcheck_with_retry,
 )
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.workflows.ship import (
@@ -774,6 +780,57 @@ def _build_runtime_identity(
     )
 
 
+def _verify_required_runtime_identity_evidence(
+    *,
+    health_url: str,
+    timeout_seconds: int,
+    expected_runtime_identity: RuntimeIdentity,
+) -> HealthcheckEvidence:
+    evidence = HealthcheckEvidence(
+        verified=True,
+        urls=(health_url,),
+        timeout_seconds=timeout_seconds,
+        status="fail",
+    )
+    try:
+        healthcheck_pass = wait_for_runtime_identity_healthcheck_with_retry(
+            url=health_url,
+            timeout_seconds=timeout_seconds,
+            expected_runtime_identity=expected_runtime_identity,
+            sleep=time.sleep,
+            monotonic=time.monotonic,
+        )
+    except RuntimeIdentityHealthcheckError as error:
+        if error.healthcheck_pass is not None:
+            return healthcheck_evidence_with_runtime_identity(
+                evidence,
+                expected_runtime_identity=expected_runtime_identity,
+                healthcheck_pass=error.healthcheck_pass,
+            )
+        return evidence.model_copy(
+            update={
+                "runtime_identity_status": "unverifiable",
+                "runtime_identity_detail": str(error),
+            }
+        )
+    except (click.ClickException, TimeoutError, OSError) as error:
+        return evidence.model_copy(
+            update={
+                "runtime_identity_status": "unverifiable",
+                "runtime_identity_detail": str(error),
+            }
+        )
+
+    verified_evidence = healthcheck_evidence_with_runtime_identity(
+        evidence.model_copy(update={"status": "pass"}),
+        expected_runtime_identity=expected_runtime_identity,
+        healthcheck_pass=healthcheck_pass,
+    )
+    if verified_evidence.runtime_identity_status != "match":
+        return verified_evidence.model_copy(update={"status": "fail"})
+    return verified_evidence
+
+
 def _write_failed_deployment(
     *,
     record_store: OdooStableTargetReplacementStore,
@@ -1151,6 +1208,21 @@ def execute_odoo_stable_target_replacement_apply(
         source_git_ref=source_git_ref,
         image_reference=image_reference,
     )
+    base_url = _target_base_url(lane=lane, domains=plan.expected_domain_hosts)
+    health_url = _target_health_url(
+        profile=profile,
+        lane=lane,
+        domains=plan.expected_domain_hosts,
+    )
+    if lane.odoo_data_policy.requires_runtime_identity:
+        if not request.verify_health:
+            raise click.ClickException(
+                "Odoo target replacement requires health verification when the lane requires runtime identity."
+            )
+        if not health_url:
+            raise click.ClickException(
+                "Odoo target replacement runtime identity verification has no health URL."
+            )
 
     record_store.write_deployment_record(
         build_deployment_record(
@@ -1179,7 +1251,6 @@ def execute_odoo_stable_target_replacement_apply(
         image_reference=image_reference,
     )
     runtime_source: dict[str, str] = {}
-    base_url = _target_base_url(lane=lane, domains=plan.expected_domain_hosts)
     odoo_override_record = _read_odoo_instance_override_record(
         record_store=record_store,
         context=plan.context,
@@ -1565,7 +1636,6 @@ def execute_odoo_stable_target_replacement_apply(
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
         )
 
-    health_url = _target_health_url(profile=profile, lane=lane, domains=plan.expected_domain_hosts)
     verification = verify_odoo_stable_readiness(
         base_url=base_url,
         health_url=health_url,
@@ -1614,12 +1684,52 @@ def execute_odoo_stable_target_replacement_apply(
 
     finished_at = utc_now_timestamp()
     final_runtime_identity = runtime_identity.model_copy(update={"deployed_at": finished_at})
-    destination_health = HealthcheckEvidence(
-        verified=request.verify_health,
-        urls=(health_url,) if request.verify_health and health_url else (),
-        timeout_seconds=health_timeout_seconds if request.verify_health and health_url else None,
-        status=health_status,
-    )
+    if lane.odoo_data_policy.requires_runtime_identity:
+        destination_health = _verify_required_runtime_identity_evidence(
+            health_url=health_url,
+            timeout_seconds=health_timeout_seconds,
+            expected_runtime_identity=runtime_identity,
+        )
+        if destination_health.runtime_identity_status != "match":
+            error_message = "Odoo runtime identity verification failed: " + (
+                destination_health.runtime_identity_detail
+                or destination_health.runtime_identity_status
+            )
+            _write_failed_deployment(
+                record_store=record_store,
+                ship_request=ship_request,
+                deployment_record_id=deployment_record_id,
+                started_at=started_at,
+                resolved_target=resolved_target,
+                runtime_source=runtime_source,
+                runtime_identity=runtime_identity,
+                post_deploy_update=post_deploy_evidence,
+                destination_health=destination_health,
+            )
+            return base_result.result(
+                deploy_status="fail",
+                post_deploy_status="pass",
+                post_deploy_result=post_deploy_result,
+                health_status="fail",
+                canonical_status=canonical_status,
+                logo_status=logo_status,
+                health_url=verification.evidence.health_url,
+                canonical_url=verification.evidence.canonical_url,
+                logo_urls=verification.evidence.logo_urls,
+                verification_evidence=verification.evidence,
+                runtime_identity_injected=True,
+                runtime_source=runtime_source,
+                error_message=error_message,
+            )
+    else:
+        destination_health = HealthcheckEvidence(
+            verified=request.verify_health,
+            urls=(health_url,) if request.verify_health and health_url else (),
+            timeout_seconds=health_timeout_seconds
+            if request.verify_health and health_url
+            else None,
+            status=health_status,
+        )
     deployment_record = build_deployment_record(
         request=ship_request,
         record_id=deployment_record_id,

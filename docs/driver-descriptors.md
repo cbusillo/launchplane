@@ -240,6 +240,13 @@ Odoo stable target replacement so runtime identity, post-deploy maintenance,
 canonical/logo verification, deployment records, inventory, and release tuples
 stay on the canonical stable executor while the rollback wrapper owns promotion
 rollback provenance.
+When an Odoo lane requires runtime identity, the stable target-replacement
+executor also reads the injected identity back from the lane-owned health URL
+after the Odoo health, canonical, and logo probes pass. Only an exact match of
+the authoritative deployment identity fields can advance current inventory or
+mint a release tuple. Missing, malformed, mismatched, or unreachable identity
+evidence writes a failed deployment record instead. Lanes that explicitly do
+not require runtime identity keep the existing health-verification behavior.
 
 The `stable_verification` action routes to
 `POST /v1/drivers/generic-web/stable-verification`. Product workflows submit the
