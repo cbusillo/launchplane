@@ -23,9 +23,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "asgi-lifespan>=2.1.0",
-    "httpx2>=2.7.0",
+    "httpx2>=2.9.0",
     "mypy>=2.3.0",
-    "ruff>=0.15.22",
+    "ruff>=0.16.0",
 ]
 
 [project.scripts]
