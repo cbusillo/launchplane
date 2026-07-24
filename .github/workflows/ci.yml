@@ -558,7 +558,7 @@ jobs:
           POSTGRES_DB: launchplane_root
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
-          - 5432/tcp
+          - "127.0.0.1::5432"
         options: >-
           --health-cmd "pg_isready -U launchplane_test -d launchplane_root"
           --health-interval 5s
