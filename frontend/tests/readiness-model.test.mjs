@@ -81,7 +81,7 @@ test("readiness request uses Launchplane-owned lane and artifact records", () =>
   });
 });
 
-test("readiness request falls back to current runtime artifact without inventing one", () => {
+test("readiness request omits artifact selector when the manifest is missing", () => {
   assert.deepEqual(
     buildOperationalReadinessRequest(
       detail({ runtimeArtifact: "artifact-current" }),
@@ -89,7 +89,6 @@ test("readiness request falls back to current runtime artifact without inventing
     ).query,
     {
       action: "demo.inspect",
-      artifact_id: "artifact-current",
       expected_current_artifact_id: "artifact-current",
     },
   );
