@@ -928,7 +928,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             )
 
     def test_executor_redacts_action_failure_before_audit_and_artifact(self) -> None:
-        secret = "ghp_1234567890abcdefghijklmnop"
+        secret = "ghp_aaaaaaaaaaaa"
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_path = Path(temporary_directory)
             spool = RunnerHostHygieneAuditSpool(
