@@ -35,6 +35,11 @@ name: Tracked Target Logs
         required: false
         default: ""
         type: string
+      service:
+        description: Optional exact Dokploy Compose service for runtime logs.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -54,6 +59,7 @@ jobs:
       SOURCE: ${{ inputs.source }}
       SINCE: ${{ inputs.since }}
       SEARCH: ${{ inputs.search }}
+      SERVICE: ${{ inputs.service }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -83,8 +89,16 @@ jobs:
             echo "deployment logs do not support search." >&2
             exit 1
           fi
+          if [ "$SOURCE" = "deployment" ] && [ -n "$SERVICE" ]; then
+            echo "deployment logs do not support compose service selection." >&2
+            exit 1
+          fi
           if ! [[ "$SEARCH" =~ ^[a-zA-Z0-9\ ._-]{0,500}$ ]]; then
             echo 'search may contain only safe plain-text characters.' >&2
+            exit 1
+          fi
+          if ! [[ "$SERVICE" =~ ^$|^[a-z0-9][a-z0-9._-]{0,127}$ ]]; then
+            echo 'service must be an exact lowercase Compose service name.' >&2
             exit 1
           fi
 
@@ -104,13 +118,15 @@ jobs:
             --arg source "$SOURCE" \
             --arg since "$effective_since" \
             --arg search "$SEARCH" \
+            --arg service "$SERVICE" \
             '{
               context: $context,
               instance: $instance,
               lines: $lines,
               source: $source,
               since: $since,
-              search: $search
+              search: $search,
+              service: $service
             }' \
             > tracked-target-logs-request.json
           route_path="$({
@@ -119,7 +135,8 @@ jobs:
                "/instances/\(.instance | @uri)/logs" +
                "?lines=\(.lines | @uri)&source=\(.source | @uri)" +
                "&since=\(.since | @uri)" +
-               "&search=\(.search | @uri)"' \
+               "&search=\(.search | @uri)" +
+               "&service=\(.service | @uri)"' \
               tracked-target-logs-request.json
           })"
           echo "route_path=${route_path}" >>"$GITHUB_OUTPUT"

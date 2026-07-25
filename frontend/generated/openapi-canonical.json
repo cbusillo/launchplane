@@ -18564,6 +18564,10 @@
             "title": "Search",
             "type": "string"
           },
+          "service": {
+            "title": "Service",
+            "type": "string"
+          },
           "since": {
             "title": "Since",
             "type": "string"
@@ -18581,7 +18585,8 @@
           "source",
           "line_count",
           "since",
-          "search"
+          "search",
+          "service"
         ],
         "title": "TrackedTargetLogRequestResponse",
         "type": "object"
@@ -22010,6 +22015,16 @@
             "schema": {
               "default": "",
               "title": "Search",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "service",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Service",
               "type": "string"
             }
           },
