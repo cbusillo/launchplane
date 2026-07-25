@@ -128,6 +128,16 @@ under `runner_host_hygiene_audit.write`, preserves the `Idempotency-Key`
 replay/conflict contract, and returns the accepted record key plus audit result
 details. The local planner only prints the planned record; the approved executor
 calls the service route after it captures the required pre/post host evidence.
+The executor also keeps a host-persistent delivery envelope outside the Actions
+workspace. It atomically records planned intent before mutation, records
+`action_started` immediately before the privileged command, and records terminal
+evidence before remote delivery. Transient delivery failures retain the exact
+idempotency key and block another mutation for the same host/action until the
+pending envelope is reconciled. The current-run envelope is copied to a redacted
+workflow artifact; bearer tokens and raw authorization headers are never part of
+the envelope. A permanently rejected planned audit (for example, authorization,
+route, or idempotency conflict) blocks mutation; a retryable transport/service
+failure may proceed only because the planned intent is already durable locally.
 
 ## Approved Ops-Lane Executor
 
@@ -168,6 +178,9 @@ The workflow requires these repository variables:
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SERVICE_USER`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS`
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RUNNER_WORKDIR_ROOTS`, as comma-separated
+  public-key/absolute-path pairs such as `legacy=/srv/runners`. The keys appear
+  in evidence; absolute paths remain executor-local runtime input.
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_ALLOWED_BUILDKIT_STATE_VOLUMES` for any
   approved BuildKit state-volume retirement target. Leave it empty when no
   named volume cleanup has been reviewed.
@@ -175,7 +188,8 @@ The workflow requires these repository variables:
 The executor fails closed unless the process user matches the requested service
 user, the GitHub repository matches the requested repository scope, retained
 warm builders are present in pre-apply evidence, the apply plan is ready, no
-active Docker build client process is observed, and
+active Docker build client or another Actions `Runner.Worker` process is observed
+in two consecutive local samples, and
 `mutate=true` is explicitly supplied to a manual workflow dispatch. Scheduled
 runs write a planned audit and stop at the `mutate_not_requested` blocker, which
 keeps the cadence report-only while preserving typed pre-apply evidence. Manual
@@ -186,6 +200,16 @@ writes `failed`. It does not run `docker system prune`, `docker image prune -a`,
 generic `docker volume prune`, runner work-directory deletion, runner service
 restart, builder deletion, or automatic rollback. Operators should use the
 captured image and volume inventory to decide any later phase-two cleanup lane.
+Runner work-directory evidence covers every operator-supplied root and records
+both apparent and allocated bytes per public root key; Docker reclaimable bytes
+are also split into images, containers, local volumes, and build cache while the
+existing aggregate remains backward-compatible.
+
+The executor excludes only its own ancestor `Runner.Worker` from the idle gate;
+any sibling worker still blocks a shared-host mutation. If a prior run stopped
+after the durable `action_started` marker, an operator may manually dispatch with
+`resolve_action_started=true`. That path captures current post evidence and
+writes a terminal failed audit without repeating the privileged action.
 
 Runner lane registration uses a separate manual ops-lane workflow,
 `.github/workflows/runner-lane-registration.yml`. It shares the same approved

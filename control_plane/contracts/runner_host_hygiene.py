@@ -15,6 +15,13 @@ RunnerHostHygieneApplyAction = Literal[
 ]
 RunnerHostHygieneApplyPlanStatus = Literal["ready", "blocked"]
 RunnerHostHygieneApplyAuditStatus = Literal["planned", "completed", "failed"]
+RunnerHostHygieneAuditDeliveryState = Literal["pending", "delivered"]
+RunnerHostHygieneAuditExecutionState = Literal[
+    "planned",
+    "blocked",
+    "action_started",
+    "terminal_recorded",
+]
 RunnerHostHygieneAdapterType = Literal[
     "github_actions_runner",
     "launchplane_worker",
@@ -86,6 +93,40 @@ class RunnerHostHygienePolicy(BaseModel):
         return self
 
 
+class RunnerHostHygieneDockerReclaimableBreakdown(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    images_bytes: int = Field(default=0, ge=0)
+    containers_bytes: int = Field(default=0, ge=0)
+    local_volumes_bytes: int = Field(default=0, ge=0)
+    build_cache_bytes: int = Field(default=0, ge=0)
+
+    @property
+    def total_bytes(self) -> int:
+        return (
+            self.images_bytes
+            + self.containers_bytes
+            + self.local_volumes_bytes
+            + self.build_cache_bytes
+        )
+
+
+class RunnerHostHygieneRunnerWorkdirUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_key: str
+    apparent_bytes: int = Field(default=0, ge=0)
+    allocated_bytes: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _normalize_usage(self) -> "RunnerHostHygieneRunnerWorkdirUsage":
+        self.root_key = _required_text(
+            _normalized_token(self.root_key),
+            "runner host hygiene workdir usage requires root_key",
+        )
+        return self
+
+
 class RunnerHostHygieneObservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -93,7 +134,12 @@ class RunnerHostHygieneObservation(BaseModel):
     observed_at: str
     free_disk_bytes: int = Field(ge=0)
     docker_reclaimable_bytes: int = Field(default=0, ge=0)
+    docker_reclaimable_breakdown: RunnerHostHygieneDockerReclaimableBreakdown = Field(
+        default_factory=RunnerHostHygieneDockerReclaimableBreakdown
+    )
     runner_workdir_bytes: int = Field(default=0, ge=0)
+    runner_workdir_allocated_bytes: int = Field(default=0, ge=0)
+    runner_workdir_usage: tuple[RunnerHostHygieneRunnerWorkdirUsage, ...] = ()
     docker_toolchain: "RunnerHostDockerToolchainObservation | None" = None
     warm_builders: tuple[str, ...] = ()
     image_inventory: tuple["RunnerHostHygieneImageInventoryItem", ...] = ()
@@ -111,6 +157,9 @@ class RunnerHostHygieneObservation(BaseModel):
             self.observed_at, "runner host hygiene observation requires observed_at"
         )
         self.warm_builders = _normalized_tokens(self.warm_builders)
+        self.runner_workdir_usage = tuple(
+            sorted(self.runner_workdir_usage, key=lambda item: item.root_key)
+        )
         self.image_inventory = _sorted_image_inventory(self.image_inventory)
         self.volume_inventory = _sorted_volume_inventory(self.volume_inventory)
         self.notes = tuple(note.strip() for note in self.notes if note.strip())
@@ -220,7 +269,12 @@ class RunnerHostHygieneReport(BaseModel):
     host_name: str
     free_disk_bytes: int = Field(default=0, ge=0)
     docker_reclaimable_bytes: int = Field(default=0, ge=0)
+    docker_reclaimable_breakdown: RunnerHostHygieneDockerReclaimableBreakdown = Field(
+        default_factory=RunnerHostHygieneDockerReclaimableBreakdown
+    )
     runner_workdir_bytes: int = Field(default=0, ge=0)
+    runner_workdir_allocated_bytes: int = Field(default=0, ge=0)
+    runner_workdir_usage: tuple[RunnerHostHygieneRunnerWorkdirUsage, ...] = ()
     docker_toolchain: RunnerHostDockerToolchainObservation | None = None
     warm_builders: tuple[str, ...] = ()
     image_inventory: tuple[RunnerHostHygieneImageInventoryItem, ...] = ()
@@ -237,6 +291,9 @@ class RunnerHostHygieneReport(BaseModel):
             self.host_name, "runner host hygiene report requires host_name"
         )
         self.warm_builders = _normalized_tokens(self.warm_builders)
+        self.runner_workdir_usage = tuple(
+            sorted(self.runner_workdir_usage, key=lambda item: item.root_key)
+        )
         self.image_inventory = _sorted_image_inventory(self.image_inventory)
         self.volume_inventory = _sorted_volume_inventory(self.volume_inventory)
         self.findings = tuple(sorted(self.findings, key=lambda finding: finding.code))
@@ -394,6 +451,84 @@ class RunnerHostHygieneApplyAuditRecord(BaseModel):
             raise ValueError("terminal runner host hygiene audit record requires post-apply report")
         if self.status in {"completed", "failed"} and self.plan.status != "ready":
             raise ValueError("terminal runner host hygiene audit record requires a ready plan")
+        return self
+
+
+class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    host_name: str
+    action: RunnerHostHygieneApplyAction
+    audit_record_key: str
+    execution_state: RunnerHostHygieneAuditExecutionState = "planned"
+    planned_audit: RunnerHostHygieneApplyAuditRecord
+    planned_idempotency_key: str
+    planned_delivery_state: RunnerHostHygieneAuditDeliveryState = "pending"
+    terminal_audit: RunnerHostHygieneApplyAuditRecord | None = None
+    terminal_idempotency_key: str = ""
+    terminal_delivery_state: RunnerHostHygieneAuditDeliveryState | None = None
+    created_at: str
+    updated_at: str
+    delivery_attempts: int = Field(default=0, ge=0)
+    last_error: str = ""
+    last_error_retryable: bool | None = None
+
+    @model_validator(mode="after")
+    def _normalize_envelope(self) -> "RunnerHostHygieneAuditDeliveryEnvelope":
+        self.host_name = _required_text(
+            _normalized_host_name(self.host_name),
+            "runner host hygiene audit delivery envelope requires host_name",
+        )
+        self.audit_record_key = _required_text(
+            self.audit_record_key,
+            "runner host hygiene audit delivery envelope requires audit_record_key",
+        )
+        self.planned_idempotency_key = _required_text(
+            self.planned_idempotency_key,
+            "runner host hygiene audit delivery envelope requires planned idempotency key",
+        )
+        self.created_at = _required_text(
+            self.created_at,
+            "runner host hygiene audit delivery envelope requires created_at",
+        )
+        self.updated_at = _required_text(
+            self.updated_at,
+            "runner host hygiene audit delivery envelope requires updated_at",
+        )
+        self.last_error = self.last_error.strip()[:500]
+        if self.audit_record_key != self.planned_audit.audit_record_key:
+            raise ValueError("runner host hygiene audit delivery key must match planned audit")
+        if self.host_name != _normalized_host_name(self.planned_audit.request.host_name):
+            raise ValueError("runner host hygiene audit delivery host must match planned audit")
+        if self.action != self.planned_audit.request.action:
+            raise ValueError("runner host hygiene audit delivery action must match planned audit")
+        if self.planned_audit.status != "planned":
+            raise ValueError("runner host hygiene audit delivery planned audit must be planned")
+        if self.terminal_audit is None:
+            if self.terminal_idempotency_key or self.terminal_delivery_state is not None:
+                raise ValueError(
+                    "runner host hygiene audit delivery terminal metadata requires terminal audit"
+                )
+            if self.execution_state == "terminal_recorded":
+                raise ValueError(
+                    "runner host hygiene terminal-recorded delivery requires terminal audit"
+                )
+        else:
+            if self.terminal_audit.status not in {"completed", "failed"}:
+                raise ValueError("runner host hygiene terminal audit must be completed or failed")
+            if self.terminal_audit.audit_record_key != self.audit_record_key:
+                raise ValueError("runner host hygiene terminal audit key must match envelope")
+            self.terminal_idempotency_key = _required_text(
+                self.terminal_idempotency_key,
+                "runner host hygiene terminal audit requires idempotency key",
+            )
+            if self.terminal_delivery_state is None:
+                raise ValueError("runner host hygiene terminal audit requires delivery state")
+            if self.execution_state != "terminal_recorded":
+                raise ValueError(
+                    "runner host hygiene terminal audit requires terminal-recorded execution state"
+                )
         return self
 
 
@@ -604,7 +739,10 @@ def evaluate_runner_host_hygiene(
         host_name=observation.host_name,
         free_disk_bytes=observation.free_disk_bytes,
         docker_reclaimable_bytes=observation.docker_reclaimable_bytes,
+        docker_reclaimable_breakdown=observation.docker_reclaimable_breakdown,
         runner_workdir_bytes=observation.runner_workdir_bytes,
+        runner_workdir_allocated_bytes=observation.runner_workdir_allocated_bytes,
+        runner_workdir_usage=observation.runner_workdir_usage,
         docker_toolchain=observation.docker_toolchain,
         warm_builders=observation.warm_builders,
         image_inventory=observation.image_inventory,

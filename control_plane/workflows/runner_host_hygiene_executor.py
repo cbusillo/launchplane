@@ -7,8 +7,13 @@ from decimal import InvalidOperation
 import json
 import os
 import pwd
+import re
+import shlex
+import socket
 import subprocess
+import time
 from urllib.error import HTTPError
+from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 import click
@@ -21,14 +26,24 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPo
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPlan
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRequest
 from control_plane.contracts.runner_host_hygiene import RunnerHostDockerToolchainObservation
+from control_plane.contracts.runner_host_hygiene import (
+    RunnerHostHygieneAuditDeliveryEnvelope,
+)
+from control_plane.contracts.runner_host_hygiene import (
+    RunnerHostHygieneDockerReclaimableBreakdown,
+)
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneImageInventoryItem
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneReport
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneRunnerWorkdirUsage
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneVolumeInventoryItem
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.workflows.runner_host_hygiene_audit_spool import (
+    RunnerHostHygieneAuditSpool,
+)
 
 
 AUDIT_ROUTE_PATH = "/v1/evidence/runner-host-hygiene/audits"
@@ -39,10 +54,18 @@ _DOCKER_LOCAL_VOLUME_USAGE_HEADERS = (
     "local volumes space usage:",
     "local volumes:",
 )
-_RUNNER_WORKDIR_BYTES_COMMAND = (
-    "find /opt/actions-runners -mindepth 2 -maxdepth 2 -type d -name _work "
-    "-exec du -sb {} + 2>/dev/null | "
-    "awk '{ total += $1 } END { print total + 0 }'"
+_ACTIVE_WORK_COMMAND = (
+    "command -v pgrep >/dev/null 2>&1 || exit 127; "
+    "command -v ps >/dev/null 2>&1 || exit 127; "
+    "ancestor_pids=''; pid=$PPID; "
+    'while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do '
+    'ancestor_pids="$ancestor_pids $pid"; '
+    "pid=$(ps -o ppid= -p \"$pid\" | tr -d ' '); "
+    "done; printf 'ancestor_pids=%s\\n' \"$ancestor_pids\"; "
+    "status=0; output=$(pgrep -af "
+    "'[d]ocker buildx|[d]ocker build|[b]uildctl|[R]unner.Worker') || status=$?; "
+    'if [ "$status" -gt 1 ]; then exit "$status"; fi; '
+    "printf '%s\\n' \"$output\""
 )
 _DOCKER_SIZE_UNITS = {
     "b": Decimal(1),
@@ -81,6 +104,19 @@ class RemoteCommandResult:
 RemoteCommandRunner = Callable[[Sequence[str], int], RemoteCommandResult]
 AuditPoster = Callable[[RunnerHostHygieneApplyAuditRecord, str], dict[str, object]]
 BearerTokenProvider = Callable[[], str]
+AuditDeliverySleeper = Callable[[float], None]
+
+
+@dataclass(frozen=True)
+class RunnerWorkdirRoot:
+    key: str
+    path: str
+
+
+class AuditDeliveryError(click.ClickException):
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class RunnerHostHygieneExecutorRequest(BaseModel):
@@ -98,6 +134,10 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
     minimum_free_disk_bytes: int = Field(default=0, ge=0)
     timeout_seconds: int = Field(default=120, ge=1)
     prune_until: str = DEFAULT_PRUNE_UNTIL
+    runner_workdir_roots: tuple[RunnerWorkdirRoot, ...] = ()
+    idle_observation_count: int = Field(default=2, ge=2, le=10)
+    idle_observation_interval_seconds: int = Field(default=5, ge=0, le=60)
+    resolve_action_started: bool = False
     target_buildkit_state_volumes: tuple[str, ...] = ()
     allowed_buildkit_state_volumes: tuple[str, ...] = ()
 
@@ -126,6 +166,22 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
         self.retained_warm_builders = tuple(
             token.strip().lower() for token in self.retained_warm_builders if token.strip()
         )
+        normalized_roots: list[RunnerWorkdirRoot] = []
+        seen_root_keys: set[str] = set()
+        seen_root_paths: set[str] = set()
+        for root in self.runner_workdir_roots:
+            key = root.key.strip().lower()
+            path = root.path.strip()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", key):
+                raise ValueError("runner workdir root key must be a public-safe token")
+            if not path.startswith("/") or path == "/" or "/../" in f"{path}/":
+                raise ValueError("runner workdir root path must be a scoped absolute path")
+            if key in seen_root_keys or path in seen_root_paths:
+                raise ValueError("runner workdir roots must be unique")
+            seen_root_keys.add(key)
+            seen_root_paths.add(path)
+            normalized_roots.append(RunnerWorkdirRoot(key=key, path=path.rstrip("/") or "/"))
+        self.runner_workdir_roots = tuple(sorted(normalized_roots, key=lambda item: item.key))
         self.target_buildkit_state_volumes = tuple(
             sorted(
                 {
@@ -162,6 +218,8 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
             raise ValueError("runner host hygiene executor requires retained_warm_builders")
         if not self.prune_until:
             raise ValueError("runner host hygiene executor requires prune_until")
+        if not self.runner_workdir_roots:
+            raise ValueError("runner host hygiene executor requires runner_workdir_roots")
         return self
 
 
@@ -172,6 +230,8 @@ class RunnerHostHygieneExecutorResult(BaseModel):
     audit_record_key: str
     planned_response: dict[str, object]
     terminal_response: dict[str, object] | None = None
+    audit_delivery_pending: bool = False
+    reconciled: bool = False
     message: str
 
 
@@ -184,7 +244,20 @@ def execute_runner_host_hygiene_executor(
     request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
     audit_poster: AuditPoster,
+    audit_spool: RunnerHostHygieneAuditSpool | None = None,
+    audit_delivery_sleeper: AuditDeliverySleeper = time.sleep,
 ) -> RunnerHostHygieneExecutorResult:
+    if audit_spool is not None:
+        reconciliation_result = _reconcile_audit_spool(
+            request=request,
+            remote_runner=remote_runner,
+            audit_spool=audit_spool,
+            audit_poster=audit_poster,
+            audit_delivery_sleeper=audit_delivery_sleeper,
+        )
+        if reconciliation_result is not None:
+            return reconciliation_result
+
     pre_report = collect_runner_host_hygiene_report(
         request=request,
         remote_runner=remote_runner,
@@ -217,11 +290,45 @@ def execute_runner_host_hygiene_executor(
         pre_apply_report=pre_report,
         message="planned runner host hygiene apply; no host mutation was executed yet",
     )
-    planned_response = audit_poster(
-        planned_audit,
-        f"runner-host-hygiene:{request.audit_record_key}:planned",
-    )
+    planned_idempotency_key = f"runner-host-hygiene:{request.audit_record_key}:planned"
+    audit_envelope: RunnerHostHygieneAuditDeliveryEnvelope | None = None
+    if audit_spool is None:
+        planned_response = audit_poster(planned_audit, planned_idempotency_key)
+    else:
+        audit_envelope = audit_spool.create(
+            planned_audit=planned_audit,
+            planned_idempotency_key=planned_idempotency_key,
+        )
+        audit_envelope, delivery_responses = _deliver_audit_envelope(
+            envelope=audit_envelope,
+            audit_spool=audit_spool,
+            audit_poster=audit_poster,
+            audit_delivery_sleeper=audit_delivery_sleeper,
+        )
+        planned_response = delivery_responses.get("planned", {})
+        if (
+            apply_plan.status == "ready"
+            and audit_envelope.planned_delivery_state == "pending"
+            and audit_envelope.last_error_retryable is False
+        ):
+            audit_envelope = audit_spool.write(
+                audit_envelope.model_copy(update={"execution_state": "blocked"})
+            )
+            return RunnerHostHygieneExecutorResult(
+                status="blocked",
+                audit_record_key=request.audit_record_key,
+                planned_response=planned_response,
+                audit_delivery_pending=True,
+                message=(
+                    "runner host hygiene planned audit was permanently rejected; "
+                    "host mutation was not executed"
+                ),
+            )
     if apply_plan.status != "ready":
+        if audit_envelope is not None and audit_spool is not None:
+            audit_envelope = audit_spool.write(
+                audit_envelope.model_copy(update={"execution_state": "blocked"})
+            )
         return RunnerHostHygieneExecutorResult(
             status="blocked",
             audit_record_key=request.audit_record_key,
@@ -229,17 +336,20 @@ def execute_runner_host_hygiene_executor(
             message=apply_plan.summary,
         )
 
-    idle_result = _check_host_idle(request=request, remote_runner=remote_runner)
+    idle_result = _check_host_idle(
+        request=request,
+        remote_runner=remote_runner,
+        sleeper=audit_delivery_sleeper,
+    )
     if idle_result is not None:
         post_report = collect_runner_host_hygiene_report(
             request=request,
             remote_runner=remote_runner,
         )
         terminal_message = (
-            f"runner host hygiene apply blocked by active build processes: {idle_result}"
+            f"runner host hygiene apply blocked by active runner or build processes: {idle_result}"
         )
-        terminal_response = _post_terminal_audit(
-            audit_poster=audit_poster,
+        terminal_audit = _terminal_audit(
             request=apply_request,
             apply_plan=apply_plan,
             pre_report=pre_report,
@@ -247,14 +357,26 @@ def execute_runner_host_hygiene_executor(
             status="failed",
             message=terminal_message,
         )
+        terminal_response, audit_delivery_pending = _deliver_terminal_audit(
+            terminal_audit=terminal_audit,
+            audit_envelope=audit_envelope,
+            audit_spool=audit_spool,
+            audit_poster=audit_poster,
+            audit_delivery_sleeper=audit_delivery_sleeper,
+        )
         return RunnerHostHygieneExecutorResult(
-            status="failed",
+            status="audit_delivery_pending" if audit_delivery_pending else "failed",
             audit_record_key=request.audit_record_key,
             planned_response=planned_response,
             terminal_response=terminal_response,
+            audit_delivery_pending=audit_delivery_pending,
             message=terminal_message,
         )
 
+    if audit_envelope is not None and audit_spool is not None:
+        audit_envelope = audit_spool.write(
+            audit_envelope.model_copy(update={"execution_state": "action_started"})
+        )
     action_result = _execute_apply_action(request=request, remote_runner=remote_runner)
     post_report = collect_runner_host_hygiene_report(
         request=request,
@@ -270,8 +392,7 @@ def execute_runner_host_hygiene_executor(
         action_result=action_result,
         post_report=post_report,
     )
-    terminal_response = _post_terminal_audit(
-        audit_poster=audit_poster,
+    terminal_audit = _terminal_audit(
         request=apply_request,
         apply_plan=apply_plan,
         pre_report=pre_report,
@@ -279,12 +400,209 @@ def execute_runner_host_hygiene_executor(
         status=terminal_status,
         message=terminal_message,
     )
+    terminal_response, audit_delivery_pending = _deliver_terminal_audit(
+        terminal_audit=terminal_audit,
+        audit_envelope=audit_envelope,
+        audit_spool=audit_spool,
+        audit_poster=audit_poster,
+        audit_delivery_sleeper=audit_delivery_sleeper,
+    )
     return RunnerHostHygieneExecutorResult(
-        status=terminal_status,
+        status="audit_delivery_pending" if audit_delivery_pending else terminal_status,
         audit_record_key=request.audit_record_key,
         planned_response=planned_response,
         terminal_response=terminal_response,
+        audit_delivery_pending=audit_delivery_pending,
         message=terminal_message,
+    )
+
+
+def _reconcile_audit_spool(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+    audit_spool: RunnerHostHygieneAuditSpool,
+    audit_poster: AuditPoster,
+    audit_delivery_sleeper: AuditDeliverySleeper,
+) -> RunnerHostHygieneExecutorResult | None:
+    for original_envelope in audit_spool.list_for(
+        host_name=request.host_name,
+        action=request.action,
+    ):
+        envelope, delivery_responses = _deliver_audit_envelope(
+            envelope=original_envelope,
+            audit_spool=audit_spool,
+            audit_poster=audit_poster,
+            audit_delivery_sleeper=audit_delivery_sleeper,
+        )
+        is_current_request = envelope.audit_record_key == request.audit_record_key
+        if is_current_request and envelope.execution_state == "terminal_recorded":
+            terminal_audit = envelope.terminal_audit
+            assert terminal_audit is not None
+            delivery_pending = envelope.terminal_delivery_state != "delivered"
+            return RunnerHostHygieneExecutorResult(
+                status=("audit_delivery_pending" if delivery_pending else terminal_audit.status),
+                audit_record_key=request.audit_record_key,
+                planned_response=delivery_responses.get("planned", {}),
+                terminal_response=delivery_responses.get("terminal"),
+                audit_delivery_pending=delivery_pending,
+                reconciled=not delivery_pending,
+                message=(
+                    "runner host hygiene terminal audit delivery remains pending"
+                    if delivery_pending
+                    else "runner host hygiene terminal audit delivery reconciled; action not repeated"
+                ),
+            )
+        if (
+            is_current_request
+            and envelope.execution_state == "action_started"
+            and request.resolve_action_started
+        ):
+            post_report = collect_runner_host_hygiene_report(
+                request=request,
+                remote_runner=remote_runner,
+            )
+            terminal_message = (
+                "runner host hygiene previous execution stopped after action_started; "
+                "current post evidence was captured and the action was not repeated"
+            )
+            terminal_audit = _terminal_audit(
+                request=envelope.planned_audit.request,
+                apply_plan=envelope.planned_audit.plan,
+                pre_report=envelope.planned_audit.pre_apply_report,
+                post_report=post_report,
+                status="failed",
+                message=terminal_message,
+            )
+            terminal_response, delivery_pending = _deliver_terminal_audit(
+                terminal_audit=terminal_audit,
+                audit_envelope=envelope,
+                audit_spool=audit_spool,
+                audit_poster=audit_poster,
+                audit_delivery_sleeper=audit_delivery_sleeper,
+            )
+            return RunnerHostHygieneExecutorResult(
+                status="audit_delivery_pending" if delivery_pending else "failed",
+                audit_record_key=request.audit_record_key,
+                planned_response=delivery_responses.get("planned", {}),
+                terminal_response=terminal_response,
+                audit_delivery_pending=delivery_pending,
+                reconciled=not delivery_pending,
+                message=terminal_message,
+            )
+        if RunnerHostHygieneAuditSpool.is_unresolved(envelope):
+            return RunnerHostHygieneExecutorResult(
+                status="blocked",
+                audit_record_key=request.audit_record_key,
+                planned_response=delivery_responses.get("planned", {}),
+                terminal_response=delivery_responses.get("terminal"),
+                audit_delivery_pending=True,
+                message=(
+                    "runner host hygiene blocked by unresolved audit delivery or "
+                    f"execution evidence for {envelope.audit_record_key}"
+                ),
+            )
+        if is_current_request and envelope.execution_state == "blocked":
+            return RunnerHostHygieneExecutorResult(
+                status="blocked",
+                audit_record_key=request.audit_record_key,
+                planned_response=delivery_responses.get("planned", {}),
+                message="runner host hygiene request was already recorded as blocked",
+            )
+    return None
+
+
+def _deliver_terminal_audit(
+    *,
+    terminal_audit: RunnerHostHygieneApplyAuditRecord,
+    audit_envelope: RunnerHostHygieneAuditDeliveryEnvelope | None,
+    audit_spool: RunnerHostHygieneAuditSpool | None,
+    audit_poster: AuditPoster,
+    audit_delivery_sleeper: AuditDeliverySleeper,
+) -> tuple[dict[str, object] | None, bool]:
+    idempotency_key = (
+        f"runner-host-hygiene:{terminal_audit.audit_record_key}:{terminal_audit.status}"
+    )
+    if audit_envelope is None or audit_spool is None:
+        return audit_poster(terminal_audit, idempotency_key), False
+    audit_envelope = audit_spool.write(
+        audit_envelope.model_copy(
+            update={
+                "execution_state": "terminal_recorded",
+                "terminal_audit": terminal_audit,
+                "terminal_idempotency_key": idempotency_key,
+                "terminal_delivery_state": "pending",
+            }
+        )
+    )
+    audit_envelope, delivery_responses = _deliver_audit_envelope(
+        envelope=audit_envelope,
+        audit_spool=audit_spool,
+        audit_poster=audit_poster,
+        audit_delivery_sleeper=audit_delivery_sleeper,
+    )
+    return (
+        delivery_responses.get("terminal"),
+        audit_envelope.terminal_delivery_state != "delivered",
+    )
+
+
+def _deliver_audit_envelope(
+    *,
+    envelope: RunnerHostHygieneAuditDeliveryEnvelope,
+    audit_spool: RunnerHostHygieneAuditSpool,
+    audit_poster: AuditPoster,
+    audit_delivery_sleeper: AuditDeliverySleeper,
+) -> tuple[RunnerHostHygieneAuditDeliveryEnvelope, dict[str, dict[str, object]]]:
+    responses: dict[str, dict[str, object]] = {}
+    for audit, idempotency_key, phase in audit_spool.pending_delivery_phases(envelope):
+        response, error_message, attempts, retryable_error = _post_audit_with_retry(
+            audit=audit,
+            idempotency_key=idempotency_key,
+            audit_poster=audit_poster,
+            sleeper=audit_delivery_sleeper,
+        )
+        updates: dict[str, object] = {
+            "delivery_attempts": envelope.delivery_attempts + attempts,
+            "last_error": error_message,
+            "last_error_retryable": retryable_error,
+        }
+        if response is not None:
+            responses[phase] = response
+            updates[f"{phase}_delivery_state"] = "delivered"
+        envelope = audit_spool.write(envelope.model_copy(update=updates))
+        if response is None:
+            break
+    return envelope, responses
+
+
+def _post_audit_with_retry(
+    *,
+    audit: RunnerHostHygieneApplyAuditRecord,
+    idempotency_key: str,
+    audit_poster: AuditPoster,
+    sleeper: AuditDeliverySleeper,
+    max_attempts: int = 3,
+) -> tuple[dict[str, object] | None, str, int, bool | None]:
+    last_error = ""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return audit_poster(audit, idempotency_key), "", attempt, None
+        except AuditDeliveryError as error:
+            last_error = _redact_sensitive_text(error.message)
+            if not error.retryable:
+                return None, last_error, attempt, False
+        except click.ClickException as error:
+            return None, _redact_sensitive_text(error.message), attempt, False
+        except OSError as error:
+            last_error = _redact_sensitive_text(str(error))
+        if attempt < max_attempts:
+            sleeper(float(2 ** (attempt - 1)))
+    return (
+        None,
+        last_error or "runner host hygiene audit delivery failed",
+        max_attempts,
+        True,
     )
 
 
@@ -363,15 +681,22 @@ def collect_runner_host_hygiene_report(
         request=request,
         remote_runner=remote_runner,
     )
+    docker_reclaimable_breakdown = _parse_docker_system_df_reclaimable_breakdown(
+        docker_summary.stdout
+    )
+    runner_workdir_usage = _collect_runner_workdir_usage(
+        request=request,
+        remote_runner=remote_runner,
+    )
     observation = RunnerHostHygieneObservation(
         host_name=request.host_name,
         observed_at=utc_now_timestamp(),
         free_disk_bytes=_parse_df_available_bytes(df_result.stdout),
-        docker_reclaimable_bytes=_parse_docker_system_df_reclaimable_bytes(docker_summary.stdout),
-        runner_workdir_bytes=_collect_runner_workdir_bytes(
-            request=request,
-            remote_runner=remote_runner,
-        ),
+        docker_reclaimable_bytes=docker_reclaimable_breakdown.total_bytes,
+        docker_reclaimable_breakdown=docker_reclaimable_breakdown,
+        runner_workdir_bytes=sum(item.apparent_bytes for item in runner_workdir_usage),
+        runner_workdir_allocated_bytes=sum(item.allocated_bytes for item in runner_workdir_usage),
+        runner_workdir_usage=runner_workdir_usage,
         docker_toolchain=_collect_docker_toolchain(
             request=request,
             remote_runner=remote_runner,
@@ -490,11 +815,23 @@ def build_refreshing_service_audit_poster(
                 response_payload = json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
             response_text = error.read().decode(errors="replace")
-            raise click.ClickException(
+            message = _redact_sensitive_text(
                 response_text.strip() or f"Launchplane service returned HTTP {error.code}."
+            )
+            raise AuditDeliveryError(
+                message,
+                retryable=error.code in {429, 500, 502, 503, 504},
+            ) from error
+        except (URLError, TimeoutError, socket.timeout) as error:
+            raise AuditDeliveryError(
+                _redact_sensitive_text(str(error) or "Launchplane service request failed"),
+                retryable=True,
             ) from error
         if not isinstance(response_payload, dict):
-            raise click.ClickException("Launchplane service returned a non-object response.")
+            raise AuditDeliveryError(
+                "Launchplane service returned a non-object response.",
+                retryable=False,
+            )
         return response_payload
 
     return post
@@ -764,21 +1101,53 @@ def _count_orphan_buildkit_volumes(
     )
 
 
-def _collect_runner_workdir_bytes(
+def _collect_runner_workdir_usage(
     *,
     request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
-) -> int:
-    result = _require_remote_success(
-        remote_runner(
-            ("bash", "-lc", _RUNNER_WORKDIR_BYTES_COMMAND),
-            request.timeout_seconds,
-        ),
-        evidence_name="runner_workdir_bytes",
+) -> tuple[RunnerHostHygieneRunnerWorkdirUsage, ...]:
+    usage: list[RunnerHostHygieneRunnerWorkdirUsage] = []
+    for root in request.runner_workdir_roots:
+        result = _require_remote_success(
+            remote_runner(
+                ("bash", "-lc", _runner_workdir_usage_command(root.path)),
+                request.timeout_seconds,
+            ),
+            evidence_name=f"runner_workdir_bytes:{root.key}",
+        )
+        lines = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+        if len(lines) != 2:
+            raise click.ClickException("runner host hygiene runner workdir evidence was incomplete")
+        usage.append(
+            RunnerHostHygieneRunnerWorkdirUsage(
+                root_key=root.key,
+                apparent_bytes=_parse_non_negative_int_evidence(
+                    lines[0], evidence_name=f"runner_workdir_apparent_bytes:{root.key}"
+                ),
+                allocated_bytes=_parse_non_negative_int_evidence(
+                    lines[1], evidence_name=f"runner_workdir_allocated_bytes:{root.key}"
+                ),
+            )
+        )
+    return tuple(usage)
+
+
+def _runner_workdir_usage_command(root_path: str) -> str:
+    quoted_root = shlex.quote(root_path)
+    apparent_command = (
+        f"find {quoted_root} -mindepth 2 -maxdepth 2 -type d -name _work "
+        "-exec du -sb {} + 2>/dev/null | "
+        "awk '{ total += $1 } END { print total + 0 }'"
     )
-    return _parse_non_negative_int_evidence(
-        result.stdout,
-        evidence_name="runner_workdir_bytes",
+    allocated_command = (
+        f"find {quoted_root} -mindepth 2 -maxdepth 2 -type d -name _work "
+        "-exec du -s -B1 {} + 2>/dev/null | "
+        "awk '{ total += $1 } END { print total + 0 }'"
+    )
+    return (
+        "set -euo pipefail; "
+        f"test -d {quoted_root}; test ! -L {quoted_root}; "
+        f"{apparent_command}; {allocated_command}"
     )
 
 
@@ -885,7 +1254,13 @@ def _collect_volume_usage(
 
 
 def _parse_docker_system_df_reclaimable_bytes(output: str) -> int:
-    total = 0
+    return _parse_docker_system_df_reclaimable_breakdown(output).total_bytes
+
+
+def _parse_docker_system_df_reclaimable_breakdown(
+    output: str,
+) -> RunnerHostHygieneDockerReclaimableBreakdown:
+    values: dict[str, int] = {row_type: 0 for row_type in _DOCKER_SYSTEM_DF_TYPES}
     parsed_rows = 0
     for line in output.splitlines():
         stripped_line = line.strip()
@@ -899,14 +1274,19 @@ def _parse_docker_system_df_reclaimable_bytes(output: str) -> int:
                     raise click.ClickException(
                         "runner host hygiene docker summary evidence was incomplete"
                     )
-                total += _parse_docker_size_bytes(columns[2])
+                values[row_type] = _parse_docker_size_bytes(columns[2])
                 parsed_rows += 1
                 break
     if parsed_rows == 0:
         raise click.ClickException(
             "runner host hygiene docker summary evidence did not include reclaimable bytes"
         )
-    return total
+    return RunnerHostHygieneDockerReclaimableBreakdown(
+        images_bytes=values["Images"],
+        containers_bytes=values["Containers"],
+        local_volumes_bytes=values["Local Volumes"],
+        build_cache_bytes=values["Build Cache"],
+    )
 
 
 def _parse_volume_usage(output: str) -> dict[str, _VolumeUsage]:
@@ -1059,40 +1439,50 @@ def _compact_evidence(output: str) -> str:
 
 
 def _check_host_idle(
-    *, request: RunnerHostHygieneExecutorRequest, remote_runner: RemoteCommandRunner
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+    sleeper: AuditDeliverySleeper,
 ) -> str | None:
-    active_processes = _require_remote_success(
-        remote_runner(
-            (
-                "bash",
-                "-lc",
-                "pgrep -af '[d]ocker buildx|[d]ocker build|[b]uildctl' || true",
+    for sample_index in range(request.idle_observation_count):
+        active_processes = _require_remote_success(
+            remote_runner(
+                ("bash", "-lc", _ACTIVE_WORK_COMMAND),
+                request.timeout_seconds,
             ),
-            request.timeout_seconds,
-        ),
-        evidence_name="active_build_processes",
-    )
-    lines = tuple(
-        line.strip()
-        for line in active_processes.stdout.splitlines()
-        if line.strip() and "runner-host-hygiene" not in line
-    )
-    if lines:
-        return _compact_evidence("\n".join(lines))
+            evidence_name="active_runner_or_build_processes",
+        )
+        raw_lines = tuple(
+            line.strip() for line in active_processes.stdout.splitlines() if line.strip()
+        )
+        ancestor_pids: set[str] = set()
+        lines: list[str] = []
+        for line in raw_lines:
+            if line.startswith("ancestor_pids="):
+                ancestor_pids.update(line.partition("=")[2].split())
+                continue
+            process_id = line.split(maxsplit=1)[0]
+            if "Runner.Worker" in line and process_id in ancestor_pids:
+                continue
+            if "runner-host-hygiene" not in line:
+                lines.append(line)
+        if lines:
+            return _compact_evidence(_redact_sensitive_text("\n".join(lines)))
+        if sample_index + 1 < request.idle_observation_count:
+            sleeper(float(request.idle_observation_interval_seconds))
     return None
 
 
-def _post_terminal_audit(
+def _terminal_audit(
     *,
-    audit_poster: AuditPoster,
     request: RunnerHostHygieneApplyRequest,
     apply_plan: RunnerHostHygieneApplyPlan,
     pre_report: RunnerHostHygieneReport,
     post_report: RunnerHostHygieneReport,
     status: RunnerHostHygieneApplyAuditStatus,
     message: str,
-) -> dict[str, object]:
-    terminal_audit = RunnerHostHygieneApplyAuditRecord(
+) -> RunnerHostHygieneApplyAuditRecord:
+    return RunnerHostHygieneApplyAuditRecord(
         audit_record_key=request.audit_record_key,
         status=status,
         request=request,
@@ -1101,10 +1491,22 @@ def _post_terminal_audit(
         post_apply_report=post_report,
         message=message,
     )
-    return audit_poster(
-        terminal_audit,
-        f"runner-host-hygiene:{request.audit_record_key}:{status}",
+
+
+def _redact_sensitive_text(value: str) -> str:
+    redacted = re.sub(
+        r"\b(?:ghp_|ghs_|github_pat_|sk-)[A-Za-z0-9_-]{12,}\b",
+        "[REDACTED]",
+        value,
     )
+    redacted = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [REDACTED]", redacted)
+    redacted = re.sub(
+        r"(?i)\b(token|secret|password|authorization)\s*([=:]|\s)\s*[^\s,;]+",
+        r"\1\2[REDACTED]",
+        redacted,
+    )
+    redacted = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1[REDACTED]@", redacted)
+    return redacted.strip()[:500]
 
 
 def _terminal_message(
@@ -1120,7 +1522,7 @@ def _terminal_message(
     )
     if action_result.returncode != 0:
         detail = action_result.stderr.strip() or action_result.stdout.strip() or "unknown error"
-        return f"runner host {action_label} failed: {detail}"
+        return f"runner host {action_label} failed: {_redact_sensitive_text(detail)}"
     if post_report.status != "healthy":
         return (
             f"runner host {action_label} completed but post evidence is not healthy: "

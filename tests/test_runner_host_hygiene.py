@@ -31,6 +31,7 @@ from control_plane.cli_runner_lanes import _runner_host_hygiene_bearer_token
 from control_plane.workflows.runner_host_hygiene_executor import DOCKER_BUILDX_PLUGIN_PATH_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
+from control_plane.workflows.runner_host_hygiene_executor import RunnerWorkdirRoot
 from control_plane.workflows.runner_host_hygiene_executor import collect_runner_host_hygiene_report
 
 
@@ -207,6 +208,8 @@ class RunnerHostHygieneTests(unittest.TestCase):
             command_tuple = tuple(command)
             if command_tuple[:3] == ("docker", "volume", "inspect"):
                 return RemoteCommandResult(returncode=1)
+            if command_tuple[:2] == ("bash", "-lc") and "-name _work" in command_tuple[2]:
+                return RemoteCommandResult(returncode=0, stdout="0\n0\n")
             return RemoteCommandResult(returncode=0, stdout=outputs.get(command_tuple, ""))
 
         report = collect_runner_host_hygiene_report(
@@ -218,6 +221,9 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 repository_scope="cbusillo/launchplane",
                 audit_record_key="runner-host-hygiene/2026-06-04/chris-testing",
                 retained_warm_builders=("odoo-docker-chris-testing",),
+                runner_workdir_roots=(
+                    RunnerWorkdirRoot(key="legacy", path="/opt/actions-runners"),
+                ),
             ),
             remote_runner=runner,
         )
@@ -295,6 +301,8 @@ class RunnerHostHygieneTests(unittest.TestCase):
             command_tuple = tuple(command)
             if command_tuple[:3] == ("docker", "volume", "inspect"):
                 return RemoteCommandResult(returncode=1)
+            if command_tuple[:2] == ("bash", "-lc") and "-name _work" in command_tuple[2]:
+                return RemoteCommandResult(returncode=0, stdout="0\n0\n")
             return RemoteCommandResult(returncode=0, stdout=outputs.get(command_tuple, ""))
 
         report = collect_runner_host_hygiene_report(
@@ -306,6 +314,9 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 repository_scope="cbusillo/launchplane",
                 audit_record_key="runner-host-hygiene/2026-06-04/chris-testing",
                 retained_warm_builders=("odoo-docker-chris-testing",),
+                runner_workdir_roots=(
+                    RunnerWorkdirRoot(key="legacy", path="/opt/actions-runners"),
+                ),
             ),
             remote_runner=runner,
         )
@@ -401,6 +412,8 @@ class RunnerHostHygieneTests(unittest.TestCase):
             command_tuple = tuple(command)
             if command_tuple[:3] == ("docker", "volume", "inspect"):
                 return RemoteCommandResult(returncode=1)
+            if command_tuple[:2] == ("bash", "-lc") and "-name _work" in command_tuple[2]:
+                return RemoteCommandResult(returncode=0, stdout="0\n0\n")
             if command_tuple in outputs:
                 return RemoteCommandResult(returncode=0, stdout=outputs[command_tuple])
             return RemoteCommandResult(returncode=1, stderr="not installed")
@@ -414,6 +427,9 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 repository_scope="cbusillo/launchplane",
                 audit_record_key="runner-host-hygiene/2026-06-04/chris-testing",
                 retained_warm_builders=("odoo-docker-chris-testing",),
+                runner_workdir_roots=(
+                    RunnerWorkdirRoot(key="legacy", path="/opt/actions-runners"),
+                ),
             ),
             remote_runner=runner,
         )
