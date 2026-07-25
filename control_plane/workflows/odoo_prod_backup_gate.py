@@ -34,6 +34,11 @@ BackupVerificationFailureCode = Literal[
     "filestore_top_level_mismatch",
     "staging_path_unavailable",
     "staging_space_insufficient",
+    "manifest_path_verification_error",
+    "manifest_read_verification_error",
+    "manifest_validation_error",
+    "artifact_path_verification_error",
+    "artifact_metadata_verification_error",
     "verification_error",
     "provider_verification_failed",
 ]

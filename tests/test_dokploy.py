@@ -3256,7 +3256,70 @@ domains = ["cm-testing.shinycomputers.com"]
         result = json.loads(base64.b64decode(encoded_result).decode("utf-8"))
         self.assertEqual(result["verification_status"], "fail")
         self.assertEqual(result["manifest_status"], "fail")
-        self.assertEqual(result["failure_code"], "verification_error")
+        self.assertEqual(result["failure_code"], "manifest_path_verification_error")
+
+    def test_odoo_backup_verification_maps_manifest_stat_error(self) -> None:
+        script = control_plane_dokploy._build_dokploy_odoo_backup_verification_script(
+            compose_app_name="cm-prod",
+            verification_nonce="c" * 64,
+            backup_record_id="backup-gate-cm-prod-1",
+            database_name="cm_prod",
+            filestore_path="/volumes/data/filestore",
+            backup_dir="/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1",
+            database_dump_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/cm_prod.dump"
+            ),
+            filestore_archive_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/"
+                "cm_prod-filestore.tar.gz"
+            ),
+            manifest_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/manifest.json"
+            ),
+        )
+        verification_script = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        injected_script = verification_script.replace(
+            '    manifest_path = Path(os.environ["MANIFEST_PATH"])',
+            '    manifest_path = Path(os.environ["MANIFEST_PATH"])\n'
+            "    class UnreadableManifestPath:\n"
+            "        def is_symlink(self):\n"
+            "            return False\n"
+            "        def is_file(self):\n"
+            "            return True\n"
+            "        def stat(self):\n"
+            '            raise PermissionError("private /volumes/data/path")\n'
+            "    manifest_path = UnreadableManifestPath()",
+            1,
+        )
+        self.assertNotEqual(injected_script, verification_script)
+        environment = {
+            **os.environ,
+            "VERIFICATION_NONCE": "c" * 64,
+            "BACKUP_RECORD_ID": "backup-gate-cm-prod-1",
+            "DATABASE_NAME": "cm_prod",
+            "FILESTORE_ROOT": "/volumes/data/filestore",
+            "BACKUP_DIR": "/volumes/data/backups",
+            "DATABASE_DUMP_PATH": "/volumes/data/backups/cm_prod.dump",
+            "FILESTORE_ARCHIVE_PATH": "/volumes/data/backups/cm_prod-filestore.tar.gz",
+            "MANIFEST_PATH": "/volumes/data/backups/manifest.json",
+            "RESULT_MARKER": control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER,
+        }
+
+        completed = subprocess.run(
+            [sys.executable, "-c", injected_script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+        self.assertNotIn("private /volumes/data/path", completed.stdout)
+        marker_prefix = f"{control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER}="
+        encoded_result = completed.stdout.strip().removeprefix(marker_prefix)
+        result = json.loads(base64.b64decode(encoded_result).decode("utf-8"))
+        self.assertEqual(result["verification_status"], "fail")
+        self.assertEqual(result["manifest_status"], "fail")
+        self.assertEqual(result["failure_code"], "manifest_unreadable")
 
     def test_odoo_backup_verification_accepts_legacy_manifest_and_computes_hashes(
         self,

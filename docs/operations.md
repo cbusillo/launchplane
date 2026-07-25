@@ -1657,11 +1657,14 @@ uncompressed filestore. Each provider result is bound to a fresh request nonce,
 the exact backup record id, and database name before Launchplane accepts it. The
 route returns hashes, counts, sizes, per-check statuses, and a bounded failure
 code only. If an unexpected verifier exception occurs, the active bounded check
-is marked `fail` while the failure code remains `verification_error`; operators
+is marked `fail`; manifest processing additionally reports a bounded path,
+read, validation, artifact-path, or artifact-metadata subphase code. Operators
 can distinguish the manifest, hash, database archive, filestore archive, and
-staging-space phases without exposing provider paths or exception text. This
-slice does not restore a database, extract a filestore, stop containers, or
-mutate served Odoo data.
+staging-space phases without exposing provider paths or exception text.
+Filesystem metadata failures in the manifest phase map to the existing bounded
+`manifest_unreadable` or `artifact_missing` codes instead of exposing raw I/O
+errors. This slice does not restore a database, extract a filestore, stop
+containers, or mutate served Odoo data.
 
 Legacy backup-gate manifests created before manifest schema and hash fields were
 introduced remain verifiable: Launchplane validates their recorded identity,

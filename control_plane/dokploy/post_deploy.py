@@ -1381,6 +1381,22 @@ def manifest_size(value):
     fail("manifest_size_invalid", "manifest_status")
 
 
+def path_size(path, failure_code, check):
+    try:
+        return path.stat().st_size
+    except OSError:
+        fail(failure_code, check)
+
+
+def require_regular_file(path, failure_code, check):
+    try:
+        invalid_file = path.is_symlink() or not path.is_file()
+    except OSError:
+        fail(failure_code, check)
+    if invalid_file:
+        fail(failure_code, check)
+
+
 verification_nonce = os.environ["VERIFICATION_NONCE"]
 backup_record_id = os.environ["BACKUP_RECORD_ID"]
 database_name = os.environ["DATABASE_NAME"]
@@ -1408,6 +1424,7 @@ result = {{
     "failure_code": "verification_error",
 }}
 active_check = "manifest_status"
+unexpected_failure_code = "manifest_path_verification_error"
 
 try:
     filestore_root = Path(os.environ["FILESTORE_ROOT"])
@@ -1416,14 +1433,15 @@ try:
     filestore_archive_path = Path(os.environ["FILESTORE_ARCHIVE_PATH"])
     manifest_path = Path(os.environ["MANIFEST_PATH"])
 
-    if manifest_path.is_symlink() or not manifest_path.is_file():
-        fail("manifest_unreadable", "manifest_status")
-    if manifest_path.stat().st_size > 1024 * 1024:
+    require_regular_file(manifest_path, "manifest_unreadable", "manifest_status")
+    unexpected_failure_code = "manifest_read_verification_error"
+    if path_size(manifest_path, "manifest_unreadable", "manifest_status") > 1024 * 1024:
         fail("manifest_unreadable", "manifest_status")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         fail("manifest_unreadable", "manifest_status")
+    unexpected_failure_code = "manifest_validation_error"
     if not isinstance(manifest, dict):
         fail("manifest_identity_mismatch", "manifest_status")
     manifest_schema_version = manifest.get("schema_version")
@@ -1448,15 +1466,16 @@ try:
     if manifest_schema_version == 1 and manifest_path_value != str(manifest_path):
         fail("manifest_path_mismatch", "manifest_status")
 
-    if (
-        database_dump_path.is_symlink()
-        or filestore_archive_path.is_symlink()
-        or not database_dump_path.is_file()
-        or not filestore_archive_path.is_file()
-    ):
-        fail("artifact_missing", "manifest_status")
-    result["database_dump_size"] = database_dump_path.stat().st_size
-    result["filestore_archive_size"] = filestore_archive_path.stat().st_size
+    unexpected_failure_code = "artifact_path_verification_error"
+    require_regular_file(database_dump_path, "artifact_missing", "manifest_status")
+    require_regular_file(filestore_archive_path, "artifact_missing", "manifest_status")
+    unexpected_failure_code = "artifact_metadata_verification_error"
+    result["database_dump_size"] = path_size(
+        database_dump_path, "artifact_missing", "manifest_status"
+    )
+    result["filestore_archive_size"] = path_size(
+        filestore_archive_path, "artifact_missing", "manifest_status"
+    )
     if (
         manifest_size(manifest.get("database_dump_size"))
         != result["database_dump_size"]
@@ -1467,6 +1486,7 @@ try:
     result["manifest_status"] = "pass"
 
     active_check = "sha256_status"
+    unexpected_failure_code = "verification_error"
     result["database_dump_sha256"] = file_sha256(database_dump_path)
     result["filestore_archive_sha256"] = file_sha256(filestore_archive_path)
     manifest_database_dump_sha256 = manifest.get("database_dump_sha256")
@@ -1567,7 +1587,7 @@ except VerificationFailure as error:
     result["failure_code"] = str(error)
 except Exception:
     result[active_check] = "fail"
-    result["failure_code"] = "verification_error"
+    result["failure_code"] = unexpected_failure_code
 
 encoded_result = base64.b64encode(
     json.dumps(result, separators=(",", ":"), sort_keys=True).encode("utf-8")
