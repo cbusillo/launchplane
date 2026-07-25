@@ -1433,14 +1433,23 @@ try:
     filestore_archive_path = Path(os.environ["FILESTORE_ARCHIVE_PATH"])
     manifest_path = Path(os.environ["MANIFEST_PATH"])
 
-    require_regular_file(manifest_path, "manifest_unreadable", "manifest_status")
+    require_regular_file(manifest_path, "manifest_missing", "manifest_status")
     unexpected_failure_code = "manifest_read_verification_error"
-    if path_size(manifest_path, "manifest_unreadable", "manifest_status") > 1024 * 1024:
-        fail("manifest_unreadable", "manifest_status")
+    if (
+        path_size(manifest_path, "manifest_metadata_unreadable", "manifest_status")
+        > 1024 * 1024
+    ):
+        fail("manifest_too_large", "manifest_status")
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        fail("manifest_unreadable", "manifest_status")
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        fail("manifest_decode_error", "manifest_status")
+    except OSError:
+        fail("manifest_read_error", "manifest_status")
+    try:
+        manifest = json.loads(manifest_text)
+    except json.JSONDecodeError:
+        fail("manifest_decode_error", "manifest_status")
     unexpected_failure_code = "manifest_validation_error"
     if not isinstance(manifest, dict):
         fail("manifest_identity_mismatch", "manifest_status")
