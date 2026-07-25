@@ -352,6 +352,126 @@ class DokployConfigTests(unittest.TestCase):
         )
         self.assertEqual(lines, ("two", "THREE_TOKEN=[redacted]"))
 
+    def test_fetch_compose_logs_selects_exact_service(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def capture_request(**kwargs: object) -> object:
+            requests.append(kwargs)
+            if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+                return [
+                    {"containerId": "database", "serviceName": "database"},
+                    {"containerId": "web", "serviceName": "web"},
+                ]
+            return {"logs": "database ready"}
+
+        with patch(
+            "control_plane.dokploy.api.dokploy_request",
+            side_effect=capture_request,
+        ):
+            lines = control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                service_name="database",
+                line_count=10,
+            )
+
+        self.assertEqual(lines, ("database ready",))
+        query = cast(dict[str, object], requests[1]["query"])
+        self.assertEqual(query["containerId"], "database")
+
+    def test_fetch_compose_logs_selects_exact_service_from_container_name(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def capture_request(**kwargs: object) -> object:
+            requests.append(kwargs)
+            if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+                return [
+                    {"containerId": "database", "Name": "/tenant_database_1"},
+                    {"containerId": "web", "Name": "/tenant_web_1"},
+                ]
+            return {"logs": "database ready"}
+
+        with patch(
+            "control_plane.dokploy.api.dokploy_request",
+            side_effect=capture_request,
+        ):
+            lines = control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                service_name="database",
+                line_count=10,
+            )
+
+        self.assertEqual(lines, ("database ready",))
+        query = cast(dict[str, object], requests[1]["query"])
+        self.assertEqual(query["containerId"], "database")
+
+    def test_fetch_compose_logs_rejects_missing_exact_service(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.api.dokploy_request",
+                return_value=[{"containerId": "web", "serviceName": "web"}],
+            ),
+            self.assertRaises(click.ClickException) as error_context,
+        ):
+            control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                service_name="database",
+            )
+
+        self.assertIn("not found", str(error_context.exception))
+
+    def test_fetch_compose_logs_does_not_match_longer_service_name_suffix(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.api.dokploy_request",
+                return_value=[
+                    {
+                        "containerId": "primary-database",
+                        "name": "tenant_primary-database_1",
+                    }
+                ],
+            ),
+            self.assertRaises(click.ClickException) as error_context,
+        ):
+            control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                service_name="database",
+            )
+
+        self.assertIn("not found", str(error_context.exception))
+
+    def test_fetch_compose_logs_rejects_ambiguous_exact_service(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.api.dokploy_request",
+                return_value=[
+                    {"containerId": "database-1", "serviceName": "database"},
+                    {"containerId": "database-2", "serviceName": "database"},
+                ],
+            ),
+            self.assertRaises(click.ClickException) as error_context,
+        ):
+            control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                service_name="database",
+            )
+
+        self.assertIn("ambiguous", str(error_context.exception))
+
     def test_fetch_deployment_logs_calls_dokploy_read_logs_endpoint(self) -> None:
         requests: list[dict[str, object]] = []
 
@@ -781,6 +901,8 @@ target_name = "opw-testing"
                         "2",
                         "--since",
                         "5m",
+                        "--service",
+                        "database",
                     ],
                 )
 
@@ -791,6 +913,7 @@ target_name = "opw-testing"
             compose_id="compose-123",
             app_name="opw-testing-iul0ql",
             server_id="server-1",
+            service_name="database",
             line_count=2,
             since="5m",
             search="",
@@ -800,6 +923,7 @@ target_name = "opw-testing"
         self.assertEqual(payload["target"]["target_id"], "compose-123")
         self.assertEqual(payload["target"]["target_type"], "compose")
         self.assertEqual(payload["target"]["app_name"], "opw-testing-iul0ql")
+        self.assertEqual(payload["request"]["service"], "database")
         self.assertEqual(payload["logs"]["lines"], ["started", "ODOO_DB_PASSWORD=[redacted]"])
         self.assertNotIn("secret-token", result.output)
 

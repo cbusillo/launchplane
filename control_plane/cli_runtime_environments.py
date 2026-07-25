@@ -415,6 +415,12 @@ def environments_show_live_target(context_name: str, instance_name: str) -> None
 @click.option("--since", default="all", show_default=True)
 @click.option("--search", default="", show_default=False)
 @click.option(
+    "--service",
+    default="",
+    show_default=False,
+    help="Optional exact Dokploy Compose service whose runtime logs should be read.",
+)
+@click.option(
     "--control-plane-root",
     type=click.Path(path_type=Path),
     default=None,
@@ -427,6 +433,7 @@ def environments_logs(
     line_count: int,
     since: str,
     search: str,
+    service: str,
     control_plane_root: Path | None,
 ) -> None:
     callbacks = _runtime_environment_callbacks()
@@ -441,6 +448,7 @@ def environments_logs(
                 line_count=line_count,
                 since=since,
                 search=search,
+                service=service,
             )
         except ValueError as error:
             raise click.ClickException(str(error)) from error
