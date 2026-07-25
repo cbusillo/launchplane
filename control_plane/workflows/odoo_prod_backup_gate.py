@@ -22,6 +22,11 @@ BackupVerificationCheckStatus = Literal["not_run", "pass", "fail"]
 BackupVerificationFailureCode = Literal[
     "",
     "manifest_unreadable",
+    "manifest_missing",
+    "manifest_metadata_unreadable",
+    "manifest_too_large",
+    "manifest_read_error",
+    "manifest_decode_error",
     "manifest_identity_mismatch",
     "manifest_path_mismatch",
     "manifest_size_invalid",
