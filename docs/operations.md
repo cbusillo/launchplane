@@ -468,6 +468,14 @@ uv run "$skills_home/github/scripts/github_workflow_babysit.py" dispatch \
   --timeout-seconds 1800
 ```
 
+Do not substitute raw `gh workflow run`, `gh run watch`, or a generic Actions
+run waiter for this helper. GitHub reports a protected-environment approval as
+`status=waiting`; generic waiters commonly treat that as an ordinary
+nonterminal state and may emit no approval diagnostic. The exact-run helper
+reads `pending_deployments` on the first waiting poll, reports the eligible
+reviewer state, and either submits the explicitly authorized approval or stops
+with an actionable split-identity error.
+
 The helper dispatches with the configured automation actor and reviews the
 protected environment with the active local human GitHub account. Those
 identities must be distinct; do not weaken the environment's self-review
