@@ -37,6 +37,7 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
     HealthcheckEvidence,
 )
+from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from tests.support.artifact_manifests import artifact_manifest_v2
 
@@ -350,6 +351,57 @@ class ProductOperationalReadinessTests(unittest.TestCase):
         )
         self.assertEqual(provider_target.state, "ready")
         self.assertEqual(provider_target.evidence[0].freshness_status, "recorded")
+
+    def test_target_replacement_remains_ready_for_broken_live_deployment(self) -> None:
+        inputs = _inputs()
+        lane_summary = inputs.lane_summary
+        assert lane_summary is not None
+        deployment = lane_summary.latest_deployment
+        assert deployment is not None
+        failed_health = deployment.destination_health.model_copy(
+            update={
+                "verified": False,
+                "status": "fail",
+                "runtime_identity_status": "unchecked",
+            }
+        )
+        topology = inputs.topology.model_copy(
+            update={
+                "warnings": (
+                    ProductTopologyWarning(
+                        code="public_ingress_failure",
+                        scope="observation",
+                        severity="error",
+                        detail="The current public ingress observation failed.",
+                    ),
+                )
+            }
+        )
+        descriptor = read_driver_descriptor("odoo")
+        action = next(
+            action for action in descriptor.actions if action.action_id == "target_replacement_plan"
+        )
+
+        readiness = build_product_operational_readiness(
+            replace(
+                inputs,
+                action=action,
+                lane_summary=lane_summary.model_copy(
+                    update={
+                        "latest_deployment": deployment.model_copy(
+                            update={"destination_health": failed_health}
+                        )
+                    }
+                ),
+                topology=topology,
+            )
+        )
+
+        self.assertTrue(readiness.ready)
+        dimensions = {dimension.dimension: dimension for dimension in readiness.dimensions}
+        self.assertEqual(dimensions["route_binding"].state, "ready")
+        self.assertNotIn("deployment", dimensions)
+        self.assertNotIn("topology", dimensions)
 
     def test_warning_severity_controls_route_and_topology_readiness(self) -> None:
         cases = (
