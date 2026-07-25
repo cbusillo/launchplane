@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from email.message import Message
+from io import BytesIO
+import tempfile
 import unittest
 
 from collections.abc import Sequence
@@ -9,11 +12,14 @@ import subprocess
 from pathlib import Path
 from typing import Literal
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.request import Request
 
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
+from control_plane.workflows.runner_host_hygiene_executor import RunnerWorkdirRoot
+from control_plane.workflows.runner_host_hygiene_executor import AuditDeliveryError
 from control_plane.workflows.runner_host_hygiene_executor import (
     build_refreshing_service_audit_poster,
 )
@@ -22,6 +28,9 @@ from control_plane.workflows.runner_host_hygiene_executor import (
 )
 from control_plane.workflows.runner_host_hygiene_executor import _parse_volume_usage
 from control_plane.workflows.runner_host_hygiene_executor import validate_local_executor_environment
+from control_plane.workflows.runner_host_hygiene_audit_spool import (
+    RunnerHostHygieneAuditSpool,
+)
 
 
 _VOLUME_RM_PREFIX = (
@@ -39,6 +48,7 @@ class _CommandRunner:
         self,
         *,
         prune_returncode: int = 0,
+        prune_stderr: str = "prune failed",
         image_present_after: bool = True,
         active_build_processes: str = "",
         volume_remove_returncode: int = 0,
@@ -49,9 +59,11 @@ class _CommandRunner:
         container_inventory: str | None = None,
         volume_inventory: str | None = None,
         runner_workdir_bytes: int = 0,
+        runner_workdir_usage: Mapping[str, tuple[int, int]] | None = None,
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
         self._prune_returncode = prune_returncode
+        self._prune_stderr = prune_stderr
         self._volume_remove_returncode = volume_remove_returncode
         self._volume_remove_partial_failure = volume_remove_partial_failure
         self._image_present_after = image_present_after
@@ -98,6 +110,7 @@ class _CommandRunner:
             ]
         )
         self._runner_workdir_bytes = runner_workdir_bytes
+        self._runner_workdir_usage = dict(runner_workdir_usage or {})
         self._pruned = False
         self.removed_volumes: list[str] = []
 
@@ -158,23 +171,26 @@ class _CommandRunner:
                     self.removed_volumes,
                 ),
             )
-        if command_tuple == (
-            "bash",
-            "-lc",
-            "find /opt/actions-runners -mindepth 2 -maxdepth 2 -type d -name _work "
-            "-exec du -sb {} + 2>/dev/null | "
-            "awk '{ total += $1 } END { print total + 0 }'",
+        if (
+            command_tuple[:2] == ("bash", "-lc")
+            and "-name _work" in command_tuple[2]
+            and "du -sb" in command_tuple[2]
         ):
-            return RemoteCommandResult(returncode=0, stdout=f"{self._runner_workdir_bytes}\n")
+            apparent_bytes = self._runner_workdir_bytes
+            allocated_bytes = self._runner_workdir_bytes
+            for root_path, root_usage in self._runner_workdir_usage.items():
+                if root_path in command_tuple[2]:
+                    apparent_bytes, allocated_bytes = root_usage
+                    break
+            return RemoteCommandResult(
+                returncode=0,
+                stdout=f"{apparent_bytes}\n{allocated_bytes}\n",
+            )
         if command_tuple[:3] == ("docker", "image", "inspect"):
             if not self._pruned or self._image_present_after:
                 return RemoteCommandResult(returncode=0, stdout="[]\n")
             return RemoteCommandResult(returncode=1, stderr="image missing")
-        if command_tuple == (
-            "bash",
-            "-lc",
-            "pgrep -af '[d]ocker buildx|[d]ocker build|[b]uildctl' || true",
-        ):
+        if command_tuple[:2] == ("bash", "-lc") and "pgrep -af" in command_tuple[2]:
             return RemoteCommandResult(returncode=0, stdout=self._active_build_processes)
         if command_tuple == (
             "flock",
@@ -188,7 +204,10 @@ class _CommandRunner:
             "until=168h",
         ):
             self._pruned = True
-            return RemoteCommandResult(returncode=self._prune_returncode, stderr="prune failed")
+            return RemoteCommandResult(
+                returncode=self._prune_returncode,
+                stderr=self._prune_stderr,
+            )
         if command_tuple[:6] == _VOLUME_RM_PREFIX:
             if self._volume_remove_partial_failure and len(command_tuple[6:]) > 1:
                 self.removed_volumes.append(command_tuple[6])
@@ -234,6 +253,89 @@ class _AuditPoster:
         }
 
 
+class _TerminalFailingAuditPoster(_AuditPoster):
+    def __call__(
+        self, audit: RunnerHostHygieneApplyAuditRecord, idempotency_key: str
+    ) -> dict[str, object]:
+        if audit.status == "planned":
+            return super().__call__(audit, idempotency_key)
+        self.records.append((audit.status, idempotency_key))
+        self.audits.append(audit)
+        raise AuditDeliveryError("temporary audit service failure", retryable=True)
+
+
+class _PermanentlyFailingAuditPoster(_AuditPoster):
+    def __call__(
+        self, audit: RunnerHostHygieneApplyAuditRecord, idempotency_key: str
+    ) -> dict[str, object]:
+        self.records.append((audit.status, idempotency_key))
+        self.audits.append(audit)
+        raise AuditDeliveryError("audit route rejected request", retryable=False)
+
+
+class _FlakyTerminalAuditPoster(_AuditPoster):
+    def __init__(self, *, failures: int) -> None:
+        super().__init__()
+        self._failures = failures
+
+    def __call__(
+        self, audit: RunnerHostHygieneApplyAuditRecord, idempotency_key: str
+    ) -> dict[str, object]:
+        if audit.status != "planned" and self._failures > 0:
+            self._failures -= 1
+            self.records.append((audit.status, idempotency_key))
+            self.audits.append(audit)
+            raise AuditDeliveryError("temporary audit service failure", retryable=True)
+        return super().__call__(audit, idempotency_key)
+
+
+class _SpoolAwareCommandRunner(_CommandRunner):
+    def __init__(
+        self,
+        *,
+        spool: RunnerHostHygieneAuditSpool,
+        request: RunnerHostHygieneExecutorRequest,
+    ) -> None:
+        super().__init__()
+        self._spool = spool
+        self._request = request
+
+    def __call__(self, command: Sequence[str], timeout_seconds: int) -> RemoteCommandResult:
+        command_tuple = tuple(command)
+        if command_tuple[:5] == (
+            "flock",
+            "-n",
+            "/tmp/launchplane-runner-host-hygiene.lock",
+            "docker",
+            "builder",
+        ):
+            envelope = self._spool.read(
+                host_name=self._request.host_name,
+                action=self._request.action,
+                audit_record_key=self._request.audit_record_key,
+            )
+            if envelope is None or envelope.execution_state != "action_started":
+                return RemoteCommandResult(
+                    returncode=99,
+                    stderr="audit intent was not durable before mutation",
+                )
+        return super().__call__(command_tuple, timeout_seconds)
+
+
+class _CrashingCommandRunner(_CommandRunner):
+    def __call__(self, command: Sequence[str], timeout_seconds: int) -> RemoteCommandResult:
+        command_tuple = tuple(command)
+        if command_tuple[:5] == (
+            "flock",
+            "-n",
+            "/tmp/launchplane-runner-host-hygiene.lock",
+            "docker",
+            "builder",
+        ):
+            raise RuntimeError("simulated runner termination")
+        return super().__call__(command_tuple, timeout_seconds)
+
+
 class RunnerHostHygieneWorkflowTests(unittest.TestCase):
     def test_workflow_runs_on_ops_lane_without_xargs_dependency(self) -> None:
         workflow_text = Path(".github/workflows/runner-host-hygiene.yml").read_text(
@@ -249,6 +351,11 @@ class RunnerHostHygieneWorkflowTests(unittest.TestCase):
         self.assertNotIn("${{ vars.LAUNCHPLANE_RUNNER_LABEL }}", workflow_text)
         self.assertNotIn("xargs <<<", workflow_text)
         self.assertIn('trimmed="${builder#', workflow_text)
+        self.assertIn("LAUNCHPLANE_RUNNER_HOST_HYGIENE_RUNNER_WORKDIR_ROOTS", workflow_text)
+        self.assertIn("--runner-workdir-root", workflow_text)
+        self.assertIn("--audit-spool-root", workflow_text)
+        self.assertIn("--audit-artifact-file", workflow_text)
+        self.assertIn("      - name: Upload executor result\n        if: always()\n", workflow_text)
 
 
 class RunnerHostHygieneExecutorTests(unittest.TestCase):
@@ -325,6 +432,18 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             post_apply_report.docker_reclaimable_bytes,
             reclaimable_bytes,
         )
+        self.assertEqual(
+            post_apply_report.docker_reclaimable_breakdown.images_bytes,
+            23_120_000_000,
+        )
+        self.assertEqual(
+            post_apply_report.docker_reclaimable_breakdown.local_volumes_bytes,
+            97_470_000_000,
+        )
+        self.assertEqual(
+            post_apply_report.docker_reclaimable_breakdown.build_cache_bytes,
+            27_880_000_000,
+        )
 
     def test_executor_records_read_only_resource_inventory(self) -> None:
         command_runner = _CommandRunner()
@@ -387,6 +506,41 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertIsNotNone(post_apply_report)
         assert post_apply_report is not None
         self.assertEqual(post_apply_report.runner_workdir_bytes, 12_345_678)
+
+    def test_executor_records_all_approved_runner_roots(self) -> None:
+        command_runner = _CommandRunner(
+            runner_workdir_usage={
+                "/opt/actions-runners": (12_000, 8_000),
+                "/home/runner/actions-runners": (7_000, 5_000),
+            }
+        )
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(
+                mutate=True,
+                runner_workdir_roots=(
+                    RunnerWorkdirRoot(key="legacy", path="/opt/actions-runners"),
+                    RunnerWorkdirRoot(key="managed", path="/home/runner/actions-runners"),
+                ),
+            ),
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "completed")
+        post_apply_report = audit_poster.audits[-1].post_apply_report
+        assert post_apply_report is not None
+        self.assertEqual(post_apply_report.runner_workdir_bytes, 19_000)
+        self.assertEqual(post_apply_report.runner_workdir_allocated_bytes, 13_000)
+        self.assertEqual(
+            [item.root_key for item in post_apply_report.runner_workdir_usage],
+            ["legacy", "managed"],
+        )
+        self.assertEqual(
+            [item.apparent_bytes for item in post_apply_report.runner_workdir_usage],
+            [12_000, 7_000],
+        )
 
     def test_executor_flags_orphan_buildkit_artifacts_from_live_evidence(self) -> None:
         command_runner = _CommandRunner(
@@ -490,7 +644,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "failed")
-        self.assertIn("active build processes", result.message)
+        self.assertIn("active runner or build processes", result.message)
         self.assertIn(
             ("failed", "runner-host-hygiene:runner-host-hygiene/2026-05-23/chris-testing:failed"),
             audit_poster.records,
@@ -498,6 +652,310 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertNotIn(
             ("docker", "builder", "prune", "--all", "--force"), command_runner.commands
         )
+
+    def test_executor_blocks_when_runner_worker_is_active(self) -> None:
+        command_runner = _CommandRunner(
+            active_build_processes="456 /opt/actions-runner/bin/Runner.Worker spawnclient 123\n"
+        )
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(mutate=True),
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("Runner.Worker", result.message)
+        self.assertFalse(
+            any(
+                command[:5]
+                == ("flock", "-n", "/tmp/launchplane-runner-host-hygiene.lock", "docker", "builder")
+                for command in command_runner.commands
+            )
+        )
+
+    def test_executor_excludes_current_job_runner_worker_ancestor(self) -> None:
+        command_runner = _CommandRunner(
+            active_build_processes=(
+                "ancestor_pids=456 123 1\n"
+                "456 /opt/actions-runner/bin/Runner.Worker spawnclient 123\n"
+            )
+        )
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(mutate=True),
+            remote_runner=command_runner,
+            audit_poster=_AuditPoster(),
+            audit_delivery_sleeper=lambda _seconds: None,
+        )
+
+        self.assertEqual(result.status, "completed")
+
+    def test_executor_blocks_other_runner_worker_beside_current_job(self) -> None:
+        command_runner = _CommandRunner(
+            active_build_processes=(
+                "ancestor_pids=456 123 1\n"
+                "456 /opt/actions-runner/bin/Runner.Worker spawnclient 123\n"
+                "789 /opt/actions-runner/bin/Runner.Worker spawnclient 456\n"
+            )
+        )
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(mutate=True),
+            remote_runner=command_runner,
+            audit_poster=_AuditPoster(),
+            audit_delivery_sleeper=lambda _seconds: None,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("789", result.message)
+
+    def test_executor_requires_two_consecutive_idle_samples(self) -> None:
+        command_runner = _CommandRunner()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(mutate=True),
+            remote_runner=command_runner,
+            audit_poster=_AuditPoster(),
+            audit_delivery_sleeper=lambda _seconds: None,
+        )
+
+        self.assertEqual(result.status, "completed")
+        idle_commands = [
+            command
+            for command in command_runner.commands
+            if command[:2] == ("bash", "-lc") and "pgrep -af" in command[2]
+        ]
+        self.assertEqual(len(idle_commands), 2)
+
+    def test_executor_spools_terminal_audit_before_failed_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            spool = RunnerHostHygieneAuditSpool(
+                root=temporary_path / "spool",
+                artifact_file=temporary_path / "artifact.json",
+            )
+            request = _request(mutate=True)
+
+            result = execute_runner_host_hygiene_executor(
+                request=request,
+                remote_runner=_CommandRunner(),
+                audit_poster=_TerminalFailingAuditPoster(),
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+
+            self.assertEqual(result.status, "audit_delivery_pending")
+            self.assertTrue(result.audit_delivery_pending)
+            envelope = spool.read(
+                host_name=request.host_name,
+                action=request.action,
+                audit_record_key=request.audit_record_key,
+            )
+            assert envelope is not None
+            self.assertEqual(envelope.execution_state, "terminal_recorded")
+            self.assertEqual(envelope.planned_delivery_state, "delivered")
+            self.assertEqual(envelope.terminal_delivery_state, "pending")
+            terminal_audit = envelope.terminal_audit
+            assert terminal_audit is not None
+            self.assertEqual(terminal_audit.status, "completed")
+            artifact_text = (temporary_path / "artifact.json").read_text(encoding="utf-8")
+            self.assertNotIn("Bearer", artifact_text)
+            self.assertNotIn("temporary-token", artifact_text)
+
+            reconciliation_runner = _CommandRunner()
+            reconciled = execute_runner_host_hygiene_executor(
+                request=request,
+                remote_runner=reconciliation_runner,
+                audit_poster=_AuditPoster(),
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+
+            self.assertEqual(reconciled.status, "completed")
+            self.assertTrue(reconciled.reconciled)
+            self.assertEqual(reconciliation_runner.commands, [])
+
+    def test_executor_persists_action_started_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
+            request = _request(mutate=True)
+
+            result = execute_runner_host_hygiene_executor(
+                request=request,
+                remote_runner=_SpoolAwareCommandRunner(spool=spool, request=request),
+                audit_poster=_AuditPoster(),
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+
+            self.assertEqual(result.status, "completed")
+            envelope = spool.read(
+                host_name=request.host_name,
+                action=request.action,
+                audit_record_key=request.audit_record_key,
+            )
+            assert envelope is not None
+            self.assertEqual(envelope.execution_state, "terminal_recorded")
+            self.assertEqual(envelope.terminal_delivery_state, "delivered")
+
+    def test_executor_retries_terminal_audit_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
+            request = _request(mutate=True)
+            poster = _FlakyTerminalAuditPoster(failures=2)
+
+            result = execute_runner_host_hygiene_executor(
+                request=request,
+                remote_runner=_CommandRunner(),
+                audit_poster=poster,
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertFalse(result.audit_delivery_pending)
+            envelope = spool.read(
+                host_name=request.host_name,
+                action=request.action,
+                audit_record_key=request.audit_record_key,
+            )
+            assert envelope is not None
+            self.assertEqual(envelope.terminal_delivery_state, "delivered")
+            self.assertEqual(envelope.delivery_attempts, 4)
+
+    def test_executor_blocks_new_action_while_terminal_delivery_is_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
+            first_request = _request(mutate=True)
+            execute_runner_host_hygiene_executor(
+                request=first_request,
+                remote_runner=_CommandRunner(),
+                audit_poster=_TerminalFailingAuditPoster(),
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+            second_runner = _CommandRunner()
+
+            blocked = execute_runner_host_hygiene_executor(
+                request=_request(
+                    mutate=True,
+                    audit_record_key="runner-host-hygiene/2026-05-24/chris-testing",
+                ),
+                remote_runner=second_runner,
+                audit_poster=_TerminalFailingAuditPoster(),
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+
+            self.assertEqual(blocked.status, "blocked")
+            self.assertTrue(blocked.audit_delivery_pending)
+            self.assertEqual(second_runner.commands, [])
+
+    def test_executor_blocks_permanently_rejected_planned_audit_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
+            command_runner = _CommandRunner()
+
+            result = execute_runner_host_hygiene_executor(
+                request=_request(mutate=True),
+                remote_runner=command_runner,
+                audit_poster=_PermanentlyFailingAuditPoster(),
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertTrue(result.audit_delivery_pending)
+            self.assertFalse(
+                any(
+                    command[:5]
+                    == (
+                        "flock",
+                        "-n",
+                        "/tmp/launchplane-runner-host-hygiene.lock",
+                        "docker",
+                        "builder",
+                    )
+                    for command in command_runner.commands
+                )
+            )
+
+    def test_executor_resolves_action_started_without_repeating_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
+            request = _request(mutate=True)
+            with self.assertRaisesRegex(RuntimeError, "simulated runner termination"):
+                execute_runner_host_hygiene_executor(
+                    request=request,
+                    remote_runner=_CrashingCommandRunner(),
+                    audit_poster=_AuditPoster(),
+                    audit_spool=spool,
+                    audit_delivery_sleeper=lambda _seconds: None,
+                )
+            envelope = spool.read(
+                host_name=request.host_name,
+                action=request.action,
+                audit_record_key=request.audit_record_key,
+            )
+            assert envelope is not None
+            self.assertEqual(envelope.execution_state, "action_started")
+            resolution_runner = _CommandRunner()
+
+            resolved = execute_runner_host_hygiene_executor(
+                request=_request(mutate=True, resolve_action_started=True),
+                remote_runner=resolution_runner,
+                audit_poster=_AuditPoster(),
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+
+            self.assertEqual(resolved.status, "failed")
+            self.assertTrue(resolved.reconciled)
+            self.assertFalse(
+                any(
+                    command[:5]
+                    == (
+                        "flock",
+                        "-n",
+                        "/tmp/launchplane-runner-host-hygiene.lock",
+                        "docker",
+                        "builder",
+                    )
+                    for command in resolution_runner.commands
+                )
+            )
+
+    def test_executor_redacts_action_failure_before_audit_and_artifact(self) -> None:
+        secret = "ghp_aaaaaaaaaaaa"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            spool = RunnerHostHygieneAuditSpool(
+                root=temporary_path / "spool",
+                artifact_file=temporary_path / "artifact.json",
+            )
+            poster = _AuditPoster()
+
+            result = execute_runner_host_hygiene_executor(
+                request=_request(mutate=True),
+                remote_runner=_CommandRunner(
+                    prune_returncode=1,
+                    prune_stderr=f"token={secret} Bearer raw-jwt-value",
+                ),
+                audit_poster=poster,
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertNotIn(secret, result.message)
+            self.assertNotIn("raw-jwt-value", result.message)
+            terminal_audit = poster.audits[-1]
+            self.assertNotIn(secret, terminal_audit.message)
+            artifact_text = (temporary_path / "artifact.json").read_text(encoding="utf-8")
+            self.assertNotIn(secret, artifact_text)
+            self.assertNotIn("raw-jwt-value", artifact_text)
 
     def test_executor_removes_allowlisted_zero_link_buildkit_state_volume(
         self,
@@ -769,6 +1227,29 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             ["Bearer first-token", "Bearer second-token"],
         )
 
+    def test_service_audit_poster_marks_route_not_found_non_retryable(self) -> None:
+        poster = build_refreshing_service_audit_poster(
+            service_url="https://launchplane.example",
+            bearer_token_provider=lambda: "token",
+        )
+        error = HTTPError(
+            url="https://launchplane.example/v1/evidence/runner-host-hygiene/audits",
+            code=404,
+            msg="not found",
+            hdrs=Message(),
+            fp=BytesIO(b"404 page not found"),
+        )
+
+        with patch(
+            "control_plane.workflows.runner_host_hygiene_executor.urlopen",
+            side_effect=error,
+        ):
+            with self.assertRaises(AuditDeliveryError) as raised:
+                poster(_planned_audit(), "idempotency-key")
+
+        self.assertFalse(raised.exception.retryable)
+        self.assertIn("404 page not found", raised.exception.message)
+
 
 def _request(
     *,
@@ -781,6 +1262,11 @@ def _request(
     ] = "prune_docker_cache",
     target_buildkit_state_volumes: tuple[str, ...] = (),
     allowed_buildkit_state_volumes: tuple[str, ...] = (),
+    audit_record_key: str = "runner-host-hygiene/2026-05-23/chris-testing",
+    runner_workdir_roots: tuple[RunnerWorkdirRoot, ...] = (
+        RunnerWorkdirRoot(key="legacy", path="/opt/actions-runners"),
+    ),
+    resolve_action_started: bool = False,
 ) -> RunnerHostHygieneExecutorRequest:
     return RunnerHostHygieneExecutorRequest(
         action=action,
@@ -788,11 +1274,14 @@ def _request(
         execution_lane="chris-testing-ops-gate",
         service_user="launchplane-runner-hygiene",
         repository_scope="cbusillo/launchplane",
-        audit_record_key="runner-host-hygiene/2026-05-23/chris-testing",
+        audit_record_key=audit_record_key,
         retained_warm_builders=("odoo-docker-chris-testing",),
         target_buildkit_state_volumes=target_buildkit_state_volumes,
         allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
         mutate=mutate,
+        runner_workdir_roots=runner_workdir_roots,
+        idle_observation_interval_seconds=0,
+        resolve_action_started=resolve_action_started,
     )
 
 
