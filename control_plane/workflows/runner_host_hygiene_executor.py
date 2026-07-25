@@ -6,9 +6,9 @@ from decimal import Decimal
 from decimal import InvalidOperation
 import json
 import os
+import posixpath
 import pwd
 import re
-import shlex
 import socket
 import subprocess
 import time
@@ -49,10 +49,15 @@ from control_plane.workflows.runner_host_hygiene_audit_spool import (
 AUDIT_ROUTE_PATH = "/v1/evidence/runner-host-hygiene/audits"
 DEFAULT_PRUNE_UNTIL = "168h"
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
-_DOCKER_SYSTEM_DF_TYPES = ("Local Volumes", "Build Cache", "Containers", "Images")
-_DOCKER_LOCAL_VOLUME_USAGE_HEADERS = (
-    "local volumes space usage:",
-    "local volumes:",
+_RUNNER_WORKDIR_USAGE_HELPER = "/usr/local/sbin/launchplane-runner-workdir-usage"
+_DOCKER_DISK_USAGE_COMMAND = (
+    "curl",
+    "--silent",
+    "--show-error",
+    "--fail",
+    "--unix-socket",
+    "/var/run/docker.sock",
+    "http://localhost/v1.45/system/df?verbose=1",
 )
 _ACTIVE_WORK_COMMAND = (
     "command -v pgrep >/dev/null 2>&1 || exit 127; "
@@ -99,6 +104,12 @@ class RemoteCommandResult:
     returncode: int
     stdout: str = ""
     stderr: str = ""
+
+
+@dataclass(frozen=True)
+class _DockerDiskUsageSnapshot:
+    reclaimable_breakdown: RunnerHostHygieneDockerReclaimableBreakdown
+    volume_inventory: tuple[RunnerHostHygieneVolumeInventoryItem, ...]
 
 
 RemoteCommandRunner = Callable[[Sequence[str], int], RemoteCommandResult]
@@ -171,16 +182,22 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
         seen_root_paths: set[str] = set()
         for root in self.runner_workdir_roots:
             key = root.key.strip().lower()
-            path = root.path.strip()
+            path = root.path.strip().rstrip("/")
             if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", key):
                 raise ValueError("runner workdir root key must be a public-safe token")
-            if not path.startswith("/") or path == "/" or "/../" in f"{path}/":
+            if (
+                not path
+                or not path.startswith("/")
+                or "/../" in f"{path}/"
+                or re.search(r"\s", path)
+                or posixpath.normpath(path) != path
+            ):
                 raise ValueError("runner workdir root path must be a scoped absolute path")
             if key in seen_root_keys or path in seen_root_paths:
                 raise ValueError("runner workdir roots must be unique")
             seen_root_keys.add(key)
             seen_root_paths.add(path)
-            normalized_roots.append(RunnerWorkdirRoot(key=key, path=path.rstrip("/") or "/"))
+            normalized_roots.append(RunnerWorkdirRoot(key=key, path=path))
         self.runner_workdir_roots = tuple(sorted(normalized_roots, key=lambda item: item.key))
         self.target_buildkit_state_volumes = tuple(
             sorted(
@@ -325,6 +342,9 @@ def execute_runner_host_hygiene_executor(
                 ),
             )
     if apply_plan.status != "ready":
+        audit_delivery_pending = (
+            audit_envelope is not None and audit_envelope.planned_delivery_state != "delivered"
+        )
         if audit_envelope is not None and audit_spool is not None:
             audit_envelope = audit_spool.write(
                 audit_envelope.model_copy(update={"execution_state": "blocked"})
@@ -333,7 +353,12 @@ def execute_runner_host_hygiene_executor(
             status="blocked",
             audit_record_key=request.audit_record_key,
             planned_response=planned_response,
-            message=apply_plan.summary,
+            audit_delivery_pending=audit_delivery_pending,
+            message=(
+                f"{apply_plan.summary}; planned audit delivery remains pending"
+                if audit_delivery_pending
+                else apply_plan.summary
+            ),
         )
 
     idle_result = _check_host_idle(
@@ -342,13 +367,15 @@ def execute_runner_host_hygiene_executor(
         sleeper=audit_delivery_sleeper,
     )
     if idle_result is not None:
-        post_report = collect_runner_host_hygiene_report(
+        post_report = _collect_terminal_report(
             request=request,
             remote_runner=remote_runner,
         )
         terminal_message = (
             f"runner host hygiene apply blocked by active runner or build processes: {idle_result}"
         )
+        if post_report is None:
+            terminal_message += "; terminal evidence collection failed"
         terminal_audit = _terminal_audit(
             request=apply_request,
             apply_plan=apply_plan,
@@ -378,20 +405,28 @@ def execute_runner_host_hygiene_executor(
             audit_envelope.model_copy(update={"execution_state": "action_started"})
         )
     action_result = _execute_apply_action(request=request, remote_runner=remote_runner)
-    post_report = collect_runner_host_hygiene_report(
+    post_report = _collect_terminal_report(
         request=request,
         remote_runner=remote_runner,
     )
-    terminal_status: RunnerHostHygieneApplyAuditStatus = (
-        "completed"
-        if action_result.returncode == 0 and post_report.status == "healthy"
-        else "failed"
-    )
-    terminal_message = _terminal_message(
-        action=request.action,
-        action_result=action_result,
-        post_report=post_report,
-    )
+    if post_report is None:
+        terminal_status: RunnerHostHygieneApplyAuditStatus = "failed"
+        action_outcome = "succeeded" if action_result.returncode == 0 else "failed"
+        terminal_message = (
+            f"runner host hygiene {request.action} {action_outcome}; "
+            "terminal evidence collection failed"
+        )
+    else:
+        terminal_status = (
+            "completed"
+            if action_result.returncode == 0 and post_report.status == "healthy"
+            else "failed"
+        )
+        terminal_message = _terminal_message(
+            action=request.action,
+            action_result=action_result,
+            post_report=post_report,
+        )
     terminal_audit = _terminal_audit(
         request=apply_request,
         apply_plan=apply_plan,
@@ -458,14 +493,20 @@ def _reconcile_audit_spool(
             and envelope.execution_state == "action_started"
             and request.resolve_action_started
         ):
-            post_report = collect_runner_host_hygiene_report(
+            post_report = _collect_terminal_report(
                 request=request,
                 remote_runner=remote_runner,
             )
-            terminal_message = (
-                "runner host hygiene previous execution stopped after action_started; "
-                "current post evidence was captured and the action was not repeated"
-            )
+            if post_report is None:
+                terminal_message = (
+                    "runner host hygiene previous execution stopped after action_started; "
+                    "terminal evidence collection failed and the action was not repeated"
+                )
+            else:
+                terminal_message = (
+                    "runner host hygiene previous execution stopped after action_started; "
+                    "current post evidence was captured and the action was not repeated"
+                )
             terminal_audit = _terminal_audit(
                 request=envelope.planned_audit.request,
                 apply_plan=envelope.planned_audit.plan,
@@ -648,18 +689,9 @@ def collect_runner_host_hygiene_report(
         remote_runner(("df", "-B1", "-P", "/"), request.timeout_seconds),
         evidence_name="df",
     )
-    docker_summary = _require_remote_success(
-        remote_runner(
-            (
-                "docker",
-                "system",
-                "df",
-                "--format",
-                "{{.Type}} {{.TotalCount}} {{.Size}} {{.Reclaimable}}",
-            ),
-            request.timeout_seconds,
-        ),
-        evidence_name="docker_summary",
+    docker_disk_usage = _collect_docker_disk_usage(
+        request=request,
+        remote_runner=remote_runner,
     )
     warm_builders = tuple(
         builder
@@ -677,13 +709,8 @@ def collect_runner_host_hygiene_report(
         request=request,
         remote_runner=remote_runner,
     )
-    volume_inventory = _collect_volume_inventory(
-        request=request,
-        remote_runner=remote_runner,
-    )
-    docker_reclaimable_breakdown = _parse_docker_system_df_reclaimable_breakdown(
-        docker_summary.stdout
-    )
+    volume_inventory = docker_disk_usage.volume_inventory
+    docker_reclaimable_breakdown = docker_disk_usage.reclaimable_breakdown
     runner_workdir_usage = _collect_runner_workdir_usage(
         request=request,
         remote_runner=remote_runner,
@@ -710,7 +737,7 @@ def collect_runner_host_hygiene_report(
             f"execution_lane={request.execution_lane}",
             f"service_user={request.service_user}",
             f"repository_scope={request.repository_scope}",
-            f"docker_summary={_compact_evidence(docker_summary.stdout)}",
+            "docker_summary=engine_api_v1.45",
         ),
     )
     return evaluate_runner_host_hygiene(
@@ -1108,13 +1135,19 @@ def _collect_runner_workdir_usage(
 ) -> tuple[RunnerHostHygieneRunnerWorkdirUsage, ...]:
     usage: list[RunnerHostHygieneRunnerWorkdirUsage] = []
     for root in request.runner_workdir_roots:
-        result = _require_remote_success(
-            remote_runner(
-                ("bash", "-lc", _runner_workdir_usage_command(root.path)),
-                request.timeout_seconds,
+        result = remote_runner(
+            (
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+                f"{root.key}={root.path}",
             ),
-            evidence_name=f"runner_workdir_bytes:{root.key}",
+            request.timeout_seconds,
         )
+        if result.returncode != 0:
+            raise click.ClickException(
+                f"runner host hygiene runner_workdir_bytes:{root.key} evidence failed"
+            )
         lines = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
         if len(lines) != 2:
             raise click.ClickException("runner host hygiene runner workdir evidence was incomplete")
@@ -1130,25 +1163,6 @@ def _collect_runner_workdir_usage(
             )
         )
     return tuple(usage)
-
-
-def _runner_workdir_usage_command(root_path: str) -> str:
-    quoted_root = shlex.quote(root_path)
-    apparent_command = (
-        f"find {quoted_root} -mindepth 2 -maxdepth 2 -type d -name _work "
-        "-exec du -sb {} + 2>/dev/null | "
-        "awk '{ total += $1 } END { print total + 0 }'"
-    )
-    allocated_command = (
-        f"find {quoted_root} -mindepth 2 -maxdepth 2 -type d -name _work "
-        "-exec du -s -B1 {} + 2>/dev/null | "
-        "awk '{ total += $1 } END { print total + 0 }'"
-    )
-    return (
-        "set -euo pipefail; "
-        f"test -d {quoted_root}; test ! -L {quoted_root}; "
-        f"{apparent_command}; {allocated_command}"
-    )
 
 
 def _is_buildkit_state_volume_name(value: str) -> bool:
@@ -1171,165 +1185,109 @@ def _parse_non_negative_int_evidence(output: str, *, evidence_name: str) -> int:
     return value
 
 
-def _collect_volume_inventory(
+def _collect_docker_disk_usage(
     *,
     request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
-) -> tuple[RunnerHostHygieneVolumeInventoryItem, ...]:
-    volume_usage = _collect_volume_usage(
-        request=request,
-        remote_runner=remote_runner,
-    )
+) -> _DockerDiskUsageSnapshot:
     result = _require_remote_success(
-        remote_runner(
-            (
-                "bash",
-                "-lc",
-                "docker volume ls -q | xargs -r docker volume inspect",
-            ),
-            request.timeout_seconds,
-        ),
-        evidence_name="volume_inventory",
+        remote_runner(_DOCKER_DISK_USAGE_COMMAND, request.timeout_seconds),
+        evidence_name="docker_summary",
     )
-    if not result.stdout.strip():
-        return ()
+    return _parse_docker_disk_usage(result.stdout)
+
+
+def _parse_docker_disk_usage(output: str) -> _DockerDiskUsageSnapshot:
     try:
-        payload = json.loads(result.stdout)
+        payload = json.loads(output)
     except json.JSONDecodeError as error:
         raise click.ClickException(
-            "runner host hygiene volume inventory evidence was not valid JSON"
+            "runner host hygiene Docker disk usage evidence was not valid JSON"
         ) from error
-    if not isinstance(payload, list):
+    if not isinstance(payload, dict):
         raise click.ClickException(
-            "runner host hygiene volume inventory evidence was not a JSON array"
+            "runner host hygiene Docker disk usage evidence was not a JSON object"
         )
 
-    inventory: list[RunnerHostHygieneVolumeInventoryItem] = []
-    for row in payload:
-        if not isinstance(row, dict):
-            raise click.ClickException(
-                "runner host hygiene volume inventory evidence contained a non-object row"
-            )
+    image_reclaimable = 0
+    for row in _docker_disk_usage_rows(payload, "Images"):
+        containers = _optional_int(row.get("Containers"))
+        size = _optional_int(row.get("Size"))
+        shared_size = _optional_int(row.get("SharedSize"))
+        if containers == 0 and size is not None and shared_size is not None:
+            image_reclaimable += max(size - shared_size, 0)
+
+    container_total = 0
+    container_used = 0
+    for row in _docker_disk_usage_rows(payload, "Containers"):
+        size = max(_optional_int(row.get("SizeRw")) or 0, 0)
+        container_total += size
+        if _docker_json_text(row, "State").lower() in {"running", "paused", "restarting"}:
+            container_used += size
+
+    volume_total = 0
+    volume_used = 0
+    volume_inventory: list[RunnerHostHygieneVolumeInventoryItem] = []
+    for row in _docker_disk_usage_rows(payload, "Volumes"):
         usage_data = row.get("UsageData")
         if not isinstance(usage_data, dict):
             usage_data = {}
-        name = _docker_json_text(row, "Name")
-        usage = volume_usage.get(name)
-        inspect_ref_count = _non_negative_int(usage_data.get("RefCount"))
-        ref_count = usage.links if usage is not None else inspect_ref_count
-        size_bytes = (
-            usage.size_bytes if usage is not None else _non_negative_int(usage_data.get("Size"))
-        )
-        inventory.append(
+        ref_count = _non_negative_int(usage_data.get("RefCount"))
+        size = _non_negative_int(usage_data.get("Size"))
+        if size > 0:
+            volume_total += size
+            if ref_count > 0:
+                volume_used += size
+        volume_inventory.append(
             RunnerHostHygieneVolumeInventoryItem(
-                name=name,
+                name=_docker_json_text(row, "Name"),
                 driver=_docker_json_text(row, "Driver"),
                 mountpoint=_docker_json_text(row, "Mountpoint"),
                 labels=_docker_labels(row.get("Labels")),
-                size_bytes=size_bytes,
+                size_bytes=size,
                 referenced_by_containers=ref_count,
                 dangling=ref_count == 0,
             )
         )
-    return tuple(inventory)
 
-
-class _VolumeUsage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    links: int = Field(default=0, ge=0)
-    size_bytes: int = Field(default=0, ge=0)
-
-
-def _collect_volume_usage(
-    *,
-    request: RunnerHostHygieneExecutorRequest,
-    remote_runner: RemoteCommandRunner,
-) -> dict[str, _VolumeUsage]:
-    result = _require_remote_success(
-        remote_runner(("docker", "system", "df", "-v"), request.timeout_seconds),
-        evidence_name="volume_usage",
-    )
-    return _parse_volume_usage(result.stdout)
-
-
-def _parse_docker_system_df_reclaimable_bytes(output: str) -> int:
-    return _parse_docker_system_df_reclaimable_breakdown(output).total_bytes
-
-
-def _parse_docker_system_df_reclaimable_breakdown(
-    output: str,
-) -> RunnerHostHygieneDockerReclaimableBreakdown:
-    values: dict[str, int] = {row_type: 0 for row_type in _DOCKER_SYSTEM_DF_TYPES}
-    parsed_rows = 0
-    for line in output.splitlines():
-        stripped_line = line.strip()
-        if not stripped_line:
+    build_cache_total = 0
+    build_cache_used = 0
+    for row in _docker_disk_usage_rows(payload, "BuildCache"):
+        if row.get("Shared") is True:
             continue
-        for row_type in _DOCKER_SYSTEM_DF_TYPES:
-            prefix = f"{row_type} "
-            if stripped_line.startswith(prefix):
-                columns = stripped_line.removeprefix(prefix).split()
-                if len(columns) < 3:
-                    raise click.ClickException(
-                        "runner host hygiene docker summary evidence was incomplete"
-                    )
-                values[row_type] = _parse_docker_size_bytes(columns[2])
-                parsed_rows += 1
-                break
-    if parsed_rows == 0:
-        raise click.ClickException(
-            "runner host hygiene docker summary evidence did not include reclaimable bytes"
-        )
-    return RunnerHostHygieneDockerReclaimableBreakdown(
-        images_bytes=values["Images"],
-        containers_bytes=values["Containers"],
-        local_volumes_bytes=values["Local Volumes"],
-        build_cache_bytes=values["Build Cache"],
+        size = max(_optional_int(row.get("Size")) or 0, 0)
+        build_cache_total += size
+        if row.get("InUse") is True:
+            build_cache_used += size
+
+    return _DockerDiskUsageSnapshot(
+        reclaimable_breakdown=RunnerHostHygieneDockerReclaimableBreakdown(
+            images_bytes=image_reclaimable,
+            containers_bytes=max(container_total - container_used, 0),
+            local_volumes_bytes=max(volume_total - volume_used, 0),
+            build_cache_bytes=max(build_cache_total - build_cache_used, 0),
+        ),
+        volume_inventory=tuple(volume_inventory),
     )
 
 
-def _parse_volume_usage(output: str) -> dict[str, _VolumeUsage]:
-    usage: dict[str, _VolumeUsage] = {}
-    in_volume_section = False
-    saw_volume_header = False
-    for line in output.splitlines():
-        stripped_line = line.strip()
-        if stripped_line.lower() in _DOCKER_LOCAL_VOLUME_USAGE_HEADERS:
-            in_volume_section = True
-            continue
-        if not in_volume_section:
-            continue
-        if not stripped_line:
-            continue
-        if stripped_line == "Build cache usage:":
-            break
-        if stripped_line.startswith("Build cache usage:"):
-            break
-        if stripped_line.startswith("VOLUME NAME"):
-            saw_volume_header = True
-            continue
-        if not saw_volume_header:
-            continue
-        columns = stripped_line.split()
-        if len(columns) < 3:
-            raise click.ClickException(
-                "runner host hygiene volume usage evidence contained an incomplete row"
-            )
-        name, links, size = columns[0], columns[1], columns[2]
-        if not links.isdigit():
-            raise click.ClickException(
-                "runner host hygiene volume usage evidence contained non-numeric links"
-            )
-        usage[name] = _VolumeUsage(
-            links=int(links),
-            size_bytes=_parse_docker_size_bytes(size),
-        )
-    if in_volume_section and not saw_volume_header:
+def _docker_disk_usage_rows(
+    payload: Mapping[str, object], key: str
+) -> tuple[dict[str, object], ...]:
+    value = payload.get(key)
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
         raise click.ClickException(
-            "runner host hygiene volume usage evidence did not include a volume header"
+            f"runner host hygiene Docker disk usage {key} evidence was malformed"
         )
-    return usage
+    return tuple(value)
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def _parse_json_lines(output: str, *, evidence_name: str) -> tuple[dict[str, object], ...]:
@@ -1478,7 +1436,7 @@ def _terminal_audit(
     request: RunnerHostHygieneApplyRequest,
     apply_plan: RunnerHostHygieneApplyPlan,
     pre_report: RunnerHostHygieneReport,
-    post_report: RunnerHostHygieneReport,
+    post_report: RunnerHostHygieneReport | None,
     status: RunnerHostHygieneApplyAuditStatus,
     message: str,
 ) -> RunnerHostHygieneApplyAuditRecord:
@@ -1491,6 +1449,20 @@ def _terminal_audit(
         post_apply_report=post_report,
         message=message,
     )
+
+
+def _collect_terminal_report(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+) -> RunnerHostHygieneReport | None:
+    try:
+        return collect_runner_host_hygiene_report(
+            request=request,
+            remote_runner=remote_runner,
+        )
+    except click.ClickException:
+        return None
 
 
 def _redact_sensitive_text(value: str) -> str:

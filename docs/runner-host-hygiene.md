@@ -203,7 +203,55 @@ captured image and volume inventory to decide any later phase-two cleanup lane.
 Runner work-directory evidence covers every operator-supplied root and records
 both apparent and allocated bytes per public root key; Docker reclaimable bytes
 are also split into images, containers, local volumes, and build cache while the
-existing aggregate remains backward-compatible.
+existing aggregate remains backward-compatible. Docker totals and volume
+inventory come from one verbose Engine `/system/df` API snapshot rather than two
+separate daemon-wide `docker system df` scans. The executor discovers only
+depth-two `_work` registration directories through the root-owned
+`/usr/local/sbin/launchplane-runner-workdir-usage` helper. Install that helper
+from `scripts/runner-host-hygiene-workdir-usage.sh` only from a reviewed merged
+revision. The helper performs two read-only GNU `du` measurements and emits only
+the apparent and allocated byte totals. A configured root with no matching
+registration fails closed instead of silently reporting zero usage.
+
+The helper reads exact public-key/path bindings from the root-owned mode-`0600`
+file `/etc/launchplane/runner-host-hygiene-roots`. Those bindings must match
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_RUNNER_WORKDIR_ROOTS`; for example:
+
+```text
+legacy=/srv/runners
+```
+
+Install the boundary from a reviewed merged checkout with equivalent ownership
+and modes:
+
+```bash
+install -d -o root -g root -m 0700 /etc/launchplane
+install -o root -g root -m 0755 \
+  scripts/runner-host-hygiene-workdir-usage.sh \
+  /usr/local/sbin/launchplane-runner-workdir-usage
+install -o root -g root -m 0600 <prepared-bindings-file> \
+  /etc/launchplane/runner-host-hygiene-roots
+```
+
+The sudoers snippet must keep `env_reset`, a root-owned `secure_path`, and
+`NOSETENV`, and permit only the helper with one public-safe binding argument:
+
+```sudoers
+Defaults:<service-user> env_reset, secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Cmnd_Alias LAUNCHPLANE_RUNNER_HYGIENE_WORKDIR_USAGE = /usr/local/sbin/launchplane-runner-workdir-usage ^[a-z0-9][a-z0-9._-]{0,63}=/[^[:space:]]+$
+<service-user> ALL=(root) NOPASSWD: NOSETENV: LAUNCHPLANE_RUNNER_HYGIENE_WORKDIR_USAGE
+```
+
+Install the snippet as root-owned mode `0440`, then validate the candidate and
+the complete policy with `visudo -cf`. The helper independently verifies the
+config directory and opened config file owner, group, mode, exact binding,
+canonical root path, same-filesystem traversal, and non-empty registration set.
+Its stdout contract is exactly two decimal lines: apparent bytes first,
+allocated bytes second. Do not grant generic passwordless `du`, `find`, shell,
+or arbitrary-path sudo. The helper suppresses path-bearing errors, and the
+executor treats any denied or failed privileged measurement as incomplete
+evidence. A service-user-controlled helper, config directory, config file, or
+sudo environment invalidates this security boundary.
 
 The executor excludes only its own ancestor `Runner.Worker` from the idle gate;
 any sibling worker still blocks a shared-host mutation. If a prior run stopped

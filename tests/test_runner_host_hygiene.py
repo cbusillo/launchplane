@@ -32,6 +32,8 @@ from control_plane.workflows.runner_host_hygiene_executor import DOCKER_BUILDX_P
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
 from control_plane.workflows.runner_host_hygiene_executor import RunnerWorkdirRoot
+from control_plane.workflows.runner_host_hygiene_executor import _DOCKER_DISK_USAGE_COMMAND
+from control_plane.workflows.runner_host_hygiene_executor import _RUNNER_WORKDIR_USAGE_HELPER
 from control_plane.workflows.runner_host_hygiene_executor import collect_runner_host_hygiene_report
 
 
@@ -183,10 +185,11 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 "docker volume ls -q | xargs -r docker volume inspect",
             ): "",
             (
-                "bash",
-                "-lc",
-                "find /opt/actions-runners -mindepth 2 -maxdepth 2 -type d -name _work -exec du -sb {} + 2>/dev/null | awk '{ total += $1 } END { print total + 0 }'",
-            ): "0\n",
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+                "legacy=/opt/actions-runners",
+            ): "0\n0\n",
             ("docker", "version", "--format", "{{.Server.Version}}"): "26.1.5+dfsg1\n",
             ("docker", "version", "--format", "{{.Client.Version}}"): "26.1.5+dfsg1\n",
             ("docker", "buildx", "version"): "github.com/docker/buildx 0.13.1+ds1 0.13.1+ds1-3\n",
@@ -206,9 +209,15 @@ class RunnerHostHygieneTests(unittest.TestCase):
 
         def runner(command: Sequence[str], _timeout: int) -> RemoteCommandResult:
             command_tuple = tuple(command)
+            if command_tuple == _DOCKER_DISK_USAGE_COMMAND:
+                return RemoteCommandResult(returncode=0, stdout=_empty_docker_disk_usage())
             if command_tuple[:3] == ("docker", "volume", "inspect"):
                 return RemoteCommandResult(returncode=1)
-            if command_tuple[:2] == ("bash", "-lc") and "-name _work" in command_tuple[2]:
+            if command_tuple[:3] == (
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+            ):
                 return RemoteCommandResult(returncode=0, stdout="0\n0\n")
             return RemoteCommandResult(returncode=0, stdout=outputs.get(command_tuple, ""))
 
@@ -276,10 +285,11 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 "docker volume ls -q | xargs -r docker volume inspect",
             ): "",
             (
-                "bash",
-                "-lc",
-                "find /opt/actions-runners -mindepth 2 -maxdepth 2 -type d -name _work -exec du -sb {} + 2>/dev/null | awk '{ total += $1 } END { print total + 0 }'",
-            ): "0\n",
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+                "legacy=/opt/actions-runners",
+            ): "0\n0\n",
             ("docker", "version", "--format", "{{.Server.Version}}"): "26.1.5+dfsg1\n",
             ("docker", "version", "--format", "{{.Client.Version}}"): "26.1.5+dfsg1\n",
             ("docker", "buildx", "version"): "github.com/docker/buildx v0.23.0 abcdef\n",
@@ -299,9 +309,15 @@ class RunnerHostHygieneTests(unittest.TestCase):
 
         def runner(command: Sequence[str], _timeout: int) -> RemoteCommandResult:
             command_tuple = tuple(command)
+            if command_tuple == _DOCKER_DISK_USAGE_COMMAND:
+                return RemoteCommandResult(returncode=0, stdout=_empty_docker_disk_usage())
             if command_tuple[:3] == ("docker", "volume", "inspect"):
                 return RemoteCommandResult(returncode=1)
-            if command_tuple[:2] == ("bash", "-lc") and "-name _work" in command_tuple[2]:
+            if command_tuple[:3] == (
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+            ):
                 return RemoteCommandResult(returncode=0, stdout="0\n0\n")
             return RemoteCommandResult(returncode=0, stdout=outputs.get(command_tuple, ""))
 
@@ -402,17 +418,24 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 "docker volume ls -q | xargs -r docker volume inspect",
             ): "",
             (
-                "bash",
-                "-lc",
-                "find /opt/actions-runners -mindepth 2 -maxdepth 2 -type d -name _work -exec du -sb {} + 2>/dev/null | awk '{ total += $1 } END { print total + 0 }'",
-            ): "0\n",
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+                "legacy=/opt/actions-runners",
+            ): "0\n0\n",
         }
 
         def runner(command: Sequence[str], _timeout: int) -> RemoteCommandResult:
             command_tuple = tuple(command)
+            if command_tuple == _DOCKER_DISK_USAGE_COMMAND:
+                return RemoteCommandResult(returncode=0, stdout=_empty_docker_disk_usage())
             if command_tuple[:3] == ("docker", "volume", "inspect"):
                 return RemoteCommandResult(returncode=1)
-            if command_tuple[:2] == ("bash", "-lc") and "-name _work" in command_tuple[2]:
+            if command_tuple[:3] == (
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+            ):
                 return RemoteCommandResult(returncode=0, stdout="0\n0\n")
             if command_tuple in outputs:
                 return RemoteCommandResult(returncode=0, stdout=outputs[command_tuple])
@@ -1036,7 +1059,7 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
                 ),
             )
 
-    def test_apply_audit_record_requires_terminal_post_apply_report(self) -> None:
+    def test_apply_audit_record_requires_completed_post_apply_report(self) -> None:
         request = RunnerHostHygieneApplyRequest(
             action="prune_docker_cache",
             host_name="chris-testing",
@@ -1059,6 +1082,32 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
                 plan=plan,
                 pre_apply_report=_healthy_report(),
             )
+
+    def test_failed_apply_audit_record_can_record_missing_post_evidence(self) -> None:
+        request = RunnerHostHygieneApplyRequest(
+            action="prune_docker_cache",
+            host_name="chris-testing",
+            mutate=True,
+            audit_record_key="runner-host-hygiene/2026-07-25/chris-testing",
+        )
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",), allow_docker_cache_prune=True
+            ),
+            request=request,
+            report=_healthy_report(),
+        )
+
+        audit = RunnerHostHygieneApplyAuditRecord(
+            audit_record_key=request.audit_record_key,
+            status="failed",
+            request=request,
+            plan=plan,
+            pre_apply_report=_healthy_report(),
+            message="terminal evidence collection failed",
+        )
+
+        self.assertIsNone(audit.post_apply_report)
 
     def test_apply_audit_record_requires_terminal_ready_plan(self) -> None:
         request = RunnerHostHygieneApplyRequest(
@@ -1383,6 +1432,18 @@ def _adapter_proposal(apply_plan: RunnerHostHygieneApplyPlan) -> RunnerHostHygie
         rollback_plan="Stop if retained builders are missing after pre-apply evidence.",
         pre_apply_evidence=("df", "docker_summary", "warm_builders"),
         post_apply_evidence=("df", "docker_summary", "warm_builders"),
+    )
+
+
+def _empty_docker_disk_usage() -> str:
+    return json.dumps(
+        {
+            "BuildCache": [],
+            "Containers": [],
+            "Images": [],
+            "LayersSize": 0,
+            "Volumes": [],
+        }
     )
 
 
