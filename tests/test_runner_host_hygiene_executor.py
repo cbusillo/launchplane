@@ -15,6 +15,8 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request
 
+import click
+
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
@@ -26,7 +28,9 @@ from control_plane.workflows.runner_host_hygiene_executor import (
 from control_plane.workflows.runner_host_hygiene_executor import (
     execute_runner_host_hygiene_executor,
 )
-from control_plane.workflows.runner_host_hygiene_executor import _parse_volume_usage
+from control_plane.workflows.runner_host_hygiene_executor import _DOCKER_DISK_USAGE_COMMAND
+from control_plane.workflows.runner_host_hygiene_executor import _parse_docker_disk_usage
+from control_plane.workflows.runner_host_hygiene_executor import _RUNNER_WORKDIR_USAGE_HELPER
 from control_plane.workflows.runner_host_hygiene_executor import validate_local_executor_environment
 from control_plane.workflows.runner_host_hygiene_audit_spool import (
     RunnerHostHygieneAuditSpool,
@@ -53,8 +57,7 @@ class _CommandRunner:
         active_build_processes: str = "",
         volume_remove_returncode: int = 0,
         volume_remove_partial_failure: bool = False,
-        docker_summary: str | None = None,
-        docker_verbose_summary: str | None = None,
+        docker_disk_usage: str | None = None,
         image_inventory: str | None = None,
         container_inventory: str | None = None,
         volume_inventory: str | None = None,
@@ -68,13 +71,6 @@ class _CommandRunner:
         self._volume_remove_partial_failure = volume_remove_partial_failure
         self._image_present_after = image_present_after
         self._active_build_processes = active_build_processes
-        self._docker_summary = docker_summary or "Images 1 1GB 500MB\n"
-        self._docker_verbose_summary = docker_verbose_summary or (
-            "Local Volumes space usage:\n\n"
-            "VOLUME NAME     LINKS     SIZE\n"
-            "runner-cache    0         45.5GB\n\n"
-            "Build cache usage: 1GB\n"
-        )
         self._image_inventory = image_inventory or _json_lines(
             {
                 "CreatedAt": "2026-05-23 12:00:00 +0000 UTC",
@@ -105,9 +101,14 @@ class _CommandRunner:
                     "Labels": {"launchplane.scope": "test"},
                     "Mountpoint": "/var/lib/docker/volumes/runner-cache/_data",
                     "Name": "runner-cache",
-                    "UsageData": {"RefCount": 0, "Size": 1234},
+                    "UsageData": {"RefCount": 0, "Size": 45_500_000_000},
                 }
             ]
+        )
+        self._docker_disk_usage = docker_disk_usage or _docker_disk_usage_json(
+            images=[{"Containers": 0, "SharedSize": 0, "Size": 500_000_000}],
+            volumes=json.loads(self._volume_inventory),
+            build_cache=[{"InUse": False, "Shared": False, "Size": 1_000_000_000}],
         )
         self._runner_workdir_bytes = runner_workdir_bytes
         self._runner_workdir_usage = dict(runner_workdir_usage or {})
@@ -124,19 +125,11 @@ class _CommandRunner:
             )
         if command_tuple == ("docker", "system", "df"):
             return RemoteCommandResult(returncode=0, stdout="TYPE TOTAL ACTIVE SIZE RECLAIMABLE\n")
-        if command_tuple == (
-            "docker",
-            "system",
-            "df",
-            "--format",
-            "{{.Type}} {{.TotalCount}} {{.Size}} {{.Reclaimable}}",
-        ):
-            return RemoteCommandResult(returncode=0, stdout=self._docker_summary)
-        if command_tuple == ("docker", "system", "df", "-v"):
+        if command_tuple == _DOCKER_DISK_USAGE_COMMAND:
             return RemoteCommandResult(
                 returncode=0,
-                stdout=_without_removed_volume_rows(
-                    self._docker_verbose_summary,
+                stdout=_without_removed_disk_usage_volumes(
+                    self._docker_disk_usage,
                     self.removed_volumes,
                 ),
             )
@@ -159,27 +152,15 @@ class _CommandRunner:
             "{{json .}}",
         ):
             return RemoteCommandResult(returncode=0, stdout=self._container_inventory)
-        if command_tuple == (
-            "bash",
-            "-lc",
-            "docker volume ls -q | xargs -r docker volume inspect",
-        ):
-            return RemoteCommandResult(
-                returncode=0,
-                stdout=_without_removed_volume_inventory(
-                    self._volume_inventory,
-                    self.removed_volumes,
-                ),
-            )
-        if (
-            command_tuple[:2] == ("bash", "-lc")
-            and "-name _work" in command_tuple[2]
-            and "du -sb" in command_tuple[2]
+        if command_tuple[:3] == (
+            "/usr/bin/sudo",
+            "-n",
+            _RUNNER_WORKDIR_USAGE_HELPER,
         ):
             apparent_bytes = self._runner_workdir_bytes
             allocated_bytes = self._runner_workdir_bytes
             for root_path, root_usage in self._runner_workdir_usage.items():
-                if root_path in command_tuple[2]:
+                if command_tuple[3].endswith(f"={root_path}"):
                     apparent_bytes, allocated_bytes = root_usage
                     break
             return RemoteCommandResult(
@@ -401,11 +382,18 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
 
     def test_executor_records_typed_docker_reclaimable_bytes(self) -> None:
         command_runner = _CommandRunner(
-            docker_summary=(
-                "Images 109 23.35GB 23.12GB (99%)\n"
-                "Containers 2 0B 0B\n"
-                "Local Volumes 38 161.5GB 97.47GB (60%)\n"
-                "Build Cache 1556 27.88GB 27.88GB\n"
+            docker_disk_usage=_docker_disk_usage_json(
+                images=[{"Containers": 0, "SharedSize": 0, "Size": 23_120_000_000}],
+                volumes=[
+                    {
+                        "Driver": "local",
+                        "Labels": {},
+                        "Mountpoint": "/var/lib/docker/volumes/reclaimable/_data",
+                        "Name": "reclaimable",
+                        "UsageData": {"RefCount": 0, "Size": 97_470_000_000},
+                    }
+                ],
+                build_cache=[{"InUse": False, "Shared": False, "Size": 27_880_000_000}],
             )
         )
         audit_poster = _AuditPoster()
@@ -480,15 +468,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertEqual(volume.referenced_by_containers, 0)
         self.assertTrue(volume.dangling)
         self.assertEqual(volume.labels, ("launchplane.scope=test",))
-        self.assertIn(("docker", "system", "df", "-v"), command_runner.commands)
-        self.assertIn(
-            (
-                "bash",
-                "-lc",
-                "docker volume ls -q | xargs -r docker volume inspect",
-            ),
-            command_runner.commands,
-        )
+        self.assertEqual(command_runner.commands.count(_DOCKER_DISK_USAGE_COMMAND), 2)
 
     def test_executor_records_runner_workdir_bytes(self) -> None:
         command_runner = _CommandRunner(runner_workdir_bytes=12_345_678)
@@ -506,6 +486,141 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertIsNotNone(post_apply_report)
         assert post_apply_report is not None
         self.assertEqual(post_apply_report.runner_workdir_bytes, 12_345_678)
+
+    def test_executor_uses_root_owned_workdir_usage_helper(self) -> None:
+        command_runner = _CommandRunner(runner_workdir_bytes=12_345)
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(mutate=True),
+            remote_runner=command_runner,
+            audit_poster=_AuditPoster(),
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertIn(
+            (
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+                "legacy=/opt/actions-runners",
+            ),
+            command_runner.commands,
+        )
+
+    def test_workdir_usage_helper_path_and_security_invariants_are_pinned(self) -> None:
+        helper_path = (
+            Path(__file__).resolve().parents[1] / "scripts" / "runner-host-hygiene-workdir-usage.sh"
+        )
+        helper_text = helper_path.read_text(encoding="utf-8")
+
+        self.assertEqual(
+            _RUNNER_WORKDIR_USAGE_HELPER,
+            "/usr/local/sbin/launchplane-runner-workdir-usage",
+        )
+        self.assertTrue(helper_path.stat().st_mode & 0o111)
+        self.assertTrue(helper_text.startswith("#!/bin/bash\nset -euo pipefail\n"))
+        self.assertIn('readonly config_directory="/etc/launchplane"', helper_text)
+        self.assertIn('[[ "$directory_mode" == "700" ]]', helper_text)
+        self.assertIn("/proc/self/fd/4", helper_text)
+        self.assertIn("--files0-from=", helper_text)
+        self.assertIn("-x --null", helper_text)
+        subprocess.run(
+            ("/bin/bash", "-n", str(helper_path)),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def test_executor_rejects_noncanonical_or_duplicate_runner_roots(self) -> None:
+        with self.assertRaisesRegex(ValueError, "scoped absolute path"):
+            _request(
+                mutate=False,
+                runner_workdir_roots=(RunnerWorkdirRoot(key="legacy", path="/srv/runner roots"),),
+            )
+        with self.assertRaisesRegex(ValueError, "scoped absolute path"):
+            _request(
+                mutate=False, runner_workdir_roots=(RunnerWorkdirRoot(key="legacy", path="//"),)
+            )
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            _request(
+                mutate=False,
+                runner_workdir_roots=(
+                    RunnerWorkdirRoot(key="legacy", path="/srv/runners"),
+                    RunnerWorkdirRoot(key="managed", path="/srv/runners/"),
+                ),
+            )
+
+    def test_executor_hides_workdir_helper_failure_detail(self) -> None:
+        command_runner = _CommandRunner()
+
+        def failing_runner(command: Sequence[str], timeout_seconds: int) -> RemoteCommandResult:
+            if tuple(command)[:3] == (
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+            ):
+                return RemoteCommandResult(
+                    returncode=1,
+                    stderr="sudo denied legacy=/private/runner/root",
+                )
+            return command_runner(command, timeout_seconds)
+
+        with self.assertRaises(click.ClickException) as raised:
+            execute_runner_host_hygiene_executor(
+                request=_request(mutate=False),
+                remote_runner=failing_runner,
+                audit_poster=_AuditPoster(),
+            )
+
+        self.assertNotIn("/private/runner/root", str(raised.exception))
+
+    def test_executor_records_failed_terminal_audit_when_post_report_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            command_runner = _CommandRunner()
+            helper_calls = 0
+
+            def post_failure_runner(
+                command: Sequence[str], timeout_seconds: int
+            ) -> RemoteCommandResult:
+                nonlocal helper_calls
+                if tuple(command)[:3] == (
+                    "/usr/bin/sudo",
+                    "-n",
+                    _RUNNER_WORKDIR_USAGE_HELPER,
+                ):
+                    helper_calls += 1
+                    if helper_calls == 2:
+                        return RemoteCommandResult(
+                            returncode=1,
+                            stderr="sudo denied legacy=/private/runner/root",
+                        )
+                return command_runner(command, timeout_seconds)
+
+            spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
+            poster = _AuditPoster()
+            request = _request(mutate=True)
+
+            result = execute_runner_host_hygiene_executor(
+                request=request,
+                remote_runner=post_failure_runner,
+                audit_poster=poster,
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertIn("terminal evidence collection failed", result.message)
+            self.assertNotIn("/private/runner/root", result.message)
+            terminal_audit = poster.audits[-1]
+            self.assertEqual(terminal_audit.status, "failed")
+            self.assertIsNone(terminal_audit.post_apply_report)
+            envelope = spool.read(
+                host_name=request.host_name,
+                action=request.action,
+                audit_record_key=request.audit_record_key,
+            )
+            assert envelope is not None
+            self.assertFalse(RunnerHostHygieneAuditSpool.is_unresolved(envelope))
 
     def test_executor_records_all_approved_runner_roots(self) -> None:
         command_runner = _CommandRunner(
@@ -554,12 +669,6 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                     "Status": "Exited (0) 2 days ago",
                 }
             ),
-            docker_verbose_summary=(
-                "Local Volumes space usage:\n\n"
-                "VOLUME NAME     LINKS     SIZE\n"
-                "buildx_buildkit_old0_state    0         12GB\n"
-                "Build cache usage: 1GB\n"
-            ),
             volume_inventory=json.dumps(
                 [
                     {
@@ -591,24 +700,30 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             [finding.code for finding in pre_apply_report.findings],
         )
 
-    def test_volume_usage_parser_accepts_documented_local_volume_header(
-        self,
-    ) -> None:
-        volume_usage = _parse_volume_usage(
-            "Local Volumes:\n\n"
-            "VOLUME NAME     LINKS     SIZE\n"
-            "runner-cache    0         45.5GB\n\n"
-            "Build cache usage: 1GB\n"
+    def test_docker_disk_usage_parser_preserves_volume_usage_data(self) -> None:
+        snapshot = _parse_docker_disk_usage(
+            _docker_disk_usage_json(
+                volumes=[
+                    {
+                        "Driver": "local",
+                        "Labels": {},
+                        "Mountpoint": "/var/lib/docker/volumes/runner-cache/_data",
+                        "Name": "runner-cache",
+                        "UsageData": {"RefCount": 0, "Size": 45_500_000_000},
+                    }
+                ]
+            )
         )
 
-        self.assertEqual(volume_usage["runner-cache"].links, 0)
-        self.assertEqual(volume_usage["runner-cache"].size_bytes, 45_500_000_000)
+        self.assertEqual(snapshot.volume_inventory[0].name, "runner-cache")
+        self.assertEqual(snapshot.volume_inventory[0].size_bytes, 45_500_000_000)
+        self.assertEqual(snapshot.reclaimable_breakdown.local_volumes_bytes, 45_500_000_000)
 
     def test_executor_fails_closed_when_docker_summary_is_unparseable(self) -> None:
-        command_runner = _CommandRunner(docker_summary="TYPE TOTAL ACTIVE SIZE RECLAIMABLE\n")
+        command_runner = _CommandRunner(docker_disk_usage="not-json")
         audit_poster = _AuditPoster()
 
-        with self.assertRaisesRegex(Exception, "did not include reclaimable bytes"):
+        with self.assertRaisesRegex(Exception, "was not valid JSON"):
             execute_runner_host_hygiene_executor(
                 request=_request(mutate=True),
                 remote_runner=command_runner,
@@ -882,6 +997,22 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 )
             )
 
+    def test_executor_reports_pending_planned_delivery_for_blocked_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
+
+            result = execute_runner_host_hygiene_executor(
+                request=_request(mutate=False),
+                remote_runner=_CommandRunner(),
+                audit_poster=_PermanentlyFailingAuditPoster(),
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertTrue(result.audit_delivery_pending)
+            self.assertIn("planned audit delivery remains pending", result.message)
+
     def test_executor_resolves_action_started_without_repeating_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
@@ -961,14 +1092,8 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         target_volume = "buildx_buildkit_launchplane-ci0_state"
-        summary_row, inventory_row = _buildkit_volume_evidence(target_volume)
+        _summary_row, inventory_row = _buildkit_volume_evidence(target_volume)
         command_runner = _CommandRunner(
-            docker_verbose_summary=(
-                "Local Volumes space usage:\n\n"
-                "VOLUME NAME     LINKS     SIZE\n"
-                f"{summary_row}"
-                "Build cache usage: 1GB\n"
-            ),
             volume_inventory=json.dumps([inventory_row]),
         )
         audit_poster = _AuditPoster()
@@ -1012,20 +1137,13 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
     ) -> None:
         first_volume = "buildx_buildkit_launchplane-ci0_state"
         second_volume = "buildx_buildkit_verireel-ci0_state"
-        first_summary_row, first_inventory_row = _buildkit_volume_evidence(first_volume)
-        second_summary_row, second_inventory_row = _buildkit_volume_evidence(
+        _first_summary_row, first_inventory_row = _buildkit_volume_evidence(first_volume)
+        _second_summary_row, second_inventory_row = _buildkit_volume_evidence(
             second_volume,
             size_bytes=12_480_000_000,
         )
         command_runner = _CommandRunner(
             volume_remove_partial_failure=True,
-            docker_verbose_summary=(
-                "Local Volumes space usage:\n\n"
-                "VOLUME NAME     LINKS     SIZE\n"
-                f"{first_summary_row}"
-                f"{second_summary_row}"
-                "Build cache usage: 1GB\n"
-            ),
             volume_inventory=json.dumps([first_inventory_row, second_inventory_row]),
         )
         audit_poster = _AuditPoster()
@@ -1055,12 +1173,6 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
     def test_executor_blocks_active_buildkit_state_volume_removal(self) -> None:
         target_volume = "buildx_buildkit_odoo-docker-chris-testing0_state"
         command_runner = _CommandRunner(
-            docker_verbose_summary=(
-                "Local Volumes space usage:\n\n"
-                "VOLUME NAME     LINKS     SIZE\n"
-                f"{target_volume}    1         32.48GB\n"
-                "Build cache usage: 1GB\n"
-            ),
             volume_inventory=json.dumps(
                 [
                     {
@@ -1098,14 +1210,8 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         target_volume = "buildx_buildkit_launchplane-ci0_state"
-        summary_row, inventory_row = _buildkit_volume_evidence(target_volume)
+        _summary_row, inventory_row = _buildkit_volume_evidence(target_volume)
         command_runner = _CommandRunner(
-            docker_verbose_summary=(
-                "Local Volumes space usage:\n\n"
-                "VOLUME NAME     LINKS     SIZE\n"
-                f"{summary_row}"
-                "Build cache usage: 1GB\n"
-            ),
             volume_inventory=json.dumps([inventory_row]),
         )
         audit_poster = _AuditPoster()
@@ -1300,28 +1406,34 @@ def _json_lines(*rows: dict[str, object]) -> str:
     return "".join(f"{json.dumps(row)}\n" for row in rows)
 
 
-def _without_removed_volume_inventory(output: str, removed_volumes: list[str]) -> str:
+def _docker_disk_usage_json(
+    *,
+    images: list[dict[str, object]] | None = None,
+    containers: list[dict[str, object]] | None = None,
+    volumes: list[dict[str, object]] | None = None,
+    build_cache: list[dict[str, object]] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "BuildCache": build_cache or [],
+            "Containers": containers or [],
+            "Images": images or [],
+            "LayersSize": 0,
+            "Volumes": volumes or [],
+        }
+    )
+
+
+def _without_removed_disk_usage_volumes(output: str, removed_volumes: list[str]) -> str:
     if not removed_volumes or not output.strip():
         return output
     payload = json.loads(output)
-    if not isinstance(payload, list):
+    if not isinstance(payload, dict) or not isinstance(payload.get("Volumes"), list):
         return output
     removed_volume_set = set(removed_volumes)
-    return json.dumps(
-        [
-            row
-            for row in payload
-            if not isinstance(row, dict) or row.get("Name") not in removed_volume_set
-        ]
-    )
-
-
-def _without_removed_volume_rows(output: str, removed_volumes: list[str]) -> str:
-    if not removed_volumes:
-        return output
-    removed_volume_set = set(removed_volumes)
-    return "\n".join(
-        line
-        for line in output.splitlines()
-        if not line.split() or line.split()[0] not in removed_volume_set
-    )
+    payload["Volumes"] = [
+        row
+        for row in payload["Volumes"]
+        if not isinstance(row, dict) or row.get("Name") not in removed_volume_set
+    ]
+    return json.dumps(payload)

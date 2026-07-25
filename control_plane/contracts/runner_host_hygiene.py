@@ -447,8 +447,14 @@ class RunnerHostHygieneApplyAuditRecord(BaseModel):
             )
         if self.status == "planned" and self.post_apply_report is not None:
             raise ValueError("planned runner host hygiene audit record cannot include post report")
-        if self.status in {"completed", "failed"} and self.post_apply_report is None:
-            raise ValueError("terminal runner host hygiene audit record requires post-apply report")
+        if self.status == "completed" and self.post_apply_report is None:
+            raise ValueError(
+                "completed runner host hygiene audit record requires post-apply report"
+            )
+        if self.status == "failed" and self.post_apply_report is None and not self.message:
+            raise ValueError(
+                "failed runner host hygiene audit record without post report requires a message"
+            )
         if self.status in {"completed", "failed"} and self.plan.status != "ready":
             raise ValueError("terminal runner host hygiene audit record requires a ready plan")
         return self
