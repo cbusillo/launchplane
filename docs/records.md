@@ -1096,6 +1096,13 @@ state/
 - Odoo prod backup-gate records are created by the Launchplane Odoo driver after
   a real compose-local DB dump and filestore archive capture. They should not be
   synthesized with generic operator assertions for release drills.
+- Odoo backup verification accepts only the exact required, passing
+  `BackupGateRecord` written by the Odoo prod backup-gate source for the same
+  context and prod instance. It recomputes backup paths from DB-backed runtime
+  records and requires the record's path evidence to match before provider
+  inspection. The verification response is intentionally not another backup
+  record: it contains only bounded statuses, SHA-256 values, counts, and sizes,
+  and does not persist private paths or add restore authority.
 - VeriReel prod backup-gate records remain the promotion evidence and replay
   authority, but long-running backup-gate execution is queued separately in
   `launchplane_verireel_prod_backup_gate_operations` for DB-backed storage and
@@ -1170,6 +1177,12 @@ state/
   for a concurrent owner id to settle, then give that owner record its own
   bounded settle window before clearing abandoned empty or orphaned reservations
   so an interrupted writer cannot block the lane forever.
+- Odoo target-replacement plan snapshots include the exact live values for
+  `ODOO_DATA_VOLUME`, `ODOO_LOG_VOLUME`, and `ODOO_DB_VOLUME`. Existing-data
+  plans compare those values with resolved DB-backed desired runtime authority
+  and block on any difference before an apply operation can be created. Volume
+  changes remain explicit rebuild/restore decisions rather than implicit
+  `data_source_mode=existing` behavior.
 - New records for all three durable driver queues use schema version 2 and
   persist authorization provenance in the canonical operation payload: action,
   product, context, exact instances, managed set/rule ids, policy record id,

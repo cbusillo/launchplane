@@ -99,6 +99,7 @@
     "Merge Train Runner",
     "Odoo Config Parameter Override",
     "Odoo Driver Route Smoke",
+    "Odoo Prod Backup Verification",
     "Odoo Website Bootstrap Override",
     "Odoo Stable Bootstrap",
     "Reusable Odoo Artifact Publish",

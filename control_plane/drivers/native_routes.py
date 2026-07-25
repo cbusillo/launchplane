@@ -35,7 +35,10 @@ from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
     ODOO_PREVIEW_APPLY_ROUTE,
 )
-from control_plane.odoo_prod_backup_gate_http import ODOO_PROD_BACKUP_GATE_ROUTE
+from control_plane.odoo_prod_backup_gate_http import (
+    ODOO_PROD_BACKUP_GATE_ROUTE,
+    ODOO_PROD_BACKUP_VERIFICATION_ROUTE,
+)
 from control_plane.odoo_prod_promotion_http import (
     ODOO_PROD_PROMOTION_INPUTS_ROUTE,
     ODOO_PROD_PROMOTION_ROUTE,
@@ -102,6 +105,7 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
         ODOO_PREVIEW_APPLY_ROUTE,
         ODOO_PROD_BACKUP_GATE_ROUTE,
+        ODOO_PROD_BACKUP_VERIFICATION_ROUTE,
         ODOO_PROD_PROMOTION_INPUTS_ROUTE,
         ODOO_PROD_PROMOTION_ROUTE,
         ODOO_PROD_PROMOTION_RUN_ROUTE,
