@@ -147,19 +147,46 @@ on a dedicated self-hosted ops lane selected by the operator-managed
 authenticates back to
 Launchplane with GitHub Actions OIDC, and executes on the runner host as the
 constrained service user. The workflow runs daily on a schedule in dry-run mode
-and can also be manually dispatched for approved mutations. Scheduled runs
-generate an audit key under
-`runner-host-hygiene/<date>/<host>-scheduled-report-<run-id>` and always pass
-`--dry-run`, even if a future workflow default changes.
-It supports `prune_docker_cache`, implemented as a bounded BuildKit prune:
+from Monday through Saturday and can also be manually dispatched for approved
+mutations. The Sunday schedule runs audited maintenance. Every scheduled action
+uses its own audit key and executor invocation, so a successful mutation cannot
+be hidden by a later action failure.
+
+The report-only schedule generates an audit key under
+`runner-host-hygiene/<date>/<host>-scheduled-report-<run-id>`. Sunday maintenance
+uses separate keys for default cache, dangling images, and each runtime-approved
+Buildx builder. The workflow attempts every scheduled action even when an
+earlier action is blocked or fails, then fails the aggregate job after all
+per-action audits have been recorded. Default Docker cache keeps 30 days of
+reuse history:
 
 ```bash
 flock -n /tmp/launchplane-runner-host-hygiene.lock \
-  docker builder prune --force --filter until=168h
+  docker builder prune --force --filter until=720h
 ```
 
 Operators can override the age bound through the workflow's `prune_until` input,
-but the executor does not expose an unbounded `--all` prune.
+but the executor does not expose an unbounded `--all` prune. Named Buildx
+builders use one audited command per builder, a seven-day age floor, and the
+runtime-configured retained-space budget:
+
+```bash
+flock -n /tmp/launchplane-runner-host-hygiene.lock \
+  docker buildx prune \
+  --builder <approved-builder> \
+  --force \
+  --filter until=168h \
+  --max-used-space <approved-bytes>
+```
+
+The separate `prune_dangling_images` action runs `docker image prune --force
+--filter until=168h`. It never supplies `-a` or `--all`, so tagged retained warm
+images remain outside that action.
+
+Launchplane's PostgreSQL integration job mounts `/var/lib/postgresql/data` as a
+bounded tmpfs. The official PostgreSQL image declares that path as a volume;
+overriding it keeps ephemeral test data out of durable anonymous Docker volumes
+while preserving the existing Actions service health check and dynamic port.
 
 It also supports `remove_buildkit_state_volumes`, implemented as a named
 single-volume `docker volume rm` call under the same lock. This action is
@@ -184,22 +211,29 @@ The workflow requires these repository variables:
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_ALLOWED_BUILDKIT_STATE_VOLUMES` for any
   approved BuildKit state-volume retirement target. Leave it empty when no
   named volume cleanup has been reviewed.
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_BUILDKIT_CACHE_BUDGETS`, as comma-separated
+  `builder=bytes` entries. Builder identities and byte budgets are runtime
+  authority; production code contains no real builder names or capacities.
 
 The executor fails closed unless the process user matches the requested service
 user, the GitHub repository matches the requested repository scope, retained
 warm builders are present in pre-apply evidence, the apply plan is ready, no
 active Docker build client or another Actions `Runner.Worker` process is observed
-in two consecutive local samples, and
-`mutate=true` is explicitly supplied to a manual workflow dispatch. Scheduled
-runs write a planned audit and stop at the `mutate_not_requested` blocker, which
-keeps the cadence report-only while preserving typed pre-apply evidence. Manual
-mutating runs write a `planned` audit before mutation, then write `completed`
+in two consecutive local samples. Manual mutations additionally require
+`mutate=true`. Monday-through-Saturday scheduled runs stop at the
+`mutate_not_requested` blocker, while the Sunday maintenance schedule supplies
+explicit mutation intent only for the bounded cache and dangling-image actions.
+Cache and image maintenance may proceed when the report has unrelated attention
+findings so cleanup can remediate pressure; host identity, warm-image retention,
+audit durability, exact builder allowlists, and the idle gate remain mandatory.
+Mutating runs write a `planned` audit before mutation, then write `completed`
 only when the bounded mutation command succeeds and post-apply evidence is
-healthy. If the idle preflight, mutation command, or post evidence fails, it
-writes `failed`. It does not run `docker system prune`, `docker image prune -a`,
-generic `docker volume prune`, runner work-directory deletion, runner service
-restart, builder deletion, or automatic rollback. Operators should use the
-captured image and volume inventory to decide any later phase-two cleanup lane.
+healthy. The CLI exits nonzero when a requested mutation is blocked, fails, or
+leaves audit delivery pending. It does not run `docker system prune`, `docker
+image prune -a`, generic `docker volume prune`, runner work-directory deletion,
+runner service restart, builder deletion, or automatic rollback. Operators
+should use the captured image and volume inventory to decide any later
+phase-two cleanup lane.
 Runner work-directory evidence covers every operator-supplied root and records
 both apparent and allocated bytes per public root key; Docker reclaimable bytes
 are also split into images, containers, local volumes, and build cache while the
@@ -246,12 +280,14 @@ Install the snippet as root-owned mode `0440`, then validate the candidate and
 the complete policy with `visudo -cf`. The helper independently verifies the
 config directory and opened config file owner, group, mode, exact binding,
 canonical root path, same-filesystem traversal, and non-empty registration set.
-Its stdout contract is exactly two decimal lines: apparent bytes first,
-allocated bytes second. Do not grant generic passwordless `du`, `find`, shell,
-or arbitrary-path sudo. The helper suppresses path-bearing errors, and the
-executor treats any denied or failed privileged measurement as incomplete
-evidence. A service-user-controlled helper, config directory, config file, or
-sudo environment invalidates this security boundary.
+Its stdout contract is apparent bytes, allocated bytes, and a final
+`complete`/`partial` status line. A transient `du` race is retried once; a
+second partial traversal remains visible in typed report findings rather than
+being presented as an authoritative total. Do not grant generic passwordless
+`du`, `find`, shell, or arbitrary-path sudo. The helper suppresses path-bearing
+errors, and the executor treats any denied or failed privileged measurement as
+incomplete evidence. A service-user-controlled helper, config directory,
+config file, or sudo environment invalidates this security boundary.
 
 The executor excludes only its own ancestor `Runner.Worker` from the idle gate;
 any sibling worker still blocks a shared-host mutation. If a prior run stopped
@@ -368,6 +404,8 @@ executor; the dedicated ops-lane executor is the separate apply surface.
 The privileged scope must match the planned action exactly:
 
 - `prune_docker_cache` requires `docker_cache`.
+- `prune_dangling_images` requires `docker_cache` and never includes tagged
+  images.
 - `remove_buildkit_state_volumes` requires `docker_volume` and may only remove
   one explicitly requested, allowlisted, zero-link `buildx_buildkit_*_state`
   named volume observed in the pre-apply report.

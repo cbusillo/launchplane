@@ -63,6 +63,8 @@ class _CommandRunner:
         volume_inventory: str | None = None,
         runner_workdir_bytes: int = 0,
         runner_workdir_usage: Mapping[str, tuple[int, int]] | None = None,
+        buildx_max_used_space_supported: bool = True,
+        runner_workdir_status: Literal["complete", "partial"] = "complete",
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
         self._prune_returncode = prune_returncode
@@ -112,6 +114,8 @@ class _CommandRunner:
         )
         self._runner_workdir_bytes = runner_workdir_bytes
         self._runner_workdir_usage = dict(runner_workdir_usage or {})
+        self._buildx_max_used_space_supported = buildx_max_used_space_supported
+        self._runner_workdir_status = runner_workdir_status
         self._pruned = False
         self.removed_volumes: list[str] = []
 
@@ -165,7 +169,7 @@ class _CommandRunner:
                     break
             return RemoteCommandResult(
                 returncode=0,
-                stdout=f"{apparent_bytes}\n{allocated_bytes}\n",
+                stdout=(f"{apparent_bytes}\n{allocated_bytes}\n{self._runner_workdir_status}\n"),
             )
         if command_tuple[:3] == ("docker", "image", "inspect"):
             if not self._pruned or self._image_present_after:
@@ -173,7 +177,16 @@ class _CommandRunner:
             return RemoteCommandResult(returncode=1, stderr="image missing")
         if command_tuple[:2] == ("bash", "-lc") and "pgrep -af" in command_tuple[2]:
             return RemoteCommandResult(returncode=0, stdout=self._active_build_processes)
-        if command_tuple == (
+        if command_tuple == ("docker", "buildx", "prune", "--help"):
+            return RemoteCommandResult(
+                returncode=0,
+                stdout=(
+                    "--max-used-space bytes\n"
+                    if self._buildx_max_used_space_supported
+                    else "--filter filter\n"
+                ),
+            )
+        if command_tuple[:7] == (
             "flock",
             "-n",
             "/tmp/launchplane-runner-host-hygiene.lock",
@@ -181,8 +194,34 @@ class _CommandRunner:
             "builder",
             "prune",
             "--force",
-            "--filter",
-            "until=168h",
+        ):
+            self._pruned = True
+            return RemoteCommandResult(
+                returncode=self._prune_returncode,
+                stderr=self._prune_stderr,
+            )
+        if command_tuple[:7] == (
+            "flock",
+            "-n",
+            "/tmp/launchplane-runner-host-hygiene.lock",
+            "docker",
+            "image",
+            "prune",
+            "--force",
+        ):
+            self._pruned = True
+            return RemoteCommandResult(
+                returncode=self._prune_returncode,
+                stderr=self._prune_stderr,
+            )
+        if command_tuple[:7] == (
+            "flock",
+            "-n",
+            "/tmp/launchplane-runner-host-hygiene.lock",
+            "docker",
+            "buildx",
+            "prune",
+            "--builder",
         ):
             self._pruned = True
             return RemoteCommandResult(
@@ -337,6 +376,15 @@ class RunnerHostHygieneWorkflowTests(unittest.TestCase):
         self.assertIn("--audit-spool-root", workflow_text)
         self.assertIn("--audit-artifact-file", workflow_text)
         self.assertIn("      - name: Upload executor result\n        if: always()\n", workflow_text)
+        self.assertIn('    - cron: "17 10 * * 1-6"\n', workflow_text)
+        self.assertIn('    - cron: "17 10 * * 0"\n', workflow_text)
+        self.assertIn('if [ "$SCHEDULE_EXPRESSION" = "17 10 * * 0" ]; then\n', workflow_text)
+        self.assertIn("prune_dangling_images", workflow_text)
+        self.assertIn("RUNNER_BUILDKIT_CACHE_BUDGETS", workflow_text)
+        self.assertIn("--target-buildkit-builder", workflow_text)
+        self.assertIn("--max-used-space-bytes", workflow_text)
+        self.assertIn("maintenance_failures=$((maintenance_failures + 1))", workflow_text)
+        self.assertIn("scheduled hygiene action(s) failed", workflow_text)
 
 
 class RunnerHostHygieneExecutorTests(unittest.TestCase):
@@ -378,6 +426,127 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         )
         self.assertNotIn(
             ("docker", "builder", "prune", "--all", "--force"), command_runner.commands
+        )
+
+    def test_executor_bounds_one_allowlisted_buildx_builder(self) -> None:
+        command_runner = _CommandRunner()
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(
+                mutate=True,
+                target_buildkit_builder="odoo-docker-chris-testing",
+                allowed_buildkit_builders=("odoo-docker-chris-testing",),
+                max_used_space_bytes=64_424_509_440,
+            ),
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertIn(
+            (
+                "flock",
+                "-n",
+                "/tmp/launchplane-runner-host-hygiene.lock",
+                "docker",
+                "buildx",
+                "prune",
+                "--builder",
+                "odoo-docker-chris-testing",
+                "--force",
+                "--filter",
+                "until=168h",
+                "--max-used-space",
+                "64424509440",
+            ),
+            command_runner.commands,
+        )
+        self.assertEqual(
+            audit_poster.audits[0].request.target_buildkit_builder,
+            "odoo-docker-chris-testing",
+        )
+        self.assertEqual(audit_poster.audits[0].request.max_used_space_bytes, 64_424_509_440)
+
+    def test_executor_blocks_unallowlisted_buildx_builder(self) -> None:
+        command_runner = _CommandRunner()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(
+                mutate=True,
+                target_buildkit_builder="unapproved-builder",
+                allowed_buildkit_builders=("odoo-docker-chris-testing",),
+                max_used_space_bytes=64_424_509_440,
+            ),
+            remote_runner=command_runner,
+            audit_poster=_AuditPoster(),
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(
+            any(command[4:6] == ("buildx", "prune") for command in command_runner.commands)
+        )
+
+    def test_executor_fails_before_prune_when_buildx_lacks_bounded_space_flag(self) -> None:
+        command_runner = _CommandRunner(buildx_max_used_space_supported=False)
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(
+                mutate=True,
+                target_buildkit_builder="odoo-docker-chris-testing",
+                allowed_buildkit_builders=("odoo-docker-chris-testing",),
+                max_used_space_bytes=64_424_509_440,
+            ),
+            remote_runner=command_runner,
+            audit_poster=_AuditPoster(),
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("does not support bounded", result.message)
+        self.assertFalse(
+            any(
+                command[:7]
+                == (
+                    "flock",
+                    "-n",
+                    "/tmp/launchplane-runner-host-hygiene.lock",
+                    "docker",
+                    "buildx",
+                    "prune",
+                    "--builder",
+                )
+                for command in command_runner.commands
+            )
+        )
+
+    def test_executor_prunes_only_dangling_images(self) -> None:
+        command_runner = _CommandRunner()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(mutate=True, action="prune_dangling_images"),
+            remote_runner=command_runner,
+            audit_poster=_AuditPoster(),
+        )
+
+        self.assertEqual(result.status, "completed")
+        command = (
+            "flock",
+            "-n",
+            "/tmp/launchplane-runner-host-hygiene.lock",
+            "docker",
+            "image",
+            "prune",
+            "--force",
+            "--filter",
+            "until=168h",
+        )
+        self.assertIn(command, command_runner.commands)
+        image_prune_commands = [
+            invoked for invoked in command_runner.commands if invoked[4:6] == ("image", "prune")
+        ]
+        self.assertEqual(image_prune_commands, [command])
+        self.assertTrue(
+            all("-a" not in invoked and "--all" not in invoked for invoked in image_prune_commands)
         )
 
     def test_executor_records_typed_docker_reclaimable_bytes(self) -> None:
@@ -487,6 +656,21 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         assert post_apply_report is not None
         self.assertEqual(post_apply_report.runner_workdir_bytes, 12_345_678)
 
+    def test_cache_prune_completes_when_unrelated_workdir_evidence_is_partial(self) -> None:
+        command_runner = _CommandRunner(runner_workdir_status="partial")
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(mutate=True),
+            remote_runner=command_runner,
+            audit_poster=_AuditPoster(),
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertIn("post evidence still needs attention", result.message)
+        self.assertTrue(
+            any(command[4:6] == ("builder", "prune") for command in command_runner.commands)
+        )
+
     def test_executor_uses_root_owned_workdir_usage_helper(self) -> None:
         command_runner = _CommandRunner(runner_workdir_bytes=12_345)
 
@@ -523,7 +707,11 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertIn('[[ "$directory_mode" == "700" ]]', helper_text)
         self.assertIn("/proc/self/fd/4", helper_text)
         self.assertIn("--files0-from=", helper_text)
-        self.assertIn("-x --null", helper_text)
+        self.assertIn('run_du_measurement "$apparent_file" -s -b -x', helper_text)
+        self.assertIn('run_du_measurement "$allocated_file" -s -B1 -x', helper_text)
+        self.assertIn("((du_status == 1))", helper_text)
+        self.assertIn("measurement_partial=1", helper_text)
+        self.assertIn("((record_count == expected_count))", helper_text)
         subprocess.run(
             ("/bin/bash", "-n", str(helper_path)),
             capture_output=True,
@@ -1249,7 +1437,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             ("failed", "runner-host-hygiene:runner-host-hygiene/2026-05-23/chris-testing:failed"),
             audit_poster.records,
         )
-        self.assertIn("post evidence is not healthy", result.message)
+        self.assertIn("post evidence failed", result.message)
 
     def test_executor_environment_requires_runner_user_to_match_service_user(
         self,
@@ -1362,12 +1550,16 @@ def _request(
     mutate: bool,
     action: Literal[
         "prune_docker_cache",
+        "prune_dangling_images",
         "remove_buildkit_state_volumes",
         "prune_runner_workdir",
         "restart_runner_service",
     ] = "prune_docker_cache",
     target_buildkit_state_volumes: tuple[str, ...] = (),
     allowed_buildkit_state_volumes: tuple[str, ...] = (),
+    target_buildkit_builder: str = "",
+    allowed_buildkit_builders: tuple[str, ...] = (),
+    max_used_space_bytes: int = 0,
     audit_record_key: str = "runner-host-hygiene/2026-05-23/chris-testing",
     runner_workdir_roots: tuple[RunnerWorkdirRoot, ...] = (
         RunnerWorkdirRoot(key="legacy", path="/opt/actions-runners"),
@@ -1382,6 +1574,9 @@ def _request(
         repository_scope="cbusillo/launchplane",
         audit_record_key=audit_record_key,
         retained_warm_builders=("odoo-docker-chris-testing",),
+        target_buildkit_builder=target_buildkit_builder,
+        allowed_buildkit_builders=allowed_buildkit_builders,
+        max_used_space_bytes=max_used_space_bytes,
         target_buildkit_state_volumes=target_buildkit_state_volumes,
         allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
         mutate=mutate,

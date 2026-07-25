@@ -23,6 +23,7 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapter
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneImageInventoryItem
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneReport
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneRunnerWorkdirUsage
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneVolumeInventoryItem
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
@@ -64,6 +65,30 @@ class RunnerHostHygieneTests(unittest.TestCase):
         self.assertEqual(report.warm_builders, ("odoo-docker-chris-testing",))
         self.assertEqual(report.findings, ())
         self.assertIn("report-only", report.summary)
+
+    def test_report_marks_partial_runner_workdir_measurement_for_attention(self) -> None:
+        report = evaluate_runner_host_hygiene(
+            policy=RunnerHostHygienePolicy(),
+            observation=RunnerHostHygieneObservation(
+                host_name="chris-testing",
+                observed_at="2026-07-25T23:00:00Z",
+                free_disk_bytes=200,
+                runner_workdir_usage=(
+                    RunnerHostHygieneRunnerWorkdirUsage(
+                        root_key="legacy",
+                        apparent_bytes=100,
+                        allocated_bytes=90,
+                        measurement_status="partial",
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(report.status, "attention")
+        self.assertEqual(
+            [finding.code for finding in report.findings],
+            ["runner_workdir_measurement_partial"],
+        )
 
     def test_report_preserves_sorted_resource_inventory(self) -> None:
         report = evaluate_runner_host_hygiene(
@@ -660,6 +685,86 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
         self.assertEqual(plan.status, "ready")
         self.assertEqual(plan.blockers, ())
         self.assertIn("pre-apply", plan.next_steps[0])
+
+    def test_apply_plan_can_bound_one_allowlisted_buildkit_builder(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_docker_cache_prune=True,
+                allowed_buildkit_builders=("odoo-docker-chris-testing",),
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_docker_cache",
+                host_name="chris-testing",
+                mutate=True,
+                target_buildkit_builder="odoo-docker-chris-testing",
+                max_used_space_bytes=64_424_509_440,
+                audit_record_key="runner-host-hygiene/2026-07-25/chris-testing-builder",
+            ),
+            report=_healthy_report(),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.blockers, ())
+
+    def test_apply_plan_blocks_unallowlisted_builder_without_budget(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_docker_cache_prune=True,
+                allowed_buildkit_builders=("odoo-docker-chris-testing",),
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_docker_cache",
+                host_name="chris-testing",
+                mutate=True,
+                target_buildkit_builder="unapproved-builder",
+                audit_record_key="runner-host-hygiene/2026-07-25/chris-testing-builder",
+            ),
+            report=_healthy_report(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers],
+            ["target_builder_budget_missing", "target_builder_not_allowlisted"],
+        )
+
+    def test_apply_plan_allows_dangling_image_prune_under_explicit_policy(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_dangling_image_prune=True,
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_dangling_images",
+                host_name="chris-testing",
+                mutate=True,
+                audit_record_key="runner-host-hygiene/2026-07-25/chris-testing-images",
+            ),
+            report=_healthy_report(),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.blockers, ())
+
+    def test_cache_prune_permission_does_not_enable_image_prune(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_docker_cache_prune=True,
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_dangling_images",
+                host_name="chris-testing",
+                mutate=True,
+                audit_record_key="runner-host-hygiene/2026-07-25/chris-testing-images",
+            ),
+            report=_healthy_report(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual([blocker.code for blocker in plan.blockers], ["action_not_enabled"])
 
     def test_apply_plan_can_target_allowlisted_zero_link_buildkit_state_volume(
         self,

@@ -67,11 +67,43 @@ temporary_files+=("$workdir_file" "$apparent_file" "$allocated_file")
   -print0 >"$workdir_file"
 [[ -s "$workdir_file" ]]
 
-/usr/bin/du -s -b -x --null --files0-from="$workdir_file" >"$apparent_file"
-/usr/bin/du -s -B1 -x --null --files0-from="$workdir_file" >"$allocated_file"
+count_nul_records() {
+  local input_file="$1"
+  local record_count=0
+  local _record
+  while IFS= read -r -d '' _record; do
+    record_count=$((record_count + 1))
+  done <"$input_file"
+  /usr/bin/printf '%s\n' "$record_count"
+}
+
+run_du_measurement() {
+  local output_file="$1"
+  shift
+  local attempt du_status
+  for attempt in 1 2; do
+    du_status=0
+    /usr/bin/du "$@" --null --files0-from="$workdir_file" >"$output_file" || du_status=$?
+    if ((du_status == 0)); then
+      return 0
+    fi
+    ((du_status == 1))
+    if ((attempt == 1)); then
+      /usr/bin/sleep 1
+    fi
+  done
+  measurement_partial=1
+}
+
+measurement_partial=0
+workdir_count="$(count_nul_records "$workdir_file")"
+((workdir_count > 0))
+run_du_measurement "$apparent_file" -s -b -x
+run_du_measurement "$allocated_file" -s -B1 -x
 
 sum_du_output() {
   local output_file="$1"
+  local expected_count="$2"
   local record_count=0
   local size _path
   local total=0
@@ -80,12 +112,16 @@ sum_du_output() {
     total=$((total + size))
     record_count=$((record_count + 1))
   done <"$output_file"
-  ((record_count > 0))
+  ((record_count == expected_count))
   /usr/bin/printf '%s\n' "$total"
 }
 
-apparent_bytes="$(sum_du_output "$apparent_file")"
-allocated_bytes="$(sum_du_output "$allocated_file")"
+apparent_bytes="$(sum_du_output "$apparent_file" "$workdir_count")"
+allocated_bytes="$(sum_du_output "$allocated_file" "$workdir_count")"
 [[ "$apparent_bytes" =~ ^[0-9]+$ ]]
 [[ "$allocated_bytes" =~ ^[0-9]+$ ]]
-/usr/bin/printf '%s\n%s\n' "$apparent_bytes" "$allocated_bytes"
+measurement_status="complete"
+if ((measurement_partial > 0)); then
+  measurement_status="partial"
+fi
+/usr/bin/printf '%s\n%s\n%s\n' "$apparent_bytes" "$allocated_bytes" "$measurement_status"
