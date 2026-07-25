@@ -17069,6 +17069,37 @@
         "title": "RunnerHostHygieneAuditEvidenceEnvelope",
         "type": "object"
       },
+      "RunnerHostHygieneDockerReclaimableBreakdown": {
+        "additionalProperties": false,
+        "properties": {
+          "build_cache_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Build Cache Bytes",
+            "type": "integer"
+          },
+          "containers_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Containers Bytes",
+            "type": "integer"
+          },
+          "images_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Images Bytes",
+            "type": "integer"
+          },
+          "local_volumes_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Local Volumes Bytes",
+            "type": "integer"
+          }
+        },
+        "title": "RunnerHostHygieneDockerReclaimableBreakdown",
+        "type": "object"
+      },
       "RunnerHostHygieneFinding": {
         "additionalProperties": false,
         "properties": {
@@ -17148,6 +17179,9 @@
       "RunnerHostHygieneReport": {
         "additionalProperties": false,
         "properties": {
+          "docker_reclaimable_breakdown": {
+            "$ref": "#/components/schemas/RunnerHostHygieneDockerReclaimableBreakdown"
+          },
           "docker_reclaimable_bytes": {
             "default": 0,
             "minimum": 0.0,
@@ -17210,11 +17244,25 @@
             "title": "Orphan Buildkit Volumes",
             "type": "integer"
           },
+          "runner_workdir_allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Runner Workdir Allocated Bytes",
+            "type": "integer"
+          },
           "runner_workdir_bytes": {
             "default": 0,
             "minimum": 0.0,
             "title": "Runner Workdir Bytes",
             "type": "integer"
+          },
+          "runner_workdir_usage": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneRunnerWorkdirUsage"
+            },
+            "title": "Runner Workdir Usage",
+            "type": "array"
           },
           "schema_version": {
             "default": 1,
@@ -17257,6 +17305,32 @@
           "summary"
         ],
         "title": "RunnerHostHygieneReport",
+        "type": "object"
+      },
+      "RunnerHostHygieneRunnerWorkdirUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Allocated Bytes",
+            "type": "integer"
+          },
+          "apparent_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Apparent Bytes",
+            "type": "integer"
+          },
+          "root_key": {
+            "title": "Root Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "root_key"
+        ],
+        "title": "RunnerHostHygieneRunnerWorkdirUsage",
         "type": "object"
       },
       "RunnerHostHygieneVolumeInventoryItem": {

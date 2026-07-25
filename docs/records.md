@@ -513,7 +513,11 @@ an ORM column/table or remains only in the evidence payload.
   request, plan, pre/post hygiene reports, retained warm-builder evidence, and
   operator message. Docker toolchain evidence, host-command output, Docker
   summaries, and rollout notes stay payload-only until they need queryable
-  operational views.
+  operational views. The host-local audit-delivery envelope is a separate
+  recovery record: it stores planned and optional terminal audit payloads,
+  execution phase, delivery state, idempotency keys, bounded redacted errors,
+  and attempt counts. It is written atomically under an explicit state
+  directory and is not a substitute for the service-owned audit row.
 - Runner lane registration audit: modeled fields are `audit_record_key`,
   `repository`, `host_name`, `lane_name`, `status`, and `mutate`. The payload
   carries the typed request, registration plan, pre/post runner inventory, and

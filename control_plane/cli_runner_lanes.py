@@ -64,6 +64,7 @@ from control_plane.workflows.runner_lane_registration_executor import (
     validate_local_executor_environment as validate_runner_registration_environment,
 )
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
+from control_plane.workflows.runner_host_hygiene_executor import RunnerWorkdirRoot
 from control_plane.workflows.runner_host_hygiene_executor import DOCKER_BUILDX_PLUGIN_PATH_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandRunner
 from control_plane.workflows.runner_host_hygiene_executor import build_local_command_runner
@@ -75,6 +76,9 @@ from control_plane.workflows.runner_host_hygiene_executor import (
 )
 from control_plane.workflows.runner_host_hygiene_executor import (
     validate_local_executor_environment as validate_runner_host_hygiene_environment,
+)
+from control_plane.workflows.runner_host_hygiene_audit_spool import (
+    RunnerHostHygieneAuditSpool,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -1332,6 +1336,33 @@ def runner_host_hygiene_adapter_boundary_plan(
     help="Bounded Docker builder cache prune age filter, passed as until=<value>.",
 )
 @click.option(
+    "--runner-workdir-root",
+    "runner_workdir_roots",
+    multiple=True,
+    required=True,
+    help="Approved runner root formatted as public-key=/absolute/path. Repeat as needed.",
+)
+@click.option(
+    "--idle-observation-count",
+    default=2,
+    show_default=True,
+    type=click.IntRange(min=2, max=10),
+    help="Consecutive local idle samples required before mutation.",
+)
+@click.option(
+    "--idle-observation-interval-seconds",
+    default=5,
+    show_default=True,
+    type=click.IntRange(min=0, max=60),
+    help="Delay between consecutive local idle samples.",
+)
+@click.option(
+    "--resolve-action-started/--no-resolve-action-started",
+    default=False,
+    show_default=True,
+    help="Record terminal failed evidence for a prior action_started state without rerunning it.",
+)
+@click.option(
     "--timeout-seconds",
     default=120,
     show_default=True,
@@ -1349,6 +1380,19 @@ def runner_host_hygiene_adapter_boundary_plan(
     show_default=True,
     help="Environment variable containing a GitHub OIDC bearer token.",
 )
+@click.option(
+    "--audit-spool-root",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    help="Absolute host-persistent directory for runner hygiene audit delivery state.",
+)
+@click.option(
+    "--audit-artifact-file",
+    default=Path("runner-host-hygiene-audit-evidence.json"),
+    show_default=True,
+    type=click.Path(path_type=Path, file_okay=True, dir_okay=False),
+    help="Current-run redacted audit envelope copied for workflow artifact upload.",
+)
 def runner_host_hygiene_executor(
     apply_action: RunnerHostHygieneApplyAction,
     host_name: str,
@@ -1362,9 +1406,15 @@ def runner_host_hygiene_executor(
     mutate: bool,
     minimum_free_disk_bytes: int,
     prune_until: str,
+    runner_workdir_roots: tuple[str, ...],
+    idle_observation_count: int,
+    idle_observation_interval_seconds: int,
+    resolve_action_started: bool,
     timeout_seconds: int,
     service_url: str,
     bearer_token_env: str,
+    audit_spool_root: Path,
+    audit_artifact_file: Path,
 ) -> None:
     try:
         token_env = bearer_token_env.strip()
@@ -1384,6 +1434,10 @@ def runner_host_hygiene_executor(
             minimum_free_disk_bytes=minimum_free_disk_bytes,
             timeout_seconds=timeout_seconds,
             prune_until=prune_until,
+            runner_workdir_roots=_parse_runner_workdir_roots(runner_workdir_roots),
+            idle_observation_count=idle_observation_count,
+            idle_observation_interval_seconds=idle_observation_interval_seconds,
+            resolve_action_started=resolve_action_started,
         )
         validate_runner_host_hygiene_environment(request=request)
         result = execute_runner_host_hygiene_executor(
@@ -1396,10 +1450,24 @@ def runner_host_hygiene_executor(
                     token_env=token_env,
                 ),
             ),
+            audit_spool=RunnerHostHygieneAuditSpool(
+                root=audit_spool_root,
+                artifact_file=audit_artifact_file,
+            ),
         )
     except (OSError, ValidationError, ValueError) as error:
         raise click.ClickException(str(error)) from error
     click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+def _parse_runner_workdir_roots(values: tuple[str, ...]) -> tuple[RunnerWorkdirRoot, ...]:
+    roots: list[RunnerWorkdirRoot] = []
+    for value in values:
+        key, separator, path = value.partition("=")
+        if not separator:
+            raise click.ClickException("runner workdir roots must use public-key=/absolute/path")
+        roots.append(RunnerWorkdirRoot(key=key, path=path))
+    return tuple(roots)
 
 
 def _load_runner_lane_inventory(inventory_file: Path) -> RunnerLaneInventory:

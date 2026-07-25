@@ -44,6 +44,12 @@ name: Runner Host Hygiene
         required: false
         default: "300"
         type: string
+      resolve_action_started:
+        description: >-
+          Finalize a prior action_started audit as failed without repeating the action
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -68,6 +74,8 @@ jobs:
       RUNNER_REPOSITORY_SCOPE: ${{ github.repository }}
       RUNNER_RETAINED_WARM_BUILDERS: >-
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS }}
+      RUNNER_WORKDIR_ROOTS: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_RUNNER_WORKDIR_ROOTS }}
       RUNNER_ALLOWED_BUILDKIT_STATE_VOLUMES: >-
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_ALLOWED_BUILDKIT_STATE_VOLUMES
         }}
@@ -94,6 +102,7 @@ jobs:
           require_env RUNNER_EXECUTION_LANE
           require_env RUNNER_SERVICE_USER
           require_env RUNNER_RETAINED_WARM_BUILDERS
+          require_env RUNNER_WORKDIR_ROOTS
           if [ "$(id -un)" != "$RUNNER_SERVICE_USER" ]; then
             echo "Runner must execute as ${RUNNER_SERVICE_USER}." >&2
             exit 1
@@ -145,6 +154,20 @@ jobs:
             exit 1
           fi
 
+          runner_root_args=()
+          IFS=',' read -r -a runner_roots <<< "$RUNNER_WORKDIR_ROOTS"
+          for runner_root in "${runner_roots[@]}"; do
+            trimmed="${runner_root#"${runner_root%%[![:space:]]*}"}"
+            trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+            if [ -n "$trimmed" ]; then
+              runner_root_args+=(--runner-workdir-root "$trimmed")
+            fi
+          done
+          if [ "${#runner_root_args[@]}" -eq 0 ]; then
+            echo "At least one runner workdir root is required." >&2
+            exit 1
+          fi
+
           volume_args=()
           target_volumes="${{ inputs.target_buildkit_state_volumes }}"
           IFS=',' read -r -a volumes <<< "$target_volumes"
@@ -174,6 +197,16 @@ jobs:
             mutate_flag="--mutate"
           fi
 
+          resolve_flag="--no-resolve-action-started"
+          if [ "${{ github.event_name }}" != "schedule" ] &&
+            [ "${{ inputs.resolve_action_started }}" = "true" ]; then
+            resolve_flag="--resolve-action-started"
+          fi
+
+          audit_spool_root="${XDG_STATE_HOME:-$HOME/.local/state}/"
+          audit_spool_root+="launchplane/runner-host-hygiene-audits"
+          audit_artifact_file="$RUNNER_TEMP/runner-host-hygiene-audit-evidence.json"
+
           uv run launchplane work-graph runner-host-hygiene-executor \
             --action "$apply_action" \
             --host-name "$RUNNER_HOST_NAME" \
@@ -182,17 +215,24 @@ jobs:
             --repository-scope "$RUNNER_REPOSITORY_SCOPE" \
             --audit-record-key "$audit_record_key" \
             "${builder_args[@]}" \
+            "${runner_root_args[@]}" \
             "${volume_args[@]}" \
             "$mutate_flag" \
+            "$resolve_flag" \
             --minimum-free-disk-bytes "$minimum_free_disk_bytes" \
             --prune-until "$prune_until" \
             --timeout-seconds "$timeout_seconds" \
             --service-url "$LAUNCHPLANE_SERVICE_URL" \
+            --audit-spool-root "$audit_spool_root" \
+            --audit-artifact-file "$audit_artifact_file" \
             | tee runner-host-hygiene-result.json
 
       - name: Upload executor result
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runner-host-hygiene-result
-          path: runner-host-hygiene-result.json
+          path: |
+            runner-host-hygiene-result.json
+            ${{ runner.temp }}/runner-host-hygiene-audit-evidence.json
           if-no-files-found: error
