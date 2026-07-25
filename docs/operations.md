@@ -1662,8 +1662,9 @@ read, validation, artifact-path, or artifact-metadata subphase code. Operators
 can distinguish the manifest, hash, database archive, filestore archive, and
 staging-space phases without exposing provider paths or exception text.
 Filesystem metadata failures in the manifest phase map to the existing bounded
-`manifest_unreadable` or `artifact_missing` codes instead of exposing raw I/O
-errors. This slice does not restore a database, extract a filestore, stop
+manifest missing, metadata, size, read, or decode codes; artifact metadata
+failures map to `artifact_missing`. Raw I/O errors and private paths are not
+returned. This slice does not restore a database, extract a filestore, stop
 containers, or mutate served Odoo data.
 
 Legacy backup-gate manifests created before manifest schema and hash fields were

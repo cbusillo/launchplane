@@ -3319,7 +3319,7 @@ domains = ["cm-testing.shinycomputers.com"]
         result = json.loads(base64.b64decode(encoded_result).decode("utf-8"))
         self.assertEqual(result["verification_status"], "fail")
         self.assertEqual(result["manifest_status"], "fail")
-        self.assertEqual(result["failure_code"], "manifest_unreadable")
+        self.assertEqual(result["failure_code"], "manifest_metadata_unreadable")
 
     def test_odoo_backup_verification_accepts_legacy_manifest_and_computes_hashes(
         self,
