@@ -696,8 +696,6 @@ ODOO_DRIVER = DriverDescriptor(
                 "runtime_environment",
                 "managed_secrets",
                 "artifact",
-                "deployment",
-                "topology",
             ),
         ),
         _action(
@@ -715,8 +713,6 @@ ODOO_DRIVER = DriverDescriptor(
                 "runtime_environment",
                 "managed_secrets",
                 "artifact",
-                "deployment",
-                "topology",
             ),
         ),
     ),

@@ -1605,6 +1605,14 @@ entrypoints and pin those reviewed reusable workers to a full commit SHA. When
 worker behavior changes, land and validate the reusable contracts first, then
 advance the wrapper pin in a separate reviewed change.
 
+Target-replacement plan and apply readiness intentionally permits a degraded
+current deployment or failed public observation because replacement is the
+repair path for those states. Provider-target authority, route binding, runtime
+environment, managed secrets, and the exact persisted artifact remain required.
+The plan and apply paths independently fence the current inventory artifact,
+and apply still requires passing post-deploy verification before inventory or
+release evidence advances.
+
 The operator UI can inspect that same readiness contract from the environment
 `Actions` route without dispatching a workflow or invoking a descriptor route.
 It derives exact lane and artifact selectors from the product-environment read

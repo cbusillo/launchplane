@@ -239,7 +239,8 @@ class FastApiProductOperationalReadinessTests(unittest.IsolatedAsyncioTestCase):
             dimension["dimension"]: dimension["state"] for dimension in readiness["dimensions"]
         }
         self.assertEqual(states["provider_target"], "ready")
-        self.assertEqual(states["deployment"], "ready")
+        self.assertNotIn("deployment", states)
+        self.assertNotIn("topology", states)
 
     async def test_readiness_reports_exact_authorization_and_missing_records_without_mutation(
         self,
@@ -282,7 +283,7 @@ class FastApiProductOperationalReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         readiness = response.json()["readiness"]
         self.assertFalse(readiness["ready"])
-        self.assertEqual(readiness["state"], "blocked")
+        self.assertEqual(readiness["state"], "missing")
         states = {
             dimension["dimension"]: dimension["state"] for dimension in readiness["dimensions"]
         }
