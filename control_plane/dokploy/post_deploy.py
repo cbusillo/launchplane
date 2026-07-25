@@ -1407,6 +1407,7 @@ result = {{
     "staging_required_bytes": 0,
     "failure_code": "verification_error",
 }}
+active_check = "manifest_status"
 
 try:
     filestore_root = Path(os.environ["FILESTORE_ROOT"])
@@ -1465,6 +1466,7 @@ try:
         fail("artifact_size_mismatch", "manifest_status")
     result["manifest_status"] = "pass"
 
+    active_check = "sha256_status"
     result["database_dump_sha256"] = file_sha256(database_dump_path)
     result["filestore_archive_sha256"] = file_sha256(filestore_archive_path)
     manifest_database_dump_sha256 = manifest.get("database_dump_sha256")
@@ -1482,6 +1484,7 @@ try:
             fail("artifact_hash_mismatch", "sha256_status")
     result["sha256_status"] = "pass"
 
+    active_check = "pg_restore_status"
     restore_list = subprocess.run(
         ["pg_restore", "--list", str(database_dump_path)],
         check=False,
@@ -1514,6 +1517,7 @@ try:
         fail("database_dump_invalid", "pg_restore_status")
     result["pg_restore_status"] = "pass"
 
+    active_check = "tar_status"
     seen_members = set()
     top_level_directory_seen = False
     try:
@@ -1545,6 +1549,7 @@ try:
         fail("filestore_top_level_mismatch", "tar_status")
     result["tar_status"] = "pass"
 
+    active_check = "staging_space_status"
     filestore_database_path = filestore_root
     if filestore_database_path.name != database_name:
         filestore_database_path = filestore_database_path / database_name
@@ -1561,6 +1566,7 @@ try:
 except VerificationFailure as error:
     result["failure_code"] = str(error)
 except Exception:
+    result[active_check] = "fail"
     result["failure_code"] = "verification_error"
 
 encoded_result = base64.b64encode(
