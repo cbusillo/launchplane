@@ -77,6 +77,9 @@ def _passing_backup_record() -> BackupGateRecord:
 def _passing_verification_evidence() -> dict[str, object]:
     return {
         "schema_version": 1,
+        "verification_nonce": "c" * 64,
+        "backup_record_id": "backup-gate-cm-prod-1",
+        "database_name": "cm",
         "verification_status": "pass",
         "manifest_status": "pass",
         "sha256_status": "pass",
@@ -265,6 +268,10 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
                 return_value=_passing_verification_evidence(),
             ) as run_verification_mock,
             patch(
+                "control_plane.workflows.odoo_prod_backup_gate.python_secrets.token_hex",
+                return_value="c" * 64,
+            ),
+            patch(
                 "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
                 return_value=_runtime_values(),
             ),
@@ -288,6 +295,43 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
             run_verification_mock.call_args.kwargs["manifest_path"],
             "/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-1/manifest.json",
         )
+        self.assertEqual(run_verification_mock.call_args.kwargs["verification_nonce"], "c" * 64)
+
+    def test_backup_verification_rejects_provider_result_for_different_request(self) -> None:
+        record_store = self._record_store()
+        record_store.read_backup_gate_record.return_value = _passing_backup_record()
+        mismatched_evidence = _passing_verification_evidence()
+        mismatched_evidence["verification_nonce"] = "d" * 64
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_verification",
+                return_value=mismatched_evidence,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.python_secrets.token_hex",
+                return_value="c" * 64,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value=_runtime_values(),
+            ),
+        ):
+            result = execute_odoo_prod_backup_verification(
+                control_plane_root=Path("/control-plane"),
+                record_store=record_store,
+                request=OdooProdBackupVerificationRequest(
+                    context="cm",
+                    backup_record_id="backup-gate-cm-prod-1",
+                ),
+            )
+
+        self.assertEqual(result.verification_status, "fail")
+        self.assertEqual(result.failure_code, "provider_verification_failed")
 
     def test_backup_verification_rejects_path_authority_drift_before_provider_read(self) -> None:
         record_store = self._record_store()

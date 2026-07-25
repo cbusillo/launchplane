@@ -81,6 +81,9 @@ ODOO_BACKUP_VERIFICATION_RESULT_MARKER = "LAUNCHPLANE_ODOO_BACKUP_VERIFICATION_R
 ODOO_BACKUP_VERIFICATION_RESULT_FIELDS = frozenset(
     {
         "schema_version",
+        "verification_nonce",
+        "backup_record_id",
+        "database_name",
         "verification_status",
         "manifest_status",
         "sha256_status",
@@ -630,6 +633,7 @@ def run_compose_odoo_backup_verification(
     host: str,
     token: str,
     target_definition: DokployTargetDefinition,
+    verification_nonce: str,
     backup_record_id: str,
     database_name: str,
     filestore_path: str,
@@ -639,6 +643,9 @@ def run_compose_odoo_backup_verification(
     manifest_path: str,
     timeout_seconds: int | None = None,
 ) -> api.JsonObject:
+    normalized_verification_nonce = verification_nonce.strip()
+    if not normalized_verification_nonce:
+        raise click.ClickException("Odoo backup verification requires a request nonce.")
     compose_id = target_definition.target_id.strip()
     compose_name = (
         target_definition.target_name.strip()
@@ -678,6 +685,7 @@ def run_compose_odoo_backup_verification(
         "command": "control-plane odoo backup verification",
         "script": _build_dokploy_odoo_backup_verification_script(
             compose_app_name=compose_app_name,
+            verification_nonce=normalized_verification_nonce,
             backup_record_id=backup_record_id,
             database_name=database_name,
             filestore_path=filestore_path,
@@ -1302,6 +1310,7 @@ trap - EXIT
 def _build_dokploy_odoo_backup_verification_script(
     *,
     compose_app_name: str,
+    verification_nonce: str,
     backup_record_id: str,
     database_name: str,
     filestore_path: str,
@@ -1323,6 +1332,7 @@ if [ -z "${{script_runner_container_id}}" ]; then
 fi
 
 docker exec -i \
+    -e VERIFICATION_NONCE={shlex.quote(verification_nonce)} \
     -e BACKUP_RECORD_ID={shlex.quote(backup_record_id)} \
     -e DATABASE_NAME={shlex.quote(database_name)} \
     -e FILESTORE_ROOT={shlex.quote(filestore_path)} \
@@ -1371,8 +1381,15 @@ def manifest_size(value):
     fail("manifest_size_invalid", "manifest_status")
 
 
+verification_nonce = os.environ["VERIFICATION_NONCE"]
+backup_record_id = os.environ["BACKUP_RECORD_ID"]
+database_name = os.environ["DATABASE_NAME"]
+
 result = {{
     "schema_version": 1,
+    "verification_nonce": verification_nonce,
+    "backup_record_id": backup_record_id,
+    "database_name": database_name,
     "verification_status": "fail",
     "manifest_status": "not_run",
     "sha256_status": "not_run",
@@ -1392,8 +1409,6 @@ result = {{
 }}
 
 try:
-    backup_record_id = os.environ["BACKUP_RECORD_ID"]
-    database_name = os.environ["DATABASE_NAME"]
     filestore_root = Path(os.environ["FILESTORE_ROOT"])
     backup_dir = Path(os.environ["BACKUP_DIR"])
     database_dump_path = Path(os.environ["DATABASE_DUMP_PATH"])
@@ -1482,6 +1497,20 @@ try:
         if line.strip() and not line.lstrip().startswith(";")
     )
     if result["pg_restore_entry_count"] < 1:
+        fail("database_dump_invalid", "pg_restore_status")
+    restore_read = subprocess.run(
+        [
+            "pg_restore",
+            "--no-owner",
+            "--no-acl",
+            "--file=/dev/null",
+            str(database_dump_path),
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if restore_read.returncode != 0:
         fail("database_dump_invalid", "pg_restore_status")
     result["pg_restore_status"] = "pass"
 

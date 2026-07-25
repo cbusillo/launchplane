@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import secrets as python_secrets
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol, cast
 
@@ -472,12 +473,14 @@ def execute_odoo_prod_backup_verification(
         request=request,
         expected_paths=expected_paths,
     )
+    verification_nonce = python_secrets.token_hex(32)
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
         raw_evidence = dokploy_post_deploy.run_compose_odoo_backup_verification(
             host=host,
             token=token,
             target_definition=target_definition,
+            verification_nonce=verification_nonce,
             backup_record_id=request.backup_record_id,
             database_name=expected_paths["database_name"],
             filestore_path=expected_paths["filestore_path"],
@@ -487,6 +490,14 @@ def execute_odoo_prod_backup_verification(
             manifest_path=expected_paths["manifest_path"],
             timeout_seconds=request.timeout_seconds,
         )
+        if (
+            raw_evidence.pop("verification_nonce", None) != verification_nonce
+            or raw_evidence.pop("backup_record_id", None) != request.backup_record_id
+            or raw_evidence.pop("database_name", None) != expected_paths["database_name"]
+        ):
+            raise click.ClickException(
+                "Dokploy Odoo backup verification result did not match the exact request."
+            )
         verification_evidence = OdooProdBackupVerificationEvidence.model_validate(raw_evidence)
     except (click.ClickException, OSError, ValidationError):
         verification_evidence = OdooProdBackupVerificationEvidence(

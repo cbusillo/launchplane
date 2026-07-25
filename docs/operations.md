@@ -1642,12 +1642,14 @@ route through GitHub Actions OIDC. The workflow accepts an exact backup-gate
 record id, stores only the bounded response artifact, and fails if the response
 contains backup paths or an unbounded error. Verification recomputes the
 expected paths from DB-backed runtime records, checks manifest identities,
-paths, sizes, and SHA-256 values, runs `pg_restore --list`, validates safe tar
-members under the expected database directory, and confirms enough free space
-on the Odoo data volume to stage the uncompressed filestore. It returns hashes,
-counts, sizes, per-check statuses, and a bounded failure code only. This slice
-does not restore a database, extract a filestore, stop containers, or mutate
-served Odoo data.
+paths, sizes, and SHA-256 values, runs `pg_restore --list` plus a full archive
+render to `/dev/null`, validates safe tar members under the expected database
+directory, and confirms enough free space on the Odoo data volume to stage the
+uncompressed filestore. Each provider result is bound to a fresh request nonce,
+the exact backup record id, and database name before Launchplane accepts it. The
+route returns hashes, counts, sizes, per-check statuses, and a bounded failure
+code only. This slice does not restore a database, extract a filestore, stop
+containers, or mutate served Odoo data.
 
 Legacy backup-gate manifests created before manifest schema and hash fields were
 introduced remain verifiable: Launchplane validates their recorded identity,

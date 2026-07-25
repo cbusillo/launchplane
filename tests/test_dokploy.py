@@ -3076,6 +3076,9 @@ domains = ["cm-testing.shinycomputers.com"]
         )
         verification_result: dict[str, object] = {
             "schema_version": 1,
+            "verification_nonce": "c" * 64,
+            "backup_record_id": "backup-gate-cm-prod-1",
+            "database_name": "cm",
             "verification_status": "pass",
             "manifest_status": "pass",
             "sha256_status": "pass",
@@ -3134,6 +3137,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 host="https://dokploy.example.com",
                 token="secret-token",
                 target_definition=target_definition,
+                verification_nonce="c" * 64,
                 backup_record_id="backup-gate-cm-prod-1",
                 database_name="cm",
                 filestore_path="/volumes/data/filestore",
@@ -3158,6 +3162,7 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertEqual(schedule_payloads[0]["command"], "control-plane odoo backup verification")
         script = str(schedule_payloads[0]["script"])
         self.assertIn('subprocess.run(\n        ["pg_restore", "--list"', script)
+        self.assertIn('"--file=/dev/null"', script)
         self.assertIn("tarfile.open", script)
         self.assertIn("shutil.disk_usage", script)
         self.assertNotIn("docker start", script)
@@ -3234,6 +3239,7 @@ domains = ["cm-testing.shinycomputers.com"]
             fake_pg_restore.chmod(0o755)
             script = control_plane_dokploy._build_dokploy_odoo_backup_verification_script(
                 compose_app_name="cm-prod",
+                verification_nonce="c" * 64,
                 backup_record_id=backup_record_id,
                 database_name=database_name,
                 filestore_path=str(filestore_root),
@@ -3242,12 +3248,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 filestore_archive_path=str(filestore_archive_path),
                 manifest_path=str(manifest_path),
             )
-            verification_script = script.split("python3 - <<'PY'\n", 1)[1].split(
-                "\nPY", 1
-            )[0]
+            verification_script = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
             environment = {
                 **os.environ,
                 "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "VERIFICATION_NONCE": "c" * 64,
                 "BACKUP_RECORD_ID": backup_record_id,
                 "DATABASE_NAME": database_name,
                 "FILESTORE_ROOT": str(filestore_root),
@@ -3255,9 +3260,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 "DATABASE_DUMP_PATH": str(database_dump_path),
                 "FILESTORE_ARCHIVE_PATH": str(filestore_archive_path),
                 "MANIFEST_PATH": str(manifest_path),
-                "RESULT_MARKER": (
-                    control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER
-                ),
+                "RESULT_MARKER": (control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER),
             }
 
             completed = subprocess.run(
@@ -3268,12 +3271,13 @@ domains = ["cm-testing.shinycomputers.com"]
                 env=environment,
             )
 
-        marker_prefix = (
-            f"{control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER}="
-        )
+        marker_prefix = f"{control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER}="
         encoded_result = completed.stdout.strip().removeprefix(marker_prefix)
         result = json.loads(base64.b64decode(encoded_result).decode("utf-8"))
         self.assertEqual(result["verification_status"], "pass")
+        self.assertEqual(result["verification_nonce"], "c" * 64)
+        self.assertEqual(result["backup_record_id"], backup_record_id)
+        self.assertEqual(result["database_name"], database_name)
         self.assertEqual(result["manifest_status"], "pass")
         self.assertEqual(result["sha256_status"], "pass")
         self.assertEqual(
