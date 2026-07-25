@@ -3256,7 +3256,7 @@ domains = ["cm-testing.shinycomputers.com"]
         result = json.loads(base64.b64decode(encoded_result).decode("utf-8"))
         self.assertEqual(result["verification_status"], "fail")
         self.assertEqual(result["manifest_status"], "fail")
-        self.assertEqual(result["failure_code"], "verification_error")
+        self.assertEqual(result["failure_code"], "manifest_path_verification_error")
 
     def test_odoo_backup_verification_maps_manifest_stat_error(self) -> None:
         script = control_plane_dokploy._build_dokploy_odoo_backup_verification_script(
