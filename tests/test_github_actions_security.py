@@ -63,10 +63,7 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
         {"cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-apply.yml"}
     ),
     Path(".github/workflows/odoo-prod-backup-verification.yml"): frozenset(
-        {
-            "cbusillo/launchplane/.github/workflows/"
-            "reusable-odoo-prod-backup-verification.yml"
-        }
+        {"cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-verification.yml"}
     ),
 }
 
