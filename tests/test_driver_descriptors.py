@@ -441,6 +441,13 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_odoo_descriptor_marks_prod_rollback_as_destructive(self) -> None:
         descriptor = read_driver_descriptor("odoo")
         actions = {action.action_id: action for action in descriptor.actions}
+        target_replacement_requirements = (
+            "provider_target",
+            "route_binding",
+            "runtime_environment",
+            "managed_secrets",
+            "artifact",
+        )
 
         self.assertEqual(descriptor.base_driver_id, "generic-web")
         self.assertEqual(actions["prod_backup_gate"].safety, "safe_write")
@@ -454,6 +461,14 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(
             actions["stable_bootstrap"].route_path,
             "/v1/drivers/odoo/stable-bootstrap",
+        )
+        self.assertEqual(
+            actions["target_replacement_plan"].readiness_requirements,
+            target_replacement_requirements,
+        )
+        self.assertEqual(
+            actions["target_replacement_apply"].readiness_requirements,
+            target_replacement_requirements,
         )
         setting_groups = {group.group_id: group for group in descriptor.setting_groups}
         self.assertIn("preview_domain_tls", setting_groups)
