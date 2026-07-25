@@ -2,6 +2,9 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
+import sys
+import tarfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -3184,6 +3187,99 @@ domains = ["cm-testing.shinycomputers.com"]
                     ]
                 }
             )
+
+    def test_odoo_backup_verification_accepts_legacy_manifest_and_computes_hashes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_name = "cm"
+            backup_record_id = "backup-gate-cm-prod-legacy"
+            backup_dir = root / "backups" / database_name / backup_record_id
+            backup_dir.mkdir(parents=True)
+            filestore_root = root / "filestore"
+            filestore_database_path = filestore_root / database_name
+            filestore_database_path.mkdir(parents=True)
+            filestore_file = filestore_database_path / "ab" / "asset"
+            filestore_file.parent.mkdir()
+            filestore_file.write_bytes(b"filestore")
+            database_dump_path = backup_dir / f"{database_name}.dump"
+            database_dump_path.write_bytes(b"legacy-custom-dump")
+            filestore_archive_path = backup_dir / f"{database_name}-filestore.tar.gz"
+            with tarfile.open(filestore_archive_path, "w:gz") as archive:
+                archive.add(filestore_database_path, arcname=database_name)
+            manifest_path = backup_dir / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "backup_record_id": backup_record_id,
+                        "database_name": database_name,
+                        "backup_dir": str(backup_dir),
+                        "database_dump_path": str(database_dump_path),
+                        "filestore_archive_path": str(filestore_archive_path),
+                        "database_dump_size": str(database_dump_path.stat().st_size),
+                        "filestore_archive_size": str(filestore_archive_path.stat().st_size),
+                        "captured_at": "2026-06-14T00:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_pg_restore = fake_bin / "pg_restore"
+            fake_pg_restore.write_text(
+                "#!/bin/sh\nprintf '1; 1259 1 TABLE public example owner\\n'\n",
+                encoding="utf-8",
+            )
+            fake_pg_restore.chmod(0o755)
+            script = control_plane_dokploy._build_dokploy_odoo_backup_verification_script(
+                compose_app_name="cm-prod",
+                backup_record_id=backup_record_id,
+                database_name=database_name,
+                filestore_path=str(filestore_root),
+                backup_dir=str(backup_dir),
+                database_dump_path=str(database_dump_path),
+                filestore_archive_path=str(filestore_archive_path),
+                manifest_path=str(manifest_path),
+            )
+            verification_script = script.split("python3 - <<'PY'\n", 1)[1].split(
+                "\nPY", 1
+            )[0]
+            environment = {
+                **os.environ,
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "BACKUP_RECORD_ID": backup_record_id,
+                "DATABASE_NAME": database_name,
+                "FILESTORE_ROOT": str(filestore_root),
+                "BACKUP_DIR": str(backup_dir),
+                "DATABASE_DUMP_PATH": str(database_dump_path),
+                "FILESTORE_ARCHIVE_PATH": str(filestore_archive_path),
+                "MANIFEST_PATH": str(manifest_path),
+                "RESULT_MARKER": (
+                    control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER
+                ),
+            }
+
+            completed = subprocess.run(
+                [sys.executable, "-c", verification_script],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+
+        marker_prefix = (
+            f"{control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER}="
+        )
+        encoded_result = completed.stdout.strip().removeprefix(marker_prefix)
+        result = json.loads(base64.b64decode(encoded_result).decode("utf-8"))
+        self.assertEqual(result["verification_status"], "pass")
+        self.assertEqual(result["manifest_status"], "pass")
+        self.assertEqual(result["sha256_status"], "pass")
+        self.assertEqual(
+            result["database_dump_sha256"],
+            hashlib.sha256(b"legacy-custom-dump").hexdigest(),
+        )
 
     def test_run_compose_odoo_stable_bootstrap_uses_dedicated_manual_schedule(self) -> None:
         target_definition = control_plane_dokploy.DokployTargetDefinition(

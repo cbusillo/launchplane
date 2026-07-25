@@ -1408,7 +1408,10 @@ try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         fail("manifest_unreadable", "manifest_status")
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+    if not isinstance(manifest, dict):
+        fail("manifest_identity_mismatch", "manifest_status")
+    manifest_schema_version = manifest.get("schema_version")
+    if manifest_schema_version not in (None, 1):
         fail("manifest_identity_mismatch", "manifest_status")
     expected_identity = {{
         "backup_record_id": backup_record_id,
@@ -1420,9 +1423,13 @@ try:
         "backup_dir": str(backup_dir),
         "database_dump_path": str(database_dump_path),
         "filestore_archive_path": str(filestore_archive_path),
-        "manifest_path": str(manifest_path),
     }}
     if any(manifest.get(key) != value for key, value in expected_paths.items()):
+        fail("manifest_path_mismatch", "manifest_status")
+    manifest_path_value = manifest.get("manifest_path")
+    if manifest_path_value is not None and manifest_path_value != str(manifest_path):
+        fail("manifest_path_mismatch", "manifest_status")
+    if manifest_schema_version == 1 and manifest_path_value != str(manifest_path):
         fail("manifest_path_mismatch", "manifest_status")
 
     if (
@@ -1445,12 +1452,19 @@ try:
 
     result["database_dump_sha256"] = file_sha256(database_dump_path)
     result["filestore_archive_sha256"] = file_sha256(filestore_archive_path)
-    if (
-        manifest.get("database_dump_sha256") != result["database_dump_sha256"]
-        or manifest.get("filestore_archive_sha256")
-        != result["filestore_archive_sha256"]
-    ):
-        fail("artifact_hash_mismatch", "sha256_status")
+    manifest_database_dump_sha256 = manifest.get("database_dump_sha256")
+    manifest_filestore_archive_sha256 = manifest.get("filestore_archive_sha256")
+    manifest_hashes_present = (
+        manifest_database_dump_sha256 is not None
+        or manifest_filestore_archive_sha256 is not None
+    )
+    if manifest_schema_version == 1 or manifest_hashes_present:
+        if (
+            manifest_database_dump_sha256 != result["database_dump_sha256"]
+            or manifest_filestore_archive_sha256
+            != result["filestore_archive_sha256"]
+        ):
+            fail("artifact_hash_mismatch", "sha256_status")
     result["sha256_status"] = "pass"
 
     restore_list = subprocess.run(

@@ -1649,6 +1649,12 @@ counts, sizes, per-check statuses, and a bounded failure code only. This slice
 does not restore a database, extract a filestore, stop containers, or mutate
 served Odoo data.
 
+Legacy backup-gate manifests created before manifest schema and hash fields were
+introduced remain verifiable: Launchplane validates their recorded identity,
+paths, and sizes, computes current SHA-256 values from the artifacts, and binds
+those values into the verification result. When a manifest does include schema,
+manifest-path, or hash fields, those fields must match exactly.
+
 After a target-replacement apply deploys and the Odoo health, canonical, and
 logo probes pass, lanes whose Odoo data policy requires runtime identity perform
 a separate bounded JSON health readback. This second probe may use the full lane
