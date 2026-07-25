@@ -40,6 +40,7 @@ from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
@@ -81,6 +82,7 @@ class _Store:
         artifact_manifest: ArtifactIdentityManifest | None = None,
         artifact_manifests: tuple[ArtifactIdentityManifest, ...] = (),
         odoo_instance_override_record: OdooInstanceOverrideRecord | None = None,
+        runtime_environment_records: tuple[RuntimeEnvironmentRecord, ...] | None = None,
     ) -> None:
         self.profile = profile or _profile()
         self.target_record = target_record
@@ -96,6 +98,11 @@ class _Store:
         self.secret_bindings: tuple[SecretBinding, ...] = ()
         self.runtime_key_safety_policy_records: tuple[RuntimeKeySafetyPolicyRecord, ...] = ()
         self.odoo_instance_override_record = odoo_instance_override_record
+        self.runtime_environment_records = (
+            runtime_environment_records
+            if runtime_environment_records is not None
+            else _runtime_environment_records_for_profile(self.profile)
+        )
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -134,6 +141,16 @@ class _Store:
         if self.odoo_instance_override_record is None:
             raise FileNotFoundError(f"{context_name}/{instance_name}")
         return self.odoo_instance_override_record
+
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        return tuple(
+            record
+            for record in self.runtime_environment_records
+            if (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
 
     def write_deployment_record(self, record: DeploymentRecord) -> None:
         self.deployment_records.append(record)
@@ -197,6 +214,27 @@ def _profile(driver_id: str = "odoo") -> LaunchplaneProductProfileRecord:
         preview=ProductPreviewProfile(enabled=True, context="cm"),
         updated_at="2026-05-09T00:00:00Z",
         source="test",
+    )
+
+
+def _runtime_environment_records_for_profile(
+    profile: LaunchplaneProductProfileRecord,
+) -> tuple[RuntimeEnvironmentRecord, ...]:
+    lane = profile.lanes[0]
+    volume_prefix = f"{lane.context}_{lane.instance}"
+    return (
+        RuntimeEnvironmentRecord(
+            scope="instance",
+            context=lane.context,
+            instance=lane.instance,
+            env={
+                "ODOO_DATA_VOLUME": f"{volume_prefix}_odoo_data",
+                "ODOO_LOG_VOLUME": f"{volume_prefix}_odoo_logs",
+                "ODOO_DB_VOLUME": f"{volume_prefix}_odoo_db",
+            },
+            updated_at="2026-07-25T00:00:00Z",
+            source_label="test",
+        ),
     )
 
 
@@ -788,6 +826,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertIsNotNone(plan.current_target)
         assert plan.current_target is not None
         self.assertEqual(plan.current_target.required_volume_keys_missing, ())
+        self.assertEqual(
+            plan.current_target.live_volume_values,
+            {
+                "ODOO_DATA_VOLUME": "cm_testing_odoo_data",
+                "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
+                "ODOO_DB_VOLUME": "cm_testing_odoo_db",
+            },
+        )
         self.assertTrue(plan.current_target.runtime_identity_present)
         self.assertEqual(plan.current_target.domain_hosts, ("cm-testing.shinycomputers.com",))
 
@@ -896,6 +942,68 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertIn("ODOO_DB_VOLUME", plan.blockers[0])
         self.assertIn(
             "Current target does not expose a Launchplane runtime identity yet.", plan.warnings
+        )
+
+    def test_build_plan_blocks_existing_data_when_desired_volume_authority_drifted(
+        self,
+    ) -> None:
+        runtime_records = _runtime_environment_records_for_profile(_profile())
+        drifted_record = runtime_records[0].model_copy(
+            update={
+                "env": {
+                    **runtime_records[0].env,
+                    "ODOO_DATA_VOLUME": "cm_testing_replacement_data",
+                }
+            }
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "cm-testing",
+                    "env": "\n".join(
+                        (
+                            "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                            "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                            "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        )
+                    ),
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+        ):
+            plan = build_odoo_stable_target_replacement_plan(
+                control_plane_root=Path("."),
+                record_store=_Store(
+                    target_record=_target_record(),
+                    target_id_record=_target_id_record(),
+                    inventory=_inventory(),
+                    runtime_environment_records=(drifted_record,),
+                ),
+                request=OdooStableTargetReplacementRequest(
+                    product="odoo-tenant-cm",
+                    instance="testing",
+                    data_source_mode="existing",
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(plan.plan_status, "blocked")
+        blocker = "; ".join(plan.blockers)
+        self.assertIn("DB-backed desired authority", blocker)
+        self.assertIn("ODOO_DATA_VOLUME", blocker)
+        self.assertNotIn("cm_testing_odoo_data", blocker)
+        self.assertNotIn("cm_testing_replacement_data", blocker)
+        self.assertEqual(
+            next(step for step in plan.steps if step.step_id == "volume-contract").status,
+            "blocked",
         )
 
     def test_build_plan_rejects_non_odoo_profile(self) -> None:

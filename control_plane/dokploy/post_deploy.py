@@ -1,3 +1,5 @@
+import base64
+import json
 import shlex
 
 from collections.abc import Callable, Mapping
@@ -16,6 +18,7 @@ from control_plane.dokploy.source import (
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
 DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME = "platform-odoo-bootstrap"
 DOKPLOY_ODOO_BACKUP_GATE_SCHEDULE_NAME = "platform-odoo-backup-gate"
+DOKPLOY_ODOO_BACKUP_VERIFICATION_SCHEDULE_NAME = "platform-odoo-backup-verification"
 DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION = "0 0 31 2 *"
 DOKPLOY_RUNNING_DEPLOYMENT_STATUSES = {"pending", "queued", "running", "in_progress", "starting"}
 DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES = {"cancelled", "canceled"}
@@ -73,6 +76,28 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
 ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset({"website_bootstrap_website_id"})
 ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
+)
+ODOO_BACKUP_VERIFICATION_RESULT_MARKER = "LAUNCHPLANE_ODOO_BACKUP_VERIFICATION_RESULT_B64"
+ODOO_BACKUP_VERIFICATION_RESULT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "verification_status",
+        "manifest_status",
+        "sha256_status",
+        "pg_restore_status",
+        "tar_status",
+        "staging_space_status",
+        "database_dump_sha256",
+        "filestore_archive_sha256",
+        "database_dump_size",
+        "filestore_archive_size",
+        "pg_restore_entry_count",
+        "filestore_member_count",
+        "filestore_unpacked_size",
+        "data_volume_free_bytes",
+        "staging_required_bytes",
+        "failure_code",
+    }
 )
 
 
@@ -600,6 +625,144 @@ def run_compose_odoo_backup_gate(
     )
 
 
+def run_compose_odoo_backup_verification(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+    backup_record_id: str,
+    database_name: str,
+    filestore_path: str,
+    backup_dir: str,
+    database_dump_path: str,
+    filestore_archive_path: str,
+    manifest_path: str,
+    timeout_seconds: int | None = None,
+) -> api.JsonObject:
+    compose_id = target_definition.target_id.strip()
+    compose_name = (
+        target_definition.target_name.strip()
+        or f"{target_definition.context}-{target_definition.instance}"
+    )
+    if not compose_id:
+        raise click.ClickException(
+            "Dokploy compose target requires target_id for Odoo backup verification."
+        )
+    target_payload = api.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type="compose",
+        target_id=compose_id,
+    )
+    schedule_timeout_seconds = (
+        timeout_seconds
+        or target_definition.deploy_timeout_seconds
+        or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+    )
+    schedule_type, schedule_lookup_id, compose_app_name, schedule_server_id = (
+        _resolve_dokploy_schedule_runtime(
+            host=host,
+            token=token,
+            compose_id=compose_id,
+            compose_name=compose_name,
+            target_payload=target_payload,
+        )
+    )
+    schedule_app_name = f"platform-{target_definition.context}-{target_definition.instance}-odoo-backup-verification"
+    schedule_payload: api.JsonObject = {
+        "name": DOKPLOY_ODOO_BACKUP_VERIFICATION_SCHEDULE_NAME,
+        "cronExpression": DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+        "appName": schedule_app_name,
+        "shellType": "bash",
+        "scheduleType": schedule_type,
+        "command": "control-plane odoo backup verification",
+        "script": _build_dokploy_odoo_backup_verification_script(
+            compose_app_name=compose_app_name,
+            backup_record_id=backup_record_id,
+            database_name=database_name,
+            filestore_path=filestore_path,
+            backup_dir=backup_dir,
+            database_dump_path=database_dump_path,
+            filestore_archive_path=filestore_archive_path,
+            manifest_path=manifest_path,
+        ),
+        "serverId": schedule_server_id,
+        "userId": schedule_lookup_id if schedule_type == "dokploy-server" else None,
+        "enabled": False,
+        "timezone": "UTC",
+    }
+    schedule = api.upsert_dokploy_schedule(
+        host=host,
+        token=token,
+        target_id=schedule_lookup_id,
+        schedule_type=schedule_type,
+        schedule_name=DOKPLOY_ODOO_BACKUP_VERIFICATION_SCHEDULE_NAME,
+        app_name=schedule_app_name,
+        schedule_payload=schedule_payload,
+    )
+    schedule_id = api.schedule_key(schedule)
+    if not schedule_id:
+        raise click.ClickException("Dokploy Odoo backup verification schedule has no schedule id.")
+    latest_schedule_deployment = api.latest_deployment_for_schedule(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+    )
+    api.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/schedule.runManually",
+        method="POST",
+        payload={"scheduleId": schedule_id},
+        timeout_seconds=schedule_timeout_seconds,
+    )
+    wait_result = api.wait_for_dokploy_schedule_deployment(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+        before_key=api.deployment_key(latest_schedule_deployment),
+        timeout_seconds=schedule_timeout_seconds,
+    )
+    deployment_id = api.deployment_key_from_wait_result(wait_result)
+    if not deployment_id:
+        raise click.ClickException(
+            "Dokploy Odoo backup verification did not return an exact deployment id."
+        )
+    log_lines = api.fetch_dokploy_deployment_logs(
+        host=host,
+        token=token,
+        deployment_id=deployment_id,
+        line_count=api.MAX_DOKPLOY_LOG_LINE_COUNT,
+    )
+    return extract_odoo_backup_verification_result({"logs": list(log_lines)})
+
+
+def extract_odoo_backup_verification_result(payload: api.JsonValue) -> api.JsonObject:
+    encoded_results: list[str] = []
+    marker_prefix = f"{ODOO_BACKUP_VERIFICATION_RESULT_MARKER}="
+    for line in api.normalize_dokploy_log_payload(payload):
+        normalized_line = line.strip()
+        if normalized_line.startswith(marker_prefix):
+            encoded_results.append(normalized_line.removeprefix(marker_prefix).strip())
+    if len(encoded_results) != 1:
+        raise click.ClickException(
+            "Dokploy Odoo backup verification returned no unique bounded result."
+        )
+    try:
+        decoded_payload = base64.b64decode(encoded_results[0], validate=True)
+        parsed_payload = json.loads(decoded_payload.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise click.ClickException(
+            "Dokploy Odoo backup verification returned an invalid bounded result."
+        ) from error
+    result = api.as_json_object(parsed_payload)
+    if result is None or set(result) != ODOO_BACKUP_VERIFICATION_RESULT_FIELDS:
+        raise click.ClickException(
+            "Dokploy Odoo backup verification returned an unexpected bounded result shape."
+        )
+    return result
+
+
 def extract_odoo_post_deploy_readback_markers(deployment: api.JsonObject | None) -> dict[str, str]:
     if deployment is None:
         return {}
@@ -1088,7 +1251,7 @@ docker exec \
 database_dump_size=$(docker exec "${{script_runner_container_id}}" stat -c %s "${{database_dump_path}}")
 filestore_archive_size=$(docker exec "${{script_runner_container_id}}" stat -c %s "${{filestore_archive_path}}")
 
-docker exec \
+docker exec -i \
     -e MANIFEST_PATH="${{manifest_path}}" \
     -e BACKUP_RECORD_ID="${{backup_record_id}}" \
     -e DATABASE_NAME="${{database_name}}" \
@@ -1100,27 +1263,268 @@ docker exec \
     "${{script_runner_container_id}}" \
     python3 - <<'PY'
 import json
+import hashlib
 import os
 from datetime import datetime, timezone
 
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 payload = {{
+    "schema_version": 1,
     "backup_record_id": os.environ["BACKUP_RECORD_ID"],
     "database_name": os.environ["DATABASE_NAME"],
     "backup_dir": os.environ["BACKUP_DIR"],
     "database_dump_path": os.environ["DATABASE_DUMP_PATH"],
     "filestore_archive_path": os.environ["FILESTORE_ARCHIVE_PATH"],
-    "database_dump_size": os.environ["DATABASE_DUMP_SIZE"],
-    "filestore_archive_size": os.environ["FILESTORE_ARCHIVE_SIZE"],
+    "manifest_path": os.environ["MANIFEST_PATH"],
+    "database_dump_size": int(os.environ["DATABASE_DUMP_SIZE"]),
+    "filestore_archive_size": int(os.environ["FILESTORE_ARCHIVE_SIZE"]),
+    "database_dump_sha256": sha256_file(os.environ["DATABASE_DUMP_PATH"]),
+    "filestore_archive_sha256": sha256_file(os.environ["FILESTORE_ARCHIVE_PATH"]),
     "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
 }}
 with open(os.environ["MANIFEST_PATH"], "w", encoding="utf-8") as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)
-    handle.write("\n")
+    handle.write("\\n")
 PY
 
 echo "Odoo backup gate complete: ${{backup_dir}}"
 start_web_container
 trap - EXIT
+"""
+
+
+def _build_dokploy_odoo_backup_verification_script(
+    *,
+    compose_app_name: str,
+    backup_record_id: str,
+    database_name: str,
+    filestore_path: str,
+    backup_dir: str,
+    database_dump_path: str,
+    filestore_archive_path: str,
+    manifest_path: str,
+) -> str:
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+compose_project={shlex.quote(compose_app_name)}
+script_runner_container_id=$(docker ps -q \
+    --filter "label=com.docker.compose.project=${{compose_project}}" \
+    --filter "label=com.docker.compose.service=script-runner" | head -n 1)
+if [ -z "${{script_runner_container_id}}" ]; then
+    echo "Odoo backup verification requires a running script-runner container." >&2
+    exit 1
+fi
+
+docker exec -i \
+    -e BACKUP_RECORD_ID={shlex.quote(backup_record_id)} \
+    -e DATABASE_NAME={shlex.quote(database_name)} \
+    -e FILESTORE_ROOT={shlex.quote(filestore_path)} \
+    -e BACKUP_DIR={shlex.quote(backup_dir)} \
+    -e DATABASE_DUMP_PATH={shlex.quote(database_dump_path)} \
+    -e FILESTORE_ARCHIVE_PATH={shlex.quote(filestore_archive_path)} \
+    -e MANIFEST_PATH={shlex.quote(manifest_path)} \
+    -e RESULT_MARKER={shlex.quote(ODOO_BACKUP_VERIFICATION_RESULT_MARKER)} \
+    "${{script_runner_container_id}}" \
+    python3 - <<'PY'
+import base64
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import tarfile
+from pathlib import Path, PurePosixPath
+
+
+class VerificationFailure(Exception):
+    pass
+
+
+def fail(code, check=""):
+    if check:
+        result[check] = "fail"
+    raise VerificationFailure(code)
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def manifest_size(value):
+    if isinstance(value, bool):
+        fail("manifest_size_invalid", "manifest_status")
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    fail("manifest_size_invalid", "manifest_status")
+
+
+result = {{
+    "schema_version": 1,
+    "verification_status": "fail",
+    "manifest_status": "not_run",
+    "sha256_status": "not_run",
+    "pg_restore_status": "not_run",
+    "tar_status": "not_run",
+    "staging_space_status": "not_run",
+    "database_dump_sha256": "",
+    "filestore_archive_sha256": "",
+    "database_dump_size": 0,
+    "filestore_archive_size": 0,
+    "pg_restore_entry_count": 0,
+    "filestore_member_count": 0,
+    "filestore_unpacked_size": 0,
+    "data_volume_free_bytes": 0,
+    "staging_required_bytes": 0,
+    "failure_code": "verification_error",
+}}
+
+try:
+    backup_record_id = os.environ["BACKUP_RECORD_ID"]
+    database_name = os.environ["DATABASE_NAME"]
+    filestore_root = Path(os.environ["FILESTORE_ROOT"])
+    backup_dir = Path(os.environ["BACKUP_DIR"])
+    database_dump_path = Path(os.environ["DATABASE_DUMP_PATH"])
+    filestore_archive_path = Path(os.environ["FILESTORE_ARCHIVE_PATH"])
+    manifest_path = Path(os.environ["MANIFEST_PATH"])
+
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        fail("manifest_unreadable", "manifest_status")
+    if manifest_path.stat().st_size > 1024 * 1024:
+        fail("manifest_unreadable", "manifest_status")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        fail("manifest_unreadable", "manifest_status")
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+        fail("manifest_identity_mismatch", "manifest_status")
+    expected_identity = {{
+        "backup_record_id": backup_record_id,
+        "database_name": database_name,
+    }}
+    if any(manifest.get(key) != value for key, value in expected_identity.items()):
+        fail("manifest_identity_mismatch", "manifest_status")
+    expected_paths = {{
+        "backup_dir": str(backup_dir),
+        "database_dump_path": str(database_dump_path),
+        "filestore_archive_path": str(filestore_archive_path),
+        "manifest_path": str(manifest_path),
+    }}
+    if any(manifest.get(key) != value for key, value in expected_paths.items()):
+        fail("manifest_path_mismatch", "manifest_status")
+
+    if (
+        database_dump_path.is_symlink()
+        or filestore_archive_path.is_symlink()
+        or not database_dump_path.is_file()
+        or not filestore_archive_path.is_file()
+    ):
+        fail("artifact_missing", "manifest_status")
+    result["database_dump_size"] = database_dump_path.stat().st_size
+    result["filestore_archive_size"] = filestore_archive_path.stat().st_size
+    if (
+        manifest_size(manifest.get("database_dump_size"))
+        != result["database_dump_size"]
+        or manifest_size(manifest.get("filestore_archive_size"))
+        != result["filestore_archive_size"]
+    ):
+        fail("artifact_size_mismatch", "manifest_status")
+    result["manifest_status"] = "pass"
+
+    result["database_dump_sha256"] = file_sha256(database_dump_path)
+    result["filestore_archive_sha256"] = file_sha256(filestore_archive_path)
+    if (
+        manifest.get("database_dump_sha256") != result["database_dump_sha256"]
+        or manifest.get("filestore_archive_sha256")
+        != result["filestore_archive_sha256"]
+    ):
+        fail("artifact_hash_mismatch", "sha256_status")
+    result["sha256_status"] = "pass"
+
+    restore_list = subprocess.run(
+        ["pg_restore", "--list", str(database_dump_path)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if restore_list.returncode != 0:
+        fail("database_dump_invalid", "pg_restore_status")
+    result["pg_restore_entry_count"] = sum(
+        1
+        for line in restore_list.stdout.splitlines()
+        if line.strip() and not line.lstrip().startswith(";")
+    )
+    if result["pg_restore_entry_count"] < 1:
+        fail("database_dump_invalid", "pg_restore_status")
+    result["pg_restore_status"] = "pass"
+
+    seen_members = set()
+    top_level_directory_seen = False
+    try:
+        with tarfile.open(filestore_archive_path, mode="r:gz") as archive:
+            for member in archive:
+                member_path = PurePosixPath(member.name)
+                if (
+                    member_path.is_absolute()
+                    or not member_path.parts
+                    or any(part in {{"", ".", ".."}} for part in member_path.parts)
+                    or member_path.parts[0] != database_name
+                    or (not member.isfile() and not member.isdir())
+                ):
+                    fail("filestore_members_unsafe", "tar_status")
+                normalized_member = member_path.as_posix()
+                if normalized_member in seen_members:
+                    fail("filestore_members_unsafe", "tar_status")
+                seen_members.add(normalized_member)
+                result["filestore_member_count"] += 1
+                if member.isfile():
+                    result["filestore_unpacked_size"] += member.size
+                if member.isdir() and normalized_member.rstrip("/") == database_name:
+                    top_level_directory_seen = True
+    except (OSError, tarfile.TarError):
+        fail("filestore_archive_invalid", "tar_status")
+    if result["filestore_member_count"] < 1:
+        fail("filestore_archive_invalid", "tar_status")
+    if not top_level_directory_seen:
+        fail("filestore_top_level_mismatch", "tar_status")
+    result["tar_status"] = "pass"
+
+    filestore_database_path = filestore_root
+    if filestore_database_path.name != database_name:
+        filestore_database_path = filestore_database_path / database_name
+    staging_parent = filestore_database_path.parent
+    if not staging_parent.is_dir():
+        fail("staging_path_unavailable", "staging_space_status")
+    result["data_volume_free_bytes"] = shutil.disk_usage(staging_parent).free
+    result["staging_required_bytes"] = result["filestore_unpacked_size"]
+    if result["data_volume_free_bytes"] < result["staging_required_bytes"]:
+        fail("staging_space_insufficient", "staging_space_status")
+    result["staging_space_status"] = "pass"
+    result["verification_status"] = "pass"
+    result["failure_code"] = ""
+except VerificationFailure as error:
+    result["failure_code"] = str(error)
+except Exception:
+    result["failure_code"] = "verification_error"
+
+encoded_result = base64.b64encode(
+    json.dumps(result, separators=(",", ":"), sort_keys=True).encode("utf-8")
+).decode("ascii")
+print(f"{{os.environ['RESULT_MARKER']}}={{encoded_result}}")
+PY
 """
 
 
