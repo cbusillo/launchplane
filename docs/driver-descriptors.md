@@ -335,6 +335,12 @@ testing artifact and source ref from Launchplane release tuple and artifact
 records, then returns the deterministic backup-gate record ID for the caller's
 request ID. Tenant workflows should use that response instead of prompting an
 operator to enter artifact or source facts by hand.
+`POST /v1/drivers/odoo/prod-backup-verification` is a separate instance-scoped
+`safe_write` action with dedicated
+`odoo_prod_backup_verification.execute` authorization. It runs a manual
+read-only Dokploy schedule against the lane's existing `script-runner`, returns
+only bounded hashes, counts, sizes, and statuses, and does not advertise or
+perform restore mutation.
 The preferred tenant-facing mutation route is
 `POST /v1/drivers/odoo/prod-promotion-run`, which keeps the full inputs,
 backup-gate, and promotion sequence inside Launchplane while returning each

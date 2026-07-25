@@ -163,6 +163,7 @@ class FastApiWriteRouteRegistrarTests(unittest.TestCase):
         ]
         expected_rollback = [
             ("POST", "/v1/drivers/odoo/prod-backup-gate"),
+            ("POST", "/v1/drivers/odoo/prod-backup-verification"),
             ("POST", "/v1/drivers/generic-web/prod-rollback-plan"),
             ("POST", "/v1/drivers/generic-web/prod-rollback"),
             ("POST", "/v1/drivers/odoo/prod-rollback"),

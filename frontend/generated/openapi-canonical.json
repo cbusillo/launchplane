@@ -28497,6 +28497,181 @@
         "summary": "Execute Odoo prod backup gate"
       }
     },
+    "/v1/drivers/odoo/prod-backup-verification": {
+      "post": {
+        "operationId": "write_odoo_prod_backup_verification",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "OdooProdBackupVerificationRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "backup_record_id": {
+                        "title": "Backup Record Id",
+                        "type": "string"
+                      },
+                      "context": {
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "instance": {
+                        "default": "prod",
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "default": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "timeout_seconds": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Timeout Seconds"
+                      }
+                    },
+                    "required": [
+                      "context",
+                      "backup_record_id"
+                    ],
+                    "title": "OdooProdBackupVerificationRequest",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "backup_verification": {
+                    "$ref": "#/$defs/OdooProdBackupVerificationRequest"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "backup_verification"
+                ],
+                "title": "OdooProdBackupVerificationEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Verify Odoo prod backup integrity"
+      }
+    },
     "/v1/drivers/odoo/prod-promotion": {
       "post": {
         "operationId": "write_odoo_prod_promotion",

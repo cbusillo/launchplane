@@ -10,6 +10,7 @@ from typing import Any, Literal
 from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.authz_scope import exclusively_instance_scoped_authz_actions
 from control_plane.contracts.driver_descriptor import (
     DriverActionDescriptor,
     DriverCapabilityDescriptor,
@@ -43,7 +44,10 @@ from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
     ODOO_PREVIEW_APPLY_ROUTE,
 )
-from control_plane.odoo_prod_backup_gate_http import ODOO_PROD_BACKUP_GATE_ROUTE
+from control_plane.odoo_prod_backup_gate_http import (
+    ODOO_PROD_BACKUP_GATE_ROUTE,
+    ODOO_PROD_BACKUP_VERIFICATION_ROUTE,
+)
 from control_plane.odoo_prod_promotion_http import (
     ODOO_PROD_PROMOTION_INPUTS_ROUTE,
     ODOO_PROD_PROMOTION_ROUTE,
@@ -1076,11 +1080,27 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             driver_id="odoo",
             route_paths_by_action={
                 "prod_backup_gate": ODOO_PROD_BACKUP_GATE_ROUTE,
+                "prod_backup_verification": ODOO_PROD_BACKUP_VERIFICATION_ROUTE,
                 "prod_promotion_inputs": ODOO_PROD_PROMOTION_INPUTS_ROUTE,
                 "prod_promotion_run": ODOO_PROD_PROMOTION_RUN_ROUTE,
                 "prod_promotion": ODOO_PROD_PROMOTION_ROUTE,
                 "prod_rollback": ODOO_PROD_ROLLBACK_ROUTE,
             },
+        )
+        odoo_actions = {
+            action.action_id: action for action in read_driver_descriptor("odoo").actions
+        }
+        verification_action = odoo_actions["prod_backup_verification"]
+        self.assertEqual(verification_action.safety, "safe_write")
+        self.assertEqual(verification_action.scope, "instance")
+        self.assertEqual(
+            verification_action.authz_action,
+            "odoo_prod_backup_verification.execute",
+        )
+        self.assertEqual(verification_action.writes_records, ())
+        self.assertIn(
+            verification_action.authz_action,
+            exclusively_instance_scoped_authz_actions(),
         )
 
     def test_odoo_preview_execution_metadata_matches_descriptors(self) -> None:
