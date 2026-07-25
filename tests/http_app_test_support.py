@@ -4058,6 +4058,7 @@ async def _get_tracked_target_logs(
     source: str = "",
     since: str = "",
     search: str = "",
+    service: str = "",
     authorization: str = "Bearer valid-token",
     headers: dict[str, str] | None = None,
 ) -> _AsgiResponse:
@@ -4073,6 +4074,8 @@ async def _get_tracked_target_logs(
         params["since"] = since
     if search:
         params["search"] = search
+    if service:
+        params["service"] = service
     suffix = f"?{urlencode(params)}" if params else ""
     return await _asgi_get(
         app,

@@ -126,6 +126,7 @@ class TrackedTargetLogRequestResponse(BaseModel):
     line_count: int
     since: str
     search: str
+    service: str
 
 
 class TrackedTargetLogLinesResponse(BaseModel):
@@ -661,6 +662,7 @@ def register_tracked_target_log_read_routes(
         lines: Annotated[str, Query()] = str(dokploy_api.DEFAULT_DOKPLOY_LOG_LINE_COUNT),
         since: Annotated[str, Query()] = "all",
         search: Annotated[str, Query()] = "",
+        service: Annotated[str, Query()] = "",
         source: Annotated[str, Query()] = "runtime",
     ) -> TrackedTargetLogsResponse:
         trace_id = common.next_trace_id()
@@ -696,6 +698,7 @@ def register_tracked_target_log_read_routes(
         try:
             normalized_since = dokploy_api.normalize_dokploy_log_since(since)
             normalized_search = dokploy_api.normalize_dokploy_log_search(search)
+            normalized_service = dokploy_api.normalize_dokploy_compose_service_name(service)
             normalized_source = (
                 control_plane_tracked_target_logs.normalize_tracked_target_log_source(source)
             )
@@ -703,6 +706,10 @@ def register_tracked_target_log_read_routes(
                 raise ValueError("Tracked deployment logs require since='all'.")
             if normalized_source == "deployment" and normalized_search:
                 raise ValueError("Tracked deployment logs do not support search.")
+            if normalized_source == "deployment" and normalized_service:
+                raise ValueError(
+                    "Tracked deployment logs do not support compose service selection."
+                )
         except (ValueError, click.ClickException) as error:
             raise common.http_error(
                 status_code=400,
@@ -720,6 +727,7 @@ def register_tracked_target_log_read_routes(
                 line_count=line_count,
                 since=normalized_since,
                 search=normalized_search,
+                service=normalized_service,
                 source=normalized_source,
             )
         except TypeError as error:

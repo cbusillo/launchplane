@@ -53,6 +53,7 @@ def build_tracked_target_logs_payload(
     line_count: int,
     since: str = "all",
     search: str = "",
+    service: str = "",
     source: str = "runtime",
 ) -> dict[str, object]:
     normalized_context = context_name.strip().lower()
@@ -81,11 +82,16 @@ def build_tracked_target_logs_payload(
     normalized_line_count = dokploy_api.normalize_dokploy_log_line_count(line_count)
     normalized_since = dokploy_api.normalize_dokploy_log_since(since)
     normalized_search = dokploy_api.normalize_dokploy_log_search(search)
+    normalized_service = dokploy_api.normalize_dokploy_compose_service_name(service)
     normalized_source = normalize_tracked_target_log_source(source)
     if normalized_source == "deployment" and normalized_since != "all":
         raise ValueError("Tracked deployment logs require since='all'.")
     if normalized_source == "deployment" and normalized_search:
         raise ValueError("Tracked deployment logs do not support search.")
+    if normalized_source == "deployment" and normalized_service:
+        raise ValueError("Tracked deployment logs do not support compose service selection.")
+    if target_record.target_type == "application" and normalized_service:
+        raise ValueError("Tracked application logs do not support compose service selection.")
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     except click.ClickException as error:
@@ -158,6 +164,7 @@ def build_tracked_target_logs_payload(
                 compose_id=target_id_record.target_id,
                 app_name=app_name,
                 server_id=server_id,
+                service_name=normalized_service,
                 line_count=normalized_line_count,
                 since=normalized_since,
                 search=normalized_search,
@@ -183,6 +190,7 @@ def build_tracked_target_logs_payload(
             "line_count": normalized_line_count,
             "since": normalized_since,
             "search": normalized_search,
+            "service": normalized_service,
         },
         "logs": {
             "line_count": len(logs),

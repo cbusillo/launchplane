@@ -1283,7 +1283,13 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["target"]["app_name"], "syo-testing-gfbiqh")
         self.assertEqual(
             payload["request"],
-            {"source": "runtime", "line_count": 2, "since": "5m", "search": "contact"},
+            {
+                "source": "runtime",
+                "line_count": 2,
+                "since": "5m",
+                "search": "contact",
+                "service": "",
+            },
         )
         self.assertEqual(payload["logs"]["lines"], ["contact form submitted"])
         self.assertTrue(payload["logs"]["redacted"])
@@ -1603,6 +1609,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             compose_id="compose-123",
             app_name="cm-website-testing-iul0ql",
             server_id="server-1",
+            service_name="",
             line_count=2,
             since="5m",
             search="",
@@ -1613,6 +1620,102 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["target"]["app_name"], "cm-website-testing-iul0ql")
         self.assertEqual(payload["logs"]["lines"], ["booting", "ODOO_ADMIN_PASSWORD=[redacted]"])
         self.assertNotIn("secret-token", json.dumps(payload))
+
+    async def test_tracked_target_logs_selects_exact_compose_service(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="cm_website",
+                instance="testing",
+                target_id="compose-123",
+                target_type="compose",
+                target_name="cm-website-testing",
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            with (
+                patch(
+                    "control_plane.tracked_target_logs.dokploy_source.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "secret-token"),
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_target_payload",
+                    return_value={"appName": "cm-website-testing-iul0ql", "serverId": "server-1"},
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_compose_logs",
+                    return_value=("database system is ready",),
+                ) as logs_mock,
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="target_logs.read",
+                        context="cm_website",
+                    ),
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+                response = await _get_tracked_target_logs(
+                    app,
+                    "cm_website",
+                    "testing",
+                    lines="20",
+                    since="30m",
+                    service="database",
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            compose_id="compose-123",
+            app_name="cm-website-testing-iul0ql",
+            server_id="server-1",
+            service_name="database",
+            line_count=20,
+            since="30m",
+            search="",
+        )
+        payload = response.json()
+        self.assertEqual(payload["request"]["service"], "database")
+        self.assertEqual(payload["logs"]["lines"], ["database system is ready"])
+
+    async def test_tracked_target_logs_rejects_service_for_application_target(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-123",
+                target_type="application",
+                target_name="syo-testing-app",
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="target_logs.read",
+                    context="sellyouroutboard-testing",
+                ),
+                record_store_factory=lambda: app_store,
+                control_plane_root_path=root,
+            )
+            response = await _get_tracked_target_logs(
+                app,
+                "sellyouroutboard-testing",
+                "testing",
+                service="database",
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertIn("application logs", response.json()["error"]["message"])
 
     async def test_tracked_target_logs_delegates_compose_log_search_to_provider(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1667,6 +1770,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             compose_id="compose-123",
             app_name="cm-website-testing-iul0ql",
             server_id="server-1",
+            service_name="",
             line_count=2,
             since="2h",
             search="website_bootstrap_applied",
@@ -1679,6 +1783,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                 "line_count": 2,
                 "since": "2h",
                 "search": "website_bootstrap_applied",
+                "service": "",
             },
         )
         self.assertEqual(payload["logs"]["lines"], ["website_bootstrap_applied name=Cell Mechanic"])
@@ -1938,6 +2043,20 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
             since="all",
             search="failed",
         )
+        deployment_service_response = await _get_tracked_target_logs(
+            app,
+            "sellyouroutboard-testing",
+            "testing",
+            source="deployment",
+            since="all",
+            service="database",
+        )
+        service_response = await _get_tracked_target_logs(
+            app,
+            "sellyouroutboard-testing",
+            "testing",
+            service="database;rm",
+        )
 
         self.assertEqual(line_response.status_code, 400)
         self.assertEqual(since_response.status_code, 400)
@@ -1945,12 +2064,16 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source_response.status_code, 400)
         self.assertEqual(deployment_since_response.status_code, 400)
         self.assertEqual(deployment_search_response.status_code, 400)
+        self.assertEqual(deployment_service_response.status_code, 400)
+        self.assertEqual(service_response.status_code, 400)
         self.assertEqual(line_response.json()["error"]["code"], "invalid_query")
         self.assertEqual(since_response.json()["error"]["code"], "invalid_query")
         self.assertEqual(max_line_response.json()["error"]["code"], "invalid_query")
         self.assertEqual(source_response.json()["error"]["code"], "invalid_query")
         self.assertEqual(deployment_since_response.json()["error"]["code"], "invalid_query")
         self.assertEqual(deployment_search_response.json()["error"]["code"], "invalid_query")
+        self.assertEqual(deployment_service_response.json()["error"]["code"], "invalid_query")
+        self.assertEqual(service_response.json()["error"]["code"], "invalid_query")
 
     async def test_openapi_includes_tracked_target_logs_contract(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -1968,6 +2091,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         openapi = response.json()
         route = openapi["paths"]["/v1/contexts/{context}/instances/{instance}/logs"]["get"]
         self.assertEqual(route["operationId"], "read_tracked_target_logs")
+        self.assertIn("service", {parameter["name"] for parameter in route["parameters"]})
         self.assertEqual(
             route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/TrackedTargetLogsResponse",
@@ -1980,4 +2104,8 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             openapi["components"]["schemas"]["TrackedTargetLogsResponse"]["additionalProperties"],
             False,
+        )
+        self.assertIn(
+            "service",
+            openapi["components"]["schemas"]["TrackedTargetLogRequestResponse"]["properties"],
         )

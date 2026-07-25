@@ -1177,7 +1177,10 @@ Current derived-state behavior:
   resolves the DB-backed tracked Dokploy target and target id before fetching
   bounded logs. It supports Dokploy `application` and `compose` targets,
   includes route/target/app/server metadata, accepts optional `--since` and
-  `--search`, and redacts likely secret values from returned log lines.
+  `--search`, and redacts likely secret values from returned log lines. Compose
+  runtime reads may also pass `--service <exact-compose-service>` to select one
+  exact service container. Launchplane fails closed when that service is absent
+  or ambiguous; application and deployment log reads reject service selection.
 - `GET /v1/contexts/{context}/instances/{instance}/logs?lines=200` exposes the
   same tracked-target log reader through a native FastAPI service route using
   action `target_logs.read`. The default `source=runtime` reads current
