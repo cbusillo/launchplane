@@ -1059,7 +1059,10 @@ Current derived-state behavior:
   `POST /v1/drivers/odoo/prod-promotion-inputs` resolves the current testing
   artifact, source ref, and deterministic backup-gate record ID from DB-backed
   release tuple and artifact records, `POST /v1/drivers/odoo/prod-backup-gate`
-  captures DB and filestore backup evidence, `POST /v1/drivers/odoo/prod-promotion`
+  captures DB and filestore backup evidence,
+  `POST /v1/drivers/odoo/prod-backup-verification` reads an exact passing Odoo
+  backup-gate record and runs read-only integrity checks against the captured
+  backup, and `POST /v1/drivers/odoo/prod-promotion`
   validates the stored artifact, source release tuple, and required backup gate
   before promoting `testing` to `prod`, and `POST /v1/drivers/odoo/prod-rollback`
   deploys an explicit previous artifact. These routes resolve target identity,
@@ -1627,9 +1630,32 @@ discoverable so operators can follow reviewed workflow ownership instead of
 falling back to an arbitrary checkout or local live-target command.
 
 The plan reads the product profile, Launchplane Dokploy target/id records,
-current inventory, live Dokploy target payload, domains, volume env keys, latest
-deployment, and expected runtime identity. It does not create, delete, deploy,
-or change routes.
+current inventory, live Dokploy target payload, domains, exact live
+`ODOO_DATA_VOLUME`, `ODOO_LOG_VOLUME`, and `ODOO_DB_VOLUME` values, latest
+deployment, and expected runtime identity. For `data_source_mode=existing`, the
+plan also resolves desired volume authority from DB-backed runtime records and
+blocks when any desired value differs from the live target. It does not create,
+delete, deploy, change routes, or reinterpret a volume change as existing data.
+
+Use the `Odoo Prod Backup Verification` workflow to exercise the verification
+route through GitHub Actions OIDC. The workflow accepts an exact backup-gate
+record id, stores only the bounded response artifact, and fails if the response
+contains backup paths or an unbounded error. Verification recomputes the
+expected paths from DB-backed runtime records, checks manifest identities,
+paths, sizes, and SHA-256 values, runs `pg_restore --list` plus a full archive
+render to `/dev/null`, validates safe tar members under the expected database
+directory, and confirms enough free space on the Odoo data volume to stage the
+uncompressed filestore. Each provider result is bound to a fresh request nonce,
+the exact backup record id, and database name before Launchplane accepts it. The
+route returns hashes, counts, sizes, per-check statuses, and a bounded failure
+code only. This slice does not restore a database, extract a filestore, stop
+containers, or mutate served Odoo data.
+
+Legacy backup-gate manifests created before manifest schema and hash fields were
+introduced remain verifiable: Launchplane validates their recorded identity,
+paths, and sizes, computes current SHA-256 values from the artifacts, and binds
+those values into the verification result. When a manifest does include schema,
+manifest-path, or hash fields, those fields must match exactly.
 
 After a target-replacement apply deploys and the Odoo health, canonical, and
 logo probes pass, lanes whose Odoo data policy requires runtime identity perform

@@ -1,0 +1,53 @@
+---
+name: Odoo Prod Backup Verification
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Odoo product profile key.
+        required: true
+        type: string
+      context:
+        description: Launchplane production context.
+        required: true
+        type: string
+      instance:
+        description: Production lane instance.
+        required: true
+        default: prod
+        type: string
+      backup_record_id:
+        description: Exact passing Odoo backup-gate record id to verify.
+        required: true
+        type: string
+      timeout_seconds:
+        description: Optional Dokploy verification timeout override in seconds.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: >-
+    odoo-prod-backup-verification-${{ inputs.product }}-${{ inputs.instance }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    # yamllint disable-line rule:line-length
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-verification.yml@b0f389326cf372cd433b96a0c98365c4cae6c5f1  # main
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: ${{ inputs.instance }}
+      backup_record_id: ${{ inputs.backup_record_id }}
+      timeout_seconds: ${{ inputs.timeout_seconds }}
+      launchplane_url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      launchplane_audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 import click
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import live_target_runtime as control_plane_live_target_runtime
@@ -29,6 +29,7 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
@@ -82,6 +83,10 @@ class OdooStableTargetReplacementStore(RuntimeKeySafetyPolicyReadStore, Protocol
         self, *, context_name: str, instance_name: str
     ) -> OdooInstanceOverrideRecord: ...
 
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
+
     def write_deployment_record(self, record: DeploymentRecord) -> object: ...
 
     def write_environment_inventory(self, record: EnvironmentInventory) -> object: ...
@@ -96,6 +101,7 @@ DokployConfigReader = Callable[..., tuple[str, str]]
 ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS = 5
 ODOO_INSTALL_MODULES_ENV_KEY = "ODOO_INSTALL_MODULES"
 LAUNCHPLANE_REQUIRED_ODOO_MODULES = ("launchplane_settings", "disable_odoo_online")
+ODOO_REQUIRED_VOLUME_ENV_KEYS = ("ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME", "ODOO_DB_VOLUME")
 
 
 class OdooStableTargetRuntimeSnapshot(BaseModel):
@@ -114,6 +120,7 @@ class OdooStableTargetRuntimeSnapshot(BaseModel):
     env_keys: tuple[str, ...] = ()
     required_volume_keys_present: tuple[str, ...] = ()
     required_volume_keys_missing: tuple[str, ...] = ()
+    live_volume_values: dict[str, str] = Field(default_factory=dict)
     runtime_identity_present: bool = False
     runtime_identity_deployment_record_id: str = ""
 
@@ -875,10 +882,14 @@ def _snapshot_current_target(
         target_id=target_id_record.target_id,
     )
     env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
-    required_volume_keys = ("ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME", "ODOO_DB_VOLUME")
-    present_volume_keys = tuple(key for key in required_volume_keys if env_map.get(key, "").strip())
+    live_volume_values = {
+        key: env_map.get(key, "").strip() for key in ODOO_REQUIRED_VOLUME_ENV_KEYS
+    }
+    present_volume_keys = tuple(
+        key for key in ODOO_REQUIRED_VOLUME_ENV_KEYS if live_volume_values[key]
+    )
     missing_volume_keys = tuple(
-        key for key in required_volume_keys if key not in present_volume_keys
+        key for key in ODOO_REQUIRED_VOLUME_ENV_KEYS if key not in present_volume_keys
     )
     latest_deployment = dokploy_api.latest_deployment_for_target(
         host=host,
@@ -916,6 +927,7 @@ def _snapshot_current_target(
         env_keys=tuple(sorted(env_map.keys())),
         required_volume_keys_present=present_volume_keys,
         required_volume_keys_missing=missing_volume_keys,
+        live_volume_values=live_volume_values,
         runtime_identity_present=bool(runtime_identity),
         runtime_identity_deployment_record_id=runtime_identity.get("deployment_record_id", ""),
     )
@@ -925,6 +937,7 @@ def _build_steps(
     *,
     current_target: OdooStableTargetRuntimeSnapshot | None,
     blockers: tuple[str, ...],
+    volume_authority_drift_keys: tuple[str, ...],
     plan_strategy: Literal["recreate-in-place", "replace-and-cutover"],
 ) -> tuple[OdooStableTargetReplacementStep, ...]:
     steps: list[OdooStableTargetReplacementStep] = []
@@ -939,9 +952,15 @@ def _build_steps(
         OdooStableTargetReplacementStep(
             step_id="volume-contract",
             status="ready"
-            if current_target is not None and not current_target.required_volume_keys_missing
+            if (
+                current_target is not None
+                and not current_target.required_volume_keys_missing
+                and not volume_authority_drift_keys
+            )
             else "blocked",
-            message="Confirm Odoo data/log/database volume keys are explicit in target env.",
+            message=(
+                "Confirm live Odoo data/log/database volumes match DB-backed desired authority."
+            ),
         )
     )
     steps.append(
@@ -1004,6 +1023,8 @@ def build_odoo_stable_target_replacement_plan(
     blockers: list[str] = []
     warnings: list[str] = []
     current_target: OdooStableTargetRuntimeSnapshot | None = None
+    desired_volume_values: dict[str, str] = {}
+    volume_authority_drift_keys: tuple[str, ...] = ()
     if target_record is None:
         blockers.append("Launchplane has no Dokploy target record for this lane.")
     if target_id_record is None:
@@ -1018,6 +1039,17 @@ def build_odoo_stable_target_replacement_plan(
     if isinstance(target_record, DokployTargetRecord) and isinstance(
         target_id_record, DokployTargetIdRecord
     ):
+        try:
+            desired_volume_values = _resolve_desired_volume_values(
+                record_store=record_store,
+                target_record=target_record,
+                context=lane.context,
+                instance=lane.instance,
+            )
+        except click.ClickException:
+            blockers.append(
+                "Launchplane could not resolve DB-backed Odoo volume authority for this lane."
+            )
         host, token = resolved_dokploy_config_reader(control_plane_root=control_plane_root)
         current_target = _snapshot_current_target(
             host=host,
@@ -1040,6 +1072,18 @@ def build_odoo_stable_target_replacement_plan(
                 "Current target is missing required Odoo volume env keys: "
                 + ", ".join(current_target.required_volume_keys_missing)
             )
+        if request.data_source_mode == "existing" and desired_volume_values:
+            volume_authority_drift_keys = tuple(
+                key
+                for key in ODOO_REQUIRED_VOLUME_ENV_KEYS
+                if desired_volume_values.get(key, "")
+                != current_target.live_volume_values.get(key, "")
+            )
+            if volume_authority_drift_keys:
+                blockers.append(
+                    "Existing-data target replacement requires live Odoo volume values to match "
+                    "DB-backed desired authority for: " + ", ".join(volume_authority_drift_keys)
+                )
         if not current_target.domain_hosts:
             blockers.append("Current target has no discoverable Dokploy domains to cut over.")
         if not current_target.runtime_identity_present:
@@ -1094,9 +1138,33 @@ def build_odoo_stable_target_replacement_plan(
         steps=_build_steps(
             current_target=current_target,
             blockers=blockers_tuple,
+            volume_authority_drift_keys=volume_authority_drift_keys,
             plan_strategy=request.strategy,
         ),
     )
+
+
+def _resolve_desired_volume_values(
+    *,
+    record_store: OdooStableTargetReplacementStore,
+    target_record: DokployTargetRecord,
+    context: str,
+    instance: str,
+) -> dict[str, str]:
+    definition = (
+        control_plane_runtime_environments.load_optional_runtime_environment_definition_from_store(
+            record_store=record_store
+        )
+    )
+    if definition is None:
+        raise click.ClickException("Missing DB-backed runtime environment records.")
+    values = control_plane_runtime_environments.resolve_values_from_definition(
+        definition=definition,
+        context_name=context,
+        instance_name=instance,
+    )
+    values.update(target_record.env)
+    return {key: values.get(key, "").strip() for key in ODOO_REQUIRED_VOLUME_ENV_KEYS}
 
 
 def execute_odoo_stable_target_replacement_apply(
