@@ -1381,6 +1381,13 @@ def manifest_size(value):
     fail("manifest_size_invalid", "manifest_status")
 
 
+def path_size(path, failure_code, check):
+    try:
+        return path.stat().st_size
+    except OSError:
+        fail(failure_code, check)
+
+
 verification_nonce = os.environ["VERIFICATION_NONCE"]
 backup_record_id = os.environ["BACKUP_RECORD_ID"]
 database_name = os.environ["DATABASE_NAME"]
@@ -1418,7 +1425,7 @@ try:
 
     if manifest_path.is_symlink() or not manifest_path.is_file():
         fail("manifest_unreadable", "manifest_status")
-    if manifest_path.stat().st_size > 1024 * 1024:
+    if path_size(manifest_path, "manifest_unreadable", "manifest_status") > 1024 * 1024:
         fail("manifest_unreadable", "manifest_status")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1455,8 +1462,12 @@ try:
         or not filestore_archive_path.is_file()
     ):
         fail("artifact_missing", "manifest_status")
-    result["database_dump_size"] = database_dump_path.stat().st_size
-    result["filestore_archive_size"] = filestore_archive_path.stat().st_size
+    result["database_dump_size"] = path_size(
+        database_dump_path, "artifact_missing", "manifest_status"
+    )
+    result["filestore_archive_size"] = path_size(
+        filestore_archive_path, "artifact_missing", "manifest_status"
+    )
     if (
         manifest_size(manifest.get("database_dump_size"))
         != result["database_dump_size"]
