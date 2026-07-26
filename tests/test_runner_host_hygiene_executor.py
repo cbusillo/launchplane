@@ -45,6 +45,13 @@ _VOLUME_RM_PREFIX = (
     "volume",
     "rm",
 )
+_ENGINE_PRUNE_PREFIX = (
+    "flock",
+    "-n",
+    "/tmp/launchplane-runner-host-hygiene.lock",
+    "curl",
+    "--silent",
+)
 
 
 class _CommandRunner:
@@ -196,15 +203,7 @@ class _CommandRunner:
                     else "--filter filter\n"
                 ),
             )
-        if command_tuple[:7] == (
-            "flock",
-            "-n",
-            "/tmp/launchplane-runner-host-hygiene.lock",
-            "docker",
-            "builder",
-            "prune",
-            "--force",
-        ):
+        if command_tuple[:5] == _ENGINE_PRUNE_PREFIX:
             self._pruned = True
             return RemoteCommandResult(
                 returncode=self._prune_returncode,
@@ -332,13 +331,7 @@ class _SpoolAwareCommandRunner(_CommandRunner):
 
     def __call__(self, command: Sequence[str], timeout_seconds: int) -> RemoteCommandResult:
         command_tuple = tuple(command)
-        if command_tuple[:5] == (
-            "flock",
-            "-n",
-            "/tmp/launchplane-runner-host-hygiene.lock",
-            "docker",
-            "builder",
-        ):
+        if command_tuple[:5] == _ENGINE_PRUNE_PREFIX:
             envelope = self._spool.read(
                 host_name=self._request.host_name,
                 action=self._request.action,
@@ -355,13 +348,7 @@ class _SpoolAwareCommandRunner(_CommandRunner):
 class _CrashingCommandRunner(_CommandRunner):
     def __call__(self, command: Sequence[str], timeout_seconds: int) -> RemoteCommandResult:
         command_tuple = tuple(command)
-        if command_tuple[:5] == (
-            "flock",
-            "-n",
-            "/tmp/launchplane-runner-host-hygiene.lock",
-            "docker",
-            "builder",
-        ):
+        if command_tuple[:5] == _ENGINE_PRUNE_PREFIX:
             raise RuntimeError("simulated runner termination")
         return super().__call__(command_tuple, timeout_seconds)
 
@@ -431,13 +418,18 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 "flock",
                 "-n",
                 "/tmp/launchplane-runner-host-hygiene.lock",
-                "docker",
-                "builder",
-                "prune",
-                "--force",
-                "--all",
-                "--filter",
-                "until=168h",
+                "curl",
+                "--silent",
+                "--show-error",
+                "--fail",
+                "--request",
+                "POST",
+                "--unix-socket",
+                "/var/run/docker.sock",
+                (
+                    "http://localhost/v1.45/build/prune?all=true&filters="
+                    "%7B%22until%22%3A%7B%22168h%22%3Atrue%7D%7D"
+                ),
             ),
             command_runner.commands,
         )
@@ -692,7 +684,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         self.assertIn("post evidence still needs attention", result.message)
         self.assertTrue(
-            any(command[4:6] == ("builder", "prune") for command in command_runner.commands)
+            any(command[:5] == _ENGINE_PRUNE_PREFIX for command in command_runner.commands)
         )
 
     def test_executor_uses_root_owned_workdir_usage_helper(self) -> None:
@@ -957,8 +949,8 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
 
         self.assertEqual(result.status, "blocked")
         self.assertEqual([record[0] for record in audit_poster.records], ["planned"])
-        self.assertNotIn(
-            ("docker", "builder", "prune", "--all", "--force"), command_runner.commands
+        self.assertFalse(
+            any(command[:5] == _ENGINE_PRUNE_PREFIX for command in command_runner.commands)
         )
 
     def test_executor_blocks_prune_when_active_build_processes_are_present(self) -> None:
@@ -977,8 +969,8 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             ("failed", "runner-host-hygiene:runner-host-hygiene/2026-05-23/chris-testing:failed"),
             audit_poster.records,
         )
-        self.assertNotIn(
-            ("docker", "builder", "prune", "--all", "--force"), command_runner.commands
+        self.assertFalse(
+            any(command[:5] == _ENGINE_PRUNE_PREFIX for command in command_runner.commands)
         )
 
     def test_executor_blocks_when_runner_worker_is_active(self) -> None:
@@ -996,11 +988,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         self.assertIn("Runner.Worker", result.message)
         self.assertFalse(
-            any(
-                command[:5]
-                == ("flock", "-n", "/tmp/launchplane-runner-host-hygiene.lock", "docker", "builder")
-                for command in command_runner.commands
-            )
+            any(command[:5] == _ENGINE_PRUNE_PREFIX for command in command_runner.commands)
         )
 
     def test_executor_excludes_current_job_runner_worker_ancestor(self) -> None:
