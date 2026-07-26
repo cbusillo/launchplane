@@ -117,7 +117,77 @@ def _create_stable_lane_operation(
     return store.create_odoo_prod_backup_restore_operation_record_if_no_active_lane(operation)[1]
 
 
+def _write_stable_lane_operation(
+    store: FilesystemRecordStore | PostgresRecordStore,
+    operation: OdooStableLaneOperationRecord,
+) -> None:
+    if isinstance(operation, OdooStableBootstrapOperationRecord):
+        store.write_odoo_stable_bootstrap_operation_record(operation)
+    elif isinstance(operation, OdooStableTargetReplacementOperationRecord):
+        store.write_odoo_stable_target_replacement_operation_record(operation)
+    elif isinstance(operation, OdooProdRetainedVolumeBackupImportOperationRecord):
+        store.write_odoo_prod_retained_volume_backup_import_operation_record(operation)
+    else:
+        store.write_odoo_prod_backup_restore_operation_record(operation)
+
+
+def _claim_stable_lane_operation(
+    store: FilesystemRecordStore | PostgresRecordStore,
+    operation_kind: str,
+) -> OdooStableLaneOperationRecord | None:
+    claim_kwargs = {
+        "lease_owner": f"worker-{operation_kind}",
+        "lease_expires_at": "2026-07-26T05:10:00Z",
+        "claimed_at": "2026-07-26T05:00:00Z",
+    }
+    if operation_kind == "stable_bootstrap":
+        return store.claim_next_odoo_stable_bootstrap_operation_record(**claim_kwargs)
+    if operation_kind == "target_replacement":
+        return store.claim_next_odoo_stable_target_replacement_operation_record(**claim_kwargs)
+    if operation_kind == "prod_backup_restore":
+        return store.claim_next_odoo_prod_backup_restore_operation_record(**claim_kwargs)
+    return store.claim_next_odoo_prod_retained_volume_backup_import_operation_record(**claim_kwargs)
+
+
 class OdooProdRetainedVolumeBackupImportStorageTests(unittest.TestCase):
+    def test_claims_fence_preexisting_cross_kind_stable_lane_queue(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            stores = (
+                FilesystemRecordStore(state_dir=root / "filesystem"),
+                PostgresRecordStore(
+                    database_url=f"sqlite+pysqlite:///{(root / 'launchplane.sqlite3').as_posix()}"
+                ),
+            )
+            stores[1].ensure_schema()
+            try:
+                for store in stores:
+                    with self.subTest(store=type(store).__name__):
+                        for operation in _stable_lane_operations().values():
+                            _write_stable_lane_operation(store, operation)
+
+                        for blocked_kind in (
+                            "retained_volume_backup_import",
+                            "prod_backup_restore",
+                            "target_replacement",
+                        ):
+                            self.assertIsNone(_claim_stable_lane_operation(store, blocked_kind))
+
+                        claimed = _claim_stable_lane_operation(store, "stable_bootstrap")
+                        self.assertIsNotNone(claimed)
+                        assert claimed is not None
+                        self.assertEqual(claimed.operation_id, "bootstrap-operation-cm-prod")
+                        self.assertEqual(claimed.status, "running")
+
+                        for blocked_kind in (
+                            "retained_volume_backup_import",
+                            "prod_backup_restore",
+                            "target_replacement",
+                        ):
+                            self.assertIsNone(_claim_stable_lane_operation(store, blocked_kind))
+            finally:
+                stores[1].close()
+
     def test_filesystem_store_blocks_every_cross_kind_stable_lane_pair(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -316,8 +386,10 @@ class OdooProdRetainedVolumeBackupImportStorageTests(unittest.TestCase):
             )
 
         self.assertEqual(recovered_ids, (operation.operation_id,))
-        self.assertEqual(stored.status, "fail")
-        self.assertIn("unsafe to retry automatically", stored.error_message)
+        self.assertEqual(stored.status, "reconciliation_required")
+        self.assertEqual(stored.phase, "provider_import_started")
+        self.assertEqual(stored.error_code, "operation_reconciliation_required")
+        self.assertIn("operator reconciliation", stored.error_message)
 
 
 if __name__ == "__main__":

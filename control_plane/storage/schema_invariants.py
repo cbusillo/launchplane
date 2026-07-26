@@ -170,6 +170,12 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
 )
 
 _ACTIVE_OPERATION_PREDICATE_TOKENS = ("status", "pending", "running")
+_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
+    "status",
+    "pending",
+    "running",
+    "reconciliation_required",
+)
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     CriticalIndex(
@@ -218,7 +224,7 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_odoo_bootstrap_active_lane_uidx",
         ("product", "context", "instance"),
         unique=True,
-        predicate_tokens=_ACTIVE_OPERATION_PREDICATE_TOKENS,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
     ),
     CriticalIndex(
         "launchplane_odoo_stable_bootstrap_operations",
@@ -235,7 +241,7 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_odoo_replacement_active_lane_uidx",
         ("product", "context", "instance"),
         unique=True,
-        predicate_tokens=_ACTIVE_OPERATION_PREDICATE_TOKENS,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
     ),
     CriticalIndex(
         "launchplane_odoo_stable_target_replacement_operations",
@@ -252,7 +258,7 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_odoo_restore_active_lane_uidx",
         ("product", "context", "instance"),
         unique=True,
-        predicate_tokens=_ACTIVE_OPERATION_PREDICATE_TOKENS,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
     ),
     CriticalIndex(
         "launchplane_odoo_prod_backup_restore_operations",
@@ -269,7 +275,7 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_odoo_retained_import_active_lane_uidx",
         ("product", "context", "instance"),
         unique=True,
-        predicate_tokens=_ACTIVE_OPERATION_PREDICATE_TOKENS,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
     ),
     CriticalIndex(
         "launchplane_odoo_prod_retained_volume_backup_import_operations",

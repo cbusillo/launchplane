@@ -6979,14 +6979,66 @@ def create_launchplane_fastapi_app(
             )
         if operation.status == "cancelled":
             return operation
-        if operation.status != "pending":
+        if operation.status not in {"pending", "reconciliation_required"}:
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="operation_not_pending",
-                message="Only pending durable operations can be cancelled safely.",
+                message=(
+                    "Only pending durable operations, or reconciliation-required operations after "
+                    "provider inspection, can be cancelled safely."
+                ),
             )
         cancelled_at = utc_now_timestamp()
+        if operation.status == "reconciliation_required":
+            reconciliation_attestation = cancellation_request.reconciliation_attestation
+            if reconciliation_attestation is None:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="reconciliation_attestation_required",
+                    message=(
+                        "Reconciliation-required durable operations need an explicit provider "
+                        "inspection attestation before cancellation can release the lane."
+                    ),
+                )
+            try:
+                provider_inspected_at = parse_utc_timestamp(
+                    reconciliation_attestation.provider_inspected_at
+                )
+                reconciliation_required_at = parse_utc_timestamp(operation.updated_at)
+                cancellation_requested_at = parse_utc_timestamp(cancelled_at)
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=422,
+                    trace_id=trace_id,
+                    code="invalid_reconciliation_attestation",
+                    message="Provider inspection evidence requires valid timestamps.",
+                ) from error
+            if provider_inspected_at < reconciliation_required_at:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="stale_reconciliation_attestation",
+                    message=(
+                        "Provider inspection must occur after the operation entered "
+                        "reconciliation-required state."
+                    ),
+                )
+            if provider_inspected_at > cancellation_requested_at:
+                raise _launchplane_http_error(
+                    status_code=422,
+                    trace_id=trace_id,
+                    code="future_reconciliation_attestation",
+                    message="Provider inspection timestamp cannot be in the future.",
+                )
+        elif cancellation_request.reconciliation_attestation is not None:
+            raise _launchplane_http_error(
+                status_code=422,
+                trace_id=trace_id,
+                code="reconciliation_attestation_not_applicable",
+                message="Pending operation cancellation does not accept reconciliation evidence.",
+            )
         cancelled_operation = type(operation).model_validate(
             {
                 **operation.model_dump(mode="json"),
@@ -7002,6 +7054,7 @@ def create_launchplane_fastapi_app(
                     identity=identity,
                     reason=cancellation_request.reason,
                     cancelled_at=cancelled_at,
+                    reconciliation_attestation=cancellation_request.reconciliation_attestation,
                 ).model_dump(mode="json"),
                 "error_code": "",
                 "error_message": "",
@@ -7017,7 +7070,7 @@ def create_launchplane_fastapi_app(
             status_code=409,
             trace_id=trace_id,
             code="operation_not_pending",
-            message="The durable operation left pending state before cancellation committed.",
+            message="The durable operation left cancellable state before cancellation committed.",
         )
 
     async def cancel_odoo_stable_bootstrap_operation(

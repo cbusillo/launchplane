@@ -806,7 +806,7 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
             self.assertEqual(loaded.started_at, "")
             self.assertEqual(loaded.attempt, 1)
 
-    def test_postgres_store_fails_unsafe_expired_operation(self) -> None:
+    def test_postgres_store_requires_reconciliation_for_unsafe_expired_operation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             store = PostgresRecordStore(database_url=f"sqlite:///{database_path}")
@@ -836,10 +836,12 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
             loaded = store.read_odoo_stable_target_replacement_operation_record(
                 "operation-cm-testing"
             )
-            self.assertEqual(loaded.status, "fail")
-            self.assertEqual(loaded.phase, "failed")
-            self.assertIn("unsafe to retry", loaded.error_message)
+            self.assertEqual(loaded.status, "reconciliation_required")
+            self.assertEqual(loaded.phase, "apply")
+            self.assertEqual(loaded.error_code, "operation_reconciliation_required")
+            self.assertIn("operator reconciliation", loaded.error_message)
             self.assertEqual(loaded.lease_owner, "")
+            self.assertEqual(loaded.finished_at, "")
 
 
 if __name__ == "__main__":

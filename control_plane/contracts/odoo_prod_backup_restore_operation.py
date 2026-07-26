@@ -17,7 +17,14 @@ from control_plane.contracts.odoo_prod_backup_restore import (
 )
 
 
-OdooProdBackupRestoreOperationStatus = Literal["pending", "running", "pass", "fail", "cancelled"]
+OdooProdBackupRestoreOperationStatus = Literal[
+    "pending",
+    "running",
+    "reconciliation_required",
+    "pass",
+    "fail",
+    "cancelled",
+]
 OdooProdBackupRestoreOperationPhase = Literal[
     "created",
     "running",
@@ -191,6 +198,17 @@ class OdooProdBackupRestoreOperationRecord(BaseModel):
                     raise ValueError(
                         "Cancelled Odoo backup restore operations cannot include result or error."
                     )
+        elif self.status == "reconciliation_required":
+            if self.finished_at or self.lease_owner or self.lease_expires_at or self.heartbeat_at:
+                raise ValueError(
+                    "Reconciliation-required Odoo backup restore operations cannot retain "
+                    "terminal or lease state."
+                )
+            if self.result is not None or not self.error_code or not self.error_message:
+                raise ValueError(
+                    "Reconciliation-required Odoo backup restore operations require an error and "
+                    "cannot include a result."
+                )
         elif self.cancellation is not None:
             raise ValueError(
                 "Only cancelled Odoo backup restore operations can include cancellation."

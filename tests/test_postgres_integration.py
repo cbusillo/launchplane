@@ -70,7 +70,10 @@ from control_plane.provider_operations import (
     ProviderOperationLease,
     run_durable_provider_operation,
 )
-from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
+from control_plane.odoo_stable_lane import (
+    OdooStableLaneOperationConflictError,
+    OdooStableLaneOperationRecord,
+)
 from control_plane.service_auth import (
     GitHubActionsPolicyRule,
     LaunchplaneAuthzPolicy,
@@ -226,6 +229,32 @@ def _create_cross_kind_stable_lane_operation(
         except OdooStableLaneOperationConflictError as error:
             return "conflict", error.owner.operation_kind
         return "created" if created else "existing", operation_kind
+    finally:
+        store.close()
+
+
+def _claim_cross_kind_stable_lane_operation(
+    *,
+    database_url: str,
+    operation_kind: str,
+    start_barrier: threading.Barrier,
+) -> tuple[str, str]:
+    store = PostgresRecordStore(database_url=database_url)
+    try:
+        start_barrier.wait(timeout=5)
+        claim_kwargs = {
+            "lease_owner": f"worker-{operation_kind}",
+            "lease_expires_at": "2026-07-26T05:10:00Z",
+            "claimed_at": "2026-07-26T05:00:00Z",
+        }
+        claimed: OdooStableLaneOperationRecord | None
+        if operation_kind == "prod_backup_restore":
+            claimed = store.claim_next_odoo_prod_backup_restore_operation_record(**claim_kwargs)
+        else:
+            claimed = store.claim_next_odoo_prod_retained_volume_backup_import_operation_record(
+                **claim_kwargs
+            )
+        return operation_kind, claimed.operation_id if claimed is not None else ""
     finally:
         store.close()
 
@@ -2686,6 +2715,43 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual([result[0] for result in results].count("created"), 1)
         self.assertEqual([result[0] for result in results].count("conflict"), 1)
         self.assertEqual(len(active_restore_records) + len(active_import_records), 1)
+
+    def test_cross_kind_stable_lane_claim_is_serialized_for_preexisting_queue(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            restore_operation = _restore_operation("operation-cm-prod-restore-preexisting")
+            retained_operation = _retained_operation_for_restore_lane().model_copy(
+                update={"operation_id": "retained-plan-operation-cm-prod-preexisting"}
+            )
+            store.write_odoo_prod_backup_restore_operation_record(restore_operation)
+            store.write_odoo_prod_retained_volume_backup_import_operation_record(retained_operation)
+
+            start_barrier = threading.Barrier(2)
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(
+                        _claim_cross_kind_stable_lane_operation,
+                        database_url=store.database_url,
+                        operation_kind=operation_kind,
+                        start_barrier=start_barrier,
+                    )
+                    for operation_kind in (
+                        "prod_backup_restore",
+                        "retained_volume_backup_import",
+                    )
+                ]
+                results = dict(future.result(timeout=10) for future in futures)
+
+            stored_restore = store.read_odoo_prod_backup_restore_operation_record(
+                restore_operation.operation_id
+            )
+            stored_import = store.read_odoo_prod_retained_volume_backup_import_operation_record(
+                retained_operation.operation_id
+            )
+
+        self.assertEqual(results["prod_backup_restore"], restore_operation.operation_id)
+        self.assertEqual(results["retained_volume_backup_import"], "")
+        self.assertEqual(stored_restore.status, "running")
+        self.assertEqual(stored_import.status, "pending")
 
 
 def _attempt_stale_owner_completion(

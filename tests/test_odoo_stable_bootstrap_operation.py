@@ -1,7 +1,10 @@
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from tempfile import TemporaryDirectory
+from typing import Any
+from unittest.mock import patch
 
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
@@ -149,6 +152,111 @@ class OdooStableBootstrapOperationRecordTests(unittest.TestCase):
                                 claimed_at="2026-07-23T03:35:00Z",
                             )
                         )
+            finally:
+                stores[1].close()
+
+    def test_reconciliation_required_cancellation_releases_lane(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            stores = (
+                FilesystemRecordStore(state_dir=root / "filesystem"),
+                PostgresRecordStore(database_url=f"sqlite:///{root / 'launchplane.sqlite3'}"),
+            )
+            stores[1].ensure_schema()
+            try:
+                for store in stores:
+                    with self.subTest(store=type(store).__name__):
+                        running_record = OdooStableBootstrapOperationRecord.model_validate(
+                            {
+                                **_operation_payload(),
+                                "status": "running",
+                                "phase": "bootstrap",
+                                "started_at": "2026-05-17T00:01:00Z",
+                                "lease_owner": "worker-a",
+                                "lease_expires_at": "2026-05-17T00:02:00Z",
+                                "heartbeat_at": "2026-05-17T00:01:00Z",
+                                "attempt": 1,
+                            }
+                        )
+                        store.write_odoo_stable_bootstrap_operation_record(running_record)
+                        store.recover_expired_odoo_stable_bootstrap_operation_records(
+                            now="2026-05-17T00:03:00Z",
+                            safe_phases=("created",),
+                            max_attempts=3,
+                        )
+                        reconciliation_required = store.read_odoo_stable_bootstrap_operation_record(
+                            running_record.operation_id
+                        )
+                        blocked_record, blocked_created = (
+                            store.create_odoo_stable_bootstrap_operation_record_if_no_active_lane(
+                                OdooStableBootstrapOperationRecord.model_validate(
+                                    {
+                                        **_operation_payload("operation-cm-testing-next"),
+                                        "idempotency_key": "bootstrap-cm-testing-next",
+                                    }
+                                )
+                            )
+                        )
+                        self.assertFalse(blocked_created)
+                        self.assertEqual(
+                            blocked_record.operation_id,
+                            reconciliation_required.operation_id,
+                        )
+                        unattested_cancelled_record = (
+                            OdooStableBootstrapOperationRecord.model_validate(
+                                {
+                                    **reconciliation_required.model_dump(mode="json"),
+                                    "status": "cancelled",
+                                    "phase": "cancelled",
+                                    "updated_at": "2026-05-17T00:04:00Z",
+                                    "finished_at": "2026-05-17T00:04:00Z",
+                                    "cancellation": durable_operation_cancellation_payload(),
+                                    "error_code": "",
+                                    "error_message": "",
+                                }
+                            )
+                        )
+                        self.assertFalse(
+                            store.cancel_pending_odoo_stable_bootstrap_operation_record(
+                                unattested_cancelled_record
+                            )
+                        )
+                        cancellation = durable_operation_cancellation_payload()
+                        cancellation["reconciliation_attestation"] = {
+                            "provider_inspected_at": "2026-05-17T00:04:00Z",
+                            "provider_state": "The provider effect is absent.",
+                            "evidence_reference": "provider-read:inspection-1",
+                            "safe_to_release": True,
+                        }
+                        cancelled_record = OdooStableBootstrapOperationRecord.model_validate(
+                            {
+                                **reconciliation_required.model_dump(mode="json"),
+                                "status": "cancelled",
+                                "phase": "cancelled",
+                                "updated_at": "2026-05-17T00:04:00Z",
+                                "finished_at": "2026-05-17T00:04:00Z",
+                                "cancellation": cancellation,
+                                "error_code": "",
+                                "error_message": "",
+                            }
+                        )
+                        self.assertTrue(
+                            store.cancel_pending_odoo_stable_bootstrap_operation_record(
+                                cancelled_record
+                            )
+                        )
+                        next_record, next_created = (
+                            store.create_odoo_stable_bootstrap_operation_record_if_no_active_lane(
+                                OdooStableBootstrapOperationRecord.model_validate(
+                                    {
+                                        **_operation_payload("operation-cm-testing-next"),
+                                        "idempotency_key": "bootstrap-cm-testing-next",
+                                    }
+                                )
+                            )
+                        )
+                        self.assertTrue(next_created)
+                        self.assertEqual(next_record.operation_id, "operation-cm-testing-next")
             finally:
                 stores[1].close()
 
@@ -433,6 +541,146 @@ class OdooStableBootstrapOperationRecordTests(unittest.TestCase):
             self.assertEqual(loaded.status, "running")
             self.assertEqual(loaded.phase, "running")
 
+    def test_filesystem_recovery_waits_for_inflight_heartbeat_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            running_record = OdooStableBootstrapOperationRecord.model_validate(
+                {
+                    **_operation_payload(),
+                    "status": "running",
+                    "phase": "bootstrap",
+                    "started_at": "2026-05-17T00:01:00Z",
+                    "lease_owner": "worker-a",
+                    "lease_expires_at": "2026-05-17T00:02:00Z",
+                    "heartbeat_at": "2026-05-17T00:01:00Z",
+                    "attempt": 1,
+                }
+            )
+            store.write_odoo_stable_bootstrap_operation_record(running_record)
+            heartbeat_read = Event()
+            release_heartbeat = Event()
+            recovery_started = Event()
+            recovery_finished = Event()
+            original_read = store.read_odoo_stable_bootstrap_operation_record
+
+            def blocking_first_read(operation_id: str) -> OdooStableBootstrapOperationRecord:
+                record = original_read(operation_id)
+                if not heartbeat_read.is_set():
+                    heartbeat_read.set()
+                    release_heartbeat.wait(timeout=5)
+                return record
+
+            def recover() -> tuple[str, ...]:
+                recovery_started.set()
+                try:
+                    return store.recover_expired_odoo_stable_bootstrap_operation_records(
+                        now="2026-05-17T00:03:00Z",
+                        safe_phases=("created",),
+                        max_attempts=3,
+                    )
+                finally:
+                    recovery_finished.set()
+
+            with (
+                patch.object(
+                    store,
+                    "read_odoo_stable_bootstrap_operation_record",
+                    side_effect=blocking_first_read,
+                ),
+                ThreadPoolExecutor(max_workers=2) as executor,
+            ):
+                heartbeat_future = executor.submit(
+                    store.heartbeat_odoo_stable_bootstrap_operation_record,
+                    operation_id=running_record.operation_id,
+                    lease_owner="worker-a",
+                    heartbeat_at="2026-05-17T00:01:30Z",
+                    lease_expires_at="2026-05-17T00:04:00Z",
+                )
+                self.assertTrue(heartbeat_read.wait(timeout=5))
+                recovery_future = executor.submit(recover)
+                self.assertTrue(recovery_started.wait(timeout=5))
+                recovery_was_blocked = not recovery_finished.wait(timeout=0.5)
+                release_heartbeat.set()
+                self.assertTrue(heartbeat_future.result(timeout=5))
+                self.assertEqual(recovery_future.result(timeout=5), ())
+
+            self.assertTrue(recovery_was_blocked)
+            stored = store.read_odoo_stable_bootstrap_operation_record(running_record.operation_id)
+            self.assertEqual(stored.status, "running")
+            self.assertEqual(stored.lease_expires_at, "2026-05-17T00:04:00Z")
+
+    def test_sqlite_recovery_waits_for_inflight_heartbeat_transaction(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite:///{database_path}")
+            recovery_store = PostgresRecordStore(database_url=store.database_url)
+            store.ensure_schema()
+            running_record = OdooStableBootstrapOperationRecord.model_validate(
+                {
+                    **_operation_payload(),
+                    "status": "running",
+                    "phase": "bootstrap",
+                    "started_at": "2026-05-17T00:01:00Z",
+                    "lease_owner": "worker-a",
+                    "lease_expires_at": "2026-05-17T00:02:00Z",
+                    "heartbeat_at": "2026-05-17T00:01:00Z",
+                    "attempt": 1,
+                }
+            )
+            store.write_odoo_stable_bootstrap_operation_record(running_record)
+            heartbeat_read = Event()
+            release_heartbeat = Event()
+            recovery_started = Event()
+            recovery_finished = Event()
+            original_read_payload = store._read_payload
+
+            def blocking_first_payload_read(
+                *,
+                model_type: type[OdooStableBootstrapOperationRecord],
+                payload: dict[str, Any],
+            ) -> OdooStableBootstrapOperationRecord:
+                record = original_read_payload(model_type=model_type, payload=payload)
+                if not heartbeat_read.is_set():
+                    heartbeat_read.set()
+                    release_heartbeat.wait(timeout=5)
+                return record
+
+            def recover() -> tuple[str, ...]:
+                recovery_started.set()
+                try:
+                    return recovery_store.recover_expired_odoo_stable_bootstrap_operation_records(
+                        now="2026-05-17T00:03:00Z",
+                        safe_phases=("created",),
+                        max_attempts=3,
+                    )
+                finally:
+                    recovery_finished.set()
+
+            try:
+                with (
+                    patch.object(store, "_read_payload", side_effect=blocking_first_payload_read),
+                    ThreadPoolExecutor(max_workers=2) as executor,
+                ):
+                    heartbeat_future = executor.submit(
+                        store.heartbeat_odoo_stable_bootstrap_operation_record,
+                        operation_id=running_record.operation_id,
+                        lease_owner="worker-a",
+                        heartbeat_at="2026-05-17T00:01:30Z",
+                        lease_expires_at="2026-05-17T00:04:00Z",
+                    )
+                    self.assertTrue(heartbeat_read.wait(timeout=5))
+                    recovery_future = executor.submit(recover)
+                    self.assertTrue(recovery_started.wait(timeout=5))
+                    recovery_was_blocked = not recovery_finished.wait(timeout=0.5)
+                    release_heartbeat.set()
+                    self.assertTrue(heartbeat_future.result(timeout=5))
+                    self.assertEqual(recovery_future.result(timeout=5), ())
+            finally:
+                recovery_store.close()
+                store.close()
+
+            self.assertTrue(recovery_was_blocked)
+
     def test_postgres_store_recovers_safe_expired_operation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
@@ -467,7 +715,39 @@ class OdooStableBootstrapOperationRecordTests(unittest.TestCase):
             self.assertEqual(loaded.started_at, "")
             self.assertEqual(loaded.attempt, 1)
 
-    def test_postgres_store_fails_unsafe_expired_operation(self) -> None:
+    def test_postgres_store_fails_safe_expired_operation_after_max_attempts(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite:///{database_path}")
+            store.ensure_schema()
+            store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(
+                    {
+                        **_operation_payload(),
+                        "status": "running",
+                        "phase": "created",
+                        "started_at": "2026-05-17T00:01:00Z",
+                        "lease_owner": "worker-a",
+                        "lease_expires_at": "2026-05-17T00:02:00Z",
+                        "heartbeat_at": "2026-05-17T00:01:00Z",
+                        "attempt": 3,
+                    }
+                )
+            )
+
+            store.recover_expired_odoo_stable_bootstrap_operation_records(
+                now="2026-05-17T00:03:00Z",
+                safe_phases=("created",),
+                max_attempts=3,
+            )
+
+            loaded = store.read_odoo_stable_bootstrap_operation_record("operation-cm-testing")
+            self.assertEqual(loaded.status, "fail")
+            self.assertEqual(loaded.phase, "failed")
+            self.assertEqual(loaded.error_code, "operation_attempts_exhausted")
+            self.assertIn("safe phase", loaded.error_message)
+
+    def test_postgres_store_requires_reconciliation_for_unsafe_expired_operation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             store = PostgresRecordStore(database_url=f"sqlite:///{database_path}")
@@ -495,10 +775,12 @@ class OdooStableBootstrapOperationRecordTests(unittest.TestCase):
 
             self.assertEqual(affected, ("operation-cm-testing",))
             loaded = store.read_odoo_stable_bootstrap_operation_record("operation-cm-testing")
-            self.assertEqual(loaded.status, "fail")
-            self.assertEqual(loaded.phase, "failed")
-            self.assertIn("unsafe to retry", loaded.error_message)
+            self.assertEqual(loaded.status, "reconciliation_required")
+            self.assertEqual(loaded.phase, "bootstrap")
+            self.assertEqual(loaded.error_code, "operation_reconciliation_required")
+            self.assertIn("operator reconciliation", loaded.error_message)
             self.assertEqual(loaded.lease_owner, "")
+            self.assertEqual(loaded.finished_at, "")
 
 
 if __name__ == "__main__":

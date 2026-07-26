@@ -19,7 +19,12 @@ from control_plane.contracts.odoo_prod_retained_volume_backup_import import (
 
 
 OdooProdRetainedVolumeBackupImportOperationStatus = Literal[
-    "pending", "running", "pass", "fail", "cancelled"
+    "pending",
+    "running",
+    "reconciliation_required",
+    "pass",
+    "fail",
+    "cancelled",
 ]
 OdooProdRetainedVolumeBackupImportOperationKind = Literal["plan", "apply"]
 OdooProdRetainedVolumeBackupImportOperationPhase = Literal[
@@ -234,6 +239,17 @@ class OdooProdRetainedVolumeBackupImportOperationRecord(BaseModel):
                     raise ValueError(
                         "Cancelled Odoo retained-volume backup import operations cannot include result or error."
                     )
+        elif self.status == "reconciliation_required":
+            if self.finished_at or self.lease_owner or self.lease_expires_at or self.heartbeat_at:
+                raise ValueError(
+                    "Reconciliation-required Odoo retained-volume backup import operations cannot "
+                    "retain terminal or lease state."
+                )
+            if self.result is not None or not self.error_code or not self.error_message:
+                raise ValueError(
+                    "Reconciliation-required Odoo retained-volume backup import operations require "
+                    "an error and cannot include a result."
+                )
         elif self.cancellation is not None:
             raise ValueError(
                 "Only cancelled Odoo retained-volume backup import operations can include cancellation."

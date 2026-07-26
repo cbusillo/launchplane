@@ -33,7 +33,10 @@ from control_plane.odoo_product_driver_http import (
     OdooRouteDependencyError,
     resolve_odoo_product_route,
 )
-from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
+from control_plane.odoo_stable_lane import (
+    ODOO_STABLE_LANE_BLOCKING_STATUSES,
+    OdooStableLaneOperationConflictError,
+)
 from control_plane.workflows.odoo_prod_backup_restore import (
     OdooProdBackupRestoreStore,
     build_odoo_prod_backup_restore_plan,
@@ -307,14 +310,14 @@ def _require_lane_not_busy(
         product=product,
         context_name=context,
         instance_name=instance,
-        statuses=("pending", "running"),
+        statuses=ODOO_STABLE_LANE_BLOCKING_STATUSES,
         limit=1,
     )
     active_replacements = operation_store.list_odoo_stable_target_replacement_operation_records(
         product=product,
         context_name=context,
         instance_name=instance,
-        statuses=("pending", "running"),
+        statuses=ODOO_STABLE_LANE_BLOCKING_STATUSES,
         limit=1,
     )
     if active_bootstraps or active_replacements:

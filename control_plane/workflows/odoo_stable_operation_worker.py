@@ -597,17 +597,17 @@ def build_odoo_stable_operation_worker_status(
         raise ValueError("Odoo stable operation worker recent_terminal_limit cannot be negative.")
     recorded_at = now or _utc_now_timestamp()
     active_bootstrap_records = record_store.list_odoo_stable_bootstrap_operation_records(
-        statuses=("pending", "running")
+        statuses=("pending", "running", "reconciliation_required")
     )
     active_replacement_records = record_store.list_odoo_stable_target_replacement_operation_records(
-        statuses=("pending", "running")
+        statuses=("pending", "running", "reconciliation_required")
     )
     active_restore_records = record_store.list_odoo_prod_backup_restore_operation_records(
-        statuses=("pending", "running")
+        statuses=("pending", "running", "reconciliation_required")
     )
     active_retained_import_records = (
         record_store.list_odoo_prod_retained_volume_backup_import_operation_records(
-            statuses=("pending", "running")
+            statuses=("pending", "running", "reconciliation_required")
         )
     )
     terminal_bootstrap_records = record_store.list_odoo_stable_bootstrap_operation_records(
@@ -680,7 +680,11 @@ def build_odoo_stable_operation_worker_status(
         for record in records:
             key = f"{kind}:{record.status}"
             counts_by_kind_status[key] = counts_by_kind_status.get(key, 0) + 1
-    stalled_count = sum(1 for summary in summaries if summary.lease_expired)
+    stalled_count = sum(
+        1
+        for summary in summaries
+        if summary.lease_expired or summary.status == "reconciliation_required"
+    )
     pending_count = sum(1 for summary in summaries if summary.status == "pending")
     running_count = sum(1 for summary in summaries if summary.status == "running")
     terminal_count = (
@@ -1018,7 +1022,7 @@ def _execute_retained_volume_backup_import_operation(
             raise RuntimeError(
                 "Odoo retained-volume backup import lost its lease before provider mutation."
             )
-        authorization_guard.authorize_execution()
+        authorization_guard.checkpoint_provider_effect(effect_name)
         checkpoint_phase(phase, {"provider_effect": effect_name})
 
     try:

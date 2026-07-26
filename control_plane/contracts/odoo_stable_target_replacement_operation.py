@@ -16,7 +16,12 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 )
 
 OdooStableTargetReplacementOperationStatus = Literal[
-    "pending", "running", "pass", "fail", "cancelled"
+    "pending",
+    "running",
+    "reconciliation_required",
+    "pass",
+    "fail",
+    "cancelled",
 ]
 OdooStableTargetReplacementOperationPhase = Literal[
     "created",
@@ -159,6 +164,17 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
                     raise ValueError(
                         "Cancelled Odoo target replacement operation cannot include result or error."
                     )
+        elif self.status == "reconciliation_required":
+            if self.finished_at or self.lease_owner or self.lease_expires_at or self.heartbeat_at:
+                raise ValueError(
+                    "Reconciliation-required Odoo target replacement operations cannot retain "
+                    "terminal or lease state."
+                )
+            if self.result is not None or not self.error_code or not self.error_message:
+                raise ValueError(
+                    "Reconciliation-required Odoo target replacement operations require an error "
+                    "and cannot include a result."
+                )
         elif self.cancellation is not None:
             raise ValueError(
                 "Only cancelled Odoo target replacement operations can include cancellation evidence."

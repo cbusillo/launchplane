@@ -2659,6 +2659,16 @@
           "reason": {
             "title": "Reason",
             "type": "string"
+          },
+          "reconciliation_attestation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DurableOperationReconciliationAttestation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -2691,6 +2701,42 @@
           "operation"
         ],
         "title": "DurableOperationCancellationResponse",
+        "type": "object"
+      },
+      "DurableOperationReconciliationAttestation": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_reference": {
+            "title": "Evidence Reference",
+            "type": "string"
+          },
+          "provider_inspected_at": {
+            "title": "Provider Inspected At",
+            "type": "string"
+          },
+          "provider_state": {
+            "title": "Provider State",
+            "type": "string"
+          },
+          "safe_to_release": {
+            "const": true,
+            "title": "Safe To Release",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "provider_inspected_at",
+          "provider_state",
+          "evidence_reference",
+          "safe_to_release"
+        ],
+        "title": "DurableOperationReconciliationAttestation",
         "type": "object"
       },
       "EdgeEndpointApplyEnvelope": {

@@ -82,8 +82,10 @@ class OdooProdBackupRestoreStorageTests(unittest.TestCase):
             stored = store.read_odoo_prod_backup_restore_operation_record(operation.operation_id)
 
             self.assertEqual(recovered_ids, (operation.operation_id,))
-            self.assertEqual(stored.status, "fail")
-            self.assertIn("unsafe to retry automatically", stored.error_message)
+            self.assertEqual(stored.status, "reconciliation_required")
+            self.assertEqual(stored.phase, "database_restore_started")
+            self.assertEqual(stored.error_code, "operation_reconciliation_required")
+            self.assertIn("operator reconciliation", stored.error_message)
 
 
 if __name__ == "__main__":

@@ -246,9 +246,14 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
         self.authorization_policy_read_mock = self.authorization_policy_patcher.start()
         self.addCleanup(self.authorization_policy_patcher.stop)
 
-    def test_worker_rechecks_authorization_before_each_retained_plan_provider_effect(
+    def test_worker_authorizes_retained_plan_once_before_provider_effects(
         self,
     ) -> None:
+        self.authorization_policy_read_mock.side_effect = (
+            self.authorization_policy_record,
+            self.authorization_policy_record,
+            durable_operation_policy_record(revision=43),
+        )
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
             operation = _retained_import_operation(
@@ -306,7 +311,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             if checkpoint.evidence.get("provider_effect")
         ]
         self.assertEqual(provider_effects, ["schedule_upsert", "schedule_trigger"])
-        self.assertGreaterEqual(self.authorization_policy_read_mock.call_count, 3)
+        self.assertEqual(self.authorization_policy_read_mock.call_count, 2)
 
     def test_worker_marks_blocked_retained_import_plan_failed(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -447,9 +452,10 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
                 reconcile_result.reconciled_restore_ids,
                 (operation.operation_id,),
             )
-            self.assertEqual(stored.status, "fail")
-            self.assertEqual(stored.phase, "failed")
-            self.assertIn("unsafe to retry automatically", stored.error_message)
+            self.assertEqual(stored.status, "reconciliation_required")
+            self.assertEqual(stored.phase, "database_restore_started")
+            self.assertEqual(stored.error_code, "operation_reconciliation_required")
+            self.assertIn("operator reconciliation", stored.error_message)
 
     def test_worker_fails_closed_when_grant_is_removed_after_enqueue(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -852,7 +858,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             )
             recovered = store.read_odoo_stable_bootstrap_operation_record("bootstrap-expired-safe")
             pending = store.read_odoo_stable_bootstrap_operation_record("bootstrap-pending")
-            failed = store.read_odoo_stable_target_replacement_operation_record(
+            reconciliation_required = store.read_odoo_stable_target_replacement_operation_record(
                 "replacement-expired-unsafe"
             )
             self.assertEqual(recovered.status, "pending")
@@ -861,10 +867,14 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(recovered.started_at, "")
             self.assertEqual(pending.status, "pending")
             self.assertEqual(pending.lease_owner, "")
-            self.assertEqual(failed.status, "fail")
-            self.assertEqual(failed.phase, "failed")
-            self.assertIn("unsafe to retry", failed.error_message)
-            self.assertEqual(failed.lease_owner, "")
+            self.assertEqual(reconciliation_required.status, "reconciliation_required")
+            self.assertEqual(reconciliation_required.phase, "apply")
+            self.assertEqual(
+                reconciliation_required.error_code,
+                "operation_reconciliation_required",
+            )
+            self.assertIn("operator reconciliation", reconciliation_required.error_message)
+            self.assertEqual(reconciliation_required.lease_owner, "")
 
     def test_reconcile_rejects_invalid_max_attempts(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -896,6 +906,17 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
                         "lease_expires_at": "2026-05-17T00:10:00Z",
                         "heartbeat_at": "2026-05-17T00:04:00Z",
                         "attempt": 1,
+                    }
+                )
+            )
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(
+                    {
+                        **_replacement_payload("replacement-reconciliation"),
+                        "status": "reconciliation_required",
+                        "phase": "apply",
+                        "error_code": "operation_reconciliation_required",
+                        "error_message": "Provider state requires operator reconciliation.",
                     }
                 )
             )
@@ -943,7 +964,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(status.status, "stalled")
             self.assertEqual(status.pending_count, 1)
             self.assertEqual(status.running_count, 3)
-            self.assertEqual(status.stalled_count, 2)
+            self.assertEqual(status.stalled_count, 3)
             self.assertEqual(status.terminal_count, 1)
             self.assertEqual(status.counts_by_kind_status["odoo_stable_bootstrap:pending"], 1)
             self.assertEqual(status.counts_by_kind_status["odoo_stable_bootstrap:running"], 1)
@@ -953,6 +974,12 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             )
             self.assertEqual(
                 status.counts_by_kind_status["odoo_stable_target_replacement:pass"],
+                1,
+            )
+            self.assertEqual(
+                status.counts_by_kind_status[
+                    "odoo_stable_target_replacement:reconciliation_required"
+                ],
                 1,
             )
             stalled_operation = next(
