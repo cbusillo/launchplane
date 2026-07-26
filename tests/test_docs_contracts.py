@@ -19,6 +19,24 @@ def _assert_no_workflow_violations(
 
 
 class DocsContractsTests(TestCase):
+    def test_protected_operator_workflows_require_exact_run_babysitter(self) -> None:
+        agents = Path("AGENTS.md").read_text(encoding="utf-8")
+        operations = Path("docs/operations.md").read_text(encoding="utf-8")
+
+        for required_text in (
+            "github_workflow_babysit.py",
+            "gh workflow run",
+            "generic run waiter",
+        ):
+            self.assertIn(required_text, agents)
+        for required_text in (
+            "github_workflow_babysit.py",
+            "status=waiting",
+            "pending_deployments",
+            "split-identity",
+        ):
+            self.assertIn(required_text, operations)
+
     def test_required_status_checks_use_fork_aware_aggregate_gates(self) -> None:
         metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
         ci_workflow = load_workflow(".github/workflows/ci.yml")

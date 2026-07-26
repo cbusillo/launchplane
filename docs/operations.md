@@ -468,6 +468,14 @@ uv run "$skills_home/github/scripts/github_workflow_babysit.py" dispatch \
   --timeout-seconds 1800
 ```
 
+Do not substitute raw `gh workflow run`, `gh run watch`, or a generic Actions
+run waiter for this helper. GitHub reports a protected-environment approval as
+`status=waiting`; generic waiters commonly treat that as an ordinary
+nonterminal state and may emit no approval diagnostic. The exact-run helper
+reads `pending_deployments` on the first waiting poll, reports the eligible
+reviewer state, and either submits the explicitly authorized approval or stops
+with an actionable split-identity error.
+
 The helper dispatches with the configured automation actor and reviews the
 protected environment with the active local human GitHub account. Those
 identities must be distinct; do not weaken the environment's self-review
@@ -1379,7 +1387,14 @@ context only, and `context_instance` has both context and instance.
   `ODOO_FILESTORE_PATH`, and `ODOO_BACKUP_ROOT` from DB-backed runtime
   environment records, runs a Dokploy schedule against the compose lane, stops
   the web service while capturing, and writes the backup-gate record only after
-  the capture succeeds.
+  the exact schedule deployment emits nonce-, record-, and database-bound
+  completion evidence with non-empty artifact sizes and SHA-256 values. A
+  provider `done` status without that bounded marker fails the gate. Directory
+  preparation accepts only the dedicated `/volumes/data/backups/launchplane`
+  tree and assigns only its exact backup-root/database/record path to the
+  script-runner identity, so stale root-owned directories cannot make `pg_dump`
+  fail after the provider has reported success or broaden ownership changes to
+  unrelated mounted data.
 - Odoo rollback is image/release-tuple rollback, not VM snapshot rollback. Do not
   invent artifact ids, source commits, backup gates, or env-file overlays to make
   a rollback proceed; write or import the real Launchplane records first.

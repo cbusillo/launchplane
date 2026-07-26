@@ -78,6 +78,19 @@ ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset({"website_bootstrap_websit
 ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
 )
+ODOO_BACKUP_GATE_RESULT_MARKER = "LAUNCHPLANE_ODOO_BACKUP_GATE_RESULT_B64"
+ODOO_BACKUP_GATE_RESULT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "backup_nonce",
+        "backup_record_id",
+        "database_name",
+        "database_dump_sha256",
+        "filestore_archive_sha256",
+        "database_dump_size",
+        "filestore_archive_size",
+    }
+)
 ODOO_BACKUP_VERIFICATION_RESULT_MARKER = "LAUNCHPLANE_ODOO_BACKUP_VERIFICATION_RESULT_B64"
 ODOO_BACKUP_VERIFICATION_RESULT_FIELDS = frozenset(
     {
@@ -538,12 +551,16 @@ def run_compose_odoo_backup_gate(
     host: str,
     token: str,
     target_definition: DokployTargetDefinition,
+    backup_nonce: str,
     backup_record_id: str,
     database_name: str,
     filestore_path: str,
     backup_root: str,
     timeout_seconds: int | None = None,
-) -> None:
+) -> api.JsonObject:
+    normalized_backup_nonce = backup_nonce.strip()
+    if not normalized_backup_nonce:
+        raise click.ClickException("Odoo backup gate requires a request nonce.")
     compose_id = target_definition.target_id.strip()
     compose_name = (
         target_definition.target_name.strip()
@@ -585,6 +602,7 @@ def run_compose_odoo_backup_gate(
     )
     schedule_script = _build_dokploy_odoo_backup_gate_script(
         compose_app_name=compose_app_name,
+        backup_nonce=normalized_backup_nonce,
         database_name=normalized_database_name,
         filestore_path=normalized_filestore_path,
         backup_root=normalized_backup_root,
@@ -630,13 +648,49 @@ def run_compose_odoo_backup_gate(
         payload={"scheduleId": schedule_id},
         timeout_seconds=schedule_timeout_seconds,
     )
-    api.wait_for_dokploy_schedule_deployment(
+    wait_result = api.wait_for_dokploy_schedule_deployment(
         host=host,
         token=token,
         schedule_id=schedule_id,
         before_key=api.deployment_key(latest_schedule_deployment),
         timeout_seconds=schedule_timeout_seconds,
     )
+    deployment_id = api.deployment_key_from_wait_result(wait_result)
+    if not deployment_id:
+        raise click.ClickException(
+            "Dokploy Odoo backup gate did not return an exact deployment id."
+        )
+    log_lines = api.fetch_dokploy_deployment_logs(
+        host=host,
+        token=token,
+        deployment_id=deployment_id,
+        line_count=api.MAX_DOKPLOY_LOG_LINE_COUNT,
+    )
+    return extract_odoo_backup_gate_result({"logs": list(log_lines)})
+
+
+def extract_odoo_backup_gate_result(payload: api.JsonValue) -> api.JsonObject:
+    encoded_results: list[str] = []
+    marker_prefix = f"{ODOO_BACKUP_GATE_RESULT_MARKER}="
+    for line in api.normalize_dokploy_log_payload(payload):
+        normalized_line = line.strip()
+        if normalized_line.startswith(marker_prefix):
+            encoded_results.append(normalized_line.removeprefix(marker_prefix).strip())
+    if len(encoded_results) != 1:
+        raise click.ClickException("Dokploy Odoo backup gate returned no unique bounded result.")
+    try:
+        decoded_payload = base64.b64decode(encoded_results[0], validate=True)
+        parsed_payload = json.loads(decoded_payload.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise click.ClickException(
+            "Dokploy Odoo backup gate returned an invalid bounded result."
+        ) from error
+    result = api.as_json_object(parsed_payload)
+    if result is None or set(result) != ODOO_BACKUP_GATE_RESULT_FIELDS:
+        raise click.ClickException(
+            "Dokploy Odoo backup gate returned an unexpected bounded result shape."
+        )
+    return result
 
 
 def run_compose_odoo_backup_verification(
@@ -1484,6 +1538,7 @@ trap - EXIT
 def _build_dokploy_odoo_backup_gate_script(
     *,
     compose_app_name: str,
+    backup_nonce: str,
     database_name: str,
     filestore_path: str,
     backup_root: str,
@@ -1492,6 +1547,7 @@ def _build_dokploy_odoo_backup_gate_script(
     normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
     normalized_backup_root = backup_root.strip() or DEFAULT_ODOO_BACKUP_ROOT
     quoted_compose_app_name = shlex.quote(compose_app_name)
+    quoted_backup_nonce = shlex.quote(backup_nonce)
     quoted_database_name = shlex.quote(database_name)
     quoted_filestore_path = shlex.quote(normalized_filestore_path)
     quoted_backup_root = shlex.quote(normalized_backup_root)
@@ -1504,6 +1560,7 @@ database_name={quoted_database_name}
 filestore_root={quoted_filestore_path}
 backup_root={quoted_backup_root}
 backup_record_id={quoted_backup_record_id}
+backup_nonce={quoted_backup_nonce}
 web_was_running=0
 
 resolve_container_id() {{
@@ -1568,10 +1625,21 @@ filestore_archive_path="${{backup_dir}}/${{database_name}}-filestore.tar.gz"
 manifest_path="${{backup_dir}}/manifest.json"
 
 echo "Creating Odoo backup gate directory ${{backup_dir}}"
+script_runner_uid=$(docker exec "${{script_runner_container_id}}" id -u)
+script_runner_gid=$(docker exec "${{script_runner_container_id}}" id -g)
 docker exec -u root \
+    -e BACKUP_ROOT="${{backup_root}}" \
+    -e DATABASE_NAME="${{database_name}}" \
     -e BACKUP_DIR="${{backup_dir}}" \
+    -e SCRIPT_RUNNER_UID="${{script_runner_uid}}" \
+    -e SCRIPT_RUNNER_GID="${{script_runner_gid}}" \
     "${{script_runner_container_id}}" \
-    /bin/bash -lc 'install -d -m 700 "$BACKUP_DIR"'
+    /bin/bash -lc '
+        set -euo pipefail
+        install -d -m 700 -o "$SCRIPT_RUNNER_UID" -g "$SCRIPT_RUNNER_GID" "$BACKUP_ROOT"
+        install -d -m 700 -o "$SCRIPT_RUNNER_UID" -g "$SCRIPT_RUNNER_GID" "$BACKUP_ROOT/$DATABASE_NAME"
+        install -d -m 700 -o "$SCRIPT_RUNNER_UID" -g "$SCRIPT_RUNNER_GID" "$BACKUP_DIR"
+    '
 
 echo "Capturing database dump for ${{database_name}}"
 docker exec \
@@ -1623,8 +1691,11 @@ docker exec -i \
     -e FILESTORE_ARCHIVE_PATH="${{filestore_archive_path}}" \
     -e DATABASE_DUMP_SIZE="${{database_dump_size}}" \
     -e FILESTORE_ARCHIVE_SIZE="${{filestore_archive_size}}" \
+    -e BACKUP_NONCE="${{backup_nonce}}" \
+    -e RESULT_MARKER={shlex.quote(ODOO_BACKUP_GATE_RESULT_MARKER)} \
     "${{script_runner_container_id}}" \
     python3 - <<'PY'
+import base64
 import json
 import hashlib
 import os
@@ -1654,6 +1725,21 @@ payload = {{
 with open(os.environ["MANIFEST_PATH"], "w", encoding="utf-8") as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)
     handle.write("\\n")
+
+result_payload = {{
+    "schema_version": payload["schema_version"],
+    "backup_nonce": os.environ["BACKUP_NONCE"],
+    "backup_record_id": payload["backup_record_id"],
+    "database_name": payload["database_name"],
+    "database_dump_sha256": payload["database_dump_sha256"],
+    "filestore_archive_sha256": payload["filestore_archive_sha256"],
+    "database_dump_size": payload["database_dump_size"],
+    "filestore_archive_size": payload["filestore_archive_size"],
+}}
+encoded_result = base64.b64encode(
+    json.dumps(result_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).decode("ascii")
+print(f"{{os.environ['RESULT_MARKER']}}={{encoded_result}}", flush=True)
 PY
 
 echo "Odoo backup gate complete: ${{backup_dir}}"

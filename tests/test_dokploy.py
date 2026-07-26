@@ -3001,6 +3001,19 @@ domains = ["cm-testing.shinycomputers.com"]
         target_definition = control_plane_dokploy.DokployTargetDefinition(
             context="cm", instance="prod", target_id="compose-123", target_name="cm-prod"
         )
+        backup_result: dict[str, object] = {
+            "schema_version": 1,
+            "backup_nonce": "c" * 64,
+            "backup_record_id": "backup-gate-cm-prod-1",
+            "database_name": "cm",
+            "database_dump_sha256": "a" * 64,
+            "filestore_archive_sha256": "b" * 64,
+            "database_dump_size": 4096,
+            "filestore_archive_size": 8192,
+        }
+        encoded_result = base64.b64encode(
+            json.dumps(backup_result, sort_keys=True).encode()
+        ).decode()
         schedule_payloads: list[dict[str, object]] = []
         request_paths: list[str] = []
 
@@ -3027,23 +3040,31 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
-                side_effect=lambda **_kwargs: None,
+                return_value="deployment=schedule-after status=done",
             ),
             patch(
                 "control_plane.dokploy.api.dokploy_request",
                 side_effect=capture_request_path,
             ),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
+                return_value=(
+                    f"{control_plane_dokploy.ODOO_BACKUP_GATE_RESULT_MARKER}={encoded_result}",
+                ),
+            ) as fetch_logs_mock,
         ):
-            control_plane_dokploy.run_compose_odoo_backup_gate(
+            result = control_plane_dokploy.run_compose_odoo_backup_gate(
                 host="https://dokploy.example.com",
                 token="secret-token",
                 target_definition=target_definition,
+                backup_nonce="c" * 64,
                 backup_record_id="backup-gate-cm-prod-1",
                 database_name="cm",
                 filestore_path="/volumes/data/filestore",
                 backup_root="/volumes/data/backups/launchplane",
             )
 
+        self.assertEqual(result, backup_result)
         self.assertEqual(len(schedule_payloads), 1)
         self.assertEqual(
             schedule_payloads[0]["name"],
@@ -3063,10 +3084,67 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertIn("manifest.json", script)
         self.assertIn('"database_dump_sha256"', script)
         self.assertIn('"filestore_archive_sha256"', script)
+        self.assertIn(
+            'script_runner_uid=$(docker exec "${script_runner_container_id}" id -u)', script
+        )
+        self.assertIn('-o "$SCRIPT_RUNNER_UID" -g "$SCRIPT_RUNNER_GID"', script)
+        self.assertIn("RESULT_MARKER", script)
+        self.assertIn("BACKUP_NONCE", script)
         self.assertIn("docker exec -i", script)
         manifest_script = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
         compile(manifest_script, "embedded-odoo-backup-manifest.py", "exec")
         self.assertIn("/api/schedule.runManually", request_paths)
+        fetch_logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            deployment_id="schedule-after",
+            line_count=control_plane_dokploy.MAX_DOKPLOY_LOG_LINE_COUNT,
+        )
+
+    def test_run_compose_odoo_backup_gate_rejects_done_schedule_without_completion_evidence(
+        self,
+    ) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="cm", instance="prod", target_id="compose-123", target_name="cm-prod"
+        )
+
+        with (
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": "cm-prod-app", "serverId": "server-123"},
+            ),
+            patch(
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-123"},
+            ),
+            patch(
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
+                return_value={"deploymentId": "schedule-before"},
+            ),
+            patch(
+                "control_plane.dokploy.api.dokploy_request",
+                return_value={"ok": True},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                return_value="deployment=schedule-after status=done",
+            ),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
+                return_value=("pg_dump: Permission denied",),
+            ),
+            self.assertRaisesRegex(click.ClickException, "no unique bounded result"),
+        ):
+            control_plane_dokploy.run_compose_odoo_backup_gate(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                backup_nonce="c" * 64,
+                backup_record_id="backup-gate-cm-prod-1",
+                database_name="cm",
+                filestore_path="/volumes/data/filestore",
+                backup_root="/volumes/data/backups/launchplane",
+            )
 
     def test_run_compose_odoo_backup_verification_returns_only_bounded_evidence(
         self,
@@ -3165,6 +3243,15 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertIn('"--file=/dev/null"', script)
         self.assertIn("tarfile.open", script)
         self.assertIn("shutil.disk_usage", script)
+        for check_name in (
+            "manifest_status",
+            "sha256_status",
+            "pg_restore_status",
+            "tar_status",
+            "staging_space_status",
+        ):
+            self.assertIn(f'active_check = "{check_name}"', script)
+        self.assertIn('result[active_check] = "fail"', script)
         self.assertNotIn("docker start", script)
         self.assertNotIn("docker stop", script)
         self.assertNotIn("extractall", script)
@@ -3192,6 +3279,125 @@ domains = ["cm-testing.shinycomputers.com"]
                     ]
                 }
             )
+
+    def test_odoo_backup_verification_marks_unexpected_active_check_failure(self) -> None:
+        script = control_plane_dokploy._build_dokploy_odoo_backup_verification_script(
+            compose_app_name="cm-prod",
+            verification_nonce="c" * 64,
+            backup_record_id="backup-gate-cm-prod-1",
+            database_name="cm_prod",
+            filestore_path="/volumes/data/filestore",
+            backup_dir="/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1",
+            database_dump_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/cm_prod.dump"
+            ),
+            filestore_archive_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/"
+                "cm_prod-filestore.tar.gz"
+            ),
+            manifest_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/manifest.json"
+            ),
+        )
+        verification_script = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        injected_script = verification_script.replace(
+            'try:\n    filestore_root = Path(os.environ["FILESTORE_ROOT"])',
+            'try:\n    raise RuntimeError("private /volumes/data/path")\n'
+            '    filestore_root = Path(os.environ["FILESTORE_ROOT"])',
+            1,
+        )
+        self.assertNotEqual(injected_script, verification_script)
+        environment = {
+            **os.environ,
+            "VERIFICATION_NONCE": "c" * 64,
+            "BACKUP_RECORD_ID": "backup-gate-cm-prod-1",
+            "DATABASE_NAME": "cm_prod",
+            "FILESTORE_ROOT": "/volumes/data/filestore",
+            "BACKUP_DIR": "/volumes/data/backups",
+            "DATABASE_DUMP_PATH": "/volumes/data/backups/cm_prod.dump",
+            "FILESTORE_ARCHIVE_PATH": "/volumes/data/backups/cm_prod-filestore.tar.gz",
+            "MANIFEST_PATH": "/volumes/data/backups/manifest.json",
+            "RESULT_MARKER": control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER,
+        }
+
+        completed = subprocess.run(
+            [sys.executable, "-c", injected_script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+        self.assertNotIn("private /volumes/data/path", completed.stdout)
+        marker_prefix = f"{control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER}="
+        encoded_result = completed.stdout.strip().removeprefix(marker_prefix)
+        result = json.loads(base64.b64decode(encoded_result).decode("utf-8"))
+        self.assertEqual(result["verification_status"], "fail")
+        self.assertEqual(result["manifest_status"], "fail")
+        self.assertEqual(result["failure_code"], "manifest_path_verification_error")
+
+    def test_odoo_backup_verification_maps_manifest_stat_error(self) -> None:
+        script = control_plane_dokploy._build_dokploy_odoo_backup_verification_script(
+            compose_app_name="cm-prod",
+            verification_nonce="c" * 64,
+            backup_record_id="backup-gate-cm-prod-1",
+            database_name="cm_prod",
+            filestore_path="/volumes/data/filestore",
+            backup_dir="/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1",
+            database_dump_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/cm_prod.dump"
+            ),
+            filestore_archive_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/"
+                "cm_prod-filestore.tar.gz"
+            ),
+            manifest_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/manifest.json"
+            ),
+        )
+        verification_script = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        injected_script = verification_script.replace(
+            '    manifest_path = Path(os.environ["MANIFEST_PATH"])',
+            '    manifest_path = Path(os.environ["MANIFEST_PATH"])\n'
+            "    class UnreadableManifestPath:\n"
+            "        def is_symlink(self):\n"
+            "            return False\n"
+            "        def is_file(self):\n"
+            "            return True\n"
+            "        def stat(self):\n"
+            '            raise PermissionError("private /volumes/data/path")\n'
+            "    manifest_path = UnreadableManifestPath()",
+            1,
+        )
+        self.assertNotEqual(injected_script, verification_script)
+        environment = {
+            **os.environ,
+            "VERIFICATION_NONCE": "c" * 64,
+            "BACKUP_RECORD_ID": "backup-gate-cm-prod-1",
+            "DATABASE_NAME": "cm_prod",
+            "FILESTORE_ROOT": "/volumes/data/filestore",
+            "BACKUP_DIR": "/volumes/data/backups",
+            "DATABASE_DUMP_PATH": "/volumes/data/backups/cm_prod.dump",
+            "FILESTORE_ARCHIVE_PATH": "/volumes/data/backups/cm_prod-filestore.tar.gz",
+            "MANIFEST_PATH": "/volumes/data/backups/manifest.json",
+            "RESULT_MARKER": control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER,
+        }
+
+        completed = subprocess.run(
+            [sys.executable, "-c", injected_script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+        self.assertNotIn("private /volumes/data/path", completed.stdout)
+        marker_prefix = f"{control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER}="
+        encoded_result = completed.stdout.strip().removeprefix(marker_prefix)
+        result = json.loads(base64.b64decode(encoded_result).decode("utf-8"))
+        self.assertEqual(result["verification_status"], "fail")
+        self.assertEqual(result["manifest_status"], "fail")
+        self.assertEqual(result["failure_code"], "manifest_metadata_unreadable")
 
     def test_odoo_backup_verification_accepts_legacy_manifest_and_computes_hashes(
         self,
