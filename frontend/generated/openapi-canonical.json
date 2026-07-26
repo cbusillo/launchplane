@@ -16899,6 +16899,8 @@
               "target_volume_not_allowlisted",
               "target_volume_not_buildkit_state",
               "target_volume_not_requested",
+              "target_builder_budget_missing",
+              "target_builder_not_allowlisted",
               "retained_warm_builder_missing_from_report",
               "warm_builder_not_retained"
             ],
@@ -16923,6 +16925,7 @@
           "action": {
             "enum": [
               "prune_docker_cache",
+              "prune_dangling_images",
               "remove_buildkit_state_volumes",
               "prune_runner_workdir",
               "restart_runner_service"
@@ -16994,6 +16997,7 @@
           "action": {
             "enum": [
               "prune_docker_cache",
+              "prune_dangling_images",
               "remove_buildkit_state_volumes",
               "prune_runner_workdir",
               "restart_runner_service"
@@ -17009,6 +17013,12 @@
           "host_name": {
             "title": "Host Name",
             "type": "string"
+          },
+          "max_used_space_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Max Used Space Bytes",
+            "type": "integer"
           },
           "mutate": {
             "default": false,
@@ -17028,6 +17038,11 @@
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "target_buildkit_builder": {
+            "default": "",
+            "title": "Target Buildkit Builder",
+            "type": "string"
           },
           "target_buildkit_state_volumes": {
             "default": [],
@@ -17109,7 +17124,8 @@
               "free_disk_below_minimum",
               "orphan_buildkit_present",
               "required_warm_builder_missing",
-              "runner_workdir_above_limit"
+              "runner_workdir_above_limit",
+              "runner_workdir_measurement_partial"
             ],
             "title": "Code",
             "type": "string"
@@ -17321,6 +17337,15 @@
             "minimum": 0.0,
             "title": "Apparent Bytes",
             "type": "integer"
+          },
+          "measurement_status": {
+            "default": "complete",
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "title": "Measurement Status",
+            "type": "string"
           },
           "root_key": {
             "title": "Root Key",

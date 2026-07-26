@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Literal, cast
 
@@ -9,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 RunnerHostHygieneStatus = Literal["healthy", "attention"]
 RunnerHostHygieneApplyAction = Literal[
     "prune_docker_cache",
+    "prune_dangling_images",
     "remove_buildkit_state_volumes",
     "prune_runner_workdir",
     "restart_runner_service",
@@ -41,6 +43,8 @@ RunnerHostHygieneApplyBlockerCode = Literal[
     "target_volume_not_allowlisted",
     "target_volume_not_buildkit_state",
     "target_volume_not_requested",
+    "target_builder_budget_missing",
+    "target_builder_not_allowlisted",
     "retained_warm_builder_missing_from_report",
     "warm_builder_not_retained",
 ]
@@ -50,6 +54,7 @@ RunnerHostHygieneFindingCode = Literal[
     "orphan_buildkit_present",
     "required_warm_builder_missing",
     "runner_workdir_above_limit",
+    "runner_workdir_measurement_partial",
 ]
 RunnerHostHygienePrivilegedScope = Literal[
     "docker_cache",
@@ -117,6 +122,7 @@ class RunnerHostHygieneRunnerWorkdirUsage(BaseModel):
     root_key: str
     apparent_bytes: int = Field(default=0, ge=0)
     allocated_bytes: int = Field(default=0, ge=0)
+    measurement_status: Literal["complete", "partial"] = "complete"
 
     @model_validator(mode="after")
     def _normalize_usage(self) -> "RunnerHostHygieneRunnerWorkdirUsage":
@@ -315,6 +321,8 @@ class RunnerHostHygieneApplyPolicy(BaseModel):
     require_healthy_report: bool = True
     require_audit_record: bool = True
     allow_docker_cache_prune: bool = False
+    allow_dangling_image_prune: bool = False
+    allowed_buildkit_builders: tuple[str, ...] = ()
     allow_buildkit_state_volume_remove: bool = False
     allowed_buildkit_state_volumes: tuple[str, ...] = ()
     allow_runner_workdir_prune: bool = False
@@ -325,6 +333,9 @@ class RunnerHostHygieneApplyPolicy(BaseModel):
         self.approved_hosts = _normalized_host_names(self.approved_hosts)
         self.required_retained_warm_builders = _normalized_tokens(
             self.required_retained_warm_builders
+        )
+        self.allowed_buildkit_builders = _normalized_buildkit_builder_names(
+            self.allowed_buildkit_builders
         )
         self.allowed_buildkit_state_volumes = _normalized_volume_names(
             self.allowed_buildkit_state_volumes
@@ -340,6 +351,8 @@ class RunnerHostHygieneApplyRequest(BaseModel):
     host_name: str
     mutate: bool = False
     retained_warm_builders: tuple[str, ...] = ()
+    target_buildkit_builder: str = ""
+    max_used_space_bytes: int = Field(default=0, ge=0)
     target_buildkit_state_volumes: tuple[str, ...] = ()
     audit_record_key: str = ""
 
@@ -349,6 +362,9 @@ class RunnerHostHygieneApplyRequest(BaseModel):
         if not self.host_name:
             raise ValueError("runner host hygiene apply requires host_name")
         self.retained_warm_builders = _normalized_tokens(self.retained_warm_builders)
+        self.target_buildkit_builder = _normalized_buildkit_builder_name(
+            self.target_buildkit_builder
+        )
         self.target_buildkit_state_volumes = _normalized_volume_name_entries(
             self.target_buildkit_state_volumes
         )
@@ -713,6 +729,21 @@ def evaluate_runner_host_hygiene(
                 ),
             )
         )
+    partial_workdir_roots = tuple(
+        item.root_key
+        for item in observation.runner_workdir_usage
+        if item.measurement_status == "partial"
+    )
+    if partial_workdir_roots:
+        findings.append(
+            _finding(
+                "runner_workdir_measurement_partial",
+                (
+                    "runner host work directory measurement was partial for roots: "
+                    + ", ".join(partial_workdir_roots)
+                ),
+            )
+        )
     missing_builders = tuple(
         builder
         for builder in policy.required_warm_builders
@@ -846,6 +877,7 @@ def plan_runner_host_hygiene_apply(
             )
         )
     blockers.extend(_target_volume_blockers(policy=policy, request=request, report=report))
+    blockers.extend(_target_builder_blockers(policy=policy, request=request))
 
     status: RunnerHostHygieneApplyPlanStatus = "blocked" if blockers else "ready"
     return RunnerHostHygieneApplyPlan(
@@ -1049,11 +1081,41 @@ def _apply_action_allowed(
 ) -> bool:
     if action == "prune_docker_cache":
         return policy.allow_docker_cache_prune
+    if action == "prune_dangling_images":
+        return policy.allow_dangling_image_prune
     if action == "remove_buildkit_state_volumes":
         return policy.allow_buildkit_state_volume_remove
     if action == "prune_runner_workdir":
         return policy.allow_runner_workdir_prune
     return policy.allow_runner_service_restart
+
+
+def _target_builder_blockers(
+    *,
+    policy: RunnerHostHygieneApplyPolicy,
+    request: RunnerHostHygieneApplyRequest,
+) -> tuple[RunnerHostHygieneApplyBlocker, ...]:
+    if request.action != "prune_docker_cache" or not request.target_buildkit_builder:
+        return ()
+    blockers: list[RunnerHostHygieneApplyBlocker] = []
+    if request.target_buildkit_builder not in policy.allowed_buildkit_builders:
+        blockers.append(
+            _apply_blocker(
+                "target_builder_not_allowlisted",
+                (
+                    "runner host hygiene target BuildKit builder is not allowlisted: "
+                    f"{request.target_buildkit_builder}"
+                ),
+            )
+        )
+    if request.max_used_space_bytes <= 0:
+        blockers.append(
+            _apply_blocker(
+                "target_builder_budget_missing",
+                "runner host hygiene target BuildKit builder requires a positive cache budget",
+            )
+        )
+    return tuple(blockers)
 
 
 def _target_volume_blockers(
@@ -1140,6 +1202,12 @@ def _apply_next_steps(
             "remove only explicitly allowlisted zero-link BuildKit state volumes",
             "capture post-apply host hygiene evidence and write the audit record",
         )
+    if action == "prune_dangling_images":
+        return (
+            "capture pre-apply host hygiene evidence",
+            "prune only dangling Docker images older than the approved age",
+            "capture post-apply host hygiene evidence and write the audit record",
+        )
     return (
         "capture pre-apply host hygiene evidence",
         "prune Docker cache without removing retained warm builders",
@@ -1175,7 +1243,7 @@ def _adapter_blocker(
 def _required_privileged_scope(
     action: RunnerHostHygieneApplyAction,
 ) -> RunnerHostHygienePrivilegedScope:
-    if action == "prune_docker_cache":
+    if action in {"prune_docker_cache", "prune_dangling_images"}:
         return "docker_cache"
     if action == "remove_buildkit_state_volumes":
         return "docker_volume"
@@ -1200,6 +1268,17 @@ def _normalized_host_names(values: tuple[str, ...]) -> tuple[str, ...]:
 
 def _normalized_host_name(value: str) -> str:
     return value.strip().lower()
+
+
+def _normalized_buildkit_builder_names(values: tuple[str, ...]) -> tuple[str, ...]:
+    return _normalized_values(values, _normalized_buildkit_builder_name)
+
+
+def _normalized_buildkit_builder_name(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized and not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", normalized):
+        raise ValueError("BuildKit builder name must be a public-safe token")
+    return normalized
 
 
 def _normalized_tokens(values: tuple[str, ...]) -> tuple[str, ...]:

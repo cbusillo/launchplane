@@ -914,6 +914,7 @@ def runner_host_hygiene_report(
     type=click.Choice(
         (
             "prune_docker_cache",
+            "prune_dangling_images",
             "remove_buildkit_state_volumes",
             "prune_runner_workdir",
             "restart_runner_service",
@@ -964,10 +965,34 @@ def runner_host_hygiene_report(
     help="BuildKit state volume policy allows removal for. Repeat for each volume.",
 )
 @click.option(
+    "--target-buildkit-builder",
+    default="",
+    help="Exact allowlisted Buildx builder whose cache the request targets.",
+)
+@click.option(
+    "--allowed-buildkit-builder",
+    "allowed_buildkit_builders",
+    multiple=True,
+    help="Buildx builder policy allows bounded pruning for. Repeat for each builder.",
+)
+@click.option(
+    "--max-used-space-bytes",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Positive Buildx cache budget required with a target builder.",
+)
+@click.option(
     "--allow-docker-cache-prune/--disallow-docker-cache-prune",
     default=False,
     show_default=True,
     help="Enable Docker cache prune planning in the local policy.",
+)
+@click.option(
+    "--allow-dangling-image-prune/--disallow-dangling-image-prune",
+    default=False,
+    show_default=True,
+    help="Enable dangling-only Docker image prune planning in the local policy.",
 )
 @click.option(
     "--allow-buildkit-state-volume-remove/--disallow-buildkit-state-volume-remove",
@@ -1015,7 +1040,11 @@ def runner_host_hygiene_apply_plan(
     required_retained_warm_builders: tuple[str, ...],
     target_buildkit_state_volumes: tuple[str, ...],
     allowed_buildkit_state_volumes: tuple[str, ...],
+    target_buildkit_builder: str,
+    allowed_buildkit_builders: tuple[str, ...],
+    max_used_space_bytes: int,
     allow_docker_cache_prune: bool,
+    allow_dangling_image_prune: bool,
     allow_buildkit_state_volume_remove: bool,
     allow_runner_workdir_prune: bool,
     allow_runner_service_restart: bool,
@@ -1031,6 +1060,8 @@ def runner_host_hygiene_apply_plan(
             require_healthy_report=require_healthy_report,
             require_audit_record=require_audit_record,
             allow_docker_cache_prune=allow_docker_cache_prune,
+            allow_dangling_image_prune=allow_dangling_image_prune,
+            allowed_buildkit_builders=allowed_buildkit_builders,
             allow_buildkit_state_volume_remove=allow_buildkit_state_volume_remove,
             allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
             allow_runner_workdir_prune=allow_runner_workdir_prune,
@@ -1041,6 +1072,8 @@ def runner_host_hygiene_apply_plan(
             host_name=host_name,
             mutate=mutate,
             retained_warm_builders=retained_warm_builders,
+            target_buildkit_builder=target_buildkit_builder,
+            max_used_space_bytes=max_used_space_bytes,
             target_buildkit_state_volumes=target_buildkit_state_volumes,
             audit_record_key=audit_record_key,
         )
@@ -1269,7 +1302,9 @@ def runner_host_hygiene_adapter_boundary_plan(
     "apply_action",
     default="prune_docker_cache",
     show_default=True,
-    type=click.Choice(("prune_docker_cache", "remove_buildkit_state_volumes")),
+    type=click.Choice(
+        ("prune_docker_cache", "prune_dangling_images", "remove_buildkit_state_volumes")
+    ),
     help="Approved runner host hygiene executor action.",
 )
 @click.option(
@@ -1315,6 +1350,24 @@ def runner_host_hygiene_adapter_boundary_plan(
     "allowed_buildkit_state_volumes",
     multiple=True,
     help="BuildKit state volume policy allows removal for. Repeat as needed.",
+)
+@click.option(
+    "--target-buildkit-builder",
+    default="",
+    help="Exact allowlisted Buildx builder whose cache should be bounded.",
+)
+@click.option(
+    "--allowed-buildkit-builder",
+    "allowed_buildkit_builders",
+    multiple=True,
+    help="Buildx builder policy allows cache pruning for. Repeat as needed.",
+)
+@click.option(
+    "--max-used-space-bytes",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help="Maximum retained cache bytes for the targeted Buildx builder.",
 )
 @click.option(
     "--mutate/--dry-run",
@@ -1403,6 +1456,9 @@ def runner_host_hygiene_executor(
     retained_warm_builders: tuple[str, ...],
     target_buildkit_state_volumes: tuple[str, ...],
     allowed_buildkit_state_volumes: tuple[str, ...],
+    target_buildkit_builder: str,
+    allowed_buildkit_builders: tuple[str, ...],
+    max_used_space_bytes: int,
     mutate: bool,
     minimum_free_disk_bytes: int,
     prune_until: str,
@@ -1428,6 +1484,9 @@ def runner_host_hygiene_executor(
             repository_scope=repository_scope,
             audit_record_key=audit_record_key,
             retained_warm_builders=retained_warm_builders,
+            target_buildkit_builder=target_buildkit_builder,
+            allowed_buildkit_builders=allowed_buildkit_builders,
+            max_used_space_bytes=max_used_space_bytes,
             target_buildkit_state_volumes=target_buildkit_state_volumes,
             allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
             mutate=mutate,
@@ -1458,6 +1517,12 @@ def runner_host_hygiene_executor(
     except (OSError, ValidationError, ValueError) as error:
         raise click.ClickException(str(error)) from error
     click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+    if result.audit_delivery_pending:
+        raise click.ClickException("runner host hygiene audit delivery remains pending")
+    if mutate and result.status != "completed":
+        raise click.ClickException(
+            f"runner host hygiene mutation did not complete: {result.status}"
+        )
 
 
 def _parse_runner_workdir_roots(values: tuple[str, ...]) -> tuple[RunnerWorkdirRoot, ...]:

@@ -12,6 +12,7 @@ import re
 import socket
 import subprocess
 import time
+from typing import Literal
 from urllib.error import HTTPError
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -48,6 +49,7 @@ from control_plane.workflows.runner_host_hygiene_audit_spool import (
 
 AUDIT_ROUTE_PATH = "/v1/evidence/runner-host-hygiene/audits"
 DEFAULT_PRUNE_UNTIL = "168h"
+MINIMUM_PRUNE_UNTIL_HOURS = 168
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
 _RUNNER_WORKDIR_USAGE_HELPER = "/usr/local/sbin/launchplane-runner-workdir-usage"
 _DOCKER_DISK_USAGE_COMMAND = (
@@ -149,15 +151,22 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
     idle_observation_count: int = Field(default=2, ge=2, le=10)
     idle_observation_interval_seconds: int = Field(default=5, ge=0, le=60)
     resolve_action_started: bool = False
+    target_buildkit_builder: str = ""
+    allowed_buildkit_builders: tuple[str, ...] = ()
+    max_used_space_bytes: int = Field(default=0, ge=0)
     target_buildkit_state_volumes: tuple[str, ...] = ()
     allowed_buildkit_state_volumes: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_request(self) -> "RunnerHostHygieneExecutorRequest":
-        if self.action not in {"prune_docker_cache", "remove_buildkit_state_volumes"}:
+        if self.action not in {
+            "prune_docker_cache",
+            "prune_dangling_images",
+            "remove_buildkit_state_volumes",
+        }:
             raise ValueError(
                 "runner host hygiene executor only supports prune_docker_cache "
-                "and remove_buildkit_state_volumes"
+                "prune_dangling_images, and remove_buildkit_state_volumes"
             )
         (
             self.host_name,
@@ -199,6 +208,25 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
             seen_root_paths.add(path)
             normalized_roots.append(RunnerWorkdirRoot(key=key, path=path))
         self.runner_workdir_roots = tuple(sorted(normalized_roots, key=lambda item: item.key))
+        self.target_buildkit_builder = self.target_buildkit_builder.strip().lower()
+        if self.target_buildkit_builder and not re.fullmatch(
+            r"[a-z0-9][a-z0-9._-]{0,127}", self.target_buildkit_builder
+        ):
+            raise ValueError("target BuildKit builder must be a public-safe token")
+        self.allowed_buildkit_builders = tuple(
+            sorted(
+                {
+                    builder.strip().lower()
+                    for builder in self.allowed_buildkit_builders
+                    if builder.strip()
+                }
+            )
+        )
+        if any(
+            not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", builder)
+            for builder in self.allowed_buildkit_builders
+        ):
+            raise ValueError("allowed BuildKit builders must be public-safe tokens")
         self.target_buildkit_state_volumes = tuple(
             sorted(
                 {
@@ -217,10 +245,26 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
                 }
             )
         )
-        if self.action == "prune_docker_cache" and self.target_buildkit_state_volumes:
-            raise ValueError("Docker cache prune requests cannot include target volumes")
-        if self.action == "prune_docker_cache" and self.allowed_buildkit_state_volumes:
-            raise ValueError("Docker cache prune requests cannot include allowed volumes")
+        if self.action != "remove_buildkit_state_volumes" and self.target_buildkit_state_volumes:
+            raise ValueError("Docker cache and image prune requests cannot include target volumes")
+        if self.action != "remove_buildkit_state_volumes" and self.allowed_buildkit_state_volumes:
+            raise ValueError("Docker cache and image prune requests cannot include allowed volumes")
+        if self.action == "prune_dangling_images" and (
+            self.target_buildkit_builder
+            or self.allowed_buildkit_builders
+            or self.max_used_space_bytes
+        ):
+            raise ValueError("dangling image prune requests cannot include BuildKit builder inputs")
+        if self.action == "remove_buildkit_state_volumes" and (
+            self.target_buildkit_builder
+            or self.allowed_buildkit_builders
+            or self.max_used_space_bytes
+        ):
+            raise ValueError("BuildKit volume removal requests cannot include builder cache inputs")
+        if not self.target_buildkit_builder and self.max_used_space_bytes:
+            raise ValueError("max_used_space_bytes requires a target BuildKit builder")
+        if not self.target_buildkit_builder and self.allowed_buildkit_builders:
+            raise ValueError("allowed BuildKit builders require a target BuildKit builder")
         if not self.host_name:
             raise ValueError("runner host hygiene executor requires host_name")
         if not self.execution_lane:
@@ -235,6 +279,15 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
             raise ValueError("runner host hygiene executor requires retained_warm_builders")
         if not self.prune_until:
             raise ValueError("runner host hygiene executor requires prune_until")
+        prune_until_match = re.fullmatch(r"([1-9][0-9]*)h", self.prune_until.lower())
+        if prune_until_match is None:
+            raise ValueError("runner host hygiene prune_until must be a whole-hour duration")
+        prune_until_hours = int(prune_until_match.group(1))
+        if prune_until_hours < MINIMUM_PRUNE_UNTIL_HOURS:
+            raise ValueError(
+                "runner host hygiene prune_until must retain at least 168 hours of cache"
+            )
+        self.prune_until = f"{prune_until_hours}h"
         if not self.runner_workdir_roots:
             raise ValueError("runner host hygiene executor requires runner_workdir_roots")
         return self
@@ -284,6 +337,8 @@ def execute_runner_host_hygiene_executor(
         host_name=request.host_name,
         mutate=request.mutate,
         retained_warm_builders=request.retained_warm_builders,
+        target_buildkit_builder=request.target_buildkit_builder,
+        max_used_space_bytes=request.max_used_space_bytes,
         target_buildkit_state_volumes=request.target_buildkit_state_volumes,
         audit_record_key=request.audit_record_key,
     )
@@ -291,8 +346,10 @@ def execute_runner_host_hygiene_executor(
         policy=RunnerHostHygieneApplyPolicy(
             approved_hosts=(request.host_name,),
             required_retained_warm_builders=request.retained_warm_builders,
-            require_healthy_report=request.action != "remove_buildkit_state_volumes",
+            require_healthy_report=False,
             allow_docker_cache_prune=request.action == "prune_docker_cache",
+            allow_dangling_image_prune=request.action == "prune_dangling_images",
+            allowed_buildkit_builders=request.allowed_buildkit_builders,
             allow_buildkit_state_volume_remove=(request.action == "remove_buildkit_state_volumes"),
             allowed_buildkit_state_volumes=request.allowed_buildkit_state_volumes,
         ),
@@ -417,15 +474,18 @@ def execute_runner_host_hygiene_executor(
             "terminal evidence collection failed"
         )
     else:
+        post_evidence_failure = _post_apply_evidence_failure(
+            request=request,
+            post_report=post_report,
+        )
         terminal_status = (
-            "completed"
-            if action_result.returncode == 0 and post_report.status == "healthy"
-            else "failed"
+            "completed" if action_result.returncode == 0 and not post_evidence_failure else "failed"
         )
         terminal_message = _terminal_message(
             action=request.action,
             action_result=action_result,
             post_report=post_report,
+            post_evidence_failure=post_evidence_failure,
         )
     terminal_audit = _terminal_audit(
         request=apply_request,
@@ -664,6 +724,49 @@ def _execute_apply_action(
             ),
             request.timeout_seconds,
         )
+    if request.action == "prune_dangling_images":
+        return remote_runner(
+            (
+                "flock",
+                "-n",
+                HOST_LOCK_PATH,
+                "docker",
+                "image",
+                "prune",
+                "--force",
+                "--filter",
+                f"until={request.prune_until}",
+            ),
+            request.timeout_seconds,
+        )
+    if request.target_buildkit_builder:
+        buildx_help = remote_runner(
+            ("docker", "buildx", "prune", "--help"),
+            request.timeout_seconds,
+        )
+        if buildx_help.returncode != 0 or "--max-used-space" not in buildx_help.stdout:
+            return RemoteCommandResult(
+                returncode=1,
+                stderr="Docker Buildx does not support bounded --max-used-space pruning",
+            )
+        return remote_runner(
+            (
+                "flock",
+                "-n",
+                HOST_LOCK_PATH,
+                "docker",
+                "buildx",
+                "prune",
+                "--builder",
+                request.target_buildkit_builder,
+                "--force",
+                "--filter",
+                f"until={request.prune_until}",
+                "--max-used-space",
+                str(request.max_used_space_bytes),
+            ),
+            request.timeout_seconds,
+        )
     return remote_runner(
         (
             "flock",
@@ -790,12 +893,21 @@ def validate_local_executor_environment(
     request: RunnerHostHygieneExecutorRequest,
     env: Mapping[str, str] | None = None,
     current_user: str | None = None,
+    current_host: str | None = None,
 ) -> None:
     resolved_env = os.environ if env is None else env
     resolved_current_user = current_user or pwd.getpwuid(os.geteuid()).pw_name
+    resolved_current_host = current_host or socket.gethostname()
     if resolved_current_user != request.service_user:
         raise click.ClickException(
             "Runner host hygiene executor user must match the approved service user."
+        )
+    if (
+        resolved_current_host.strip().lower().split(".", maxsplit=1)[0]
+        != (request.host_name.lower().split(".", maxsplit=1)[0])
+    ):
+        raise click.ClickException(
+            "Runner host hygiene executor host must match the approved host."
         )
     github_repository = resolved_env.get("GITHUB_REPOSITORY", "").strip()
     if github_repository and github_repository != request.repository_scope:
@@ -1149,8 +1261,18 @@ def _collect_runner_workdir_usage(
                 f"runner host hygiene runner_workdir_bytes:{root.key} evidence failed"
             )
         lines = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
-        if len(lines) != 2:
+        if len(lines) not in {2, 3}:
             raise click.ClickException("runner host hygiene runner workdir evidence was incomplete")
+        raw_measurement_status = lines[2] if len(lines) == 3 else "complete"
+        measurement_status: Literal["complete", "partial"]
+        if raw_measurement_status == "complete":
+            measurement_status = "complete"
+        elif raw_measurement_status == "partial":
+            measurement_status = "partial"
+        else:
+            raise click.ClickException(
+                "runner host hygiene runner workdir evidence had an invalid status"
+            )
         usage.append(
             RunnerHostHygieneRunnerWorkdirUsage(
                 root_key=root.key,
@@ -1160,6 +1282,7 @@ def _collect_runner_workdir_usage(
                 allocated_bytes=_parse_non_negative_int_evidence(
                     lines[1], evidence_name=f"runner_workdir_allocated_bytes:{root.key}"
                 ),
+                measurement_status=measurement_status,
             )
         )
     return tuple(usage)
@@ -1486,18 +1609,47 @@ def _terminal_message(
     action: RunnerHostHygieneApplyAction,
     action_result: RemoteCommandResult,
     post_report: RunnerHostHygieneReport,
+    post_evidence_failure: str,
 ) -> str:
-    action_label = (
-        "BuildKit state volume removal"
-        if action == "remove_buildkit_state_volumes"
-        else "Docker cache prune"
-    )
+    action_label = {
+        "prune_docker_cache": "Docker cache prune",
+        "prune_dangling_images": "dangling Docker image prune",
+        "remove_buildkit_state_volumes": "BuildKit state volume removal",
+        "prune_runner_workdir": "runner workdir prune",
+        "restart_runner_service": "runner service restart",
+    }[action]
     if action_result.returncode != 0:
         detail = action_result.stderr.strip() or action_result.stdout.strip() or "unknown error"
         return f"runner host {action_label} failed: {_redact_sensitive_text(detail)}"
+    if post_evidence_failure:
+        return f"runner host {action_label} completed but post evidence failed: {post_evidence_failure}"
     if post_report.status != "healthy":
         return (
-            f"runner host {action_label} completed but post evidence is not healthy: "
+            f"runner host {action_label} completed; post evidence still needs attention: "
             f"{post_report.summary}"
         )
     return f"runner host {action_label} completed and post evidence is healthy"
+
+
+def _post_apply_evidence_failure(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    post_report: RunnerHostHygieneReport,
+) -> str:
+    missing_warm_builders = tuple(
+        builder
+        for builder in request.retained_warm_builders
+        if builder not in post_report.warm_builders
+    )
+    if missing_warm_builders:
+        return "retained warm builders are missing: " + ", ".join(missing_warm_builders)
+    if request.action == "remove_buildkit_state_volumes":
+        remaining_volumes = {volume.name for volume in post_report.volume_inventory}
+        remaining_targets = tuple(
+            volume
+            for volume in request.target_buildkit_state_volumes
+            if volume in remaining_volumes
+        )
+        if remaining_targets:
+            return "target BuildKit state volumes remain present: " + ", ".join(remaining_targets)
+    return ""
