@@ -22,6 +22,7 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_prod_retained_volume_backup_import import (
     ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_CONFIRMATION,
     OdooProdRetainedVolumeBackupImportApplyRequest,
+    OdooProdRetainedVolumeBackupImportInspectionFailureEvidence,
     OdooProdRetainedVolumeBackupImportPlan,
     OdooProdRetainedVolumeBackupImportRequest,
     build_odoo_prod_retained_volume_backup_import_plan_fingerprint,
@@ -359,6 +360,41 @@ def _run_provider_inspection(target: DokployTargetDefinition) -> dokploy_api.Jso
     )
 
 
+def _run_provider_apply(target: DokployTargetDefinition) -> dokploy_api.JsonObject:
+    return dokploy_post_deploy.run_compose_odoo_retained_volume_backup_import_apply(
+        host="https://dokploy.example.test",
+        token="token",
+        target_definition=target,
+        expected_compose_app_name=ACTIVE_COMPOSE_PROJECT,
+        import_nonce="6" * 64,
+        operation_id="retained-import-apply-1",
+        plan_fingerprint="7" * 64,
+        backup_record_id=BACKUP_RECORD_ID,
+        active_db_volume=ACTIVE_DB_VOLUME,
+        active_data_volume=ACTIVE_DATA_VOLUME,
+        active_log_volume=ACTIVE_LOG_VOLUME,
+        source_db_volume=SOURCE_DB_VOLUME,
+        source_data_volume=SOURCE_DATA_VOLUME,
+        staging_clone_volume=STAGING_CLONE_VOLUME,
+        source_database_name=SOURCE_DATABASE_NAME,
+        destination_database_name=DESTINATION_DATABASE_NAME,
+        database_user=DATABASE_USER,
+        expected_source_compose_project=SOURCE_COMPOSE_PROJECT,
+        expected_source_pg_control_sha256=PG_CONTROL_SHA256,
+        expected_source_pg_version="17",
+        expected_postgres_image_id=POSTGRES_IMAGE_ID,
+        expected_script_runner_image_id=SCRIPT_RUNNER_IMAGE_ID,
+        expected_source_filestore_file_count=42,
+        expected_source_filestore_size_bytes=100_000_000,
+        expected_active_data_required_bytes=2_300_000_000,
+        filestore_relative_path="filestore",
+        backup_dir_relative_path="backups/example",
+        database_dump_relative_path="backups/example/example.dump",
+        filestore_archive_relative_path="backups/example/example-filestore.tar.gz",
+        manifest_relative_path="backups/example/manifest.json",
+    )
+
+
 def _build_plan(store: _Store) -> OdooProdRetainedVolumeBackupImportPlan:
     def inspect(**kwargs: object) -> dict[str, object]:
         callback = kwargs.get("before_provider_mutation")
@@ -440,6 +476,22 @@ def _operation(
 
 
 class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
+    def test_inspection_failure_evidence_rejects_unsafe_provider_ids(self) -> None:
+        base_payload = {
+            "schema_version": 1,
+            "inspection_nonce": "e" * 64,
+            "backup_record_id": BACKUP_RECORD_ID,
+            "failure_stage": "provider_control",
+            "failure_code": "provider_schedule_wait_failed",
+            "inspection_schedule_id": "schedule-1",
+            "inspection_deployment_id": "",
+        }
+        for field_name in ("inspection_schedule_id", "inspection_deployment_id"):
+            with self.subTest(field_name=field_name), self.assertRaises(ValueError):
+                OdooProdRetainedVolumeBackupImportInspectionFailureEvidence.model_validate(
+                    {**base_payload, field_name: "unsafe/provider/id"}
+                )
+
     def test_request_rejects_source_or_staging_volume_aliases(self) -> None:
         payload = _request().model_dump()
         payload["source_db_volume"] = ACTIVE_DB_VOLUME
@@ -565,9 +617,10 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
                     "schema_version": 1,
                     "inspection_nonce": inspection_nonces[-1],
                     "backup_record_id": BACKUP_RECORD_ID,
-                    "failure_stage": "source_database",
-                    "failure_code": "source_postgres_metadata_read_failed",
-                    "inspection_deployment_id": "deployment-inspection-failed",
+                    "failure_stage": "provider_control",
+                    "failure_code": "provider_schedule_wait_failed",
+                    "inspection_schedule_id": "schedule-inspection-failed",
+                    "inspection_deployment_id": "",
                 }
             )
 
@@ -596,19 +649,19 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
 
         self.assertEqual(plan.plan_status, "blocked")
         self.assertIn(
-            "Retained-volume provider inspection failed at source_database "
-            "(source_postgres_metadata_read_failed).",
+            "Retained-volume provider inspection failed at provider_control "
+            "(provider_schedule_wait_failed).",
             plan.blockers,
         )
         self.assertIn(
             (
                 "inspection_started",
                 {
-                    "inspection_deployment_id": "deployment-inspection-failed",
                     "inspection_nonce": inspection_nonces[0],
                     "backup_record_id": BACKUP_RECORD_ID,
-                    "failure_stage": "source_database",
-                    "failure_code": "source_postgres_metadata_read_failed",
+                    "failure_stage": "provider_control",
+                    "failure_code": "provider_schedule_wait_failed",
+                    "inspection_schedule_id": "schedule-inspection-failed",
                 },
             ),
             checkpoints,
@@ -1326,6 +1379,7 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
                 "backup_record_id": BACKUP_RECORD_ID,
                 "failure_stage": "source_database",
                 "failure_code": "source_postgres_metadata_read_failed",
+                "inspection_schedule_id": "schedule-1",
                 "inspection_deployment_id": "failed-deployment",
             },
         )
@@ -1336,6 +1390,207 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
             deployment_id="failed-deployment",
             line_count=dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT,
         )
+
+    def test_provider_inspection_bounds_control_failures(self) -> None:
+        target = DokployTargetDefinition(
+            context=CONTEXT,
+            instance="prod",
+            target_id="compose-example-prod",
+            target_name="example-prod",
+        )
+        for failure_point, expected_code, schedule_id in (
+            ("target", "provider_target_read_failed", ""),
+            ("runtime", "provider_schedule_runtime_resolution_failed", ""),
+            ("upsert", "provider_schedule_upsert_failed", ""),
+            ("baseline", "provider_schedule_baseline_read_failed", "schedule-1"),
+            ("trigger", "provider_schedule_trigger_failed", "schedule-1"),
+            ("wait", "provider_schedule_wait_failed", "schedule-1"),
+        ):
+            with self.subTest(failure_point=failure_point):
+                provider_error = click.ClickException(f"private-{failure_point}-provider-error")
+                with (
+                    patch(
+                        "control_plane.dokploy.post_deploy.api.fetch_dokploy_target_payload",
+                        side_effect=provider_error if failure_point == "target" else None,
+                        return_value={
+                            "appName": ACTIVE_COMPOSE_PROJECT,
+                            "serverId": "server-1",
+                        },
+                    ),
+                    patch(
+                        "control_plane.dokploy.post_deploy._resolve_dokploy_schedule_runtime",
+                        side_effect=provider_error if failure_point == "runtime" else None,
+                        return_value=(
+                            "server",
+                            "server-1",
+                            ACTIVE_COMPOSE_PROJECT,
+                            "server-1",
+                        ),
+                    ),
+                    patch(
+                        "control_plane.dokploy.post_deploy.api.upsert_dokploy_schedule",
+                        side_effect=provider_error if failure_point == "upsert" else None,
+                        return_value={"scheduleId": "schedule-1"},
+                    ),
+                    patch(
+                        "control_plane.dokploy.post_deploy.api.latest_deployment_for_schedule",
+                        side_effect=provider_error if failure_point == "baseline" else None,
+                        return_value={"deploymentId": "before"},
+                    ),
+                    patch(
+                        "control_plane.dokploy.post_deploy.api.dokploy_request",
+                        side_effect=provider_error if failure_point == "trigger" else None,
+                        return_value={"ok": True},
+                    ),
+                    patch(
+                        "control_plane.dokploy.post_deploy.api.wait_for_dokploy_schedule_deployment",
+                        side_effect=provider_error if failure_point == "wait" else None,
+                        return_value="deployment=unused status=done",
+                    ),
+                ):
+                    with self.assertRaises(
+                        dokploy_post_deploy.OdooRetainedVolumeBackupImportInspectionFailure
+                    ) as raised:
+                        _run_provider_inspection(target)
+
+                self.assertEqual(
+                    raised.exception.evidence,
+                    {
+                        "schema_version": 1,
+                        "inspection_nonce": "e" * 64,
+                        "backup_record_id": BACKUP_RECORD_ID,
+                        "failure_stage": "provider_control",
+                        "failure_code": expected_code,
+                        "inspection_schedule_id": schedule_id,
+                        "inspection_deployment_id": "",
+                    },
+                )
+                self.assertNotIn("private-", str(raised.exception))
+
+    def test_provider_inspection_rejects_unbounded_baseline_identity(self) -> None:
+        target = DokployTargetDefinition(
+            context=CONTEXT,
+            instance="prod",
+            target_id="compose-example-prod",
+            target_name="example-prod",
+        )
+        with (
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": ACTIVE_COMPOSE_PROJECT, "serverId": "server-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.latest_deployment_for_schedule",
+                return_value={"deploymentId": "unsafe/deployment/id"},
+            ),
+            patch("control_plane.dokploy.post_deploy.api.dokploy_request") as trigger_mock,
+        ):
+            with self.assertRaises(
+                dokploy_post_deploy.OdooRetainedVolumeBackupImportInspectionFailure
+            ) as raised:
+                _run_provider_inspection(target)
+
+        self.assertEqual(
+            raised.exception.evidence["failure_code"],
+            "provider_schedule_baseline_read_failed",
+        )
+        self.assertEqual(raised.exception.evidence["inspection_schedule_id"], "schedule-1")
+        self.assertEqual(raised.exception.evidence["inspection_deployment_id"], "")
+        trigger_mock.assert_not_called()
+
+    def test_inspection_provider_adapter_preserves_apply_exception(self) -> None:
+        provider_error = click.ClickException("original apply provider failure")
+
+        def fail() -> None:
+            raise provider_error
+
+        with self.assertRaises(click.ClickException) as raised:
+            dokploy_post_deploy._run_retained_volume_inspection_provider_call(
+                callback=fail,
+                failure_identity=None,
+                failure_code="provider_schedule_wait_failed",
+            )
+
+        self.assertIs(raised.exception, provider_error)
+
+    def test_provider_apply_preserves_original_schedule_exception(self) -> None:
+        target = DokployTargetDefinition(
+            context=CONTEXT,
+            instance="prod",
+            target_id="compose-example-prod",
+            target_name="example-prod",
+        )
+        provider_error = click.ClickException("original apply schedule failure")
+        with (
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": ACTIVE_COMPOSE_PROJECT, "serverId": "server-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.upsert_dokploy_schedule",
+                side_effect=provider_error,
+            ),
+        ):
+            with self.assertRaises(click.ClickException) as raised:
+                _run_provider_apply(target)
+
+        self.assertIs(raised.exception, provider_error)
+
+    def test_provider_inspection_bounds_invalid_success_result(self) -> None:
+        target = DokployTargetDefinition(
+            context=CONTEXT,
+            instance="prod",
+            target_id="compose-example-prod",
+            target_name="example-prod",
+        )
+        with (
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": ACTIVE_COMPOSE_PROJECT, "serverId": "server-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.latest_deployment_for_schedule",
+                return_value={"deploymentId": "before"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.dokploy_request",
+                return_value={"ok": True},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.wait_for_dokploy_schedule_deployment",
+                return_value="deployment=exact-deployment status=done",
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_deployment_logs",
+                return_value=("private provider output without a marker",),
+            ),
+        ):
+            with self.assertRaises(
+                dokploy_post_deploy.OdooRetainedVolumeBackupImportInspectionFailure
+            ) as raised:
+                _run_provider_inspection(target)
+
+        self.assertEqual(
+            raised.exception.evidence,
+            {
+                "schema_version": 1,
+                "inspection_nonce": "e" * 64,
+                "backup_record_id": BACKUP_RECORD_ID,
+                "failure_stage": "result",
+                "failure_code": "provider_result_invalid",
+                "inspection_schedule_id": "schedule-1",
+                "inspection_deployment_id": "exact-deployment",
+            },
+        )
+        self.assertNotIn("private provider output", str(raised.exception))
 
     def test_provider_inspection_bounds_unavailable_failure_logs(self) -> None:
         target = DokployTargetDefinition(
@@ -1386,7 +1641,8 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
                 "inspection_nonce": "e" * 64,
                 "backup_record_id": BACKUP_RECORD_ID,
                 "failure_stage": "result",
-                "failure_code": "provider_schedule_failed_without_evidence",
+                "failure_code": "provider_result_log_read_failed",
+                "inspection_schedule_id": "schedule-1",
                 "inspection_deployment_id": "failed-deployment",
             },
         )

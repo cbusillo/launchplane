@@ -1690,11 +1690,18 @@ the service reads only the exact failed schedule deployment and accepts one
 nonce- and backup-record-bound failure marker. The operation checkpoint records
 only the request nonce, backup-record id, inspection deployment id, and a
 bounded failure stage/code pair; raw provider logs and command output are not
-copied into the plan, operation error, or API response. If the exact marker or
-its logs are unavailable, the same request and deployment are recorded with the
-generic bounded `result/provider_schedule_failed_without_evidence` pair. This
+copied into the plan, operation error, or API response. An unreadable exact log
+is recorded as `result/provider_result_log_read_failed`; a missing, duplicate,
+or invalid marker is recorded as `result/provider_result_invalid`. This
 distinguishes a provider inspection failure from a GitHub environment approval
 wait without weakening the fail-closed plan boundary.
+
+Failures before a script result are also bounded. Target lookup, schedule
+runtime resolution, upsert, baseline read, trigger, wait,
+deployment-id extraction, result-log read, and result parsing each have a
+distinct allowlisted code. Their checkpoint records the exact schedule and
+deployment ids when those identities are available, but never persists the
+underlying provider exception text.
 
 Run `Odoo Prod Retained Volume Backup Import Apply` only with the exact reviewed
 plan operation and fingerprint, a stable idempotency key, and confirmation phrase
