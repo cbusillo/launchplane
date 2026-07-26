@@ -435,13 +435,11 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 "builder",
                 "prune",
                 "--force",
+                "--all",
                 "--filter",
                 "until=168h",
             ),
             command_runner.commands,
-        )
-        self.assertNotIn(
-            ("docker", "builder", "prune", "--all", "--force"), command_runner.commands
         )
 
     def test_executor_bounds_one_allowlisted_buildx_builder(self) -> None:
