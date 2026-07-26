@@ -3460,9 +3460,9 @@ if [ "${{ready}}" != "1" ]; then
     exit 1
 fi
 database_exists=$(docker exec -u postgres "${{clone_container}}" \
-    psql --host /var/run/postgresql --username "${{database_user}}" --dbname postgres \
-    --no-psqlrc --tuples-only --no-align --set=source_database="${{source_database_name}}" \
-    --command "SELECT 1 FROM pg_database WHERE datname = :'source_database';")
+    psql --host /var/run/postgresql --username "${{database_user}}" \
+    --dbname "${{source_database_name}}" --no-psqlrc --tuples-only --no-align \
+    --command "SELECT 1;")
 if [ "${{database_exists}}" != "1" ]; then
     echo "Requested retained source database does not exist in the staging clone." >&2
     exit 1

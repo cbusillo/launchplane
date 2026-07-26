@@ -1728,12 +1728,14 @@ It never starts PostgreSQL on, or writes to, either retained source volume. It
 copies the source database volume read-only into the fresh staging volume while
 preserving ownership, verifies the copied `pg_control` fingerprint, and starts
 PostgreSQL 17 only from that clone in an isolated named container and network.
-After proving the requested source database exists, it writes a custom-format
-dump and source-filestore archive into the active data volume's standard
-Launchplane backup directory. Artifact names and the schema-v1 manifest use the
-destination database identity; the archived filestore has that identity as its
-top-level directory. Launchplane verifies sizes and SHA-256 values and accepts
-only nonce-, request-, and exact schedule-deployment-bound completion evidence.
+It proves the requested source database exists by connecting to that exact
+validated database name instead of interpolating the name into SQL. It then
+writes a custom-format dump and source-filestore archive into the active data
+volume's standard Launchplane backup directory. Artifact names and the schema-v1
+manifest use the destination database identity; the archived filestore has that
+identity as its top-level directory. Launchplane verifies sizes and SHA-256
+values and accepts only nonce-, request-, and exact schedule-deployment-bound
+completion evidence.
 
 The clone container and network are removed on exit, while the staging clone
 volume remains labeled for explicit recovery inspection. A passing import writes
