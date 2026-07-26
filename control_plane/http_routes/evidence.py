@@ -957,6 +957,7 @@ def register_evidence_write_routes(
             "repository": runner_lane_registration_request.audit.request.repository,
             "host_name": runner_lane_registration_request.audit.request.host_name,
             "lane_name": runner_lane_registration_request.audit.request.lane_name,
+            "operation": runner_lane_registration_request.audit.request.operation,
             "audit_status": runner_lane_registration_request.audit.status,
             "mutate": runner_lane_registration_request.audit.request.mutate,
             "audit": runner_lane_registration_request.audit.model_dump(mode="json"),

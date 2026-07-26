@@ -43,6 +43,8 @@ from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.runner_lane_github import GitHubRunnerLaneRegistrationTokenFetcher
+from control_plane.runner_lane_github import GitHubRunnerLaneRetirer
+from control_plane.runner_lane_github import GitHubRepositoryActiveRunReader
 from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
 from control_plane.workflows.runner_lane_registration_executor import (
     RunnerLaneRegistrationExecutorRequest,
@@ -62,6 +64,15 @@ from control_plane.workflows.runner_lane_registration_executor import (
 )
 from control_plane.workflows.runner_lane_registration_executor import (
     validate_local_executor_environment as validate_runner_registration_environment,
+)
+from control_plane.workflows.runner_lane_retirement_executor import (
+    RunnerLaneRetirementExecutorRequest,
+)
+from control_plane.workflows.runner_lane_retirement_executor import (
+    execute_runner_lane_retirement_executor,
+)
+from control_plane.workflows.runner_lane_retirement_executor import (
+    validate_local_executor_environment as validate_runner_retirement_environment,
 )
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
 from control_plane.workflows.runner_host_hygiene_executor import RunnerWorkdirRoot
@@ -92,6 +103,10 @@ def register_runner_lane_commands(work_graph: click.Group) -> None:
     work_graph.add_command(
         runner_lane_registration_executor,
         name="runner-lane-registration-executor",
+    )
+    work_graph.add_command(
+        runner_lane_retirement_executor,
+        name="runner-lane-retirement-executor",
     )
     work_graph.add_command(runner_host_hygiene_report, name="runner-host-hygiene-report")
     work_graph.add_command(runner_host_hygiene_apply_plan, name="runner-host-hygiene-apply-plan")
@@ -822,6 +837,184 @@ def runner_lane_registration_executor(
             audit_poster=audit_poster,
         )
     except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@click.command("runner-lane-retirement-executor")
+@click.option("--repository", required=True, help="owner/name repository whose lane should retire.")
+@click.option("--host-name", required=True, help="Approved runner host name.")
+@click.option("--execution-lane", required=True, help="Approved ops execution lane.")
+@click.option("--service-user", required=True, help="Expected constrained service user.")
+@click.option("--lane-name", required=True, help="Exact runner lane name to retire.")
+@click.option(
+    "--registration-root",
+    required=True,
+    help="Absolute approved root containing the runner lane directory.",
+)
+@click.option("--mutate/--dry-run", default=False, show_default=True)
+@click.option("--audit-record-key", required=True, help="Durable lifecycle audit key.")
+@click.option(
+    "--allowed-repository",
+    "allowed_repositories",
+    multiple=True,
+    help="Repository opted into runner lane retirement. Repeat as needed.",
+)
+@click.option(
+    "--approved-host",
+    "approved_hosts",
+    multiple=True,
+    help="Host approved for runner lane retirement. Repeat as needed.",
+)
+@click.option(
+    "--allowed-registration-root",
+    "allowed_registration_roots",
+    multiple=True,
+    help="Absolute root allowed for runner retirement. Repeat as needed.",
+)
+@click.option(
+    "--required-label",
+    "required_labels",
+    multiple=True,
+    help="Observed managed label required for retirement.",
+)
+@click.option(
+    "--inventory-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="Pre-mutation RunnerLaneInventory JSON from runner-inventory.",
+)
+@click.option(
+    "--github-token-env",
+    default="GITHUB_TOKEN",
+    show_default=True,
+    help="Environment variable containing runner administration authority.",
+)
+@click.option(
+    "--github-api-base-url",
+    default="https://api.github.com",
+    show_default=True,
+    help="GitHub API base URL.",
+)
+@click.option(
+    "--timeout-seconds",
+    default=120,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Timeout for each local runner retirement command.",
+)
+@click.option(
+    "--audit-mode",
+    type=click.Choice(("local", "service")),
+    default="local",
+    show_default=True,
+    help="Where runner lifecycle audit records should be written.",
+)
+@click.option(
+    "--service-url",
+    default="",
+    help="Launchplane service origin for --audit-mode service.",
+)
+@click.option(
+    "--bearer-token-env",
+    default="LAUNCHPLANE_SERVICE_TOKEN",
+    show_default=True,
+    help="Environment variable containing a Launchplane bearer token.",
+)
+def runner_lane_retirement_executor(
+    repository: str,
+    host_name: str,
+    execution_lane: str,
+    service_user: str,
+    lane_name: str,
+    registration_root: str,
+    mutate: bool,
+    audit_record_key: str,
+    allowed_repositories: tuple[str, ...],
+    approved_hosts: tuple[str, ...],
+    allowed_registration_roots: tuple[str, ...],
+    required_labels: tuple[str, ...],
+    inventory_file: Path,
+    github_token_env: str,
+    github_api_base_url: str,
+    timeout_seconds: int,
+    audit_mode: str,
+    service_url: str,
+    bearer_token_env: str,
+) -> None:
+    try:
+        pre_inventory = _load_runner_lane_inventory(inventory_file)
+        github_token_name = github_token_env.strip()
+        github_token = os.environ.get(github_token_name, "").strip() if github_token_name else ""
+        if not github_token:
+            raise click.ClickException(
+                f"Missing GitHub token in environment variable {github_token_name}."
+            )
+        transport = UrllibMergeTrainGitHubTransport(
+            token=github_token,
+            api_base_url=github_api_base_url,
+        )
+        inventory_reader = GitHubRunnerLaneInventoryReader(transport=transport)
+        activity_reader = GitHubRepositoryActiveRunReader(transport=transport)
+        runner_retirer = GitHubRunnerLaneRetirer(transport=transport)
+        if mutate and audit_mode != "service":
+            raise click.ClickException(
+                "runner lane retirement mutation requires --audit-mode service."
+            )
+        audit_poster: RunnerRegistrationAuditPoster = dry_run_audit_poster
+        if audit_mode == "service":
+            token_name = bearer_token_env.strip()
+            if not token_name:
+                raise click.ClickException(
+                    "runner lane retirement executor requires --bearer-token-env."
+                )
+            audit_poster = build_runner_registration_service_audit_poster(
+                service_url=service_url,
+                bearer_token_provider=lambda: _launchplane_service_bearer_token(
+                    service_url=service_url,
+                    token_env=token_name,
+                    label="runner lane retirement",
+                ),
+            )
+        request = RunnerLaneRetirementExecutorRequest(
+            repository=repository,
+            host_name=host_name,
+            execution_lane=execution_lane,
+            service_user=service_user,
+            lane_name=lane_name,
+            registration_root=registration_root,
+            mutate=mutate,
+            audit_record_key=audit_record_key,
+            timeout_seconds=timeout_seconds,
+        )
+        validate_runner_retirement_environment(request=request)
+        result = execute_runner_lane_retirement_executor(
+            request=request,
+            policy=RunnerLaneRegistrationPolicy(
+                allowed_repositories=allowed_repositories,
+                approved_hosts=approved_hosts,
+                allowed_registration_roots=allowed_registration_roots,
+                required_labels=(required_labels or ("launchplane-managed",)),
+            ),
+            pre_inventory=pre_inventory,
+            inventory_reader=lambda repo: inventory_reader.read_runner_lane_inventory(
+                repository=repo
+            ),
+            active_run_reader=lambda repo: activity_reader.read_active_run_ids(repository=repo),
+            runner_retirer=lambda repo, runner_id: runner_retirer.delete_runner(
+                repository=repo,
+                runner_id=runner_id,
+            ),
+            remote_runner=build_runner_registration_command_runner(),
+            audit_poster=audit_poster,
+        )
+    except (
+        OSError,
+        JSONDecodeError,
+        MergeTrainGitHubError,
+        ValidationError,
+        ValueError,
+    ) as error:
         raise click.ClickException(str(error)) from error
     click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
 

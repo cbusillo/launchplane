@@ -17754,9 +17754,14 @@
               "inventory_repository_mismatch",
               "label_missing",
               "lane_already_exists",
+              "lane_ambiguous",
+              "lane_busy",
+              "lane_missing",
               "mutate_not_requested",
               "registration_root_not_allowed",
-              "repository_not_allowed"
+              "repository_runs_active",
+              "repository_not_allowed",
+              "target_worker_active"
             ],
             "title": "Code",
             "type": "string"
@@ -17776,6 +17781,14 @@
       "RunnerLaneRegistrationPlan": {
         "additionalProperties": false,
         "properties": {
+          "active_run_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Active Run Ids",
+            "type": "array"
+          },
           "audit_record_key": {
             "title": "Audit Record Key",
             "type": "string"
@@ -17815,6 +17828,15 @@
             "title": "Next Steps",
             "type": "array"
           },
+          "operation": {
+            "default": "register",
+            "enum": [
+              "register",
+              "retire"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
           "registration_root": {
             "title": "Registration Root",
             "type": "string"
@@ -17840,6 +17862,11 @@
           "summary": {
             "title": "Summary",
             "type": "string"
+          },
+          "target_worker_active": {
+            "default": false,
+            "title": "Target Worker Active",
+            "type": "boolean"
           }
         },
         "required": [
@@ -17859,6 +17886,14 @@
       "RunnerLaneRegistrationRequest": {
         "additionalProperties": false,
         "properties": {
+          "active_run_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Active Run Ids",
+            "type": "array"
+          },
           "audit_record_key": {
             "default": "",
             "title": "Audit Record Key",
@@ -17884,6 +17919,15 @@
             "title": "Mutate",
             "type": "boolean"
           },
+          "operation": {
+            "default": "register",
+            "enum": [
+              "register",
+              "retire"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
           "registration_root": {
             "title": "Registration Root",
             "type": "string"
@@ -17897,6 +17941,11 @@
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "target_worker_active": {
+            "default": false,
+            "title": "Target Worker Active",
+            "type": "boolean"
           }
         },
         "required": [

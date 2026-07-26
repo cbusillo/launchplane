@@ -2916,7 +2916,7 @@ bearer-token callers with OpenAPI contract coverage and idempotency replay
 preservation. It records planned, completed, or failed audit facts supplied by a
 future approved executor, but it does not mutate runner hosts itself.
 
-### Runner lane registration audit evidence
+### Runner lane lifecycle audit evidence
 
 `POST /v1/evidence/runner-lane-registration/audits`
 
@@ -2928,13 +2928,19 @@ Request payload:
   "product": "launchplane",
   "audit": {
     "schema_version": 1,
-    "audit_record_key": "runner-lane-registration/2026-06-08/cm-website/dry-run",
+    "audit_record_key": "runner-lane-retirement/2026-07-26/product/dry-run",
     "status": "planned",
-    "request": "RunnerLaneRegistrationRequest",
-    "plan": "RunnerLaneRegistrationPlan",
+    "request": {
+      "operation": "retire",
+      "contract": "RunnerLaneRegistrationRequest"
+    },
+    "plan": {
+      "operation": "retire",
+      "contract": "RunnerLaneRegistrationPlan"
+    },
     "pre_inventory": "RunnerLaneInventory",
     "post_inventory": null,
-    "message": "planned runner lane registration; no host mutation was executed"
+    "message": "planned runner lane retirement; no runner mutation was executed yet"
   }
 }
 ```
@@ -2945,7 +2951,10 @@ storage, and returns the `runner_lane_registration_audit_record_key` in both the
 accepted records and result details. It is native FastAPI evidence ingress for
 bearer-token callers with OpenAPI contract coverage and idempotency replay
 preservation. The host-side registration executor owns any GitHub registration
-token request and runner `config.sh` execution.
+token request and runner `config.sh` execution. The retirement executor uses the
+same compatibility route and exact authorized workflow identity, writes
+`operation: retire`, and owns the separately guarded service stop, GitHub runner
+deletion, and inactive root cleanup.
 
 For VeriReel's first stable-lane Launchplane slice, use context `verireel` for the
 long-lived `testing` and `prod` instances. Preview evidence remains separate
