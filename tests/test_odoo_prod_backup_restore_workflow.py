@@ -14,7 +14,8 @@ PLAN_WRAPPER_PATH = Path(".github/workflows/odoo-prod-backup-restore-plan.yml")
 PLAN_WORKER_PATH = Path(".github/workflows/reusable-odoo-prod-backup-restore-plan.yml")
 APPLY_WRAPPER_PATH = Path(".github/workflows/odoo-prod-backup-restore-apply.yml")
 APPLY_WORKER_PATH = Path(".github/workflows/reusable-odoo-prod-backup-restore-apply.yml")
-PINNED_WORKFLOW_SHA = "75c632d645f29775c5f2b1ab91f5318e1468000b"
+PLAN_PINNED_WORKFLOW_SHA = "75c632d645f29775c5f2b1ab91f5318e1468000b"
+APPLY_PINNED_WORKFLOW_SHA = "2e3168626bd90cc0839eed455b9b206a9a19231e"
 
 RESTORE_IDENTITY_INPUTS = {
     "product",
@@ -53,7 +54,7 @@ class OdooProdBackupRestoreWorkflowTests(unittest.TestCase):
         self.assertEqual(
             self.plan_wrapper.job_uses("plan"),
             "cbusillo/launchplane/.github/workflows/"
-            f"reusable-odoo-prod-backup-restore-plan.yml@{PINNED_WORKFLOW_SHA}",
+            f"reusable-odoo-prod-backup-restore-plan.yml@{PLAN_PINNED_WORKFLOW_SHA}",
         )
         self.assertEqual(self.plan_wrapper.steps("plan"), ())
         concurrency = cast(YamlMapping, self.plan_wrapper.data["concurrency"])
@@ -85,7 +86,7 @@ class OdooProdBackupRestoreWorkflowTests(unittest.TestCase):
         self.assertEqual(
             self.apply_wrapper.job_uses("apply"),
             "cbusillo/launchplane/.github/workflows/"
-            f"reusable-odoo-prod-backup-restore-apply.yml@{PINNED_WORKFLOW_SHA}",
+            f"reusable-odoo-prod-backup-restore-apply.yml@{APPLY_PINNED_WORKFLOW_SHA}",
         )
         self.assertEqual(self.apply_wrapper.steps("apply"), ())
         concurrency = cast(YamlMapping, self.apply_wrapper.data["concurrency"])
