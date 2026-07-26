@@ -106,6 +106,11 @@ from control_plane.contracts.odoo_stable_bootstrap_operation import (
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
+from control_plane.odoo_stable_lane import (
+    OdooStableLaneOperationConflictError,
+    OdooStableLaneOperationKind,
+    OdooStableLaneOperationOwner,
+)
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
@@ -4066,10 +4071,92 @@ class PostgresRecordStore(HumanSessionStore):
         row.attempt = record.attempt
         row.payload = self._payload_dict(record)
 
+    def _lock_odoo_stable_lane_creation(
+        self,
+        session: Any,
+        *,
+        product: str,
+        context: str,
+        instance: str,
+    ) -> None:
+        dialect_name = session.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            lane_key = "".join(f"{len(value)}:{value}" for value in (product, context, instance))
+            session.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock("
+                    "hashtext('launchplane-odoo-stable-lane'), hashtext(:lane_key))"
+                ),
+                {"lane_key": lane_key},
+            )
+        elif dialect_name == "sqlite":
+            session.execute(text("BEGIN IMMEDIATE"))
+
+    def _active_odoo_stable_lane_operation_owner(
+        self,
+        session: Any,
+        *,
+        product: str,
+        context: str,
+        instance: str,
+    ) -> OdooStableLaneOperationOwner | None:
+        operation_tables: tuple[tuple[OdooStableLaneOperationKind, Any], ...] = (
+            ("stable_bootstrap", LaunchplaneOdooStableBootstrapOperationRow),
+            ("target_replacement", LaunchplaneOdooStableTargetReplacementOperationRow),
+            ("prod_backup_restore", LaunchplaneOdooProdBackupRestoreOperationRow),
+            (
+                "retained_volume_backup_import",
+                LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
+            ),
+        )
+        for operation_kind, operation_table in operation_tables:
+            operation_id = session.scalar(
+                select(operation_table.operation_id)
+                .where(
+                    operation_table.product == product,
+                    operation_table.context == context,
+                    operation_table.instance == instance,
+                    operation_table.status.in_(("pending", "running")),
+                )
+                .order_by(operation_table.updated_at.desc(), operation_table.operation_id.desc())
+                .limit(1)
+            )
+            if operation_id:
+                return OdooStableLaneOperationOwner(
+                    operation_kind=operation_kind,
+                    operation_id=str(operation_id),
+                )
+        return None
+
     def create_odoo_stable_bootstrap_operation_record_if_no_active_lane(
         self, record: OdooStableBootstrapOperationRecord
     ) -> tuple[OdooStableBootstrapOperationRecord, bool]:
         with self._session_factory() as session:
+            self._lock_odoo_stable_lane_creation(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            active_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_owner is not None:
+                if active_owner.operation_kind == "stable_bootstrap":
+                    active_row = session.get(
+                        LaunchplaneOdooStableBootstrapOperationRow,
+                        active_owner.operation_id,
+                    )
+                    if active_row is None:
+                        raise RuntimeError("Active Odoo stable bootstrap operation disappeared.")
+                    return (
+                        OdooStableBootstrapOperationRecord.model_validate(active_row.payload),
+                        False,
+                    )
+                raise OdooStableLaneOperationConflictError(active_owner)
             session.add(
                 LaunchplaneOdooStableBootstrapOperationRow(
                     operation_id=record.operation_id,
@@ -4404,6 +4491,33 @@ class PostgresRecordStore(HumanSessionStore):
         self, record: OdooStableTargetReplacementOperationRecord
     ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]:
         with self._session_factory() as session:
+            self._lock_odoo_stable_lane_creation(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            active_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_owner is not None:
+                if active_owner.operation_kind == "target_replacement":
+                    active_row = session.get(
+                        LaunchplaneOdooStableTargetReplacementOperationRow,
+                        active_owner.operation_id,
+                    )
+                    if active_row is None:
+                        raise RuntimeError("Active Odoo target replacement operation disappeared.")
+                    return (
+                        OdooStableTargetReplacementOperationRecord.model_validate(
+                            active_row.payload
+                        ),
+                        False,
+                    )
+                raise OdooStableLaneOperationConflictError(active_owner)
             session.add(
                 LaunchplaneOdooStableTargetReplacementOperationRow(
                     operation_id=record.operation_id,
@@ -4760,6 +4874,31 @@ class PostgresRecordStore(HumanSessionStore):
         self, record: OdooProdBackupRestoreOperationRecord
     ) -> tuple[OdooProdBackupRestoreOperationRecord, bool]:
         with self._session_factory() as session:
+            self._lock_odoo_stable_lane_creation(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            active_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_owner is not None:
+                if active_owner.operation_kind == "prod_backup_restore":
+                    active_row = session.get(
+                        LaunchplaneOdooProdBackupRestoreOperationRow,
+                        active_owner.operation_id,
+                    )
+                    if active_row is None:
+                        raise RuntimeError("Active Odoo backup restore operation disappeared.")
+                    return (
+                        OdooProdBackupRestoreOperationRecord.model_validate(active_row.payload),
+                        False,
+                    )
+                raise OdooStableLaneOperationConflictError(active_owner)
             session.add(
                 LaunchplaneOdooProdBackupRestoreOperationRow(
                     operation_id=record.operation_id,
@@ -5157,6 +5296,35 @@ class PostgresRecordStore(HumanSessionStore):
         self, record: OdooProdRetainedVolumeBackupImportOperationRecord
     ) -> tuple[OdooProdRetainedVolumeBackupImportOperationRecord, bool]:
         with self._session_factory() as session:
+            self._lock_odoo_stable_lane_creation(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            active_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_owner is not None:
+                if active_owner.operation_kind == "retained_volume_backup_import":
+                    active_row = session.get(
+                        LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
+                        active_owner.operation_id,
+                    )
+                    if active_row is None:
+                        raise RuntimeError(
+                            "Active Odoo retained-volume backup import operation disappeared."
+                        )
+                    return (
+                        OdooProdRetainedVolumeBackupImportOperationRecord.model_validate(
+                            active_row.payload
+                        ),
+                        False,
+                    )
+                raise OdooStableLaneOperationConflictError(active_owner)
             session.add(
                 LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow(
                     operation_id=record.operation_id,

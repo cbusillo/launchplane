@@ -33,6 +33,7 @@ from control_plane.odoo_product_driver_http import (
     OdooRouteDependencyError,
     resolve_odoo_product_route,
 )
+from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
 from control_plane.workflows.odoo_prod_backup_restore import (
     OdooProdBackupRestoreStore,
     build_odoo_prod_backup_restore_plan,
@@ -244,11 +245,14 @@ def enqueue_odoo_prod_backup_restore_operation(
         created_at=created_at,
         updated_at=created_at,
     )
-    persisted, created = (
-        operation_store.create_odoo_prod_backup_restore_operation_record_if_no_active_lane(
-            operation
+    try:
+        persisted, created = (
+            operation_store.create_odoo_prod_backup_restore_operation_record_if_no_active_lane(
+                operation
+            )
         )
-    )
+    except OdooStableLaneOperationConflictError as error:
+        raise OdooProdBackupRestoreLaneBusyError(str(error)) from error
     if not created:
         raise OdooProdBackupRestoreOperationActiveError(persisted)
     return _operation_records(persisted), odoo_prod_backup_restore_operation_payload(persisted)

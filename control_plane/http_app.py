@@ -424,6 +424,7 @@ from control_plane.odoo_stable_bootstrap_http import (
     ODOO_STABLE_BOOTSTRAP_ROUTE as _ODOO_STABLE_BOOTSTRAP_ROUTE,
     OdooStableBootstrapEnvelope,
     OdooStableBootstrapIdempotencyKeyReusedError,
+    OdooStableBootstrapLaneBusyError,
     OdooStableBootstrapOperationActiveError,
     OdooStableBootstrapProductMismatchError,
     OdooStableBootstrapRouteDependencyError,
@@ -443,6 +444,7 @@ from control_plane.odoo_target_replacement_apply_http import (
     OdooTargetReplacementApplyEnvelope,
     OdooTargetReplacementApplyCurrentArtifactChangedError,
     OdooTargetReplacementApplyIdempotencyKeyReusedError,
+    OdooTargetReplacementApplyLaneBusyError,
     OdooTargetReplacementApplyOperationActiveError,
     OdooTargetReplacementApplyProductMismatchError,
     OdooTargetReplacementApplyRouteDependencyError,
@@ -7280,6 +7282,13 @@ def create_launchplane_fastapi_app(
                     " bootstrap request."
                 ),
             ) from error
+        except OdooStableBootstrapLaneBusyError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="odoo_stable_lane_operation_active",
+                message=str(error),
+            ) from error
         except OdooStableBootstrapOperationActiveError as error:
             return JSONResponse(
                 status_code=409,
@@ -7540,6 +7549,13 @@ def create_launchplane_fastapi_app(
                     "Idempotency-Key was already used for a different Odoo"
                     " target replacement request."
                 ),
+            ) from error
+        except OdooTargetReplacementApplyLaneBusyError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="odoo_stable_lane_operation_active",
+                message=str(error),
             ) from error
         except OdooTargetReplacementApplyOperationActiveError as error:
             return JSONResponse(

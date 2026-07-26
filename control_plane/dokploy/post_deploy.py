@@ -3247,6 +3247,12 @@ require_mount() {
     fi
 }
 
+volume_label() {
+    local volume_name="$1"
+    local label_name="$2"
+    docker volume inspect -f "{{ index .Labels \"${label_name}\" }}" "${volume_name}"
+}
+
 database_container_id=$(resolve_container_id database)
 script_runner_container_id=$(resolve_container_id script-runner)
 web_container_id=$(resolve_container_id web)
@@ -3260,9 +3266,18 @@ if docker volume inspect "${new_db_volume}" >/dev/null 2>&1; then
     exit 1
 fi
 
-postgres_image=$(docker inspect -f '{{.Config.Image}}' "${database_container_id}")
+postgres_image=$(docker inspect -f '{{.Image}}' "${database_container_id}")
 case "${postgres_image}" in
-    postgres:17 | postgres:17.* | postgres:17-* | postgres:17@*) ;;
+    sha256:[0-9a-f][0-9a-f]*) ;;
+    *)
+        echo "Odoo backup restore requires an immutable PostgreSQL image id." >&2
+        exit 1
+        ;;
+esac
+postgres_binary_version=$(docker run --rm --read-only --network none \
+    --entrypoint postgres "${postgres_image}" --version)
+case "${postgres_binary_version}" in
+    "postgres (PostgreSQL) 17" | "postgres (PostgreSQL) 17."*) ;;
     *)
         echo "Odoo backup restore requires the current PostgreSQL 17 image." >&2
         exit 1
@@ -3303,10 +3318,17 @@ PY
 restore_container_name="launchplane-odoo-restore-${operation_digest}"
 restore_database_host="launchplane-odoo-restore-db-${operation_digest}"
 
-docker volume create \
+created_new_db_volume=$(docker volume create \
     --label "launchplane.restore.operation=${operation_id}" \
     --label "launchplane.restore.preserve=true" \
-    "${new_db_volume}" >/dev/null
+    "${new_db_volume}")
+if [ "${created_new_db_volume}" != "${new_db_volume}" ] || \
+   [ "$(volume_label "${new_db_volume}" launchplane.restore.operation)" != \
+     "${operation_id}" ] || \
+   [ "$(volume_label "${new_db_volume}" launchplane.restore.preserve)" != "true" ]; then
+    echo "Restore DB volume was not created with the exact recovery labels." >&2
+    exit 1
+fi
 
 docker run --rm \
     --volume "${new_db_volume}:/var/lib/postgresql/data" \

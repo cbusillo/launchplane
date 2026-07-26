@@ -1216,6 +1216,12 @@ state/
   product/context/instance lane across plan and apply while work is pending or
   running. Expired work is recoverable only before a provider-effect checkpoint;
   later expiry fails closed for explicit operator inspection.
+- Bootstrap, target replacement, production backup restore, and retained-volume
+  backup import creation also share one storage-level stable-lane reservation.
+  Filesystem storage serializes the exact product/context/instance with one lock;
+  PostgreSQL uses a transaction-scoped advisory lock and checks all four active
+  operation tables before inserting. Per-table partial indexes remain a second
+  same-kind defense, but no operation kind can race another into the same lane.
 - Odoo target-replacement plan snapshots include the exact live values for
   `ODOO_DATA_VOLUME`, `ODOO_LOG_VOLUME`, and `ODOO_DB_VOLUME`. Existing-data
   plans compare those values with resolved DB-backed desired runtime authority

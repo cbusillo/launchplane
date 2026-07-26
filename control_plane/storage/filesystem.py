@@ -75,6 +75,12 @@ from control_plane.contracts.odoo_stable_bootstrap_operation import (
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
+from control_plane.odoo_stable_lane import (
+    OdooStableLaneOperationConflictError,
+    OdooStableLaneOperationKind,
+    OdooStableLaneOperationOwner,
+    OdooStableLaneOperationRecord,
+)
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -2322,6 +2328,28 @@ class FilesystemRecordStore:
     def create_odoo_stable_bootstrap_operation_record_if_no_active_lane(
         self, record: OdooStableBootstrapOperationRecord
     ) -> tuple[OdooStableBootstrapOperationRecord, bool]:
+        reservation_id = _odoo_stable_lane_reservation_id(
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+        )
+        with self._exclusive_record_lock("odoo_stable_lane_operation_reservations", reservation_id):
+            active_operation = self._active_odoo_stable_lane_operation(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_operation is not None:
+                if isinstance(active_operation, OdooStableBootstrapOperationRecord):
+                    return active_operation, False
+                raise OdooStableLaneOperationConflictError(
+                    _odoo_stable_lane_operation_owner(active_operation)
+                )
+            return self._create_odoo_stable_bootstrap_operation_record(record)
+
+    def _create_odoo_stable_bootstrap_operation_record(
+        self, record: OdooStableBootstrapOperationRecord
+    ) -> tuple[OdooStableBootstrapOperationRecord, bool]:
         reservation_id = _odoo_stable_bootstrap_lane_reservation_id(record)
         reservation_path = self._record_path(
             "odoo_stable_bootstrap_lane_reservations", reservation_id
@@ -2352,7 +2380,7 @@ class FilesystemRecordStore:
                 }:
                     return reserved_operation, False
             reservation_path.unlink(missing_ok=True)
-            return self.create_odoo_stable_bootstrap_operation_record_if_no_active_lane(record)
+            return self._create_odoo_stable_bootstrap_operation_record(record)
         self.write_odoo_stable_bootstrap_operation_record(record)
         return record, True
 
@@ -2630,6 +2658,28 @@ class FilesystemRecordStore:
     def create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
         self, record: OdooStableTargetReplacementOperationRecord
     ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]:
+        reservation_id = _odoo_stable_lane_reservation_id(
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+        )
+        with self._exclusive_record_lock("odoo_stable_lane_operation_reservations", reservation_id):
+            active_operation = self._active_odoo_stable_lane_operation(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_operation is not None:
+                if isinstance(active_operation, OdooStableTargetReplacementOperationRecord):
+                    return active_operation, False
+                raise OdooStableLaneOperationConflictError(
+                    _odoo_stable_lane_operation_owner(active_operation)
+                )
+            return self._create_odoo_stable_target_replacement_operation_record(record)
+
+    def _create_odoo_stable_target_replacement_operation_record(
+        self, record: OdooStableTargetReplacementOperationRecord
+    ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]:
         reservation_id = _odoo_target_replacement_lane_reservation_id(record)
         reservation_path = self._record_path(
             "odoo_stable_target_replacement_lane_reservations", reservation_id
@@ -2663,9 +2713,7 @@ class FilesystemRecordStore:
                 }:
                     return reserved_operation, False
             reservation_path.unlink(missing_ok=True)
-            return self.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
-                record
-            )
+            return self._create_odoo_stable_target_replacement_operation_record(record)
         self.write_odoo_stable_target_replacement_operation_record(record)
         return record, True
 
@@ -2870,21 +2918,23 @@ class FilesystemRecordStore:
     def create_odoo_prod_backup_restore_operation_record_if_no_active_lane(
         self, record: OdooProdBackupRestoreOperationRecord
     ) -> tuple[OdooProdBackupRestoreOperationRecord, bool]:
-        reservation_id = hashlib.sha256(
-            f"{record.product}\0{record.context}\0{record.instance}".encode("utf-8")
-        ).hexdigest()
-        with self._exclusive_record_lock(
-            "odoo_prod_backup_restore_lane_reservations", reservation_id
-        ):
-            active_records = self.list_odoo_prod_backup_restore_operation_records(
+        reservation_id = _odoo_stable_lane_reservation_id(
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+        )
+        with self._exclusive_record_lock("odoo_stable_lane_operation_reservations", reservation_id):
+            active_operation = self._active_odoo_stable_lane_operation(
                 product=record.product,
-                context_name=record.context,
-                instance_name=record.instance,
-                statuses=("pending", "running"),
-                limit=1,
+                context=record.context,
+                instance=record.instance,
             )
-            if active_records:
-                return active_records[0], False
+            if active_operation is not None:
+                if isinstance(active_operation, OdooProdBackupRestoreOperationRecord):
+                    return active_operation, False
+                raise OdooStableLaneOperationConflictError(
+                    _odoo_stable_lane_operation_owner(active_operation)
+                )
             self.write_odoo_prod_backup_restore_operation_record(record)
             return record, True
 
@@ -3137,24 +3187,78 @@ class FilesystemRecordStore:
     def create_odoo_prod_retained_volume_backup_import_operation_record_if_no_active_lane(
         self, record: OdooProdRetainedVolumeBackupImportOperationRecord
     ) -> tuple[OdooProdRetainedVolumeBackupImportOperationRecord, bool]:
-        reservation_id = hashlib.sha256(
-            f"{record.product}\0{record.context}\0{record.instance}".encode("utf-8")
-        ).hexdigest()
+        reservation_id = _odoo_stable_lane_reservation_id(
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+        )
         with self._exclusive_record_lock(
-            "odoo_prod_retained_volume_backup_import_lane_reservations",
+            "odoo_stable_lane_operation_reservations",
             reservation_id,
         ):
-            active_records = self.list_odoo_prod_retained_volume_backup_import_operation_records(
+            active_operation = self._active_odoo_stable_lane_operation(
                 product=record.product,
-                context_name=record.context,
-                instance_name=record.instance,
-                statuses=("pending", "running"),
-                limit=1,
+                context=record.context,
+                instance=record.instance,
             )
-            if active_records:
-                return active_records[0], False
+            if active_operation is not None:
+                if isinstance(
+                    active_operation,
+                    OdooProdRetainedVolumeBackupImportOperationRecord,
+                ):
+                    return active_operation, False
+                raise OdooStableLaneOperationConflictError(
+                    _odoo_stable_lane_operation_owner(active_operation)
+                )
             self.write_odoo_prod_retained_volume_backup_import_operation_record(record)
             return record, True
+
+    def _active_odoo_stable_lane_operation(
+        self,
+        *,
+        product: str,
+        context: str,
+        instance: str,
+    ) -> OdooStableLaneOperationRecord | None:
+        active_operations: list[OdooStableLaneOperationRecord] = []
+        active_operations.extend(
+            self.list_odoo_stable_bootstrap_operation_records(
+                product=product,
+                context_name=context,
+                instance_name=instance,
+                statuses=("pending", "running"),
+            )
+        )
+        active_operations.extend(
+            self.list_odoo_stable_target_replacement_operation_records(
+                product=product,
+                context_name=context,
+                instance_name=instance,
+                statuses=("pending", "running"),
+            )
+        )
+        active_operations.extend(
+            self.list_odoo_prod_backup_restore_operation_records(
+                product=product,
+                context_name=context,
+                instance_name=instance,
+                statuses=("pending", "running"),
+            )
+        )
+        active_operations.extend(
+            self.list_odoo_prod_retained_volume_backup_import_operation_records(
+                product=product,
+                context_name=context,
+                instance_name=instance,
+                statuses=("pending", "running"),
+            )
+        )
+        if not active_operations:
+            return None
+        return max(
+            active_operations,
+            key=lambda operation: (operation.updated_at, operation.operation_id),
+        )
 
     def claim_next_odoo_prod_retained_volume_backup_import_operation_record(
         self,
@@ -4143,6 +4247,30 @@ def _odoo_target_replacement_lane_reservation_id(
     lane_key = "|".join((record.product, record.context, record.instance))
     digest = hashlib.sha256(lane_key.encode()).hexdigest()[:16]
     return f"{record.product}-{record.context}-{record.instance}".replace("/", "-") + f"-{digest}"
+
+
+def _odoo_stable_lane_reservation_id(*, product: str, context: str, instance: str) -> str:
+    lane_key = "|".join((product, context, instance))
+    digest = hashlib.sha256(lane_key.encode()).hexdigest()[:16]
+    return f"{product}-{context}-{instance}".replace("/", "-") + f"-{digest}"
+
+
+def _odoo_stable_lane_operation_owner(
+    operation: OdooStableLaneOperationRecord,
+) -> OdooStableLaneOperationOwner:
+    operation_kind: OdooStableLaneOperationKind
+    if isinstance(operation, OdooStableBootstrapOperationRecord):
+        operation_kind = "stable_bootstrap"
+    elif isinstance(operation, OdooStableTargetReplacementOperationRecord):
+        operation_kind = "target_replacement"
+    elif isinstance(operation, OdooProdBackupRestoreOperationRecord):
+        operation_kind = "prod_backup_restore"
+    else:
+        operation_kind = "retained_volume_backup_import"
+    return OdooStableLaneOperationOwner(
+        operation_kind=operation_kind,
+        operation_id=operation.operation_id,
+    )
 
 
 def _odoo_stable_bootstrap_lane_reservation_id(

@@ -410,16 +410,6 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
                     self.release_first_write.wait(timeout=2.0)
                 return super().write_odoo_stable_target_replacement_operation_record(record)
 
-            def _wait_for_odoo_stable_target_replacement_reserved_operation(
-                self, operation_id: str, deadline: float
-            ) -> OdooStableTargetReplacementOperationRecord | None:
-                if operation_id == "operation-cm-testing-first":
-                    self.first_write_started.wait(timeout=2.0)
-                    self.release_first_write.set()
-                return super()._wait_for_odoo_stable_target_replacement_reserved_operation(
-                    operation_id, deadline
-                )
-
         with TemporaryDirectory() as temporary_directory_name:
             store = SlowWriteFilesystemRecordStore(state_dir=Path(temporary_directory_name))
             first = OdooStableTargetReplacementOperationRecord.model_validate(
@@ -443,6 +433,8 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
                     store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane,
                     second,
                 )
+                self.assertFalse(second_future.done())
+                store.release_first_write.set()
 
                 first_record, first_created = first_future.result(timeout=2.0)
                 second_record, second_created = second_future.result(timeout=2.0)
