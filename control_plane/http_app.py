@@ -6599,7 +6599,10 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="odoo_stable_lane_operation_active",
-                message=str(error),
+                message=(
+                    "Another Odoo stable-lane operation is already active for this "
+                    "product/context/instance."
+                ),
             ) from error
         except OdooProdBackupRestoreOperationActiveError as error:
             return JSONResponse(
@@ -6609,7 +6612,10 @@ def create_launchplane_fastapi_app(
                     "trace_id": trace_id,
                     "error": {
                         "code": "odoo_prod_backup_restore_operation_active",
-                        "message": str(error),
+                        "message": (
+                            "An Odoo production backup restore operation is already active for "
+                            "this lane."
+                        ),
                     },
                     "operation": odoo_prod_backup_restore_operation_payload(error.operation),
                 },
@@ -6745,7 +6751,10 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="odoo_stable_lane_operation_active",
-                message=str(error),
+                message=(
+                    "Another Odoo stable-lane operation is already active for this "
+                    "product/context/instance."
+                ),
             ) from error
         except OdooProdRetainedVolumeBackupImportOperationActiveError as error:
             return JSONResponse(
@@ -6755,7 +6764,10 @@ def create_launchplane_fastapi_app(
                     "trace_id": trace_id,
                     "error": {
                         "code": "odoo_retained_volume_backup_import_operation_active",
-                        "message": str(error),
+                        "message": (
+                            "An Odoo retained-volume backup import operation is already active for "
+                            "this lane."
+                        ),
                     },
                     "operation": odoo_prod_retained_volume_backup_import_operation_payload(
                         error.operation
@@ -6902,7 +6914,10 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="odoo_stable_lane_operation_active",
-                message=str(error),
+                message=(
+                    "Another Odoo stable-lane operation is already active for this "
+                    "product/context/instance."
+                ),
             ) from error
         except OdooProdRetainedVolumeBackupImportOperationActiveError as error:
             return JSONResponse(
@@ -6912,7 +6927,10 @@ def create_launchplane_fastapi_app(
                     "trace_id": trace_id,
                     "error": {
                         "code": "odoo_retained_volume_backup_import_operation_active",
-                        "message": str(error),
+                        "message": (
+                            "An Odoo retained-volume backup import operation is already active for "
+                            "this lane."
+                        ),
                     },
                     "operation": odoo_prod_retained_volume_backup_import_operation_payload(
                         error.operation

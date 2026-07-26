@@ -5,6 +5,9 @@ from unittest.mock import patch
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.odoo_prod_backup_restore_http import (
+    OdooProdBackupRestoreOperationActiveError,
+)
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _asgi_request
@@ -155,6 +158,40 @@ class OdooProdBackupRestoreHttpTests(unittest.IsolatedAsyncioTestCase):
             authorization.action,
             "odoo_prod_backup_restore_apply.execute",
         )
+
+    async def test_apply_route_does_not_expose_operation_exception_text(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_prod_backup_restore_apply.execute"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            error = OdooProdBackupRestoreOperationActiveError(_restore_operation())
+            error.args = ("private provider path and stack detail",)
+            with patch(
+                "control_plane.http_app.enqueue_odoo_prod_backup_restore_operation",
+                side_effect=error,
+            ):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/drivers/odoo/prod-backup-restore-apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "restore-request-active",
+                    },
+                    payload=self._payload(apply=True),
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "An Odoo production backup restore operation is already active for this lane.",
+        )
+        self.assertNotIn("private provider path", response.text)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,9 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.odoo_prod_retained_volume_backup_import_http import (
+    OdooProdRetainedVolumeBackupImportOperationActiveError,
+)
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _asgi_request
@@ -180,6 +183,58 @@ class OdooProdRetainedVolumeBackupImportHttpTests(unittest.IsolatedAsyncioTestCa
             authorization.action,
             "odoo_prod_retained_volume_backup_import_apply.execute",
         )
+
+    async def test_write_routes_do_not_expose_operation_exception_text(self) -> None:
+        cases = (
+            (
+                False,
+                "odoo_prod_retained_volume_backup_import_plan.execute",
+                "/v1/drivers/odoo/prod-retained-volume-backup-import-plan",
+                "control_plane.http_app.enqueue_odoo_prod_retained_volume_backup_import_plan_operation",
+            ),
+            (
+                True,
+                "odoo_prod_retained_volume_backup_import_apply.execute",
+                "/v1/drivers/odoo/prod-retained-volume-backup-import-apply",
+                "control_plane.http_app.enqueue_odoo_prod_retained_volume_backup_import_apply_operation",
+            ),
+        )
+        for apply, action, route_path, patch_target in cases:
+            with self.subTest(action=action), TemporaryDirectory() as temporary_directory_name:
+                root = Path(temporary_directory_name)
+                store = self._store(root / "state")
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(self._identity()),
+                    authz_policy=self._policy(action=action),
+                    record_store_factory=lambda: store,
+                    control_plane_root_path=root,
+                )
+                operation_kind = "apply" if apply else "plan"
+                error = OdooProdRetainedVolumeBackupImportOperationActiveError(
+                    _operation(
+                        operation_kind=operation_kind,
+                        operation_id=f"retained-import-{operation_kind}-operation-active",
+                    )
+                )
+                error.args = ("private provider path and stack detail",)
+                with patch(patch_target, side_effect=error):
+                    response = await _asgi_request(
+                        app,
+                        "POST",
+                        route_path,
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": f"retained-{operation_kind}-active",
+                        },
+                        payload=self._payload(apply=apply),
+                    )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(
+                response.json()["error"]["message"],
+                "An Odoo retained-volume backup import operation is already active for this lane.",
+            )
+            self.assertNotIn("private provider path", response.text)
 
     async def test_operation_status_route_returns_plan_result_and_poll_url(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
