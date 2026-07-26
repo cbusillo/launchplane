@@ -245,39 +245,30 @@ jobs:
           route-path: /v1/drivers/odoo/prod-backup-restore-apply
           payload-file: .launchplane/restore-apply-payload.json
           idempotency-key: ${{ inputs.idempotency_key }}
-          output-paths: >-
-            poll_url=result.poll_url,operation_id=result.operation_id
+          output-paths: operation_id=result.operation_id
           fail-result-paths: ""
           log-response-body: "false"
           response-output-file: odoo-prod-backup-restore-create.json
 
       - name: Validate restore operation metadata
+        id: restore_metadata
         env:
           CREATE_STATUS_CODE: ${{ steps.create_restore.outputs.status-code }}
-          POLL_URL: ${{ steps.create_restore.outputs.poll_url }}
           OPERATION_ID: ${{ steps.create_restore.outputs.operation_id }}
         shell: bash
         run: |
           set -euo pipefail
           if [ "$CREATE_STATUS_CODE" != "202" ] || \
-            [ -z "$POLL_URL" ] || \
             [ -z "$OPERATION_ID" ]; then
-            echo 'Restore operation was not accepted with poll metadata.' >&2
+            echo 'Restore operation was not accepted with operation metadata.' >&2
             exit 1
           fi
-          case "$POLL_URL" in
-            /v1/drivers/odoo/prod-backup-restore/operations/*) ;;
-            *)
-              echo 'Restore operation returned an unexpected poll path.' >&2
-              exit 1
-              ;;
-          esac
-          case "$POLL_URL" in
-            *$'\n'* | *$'\r'* | *://* | *'?'* | *'#'* | *'%'*)
-              echo 'Restore poll URL must be a bounded local path.' >&2
-              exit 1
-              ;;
-          esac
+          if ! [[ "$OPERATION_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo 'Restore operation ID must be path-safe.' >&2
+            exit 1
+          fi
+          poll_url="/v1/drivers/odoo/prod-backup-restore/operations/${OPERATION_ID}"
+          echo "poll_url=${poll_url}" >> "$GITHUB_OUTPUT"
 
       - name: Poll destructive restore operation
         id: poll_restore
@@ -291,7 +282,7 @@ jobs:
               vars.LAUNCHPLANE_SERVICE_AUDIENCE
             }}
           method: GET
-          route-path: ${{ steps.create_restore.outputs.poll_url }}
+          route-path: ${{ steps.restore_metadata.outputs.poll_url }}
           poll-result-path: operation.status
           poll-result-statuses: pending,running
           poll-interval-ms: 15000
