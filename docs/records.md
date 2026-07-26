@@ -83,13 +83,15 @@ LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run python -m control_plane
 Do not run `alembic upgrade head` directly against the shared service database
 during a staged rollout. The authorization compatibility image was deployed at
 revision `f3b5d7e9a1c2` before this release advanced the migration target to the
-fenced `f4c6e8a0b2d4` schema. The full reconciliation image accepts f3 only as a
-serialized migration source; its ORM and runtime compatibility contract require
-f4. After the database reaches f4, rollback is supported only to the previously
-deployed compatibility image or another image that understands f4. The runtime
-status route reports the observed database revision, the image's f4-only runtime
-compatibility set, and its migration target so deployment verification can
-enforce this boundary.
+fenced `f4c6e8a0b2d4` schema, then to `a1c3e5f7b9d2` for the dedicated Odoo
+production backup-restore operation table, and then to `b3d5f7a9c1e4` for the
+retained-volume backup-import operation table. The full reconciliation image
+accepts older revisions only as serialized migration sources; its ORM and
+runtime compatibility contract requires b3. After the database reaches b3,
+rollback is supported only to an image that understands both production
+recovery operation tables. The runtime status route reports the observed
+database revision, the image's b3-only runtime compatibility set, and its
+migration target so deployment verification can enforce this boundary.
 
 JSONB `payload` columns remain durable evidence envelopes and original typed
 payload snapshots. Fields that the GUI or drivers need to filter, order, join,
@@ -1101,13 +1103,24 @@ state/
   deployment. Dokploy terminal status alone is not backup evidence; a missing,
   duplicate, malformed, or mismatched bounded completion marker writes a failed
   gate record.
+- A retained-volume backup import writes the same schema-v1 logical backup
+  manifest and artifact evidence under a distinct backup-gate source. Its record
+  additionally binds the reviewed import plan and operation, retained source
+  volume identities and labels, source and destination database identities,
+  PostgreSQL 17 control/checkpoint evidence, preserved staging-clone volume, and
+  exact schedule deployment. Backup verification and guarded restore accept this
+  source. Routine promotion explicitly rejects it so incident-recovery imports
+  cannot satisfy the ordinary backup-before-promote gate.
 - Odoo backup verification accepts only the exact required, passing
   `BackupGateRecord` written by the Odoo prod backup-gate source for the same
   context and prod instance. It recomputes backup paths from DB-backed runtime
   records and requires the record's path evidence to match before provider
-  inspection. The verification response is intentionally not another backup
-  record: it contains only bounded statuses, SHA-256 values, counts, and sizes,
-  and does not persist private paths or add restore authority.
+  inspection. Every verification attempt also writes a separate
+  `BackupGateRecord` from the Odoo backup-verification source. That durable
+  record binds the exact backup record, request nonce, database identity,
+  artifact paths, SHA-256 values, counts, sizes, and bounded per-check status.
+  A passing verification record is evidence for the dedicated restore planner;
+  it does not authorize routine target replacement or promotion.
 - VeriReel prod backup-gate records remain the promotion evidence and replay
   authority, but long-running backup-gate execution is queued separately in
   `launchplane_verireel_prod_backup_gate_operations` for DB-backed storage and
@@ -1164,8 +1177,10 @@ state/
   create/read/poll boundary for the service-backed workflow: they store the
   original request, idempotency key, request fingerprint, active status/phase,
   deployment-record id when available, final driver result, and terminal error.
-  A `pending` or `running` record is the single-flight guard for that
-  product/context/instance.
+  A `pending`, `running`, or `reconciliation_required` record is the
+  single-flight guard for that product/context/instance. Unsafe lease expiry
+  clears the stale lease but keeps the lane blocked until an authorized operator
+  has inspected provider state and records cancellation evidence.
 - Odoo stable target replacement apply writes durable operation records under
   `odoo_stable_target_replacement_operations`. These records mirror the stable
   bootstrap operation boundary for the guarded `recreate-in-place` replacement
@@ -1182,13 +1197,49 @@ state/
   for a concurrent owner id to settle, then give that owner record its own
   bounded settle window before clearing abandoned empty or orphaned reservations
   so an interrupted writer cannot block the lane forever.
+- Odoo production backup restore apply writes dedicated operation records under
+  `odoo_prod_backup_restore_operations`. The immutable plan binds the exact
+  product/context/prod instance, passing backup and verification record ids and
+  timestamps, current artifact, old and fresh database volumes, unchanged data
+  and log volumes, archive paths, hashes, counts, sizes, staging/quarantine
+  paths, target, domains, and runtime identity. The operation stores the caller
+  idempotency scope, request fingerprint, reviewed plan fingerprint,
+  authorization provenance, lease ownership, monotonic phase checkpoints,
+  terminal result, and bounded error. A partial unique index permits only one
+  pending, running, or reconciliation-required restore for a
+  product/context/instance. Expired work may be recovered only before a
+  provider-effect phase; after any provider effect has started, lease recovery
+  moves the operation to `reconciliation_required` and preserves the lane fence
+  for explicit operator review.
+- Odoo retained-volume backup import plan and apply write dedicated operation
+  records under `odoo_prod_retained_volume_backup_import_operations`. Plan and
+  apply have separate operation kinds, request fingerprints, idempotency scopes,
+  and authorization actions. Apply stores the immutable reviewed plan and exact
+  plan fingerprint. Both kinds retain lease ownership, monotonic checkpoints,
+  terminal evidence, and bounded errors. One partial unique index reserves the
+  product/context/instance lane across plan and apply while work is pending,
+  running, or reconciliation-required. Expired work is recoverable only before a
+  provider-effect checkpoint; later expiry preserves a reconciliation-required
+  lane fence for explicit operator inspection.
+- Bootstrap, target replacement, production backup restore, and retained-volume
+  backup import creation and worker claim also share one storage-level
+  stable-lane reservation.
+  Filesystem storage serializes the exact product/context/instance with one lock;
+  PostgreSQL uses a transaction-scoped advisory lock and checks all four blocking
+  operation tables before inserting or claiming. Claims choose one deterministic
+  owner across legacy cross-kind queue entries, prioritizing reconciliation and
+  running work before the oldest pending record. Per-table partial indexes remain
+  a second same-kind defense, but no operation kind can race another into the
+  same lane. The schema migration refuses to activate this worker contract when
+  an existing database already contains multiple blocking operation kinds for
+  one lane, so rollout cannot silently inherit an ambiguous queue.
 - Odoo target-replacement plan snapshots include the exact live values for
   `ODOO_DATA_VOLUME`, `ODOO_LOG_VOLUME`, and `ODOO_DB_VOLUME`. Existing-data
   plans compare those values with resolved DB-backed desired runtime authority
   and block on any difference before an apply operation can be created. Volume
   changes remain explicit rebuild/restore decisions rather than implicit
   `data_source_mode=existing` behavior.
-- New records for all three durable driver queues use schema version 2 and
+- New records for all five durable driver queues use schema version 2 and
   persist authorization provenance in the canonical operation payload: action,
   product, context, exact instances, managed set/rule ids, policy record id,
   revision, schema version, digest, source, authorization time, and normalized
@@ -1204,13 +1255,24 @@ state/
   instances, or caller mismatch terminates the operation with a stable
   `error_code` before provider mutation. Launchplane does not fabricate
   provenance for schema-v1 queued records.
-- Pending Odoo bootstrap, Odoo target-replacement, and VeriReel backup-gate
+- Retained-volume backup import additionally re-evaluates the recorded caller
+  and exact managed rule immediately before its first provider effect. That
+  authorization remains bound for later effects in the same operation so a
+  policy revision cannot stop execution after partial provider mutation; lease
+  loss after the effect boundary instead preserves a reconciliation-required
+  fence.
+- Pending Odoo bootstrap, Odoo target-replacement, Odoo backup-restore, Odoo
+  retained-volume backup-import, and VeriReel backup-gate
   operations expose authenticated `POST .../operations/{operation_id}/cancel`
   endpoints. Cancellation is idempotent after it commits, records the normalized
   caller, reason, timestamp, and trace id, releases the active-lane predicate,
-  and never rewrites `running` or terminal work. A claim that wins the race
-  returns `409 operation_not_pending`; operators must inspect that running
-  operation rather than assume cancellation prevented an effect.
+  and never rewrites `running` or terminal work. Odoo operations in
+  `reconciliation_required` may also be cancelled only with a structured
+  safe-release attestation that records an inspection timestamp between the
+  fence and cancellation request, observed provider state, and an evidence
+  reference. A claim that wins the race returns `409 operation_not_pending`;
+  operators must inspect that running operation rather than assume cancellation
+  prevented an effect.
 - The target execution model for these Odoo long-running operation records is a
   dedicated Launchplane worker process backed by DB leases and heartbeats. The
   HTTP route creates or replays the operation record and returns the poll URL;
@@ -1218,7 +1280,11 @@ state/
   daemon threads. Operation
   records carry execution fields for `attempt`, `lease_owner`,
   `lease_expires_at`, and `heartbeat_at`; terminal writes are guarded by the
-  current lease owner so stale workers cannot overwrite recovered work. Worker
+  current lease owner so stale workers cannot overwrite recovered work.
+  Filesystem mutations and recovery share the exact operation lock, while SQLite
+  starts an immediate write transaction before reading mutable operation state;
+  the recovery fence and stale-worker heartbeat/checkpoint/completion are
+  therefore one atomic order. Worker
   entry points require DB-backed storage: `uv run launchplane service
 odoo-workers run-once` performs one recovery/claim/execution pass, `uv run
 launchplane service odoo-workers reconcile` performs the same expired-lease

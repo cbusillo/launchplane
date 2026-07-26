@@ -1652,10 +1652,55 @@ plan also resolves desired volume authority from DB-backed runtime records and
 blocks when any desired value differs from the live target. It does not create,
 delete, deploy, change routes, or reinterpret a volume change as existing data.
 
+When production recovery starts from retained physical volumes and no valid
+logical backup exists, use the dedicated retained-volume backup import actions;
+do not add import flags to routine backup or restore. First run
+`Odoo Prod Retained Volume Backup Import Plan` with the exact product, production
+context and instance, current artifact, active database/data/log volumes, source
+database/data volumes, source database name, destination database name, expected
+database owner, fresh staging-clone volume, source compose project, and a new
+backup-record id. Every value is an operator request field checked against
+DB-backed current authority or read-only provider evidence. The plan mounts the
+source volumes read-only, verifies their compose project and `odoo_db` /
+`odoo_data` roles, proves PostgreSQL major version 17, captures the exact
+`PG_VERSION`, `pg_control` SHA-256 and checkpoint metadata, requires the source
+cluster state to be exactly `shut down`, counts and sizes the source filestore,
+proves the staging and destination paths absent, checks active data-volume free
+space, and binds all evidence into a SHA-256 plan fingerprint.
+
+Run `Odoo Prod Retained Volume Backup Import Apply` only with the exact reviewed
+plan operation and fingerprint, a stable idempotency key, and confirmation phrase
+`import-retained-volumes-as-production-backup`. The service queues a dedicated
+durable operation and rechecks the recorded authorization after claim and again
+immediately before the first provider effect. Once that effect is authorized,
+the same operation keeps its authorization fence through later effects rather
+than stopping mid-mutation on a policy revision. Apply re-runs the plan and fails
+closed on authority or provider drift before mutation begins.
+It never starts PostgreSQL on, or writes to, either retained source volume. It
+copies the source database volume read-only into the fresh staging volume while
+preserving ownership, verifies the copied `pg_control` fingerprint, and starts
+PostgreSQL 17 only from that clone in an isolated named container and network.
+After proving the requested source database exists, it writes a custom-format
+dump and source-filestore archive into the active data volume's standard
+Launchplane backup directory. Artifact names and the schema-v1 manifest use the
+destination database identity; the archived filestore has that identity as its
+top-level directory. Launchplane verifies sizes and SHA-256 values and accepts
+only nonce-, request-, and exact schedule-deployment-bound completion evidence.
+
+The clone container and network are removed on exit, while the staging clone
+volume remains labeled for explicit recovery inspection. A passing import writes
+a distinct retained-volume-import backup-gate source. Standard backup
+verification and guarded restore accept that source, but routine production
+promotion accepts only its ordinary backup-before-promote source. This action
+does not update the live target, runtime environment, deployment, inventory, or
+release tuple and performs no cutover. Inspect or cancel it through the deployed
+service operation endpoint; never rerun its provider schedule directly or use a
+local checkout as a live-target fallback.
+
 Use the `Odoo Prod Backup Verification` workflow to exercise the verification
 route through GitHub Actions OIDC. The workflow accepts an exact backup-gate
-record id, stores only the bounded response artifact, and fails if the response
-contains backup paths or an unbounded error. Verification recomputes the
+record id, stores a bounded workflow artifact, and returns the id of a separate
+durable verification record. Verification recomputes the
 expected paths from DB-backed runtime records, checks manifest identities,
 paths, sizes, and SHA-256 values, runs `pg_restore --list` plus a full archive
 render to `/dev/null`, validates safe tar members under the expected database
@@ -1671,8 +1716,48 @@ staging-space phases without exposing provider paths or exception text.
 Filesystem metadata failures in the manifest phase map to the existing bounded
 manifest missing, metadata, size, read, or decode codes; artifact metadata
 failures map to `artifact_missing`. Raw I/O errors and private paths are not
-returned. This slice does not restore a database, extract a filestore, stop
+returned. Verification does not restore a database, extract a filestore, stop
 containers, or mutate served Odoo data.
+
+Production restore is a separate destructive authority. First run
+`Odoo Prod Backup Restore Plan` with the exact product, production context,
+passing backup record, passing durable verification record, current artifact,
+current corrupt database volume, fresh database volume, and unchanged data and
+log volumes. The planner reads all runtime authority from Launchplane records,
+requires the live target to match the old database/data/log snapshot, requires
+the fresh database volume name to be the DB-backed desired value and absent from
+the provider, and binds the verification hashes, counts, sizes, paths, target,
+domains, and runtime identity into the reviewed SHA-256 plan fingerprint.
+
+Run `Odoo Prod Backup Restore Apply` only with that exact fingerprint, a stable
+idempotency key, and confirmation phrase
+`restore-verified-production-backup`. The service creates a dedicated durable
+restore operation; routine existing-data target replacement cannot exercise
+this authority. The worker rechecks authorization after claim and immediately
+before the first provider effect, then records before/after checkpoints for fresh
+database restore, filestore staging, web quiesce, filestore activation,
+runtime-environment update, deploy, post-deploy work, and verification. Once any
+provider effect starts, an expired lease moves to `reconciliation_required`,
+keeps the shared lane fenced, and requires exact provider inspection rather than
+automatic retry.
+
+The database phase creates the exact fresh volume and restores the complete
+archive with `pg_restore --exit-on-error`; it never runs `pg_resetwal` and never
+attaches or mutates the old corrupt database volume. Filestore staging validates
+every tar member again, rejects absolute/traversal/link/special entries, checks
+the reviewed member count and expanded size, and extracts into a sibling staging
+directory on the unchanged data volume. After the web service is stopped, the
+old filestore is moved to the reviewed quarantine path and the staged tree is
+activated. The data and log volume names cannot change. The old database volume
+and quarantined filestore remain available for explicit later cleanup.
+
+Apply passes only after deploy and post-deploy complete and Launchplane verifies
+the health endpoint, canonical page, logo route, and exact runtime identity.
+Deployment, inventory, release-tuple, phase checkpoint, authorization, provider
+result, and final verification evidence remain durable in Launchplane. A failed
+or interrupted operation must be inspected from its operation record before any
+new restore is planned; do not rerun a provider schedule or use target
+replacement as a recovery shortcut.
 
 Legacy backup-gate manifests created before manifest schema and hash fields were
 introduced remain verifiable: Launchplane validates their recorded identity,
@@ -1709,12 +1794,13 @@ call `POST /v1/drivers/odoo/target-replacement-apply` for the guarded
 `recreate-in-place` path. The service creates a durable operation record and
 returns immediately; the workflow polls
 `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}` until the
-operation status is `pass`, `fail`, or `cancelled`, then uploads the final
-operation payload as
-the workflow artifact. `Idempotency-Key` is required: a repeated request with the
-same key from the same caller identity returns the existing operation, while a
+operation leaves `pending` or `running`, then uploads the final operation payload
+as the workflow artifact. `reconciliation_required` therefore stops polling and
+surfaces as a failed, operator-actionable workflow result instead of waiting for
+the poll timeout. `Idempotency-Key` is required: a repeated request with the same
+key from the same caller identity returns the existing operation, while a
 different key for the same product/context/instance is rejected while a
-`pending` or `running` operation is active. Storage owns that active-lane
+`pending`, `running`, or `reconciliation_required` operation is active. Storage owns that active-lane
 reservation so the worker starts only after the lane is claimed; abandoned
 filesystem reservations recover after a bounded settle window if the owner or
 owner record never appears. The first apply surface is testing-only and keeps
@@ -1743,7 +1829,11 @@ exact target, and managed rule against the current active policy. Revoked or
 narrowed authority and legacy operations without provenance fail terminally
 without provider mutation. Operators may cancel pending replacement work with
 `POST /v1/drivers/odoo/target-replacement/operations/{operation_id}/cancel` and
-a non-empty `reason`; running work returns `409 operation_not_pending`.
+a non-empty `reason`. Reconciliation-required work additionally requires a
+structured attestation with a provider inspection timestamp between the fence
+and cancellation request, the observed provider state, an evidence reference,
+and explicit `safe_to_release=true`; running work returns
+`409 operation_not_pending`.
 
 Runtime identity is a driver-owned breadcrumb, not tenant config. Launchplane
 injects `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`, `LAUNCHPLANE_DEPLOYMENT_RECORD_ID`,
@@ -1785,21 +1875,30 @@ policy evidence for that lane.
 The service route creates a durable Odoo stable-bootstrap operation and returns
 an operation id immediately. The GitHub workflow polls
 `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}` until the
-operation status is `pass`, `fail`, or `cancelled`, then uploads the final
-operation payload as
+operation leaves `pending` or `running`, then uploads the final operation payload
+as
 the workflow artifact. `Idempotency-Key` is required: a repeated request with the
 same key returns the existing operation, while a different key for the same
-product/context/instance is rejected while a `pending` or `running` operation is
-active. The operation record stores the request, status, phase,
+product/context/instance is rejected while a `pending`, `running`, or
+`reconciliation_required` operation is active. The operation record stores the
+request, status, phase,
 deployment-record linkage when known, final bootstrap result, and any terminal
 error message so operators can inspect progress after the original HTTP request
 has ended.
 The worker reauthorizes the stored managed rule and exact lane after claim and
 immediately before the destructive Dokploy schedule. Operators may cancel only
-pending work through
+pending work, or reconciliation-required work after inspecting the exact provider
+state, through
 `POST /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}/cancel`; the
-request records a reason and caller identity, while running work fails the
-cancellation request with `409` rather than claiming no external effect occurred.
+request records a reason and caller identity. Reconciliation-required
+cancellation also persists the provider-inspection timestamp, observed state,
+evidence reference, and explicit safe-release attestation; stale or missing
+inspection evidence cannot release the lane. Running work fails the cancellation
+request with `409` rather than claiming no external effect occurred. Unsafe lease
+expiry never frees the shared stable lane automatically: it clears the stale
+lease, records `operation_reconciliation_required`, and keeps all bootstrap,
+target-replacement, restore, and retained-volume-import claims blocked until the
+operator resolves that evidence.
 
 Pending VeriReel backup-gate work uses the equivalent endpoint
 `POST /v1/drivers/verireel/prod-backup-gate/operations/{operation_id}/cancel`.

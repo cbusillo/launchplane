@@ -1,0 +1,118 @@
+---
+name: Odoo Prod Retained Volume Backup Import Apply
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Exact Launchplane Odoo product key.
+        required: true
+        type: string
+      context:
+        description: Exact Launchplane production context.
+        required: true
+        type: string
+      backup_record_id:
+        description: Exact new backup record ID from the reviewed plan.
+        required: true
+        type: string
+      expected_current_artifact_id:
+        description: Exact current production artifact ID.
+        required: true
+        type: string
+      expected_active_db_volume:
+        description: Exact active production DB volume.
+        required: true
+        type: string
+      expected_active_data_volume:
+        description: Exact active production data volume.
+        required: true
+        type: string
+      expected_active_log_volume:
+        description: Exact active production log volume.
+        required: true
+        type: string
+      source_db_volume:
+        description: Exact retained PostgreSQL source volume.
+        required: true
+        type: string
+      source_data_volume:
+        description: Exact retained Odoo data source volume.
+        required: true
+        type: string
+      source_database_name:
+        description: Exact retained source database name.
+        required: true
+        type: string
+      expected_destination_database_name:
+        description: Exact destination database name from runtime authority.
+        required: true
+        type: string
+      expected_database_user:
+        description: Exact PostgreSQL user from runtime authority.
+        required: true
+        type: string
+      staging_clone_volume:
+        description: Exact fresh staging clone volume from the reviewed plan.
+        required: true
+        type: string
+      expected_source_compose_project:
+        description: Exact retained source compose project label.
+        required: true
+        type: string
+      plan_operation_id:
+        description: Exact completed durable plan operation ID.
+        required: true
+        type: string
+      plan_fingerprint:
+        description: Exact SHA-256 fingerprint from the reviewed plan.
+        required: true
+        type: string
+      confirmation:
+        description: Must equal import-retained-volumes-as-production-backup.
+        required: true
+        type: string
+      idempotency_key:
+        description: Unique apply-operation idempotency key.
+        required: true
+        type: string
+      timeout_seconds:
+        description: Optional bounded provider timeout in seconds.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    odoo-prod-retained-volume-backup-import-apply-${{ inputs.product }}-${{ inputs.context }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    permissions:
+      contents: read
+      id-token: write
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-prod-retained-volume-backup-import-apply.yml@75c632d645f29775c5f2b1ab91f5318e1468000b # main
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      backup_record_id: ${{ inputs.backup_record_id }}
+      expected_current_artifact_id: ${{ inputs.expected_current_artifact_id }}
+      expected_active_db_volume: ${{ inputs.expected_active_db_volume }}
+      expected_active_data_volume: ${{ inputs.expected_active_data_volume }}
+      expected_active_log_volume: ${{ inputs.expected_active_log_volume }}
+      source_db_volume: ${{ inputs.source_db_volume }}
+      source_data_volume: ${{ inputs.source_data_volume }}
+      source_database_name: ${{ inputs.source_database_name }}
+      expected_destination_database_name: ${{ inputs.expected_destination_database_name }}
+      expected_database_user: ${{ inputs.expected_database_user }}
+      staging_clone_volume: ${{ inputs.staging_clone_volume }}
+      expected_source_compose_project: ${{ inputs.expected_source_compose_project }}
+      plan_operation_id: ${{ inputs.plan_operation_id }}
+      plan_fingerprint: ${{ inputs.plan_fingerprint }}
+      confirmation: ${{ inputs.confirmation }}
+      idempotency_key: ${{ inputs.idempotency_key }}
+      timeout_seconds: ${{ inputs.timeout_seconds }}

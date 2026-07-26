@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from alembic import command
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -104,6 +104,71 @@ class SchemaMigrationTests(unittest.TestCase):
             _alembic_config(database_url).get_main_option("sqlalchemy.url"),
             database_url,
         )
+
+    def test_odoo_stable_lane_migration_rejects_preexisting_cross_kind_queue(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = _alembic_config(database_url)
+            command.upgrade(config, "a1c3e5f7b9d2")
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    common_values = {
+                        "product": "odoo-tenant-cm",
+                        "context": "cm",
+                        "instance": "prod",
+                        "status": "pending",
+                        "phase": "created",
+                        "created_at": "2026-07-26T05:00:00Z",
+                        "updated_at": "2026-07-26T05:00:00Z",
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                        "attempt": 0,
+                        "payload": "{}",
+                    }
+                    connection.execute(
+                        text(
+                            "insert into launchplane_odoo_stable_bootstrap_operations "
+                            "(operation_id, product, context, instance, idempotency_key, status, "
+                            "phase, created_at, updated_at, lease_owner, lease_expires_at, "
+                            "heartbeat_at, attempt, payload) values "
+                            "(:operation_id, :product, :context, :instance, :idempotency_key, "
+                            ":status, :phase, :created_at, :updated_at, :lease_owner, "
+                            ":lease_expires_at, :heartbeat_at, :attempt, :payload)"
+                        ),
+                        {
+                            **common_values,
+                            "operation_id": "bootstrap-preexisting",
+                            "idempotency_key": "bootstrap-preexisting",
+                        },
+                    )
+                    connection.execute(
+                        text(
+                            "insert into launchplane_odoo_prod_backup_restore_operations "
+                            "(operation_id, product, context, instance, idempotency_key, "
+                            "idempotency_scope, status, phase, created_at, updated_at, "
+                            "lease_owner, lease_expires_at, heartbeat_at, attempt, payload) values "
+                            "(:operation_id, :product, :context, :instance, :idempotency_key, "
+                            ":idempotency_scope, :status, :phase, :created_at, :updated_at, "
+                            ":lease_owner, :lease_expires_at, :heartbeat_at, :attempt, :payload)"
+                        ),
+                        {
+                            **common_values,
+                            "operation_id": "restore-preexisting",
+                            "idempotency_key": "restore-preexisting",
+                            "idempotency_scope": "operator",
+                        },
+                    )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "multiple blocking operation kinds",
+                ):
+                    command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            finally:
+                engine.dispose()
 
     def test_sqlite_fenced_schema_allocates_revisions_for_compatibility_writer(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

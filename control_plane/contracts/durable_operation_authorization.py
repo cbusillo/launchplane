@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -123,6 +124,28 @@ class DurableOperationAuthorization(BaseModel):
         return self
 
 
+class DurableOperationReconciliationAttestation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    provider_inspected_at: str
+    provider_state: str
+    evidence_reference: str
+    safe_to_release: Literal[True]
+
+    @model_validator(mode="after")
+    def _validate_attestation(self) -> "DurableOperationReconciliationAttestation":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported durable operation reconciliation schema version.")
+        self.provider_inspected_at = _normalize_utc_timestamp(self.provider_inspected_at)
+        for field_name in ("provider_state", "evidence_reference"):
+            normalized = str(getattr(self, field_name)).strip()
+            if not normalized:
+                raise ValueError(f"Durable operation reconciliation requires {field_name}.")
+            setattr(self, field_name, normalized)
+        return self
+
+
 class DurableOperationCancellation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -130,6 +153,7 @@ class DurableOperationCancellation(BaseModel):
     reason: str
     cancelled_at: str
     caller: DurableOperationCallerIdentity
+    reconciliation_attestation: DurableOperationReconciliationAttestation | None = None
 
     @model_validator(mode="after")
     def _validate_cancellation(self) -> "DurableOperationCancellation":
@@ -148,6 +172,7 @@ class DurableOperationCancellationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str
+    reconciliation_attestation: DurableOperationReconciliationAttestation | None = None
 
     @model_validator(mode="after")
     def _validate_request(self) -> "DurableOperationCancellationRequest":
@@ -159,3 +184,18 @@ class DurableOperationCancellationRequest(BaseModel):
 
 def _normalized_values(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+
+def _normalize_utc_timestamp(value: str) -> str:
+    normalized = value.strip()
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(
+            "Durable operation reconciliation provider_inspected_at must be an ISO-8601 timestamp."
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(
+            "Durable operation reconciliation provider_inspected_at requires a timezone."
+        )
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

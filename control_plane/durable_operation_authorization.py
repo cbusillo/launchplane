@@ -11,6 +11,7 @@ from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
     DurableOperationCancellation,
     DurableOperationCallerIdentity,
+    DurableOperationReconciliationAttestation,
 )
 from control_plane.service_auth import (
     AuthorizationTarget,
@@ -219,11 +220,13 @@ def build_durable_operation_cancellation(
     identity: LaunchplaneIdentity,
     reason: str,
     cancelled_at: str,
+    reconciliation_attestation: DurableOperationReconciliationAttestation | None = None,
 ) -> DurableOperationCancellation:
     return DurableOperationCancellation(
         reason=reason,
         cancelled_at=cancelled_at,
         caller=durable_operation_caller_identity(identity),
+        reconciliation_attestation=reconciliation_attestation,
     )
 
 

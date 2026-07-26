@@ -1242,6 +1242,7 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             payload["reconcile_result"],
             {
                 "reconciled_bootstrap_ids": ["bootstrap-cm-testing"],
+                "reconciled_restore_ids": [],
                 "reconciled_replacement_ids": [],
                 "reconciled_count": 1,
             },
@@ -1842,6 +1843,110 @@ class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"]["code"], "operation_not_pending")
+
+    async def test_reconciliation_required_odoo_operation_can_be_cancelled(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            running_record = _running_odoo_stable_bootstrap_record()
+            reconciliation_required = type(running_record).model_validate(
+                {
+                    **running_record.model_dump(mode="json"),
+                    "status": "reconciliation_required",
+                    "phase": "bootstrap",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
+                    "error_code": "operation_reconciliation_required",
+                    "error_message": "Provider state requires operator reconciliation.",
+                }
+            )
+            record_store.write_odoo_stable_bootstrap_operation_record(reconciliation_required)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="odoo_stable_bootstrap.execute",
+                    instances=("testing",),
+                    schema_version=2,
+                ),
+                record_store_factory=lambda: record_store,
+            )
+
+            missing_attestation_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing/cancel",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={"reason": "Provider state inspected; release the blocked lane."},
+            )
+            stale_attestation_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing/cancel",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={
+                    "reason": "Provider state inspected; release the blocked lane.",
+                    "reconciliation_attestation": {
+                        "provider_inspected_at": "2026-05-17T00:00:00Z",
+                        "provider_state": "The provider effect is absent.",
+                        "evidence_reference": "provider-read:inspection-1",
+                        "safe_to_release": True,
+                    },
+                },
+            )
+            future_attestation_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing/cancel",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={
+                    "reason": "Provider state inspected; release the blocked lane.",
+                    "reconciliation_attestation": {
+                        "provider_inspected_at": "2099-05-17T00:02:00Z",
+                        "provider_state": "The provider effect is absent.",
+                        "evidence_reference": "provider-read:inspection-future",
+                        "safe_to_release": True,
+                    },
+                },
+            )
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing/cancel",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={
+                    "reason": "Provider state inspected; release the blocked lane.",
+                    "reconciliation_attestation": {
+                        "provider_inspected_at": "2026-05-17T00:02:00Z",
+                        "provider_state": "The provider effect is absent.",
+                        "evidence_reference": "provider-read:inspection-2",
+                        "safe_to_release": True,
+                    },
+                },
+            )
+
+        self.assertEqual(missing_attestation_response.status_code, 409)
+        self.assertEqual(
+            missing_attestation_response.json()["error"]["code"],
+            "reconciliation_attestation_required",
+        )
+        self.assertEqual(stale_attestation_response.status_code, 409)
+        self.assertEqual(
+            stale_attestation_response.json()["error"]["code"],
+            "stale_reconciliation_attestation",
+        )
+        self.assertEqual(future_attestation_response.status_code, 422)
+        self.assertEqual(
+            future_attestation_response.json()["error"]["code"],
+            "future_reconciliation_attestation",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["operation"]["status"], "cancelled")
+        self.assertEqual(
+            response.json()["operation"]["cancellation"]["reconciliation_attestation"][
+                "evidence_reference"
+            ],
+            "provider-read:inspection-2",
+        )
 
     async def test_pending_target_replacement_operation_can_be_cancelled(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

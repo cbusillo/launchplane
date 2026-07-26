@@ -33,6 +33,7 @@ from control_plane.odoo_product_driver_http import (
     OdooRouteDependencyError,
     resolve_odoo_product_route,
 )
+from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
 
 
 ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = "/v1/drivers/odoo/target-replacement-apply"
@@ -56,6 +57,10 @@ class OdooTargetReplacementApplyOperationActiveError(ValueError):
             "An Odoo target replacement operation is already active for this product/context/instance."
         )
         self.operation = operation
+
+
+class OdooTargetReplacementApplyLaneBusyError(ValueError):
+    pass
 
 
 class OdooTargetReplacementApplyCurrentArtifactChangedError(ValueError):
@@ -167,11 +172,14 @@ def enqueue_odoo_target_replacement_apply_operation(
         created_at=created_at,
         authorization=authorization,
     )
-    operation, created_operation = (
-        operation_store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
-            operation
+    try:
+        operation, created_operation = (
+            operation_store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                operation
+            )
         )
-    )
+    except OdooStableLaneOperationConflictError as error:
+        raise OdooTargetReplacementApplyLaneBusyError(str(error)) from error
     if not created_operation:
         if (
             operation.idempotency_key == idempotency_key

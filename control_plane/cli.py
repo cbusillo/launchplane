@@ -126,6 +126,9 @@ from control_plane.workflows.launchplane import (
     resolve_pull_request_event_manifest,
 )
 from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.workflows.odoo_prod_backup_gate import (
+    RETAINED_VOLUME_BACKUP_IMPORT_SOURCE,
+)
 from control_plane.workflows import promotion_ship_execution
 from control_plane.workflows import promotion_ship_resolution
 from control_plane.workflows.ship import utc_now_timestamp
@@ -865,17 +868,26 @@ def _launchplane_promotion_backup_gate_evidence_check(
             "status": "pending",
             "detail": "Launchplane has no prod backup-gate evidence yet. Promotion stays blocked until one is recorded.",
         }
-    if latest_backup_gate.required and latest_backup_gate.status == "pass":
-        return {
-            "label": "Prod backup gate",
-            "status": "pass",
-            "detail": f"Latest prod backup gate {latest_backup_gate.record_id} passed and can authorize promotion.",
-        }
     if latest_backup_gate.status == "fail":
         return {
             "label": "Prod backup gate",
             "status": "fail",
             "detail": f"Latest prod backup gate {latest_backup_gate.record_id} failed. Promotion is blocked until a passing gate is recorded.",
+        }
+    if latest_backup_gate.source == RETAINED_VOLUME_BACKUP_IMPORT_SOURCE:
+        return {
+            "label": "Prod backup gate",
+            "status": "pending",
+            "detail": (
+                f"Latest prod backup record {latest_backup_gate.record_id} is recovery-only "
+                "evidence and cannot authorize ordinary promotion."
+            ),
+        }
+    if latest_backup_gate.required and latest_backup_gate.status == "pass":
+        return {
+            "label": "Prod backup gate",
+            "status": "pass",
+            "detail": f"Latest prod backup gate {latest_backup_gate.record_id} passed and can authorize promotion.",
         }
     return {
         "label": "Prod backup gate",

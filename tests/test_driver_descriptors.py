@@ -48,6 +48,10 @@ from control_plane.odoo_prod_backup_gate_http import (
     ODOO_PROD_BACKUP_GATE_ROUTE,
     ODOO_PROD_BACKUP_VERIFICATION_ROUTE,
 )
+from control_plane.odoo_prod_backup_restore_http import (
+    ODOO_PROD_BACKUP_RESTORE_APPLY_ROUTE,
+    ODOO_PROD_BACKUP_RESTORE_PLAN_ROUTE,
+)
 from control_plane.odoo_prod_promotion_http import (
     ODOO_PROD_PROMOTION_INPUTS_ROUTE,
     ODOO_PROD_PROMOTION_ROUTE,
@@ -1096,6 +1100,8 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             route_paths_by_action={
                 "prod_backup_gate": ODOO_PROD_BACKUP_GATE_ROUTE,
                 "prod_backup_verification": ODOO_PROD_BACKUP_VERIFICATION_ROUTE,
+                "prod_backup_restore_plan": ODOO_PROD_BACKUP_RESTORE_PLAN_ROUTE,
+                "prod_backup_restore_apply": ODOO_PROD_BACKUP_RESTORE_APPLY_ROUTE,
                 "prod_promotion_inputs": ODOO_PROD_PROMOTION_INPUTS_ROUTE,
                 "prod_promotion_run": ODOO_PROD_PROMOTION_RUN_ROUTE,
                 "prod_promotion": ODOO_PROD_PROMOTION_ROUTE,
@@ -1112,9 +1118,20 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             verification_action.authz_action,
             "odoo_prod_backup_verification.execute",
         )
-        self.assertEqual(verification_action.writes_records, ())
+        self.assertEqual(verification_action.writes_records, ("backup_gate",))
         self.assertIn(
             verification_action.authz_action,
+            exclusively_instance_scoped_authz_actions(),
+        )
+        restore_action = odoo_actions["prod_backup_restore_apply"]
+        self.assertEqual(restore_action.safety, "destructive")
+        self.assertEqual(restore_action.scope, "instance")
+        self.assertEqual(
+            restore_action.authz_action,
+            "odoo_prod_backup_restore_apply.execute",
+        )
+        self.assertIn(
+            restore_action.authz_action,
             exclusively_instance_scoped_authz_actions(),
         )
 

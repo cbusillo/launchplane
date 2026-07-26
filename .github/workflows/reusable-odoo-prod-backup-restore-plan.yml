@@ -1,0 +1,246 @@
+---
+name: Reusable Odoo Prod Backup Restore Plan
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        required: true
+        type: string
+      context:
+        required: true
+        type: string
+      backup_record_id:
+        required: true
+        type: string
+      verification_record_id:
+        required: true
+        type: string
+      expected_current_artifact_id:
+        required: true
+        type: string
+      expected_old_db_volume:
+        required: true
+        type: string
+      expected_new_db_volume:
+        required: true
+        type: string
+      expected_data_volume:
+        required: true
+        type: string
+      expected_log_volume:
+        required: true
+        type: string
+      launchplane_url:
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    env:
+      PRODUCT: ${{ inputs.product }}
+      CONTEXT: ${{ inputs.context }}
+      BACKUP_RECORD_ID: ${{ inputs.backup_record_id }}
+      VERIFICATION_RECORD_ID: ${{ inputs.verification_record_id }}
+      EXPECTED_CURRENT_ARTIFACT_ID: ${{ inputs.expected_current_artifact_id }}
+      EXPECTED_OLD_DB_VOLUME: ${{ inputs.expected_old_db_volume }}
+      EXPECTED_NEW_DB_VOLUME: ${{ inputs.expected_new_db_volume }}
+      EXPECTED_DATA_VOLUME: ${{ inputs.expected_data_volume }}
+      EXPECTED_LOG_VOLUME: ${{ inputs.expected_log_volume }}
+    steps:
+      - name: Build exact restore plan request
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .launchplane
+          for scalar in \
+            PRODUCT CONTEXT BACKUP_RECORD_ID VERIFICATION_RECORD_ID \
+            EXPECTED_CURRENT_ARTIFACT_ID EXPECTED_OLD_DB_VOLUME \
+            EXPECTED_NEW_DB_VOLUME EXPECTED_DATA_VOLUME EXPECTED_LOG_VOLUME; do
+            value="${!scalar}"
+            if [ -z "$value" ]; then
+              echo "${scalar} is required." >&2
+              exit 1
+            fi
+            case "$value" in
+              *$'\n'* | *$'\r'*)
+                echo "${scalar} must be single-line." >&2
+                exit 1
+                ;;
+            esac
+          done
+          for scalar in \
+            BACKUP_RECORD_ID VERIFICATION_RECORD_ID EXPECTED_OLD_DB_VOLUME \
+            EXPECTED_NEW_DB_VOLUME EXPECTED_DATA_VOLUME EXPECTED_LOG_VOLUME; do
+            value="${!scalar}"
+            if ! [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "${scalar} is not path-safe." >&2
+              exit 1
+            fi
+          done
+          if [ "$EXPECTED_OLD_DB_VOLUME" = "$EXPECTED_NEW_DB_VOLUME" ]; then
+            echo 'Old and new DB volumes must differ.' >&2
+            exit 1
+          fi
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg backup_record_id "$BACKUP_RECORD_ID" \
+            --arg verification_record_id "$VERIFICATION_RECORD_ID" \
+            --arg expected_current_artifact_id "$EXPECTED_CURRENT_ARTIFACT_ID" \
+            --arg expected_old_db_volume "$EXPECTED_OLD_DB_VOLUME" \
+            --arg expected_new_db_volume "$EXPECTED_NEW_DB_VOLUME" \
+            --arg expected_data_volume "$EXPECTED_DATA_VOLUME" \
+            --arg expected_log_volume "$EXPECTED_LOG_VOLUME" \
+            '{
+              schema_version: 1,
+              product: $product,
+              restore: {
+                schema_version: 1,
+                product: $product,
+                context: $context,
+                instance: "prod",
+                backup_record_id: $backup_record_id,
+                verification_record_id: $verification_record_id,
+                expected_current_artifact_id: $expected_current_artifact_id,
+                expected_old_db_volume: $expected_old_db_volume,
+                expected_new_db_volume: $expected_new_db_volume,
+                expected_data_volume: $expected_data_volume,
+                expected_log_volume: $expected_log_volume
+              }
+            }' > .launchplane/odoo-prod-backup-restore-plan-payload.json
+
+      - name: Build reviewed restore plan
+        id: launchplane
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: >-
+            ${{
+              inputs.launchplane_audience ||
+              vars.LAUNCHPLANE_SERVICE_AUDIENCE
+            }}
+          route-path: /v1/drivers/odoo/prod-backup-restore-plan
+          payload-file: .launchplane/odoo-prod-backup-restore-plan-payload.json
+          fail-result-paths: ""
+          log-response-body: "false"
+          response-output-file: odoo-prod-backup-restore-plan.json
+
+      - name: Verify reviewed restore plan
+        env:
+          STATUS_CODE: ${{ steps.launchplane.outputs.status-code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$STATUS_CODE" != "202" ]; then
+            echo "Restore plan failed with HTTP ${STATUS_CODE}." >&2
+            exit 1
+          fi
+          if ! jq -e \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg backup_record_id "$BACKUP_RECORD_ID" \
+            --arg verification_record_id "$VERIFICATION_RECORD_ID" \
+            --arg artifact_id "$EXPECTED_CURRENT_ARTIFACT_ID" \
+            --arg old_db "$EXPECTED_OLD_DB_VOLUME" \
+            --arg new_db "$EXPECTED_NEW_DB_VOLUME" \
+            --arg data_volume "$EXPECTED_DATA_VOLUME" \
+            --arg log_volume "$EXPECTED_LOG_VOLUME" \
+            '
+              .status == "accepted" and
+              .result.plan_status == "ready" and
+              (.result.plan_fingerprint | test("^[0-9a-f]{64}$")) and
+              .result.product == $product and
+              .result.context == $context and
+              .result.instance == "prod" and
+              .result.backup_record_id == $backup_record_id and
+              .result.verification_record_id == $verification_record_id and
+              .result.verification_status == "pass" and
+              .result.manifest_status == "pass" and
+              .result.sha256_status == "pass" and
+              .result.pg_restore_status == "pass" and
+              .result.tar_status == "pass" and
+              .result.staging_space_status == "pass" and
+              (.result.verification_nonce | length) > 0 and
+              .result.expected_current_artifact_id == $artifact_id and
+              .result.old_db_volume == $old_db and
+              .result.new_db_volume == $new_db and
+              .result.data_volume == $data_volume and
+              .result.log_volume == $log_volume and
+              (.result.database_dump_sha256 | test("^[0-9a-f]{64}$")) and
+              (.result.filestore_archive_sha256 | test("^[0-9a-f]{64}$"))
+            ' odoo-prod-backup-restore-plan.json >/dev/null; then
+            echo 'Launchplane did not return the exact ready restore plan.' >&2
+            jq -c '{
+              status,
+              result: {
+                plan_status: .result.plan_status,
+                blockers: .result.blockers
+              }
+            }' \
+              odoo-prod-backup-restore-plan.json >&2
+            exit 1
+          fi
+          jq '{
+            status,
+            trace_id,
+            records,
+            result: {
+              plan_status,
+              plan_fingerprint,
+              product,
+              context,
+              instance,
+              backup_record_id,
+              backup_record_created_at,
+              verification_record_id,
+              verification_record_created_at,
+              verification_nonce,
+              verification_status,
+              manifest_status,
+              sha256_status,
+              pg_restore_status,
+              tar_status,
+              staging_space_status,
+              expected_current_artifact_id,
+              database_dump_sha256,
+              filestore_archive_sha256,
+              database_dump_size,
+              filestore_archive_size,
+              pg_restore_entry_count,
+              filestore_member_count,
+              filestore_unpacked_size,
+              data_volume_free_bytes,
+              staging_required_bytes,
+              old_db_volume,
+              new_db_volume,
+              data_volume,
+              log_volume,
+              filestore_quarantine_path,
+              blockers,
+              warnings,
+              steps
+            }
+          }' odoo-prod-backup-restore-plan.json
+
+      - name: Upload reviewed restore plan
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: odoo-prod-backup-restore-plan
+          path: odoo-prod-backup-restore-plan.json
+          if-no-files-found: ignore
+          retention-days: 30

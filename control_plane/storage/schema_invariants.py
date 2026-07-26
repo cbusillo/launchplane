@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "f4c6e8a0b2d4"
+EXPECTED_ALEMBIC_HEAD_REVISION = "b3d5f7a9c1e4"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -103,6 +103,26 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         ("integer", "int4"),
     ),
     CriticalColumnType(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_odoo_prod_retained_volume_backup_import_operations",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_odoo_prod_retained_volume_backup_import_operations",
+        "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
         "launchplane_verireel_prod_backup_gate_operations",
         "payload",
         ("jsonb",),
@@ -150,6 +170,12 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
 )
 
 _ACTIVE_OPERATION_PREDICATE_TOKENS = ("status", "pending", "running")
+_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
+    "status",
+    "pending",
+    "running",
+    "reconciliation_required",
+)
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     CriticalIndex(
@@ -198,7 +224,7 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_odoo_bootstrap_active_lane_uidx",
         ("product", "context", "instance"),
         unique=True,
-        predicate_tokens=_ACTIVE_OPERATION_PREDICATE_TOKENS,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
     ),
     CriticalIndex(
         "launchplane_odoo_stable_bootstrap_operations",
@@ -215,11 +241,45 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_odoo_replacement_active_lane_uidx",
         ("product", "context", "instance"),
         unique=True,
-        predicate_tokens=_ACTIVE_OPERATION_PREDICATE_TOKENS,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
     ),
     CriticalIndex(
         "launchplane_odoo_stable_target_replacement_operations",
         "launchplane_odoo_replacement_worker_claim_idx",
+        ("status", "lease_expires_at", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "launchplane_odoo_restore_operation_idempotency_idx",
+        ("idempotency_scope", "idempotency_key", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "launchplane_odoo_restore_active_lane_uidx",
+        ("product", "context", "instance"),
+        unique=True,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "launchplane_odoo_restore_worker_claim_idx",
+        ("status", "lease_expires_at", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_retained_volume_backup_import_operations",
+        "launchplane_odoo_retained_import_operation_idempotency_idx",
+        ("operation_kind", "idempotency_scope", "idempotency_key", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_retained_volume_backup_import_operations",
+        "launchplane_odoo_retained_import_active_lane_uidx",
+        ("product", "context", "instance"),
+        unique=True,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_retained_volume_backup_import_operations",
+        "launchplane_odoo_retained_import_worker_claim_idx",
         ("status", "lease_expires_at", "updated_at"),
     ),
     CriticalIndex(
