@@ -380,6 +380,7 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     },
     ".github/workflows/runner-lane-registration.yml": {
         "inputs.mutate.default": frozenset(("false",)),
+        "inputs.operation.default": frozenset(("register",)),
         "inputs.registration_root.default": frozenset(("auto",)),
     },
     ".github/workflows/tracked-target-logs.yml": {
@@ -723,6 +724,7 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
     ".github/workflows/runner-lane-registration.yml": {
         "AUDIT_RECORD_KEY": frozenset(("${{ inputs.audit_record_key }}",)),
         "LANE_NAME": frozenset(("${{ inputs.lane_name }}",)),
+        "OPERATION": frozenset(("${{ inputs.operation }}",)),
         "RUNNER_REGISTRATION_EXECUTION_LANE": frozenset(
             ("${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}",)
         ),

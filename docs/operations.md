@@ -899,15 +899,16 @@ Dokploy-hosted.
   fails closed without positive per-job Docker credential isolation evidence, so
   product repositories should not carry local `DOCKER_CONFIG` workaround retries
   as the long-term safety mechanism.
-- To prove repo-scoped runner registration, start with
-  `.github/workflows/runner-lane-registration.yml` in `mutate=false` mode. For
-  the cm-website pilot, capture `runner-inventory` evidence for
-  `cbusillo/odoo-tenant-cm-website`, run the registration workflow with an audit
-  key under `runner-lane-registration/<date>/...`, inspect the uploaded JSON
-  artifact, and only rerun with `mutate=true` after the dry-run evidence and
-  confirmation text have been reviewed. The workflow writes service-backed
-  runner-registration audit evidence and also uploads the local JSON artifact
-  for operator review.
+- For repo-scoped runner lifecycle, use the stable
+  `.github/workflows/runner-lane-registration.yml` workflow path and select
+  `register` or `retire`. Start with `mutate=false`, use an operation-shaped
+  audit key under `runner-lane-registration/<date>/...` or
+  `runner-lane-retirement/<date>/...`, and inspect the uploaded lifecycle JSON.
+  Registration mutation requires `register runner lane`; retirement mutation
+  requires `retire <owner/name> <lane>`. The workflow writes service-backed
+  lifecycle audit evidence through the existing exact OIDC-authorized path,
+  serializes host mutation with runner-host hygiene, and uploads the local JSON
+  artifact for operator review.
 - Deploy verification should probe Launchplane's live health endpoint, currently
   `GET /v1/health`, after the Dokploy update.
 - When rollout health fails, deploy automation should restore the previous

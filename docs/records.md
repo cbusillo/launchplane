@@ -1842,11 +1842,14 @@ preflights.
   including Docker credential isolation and Docker toolchain/version policy;
   they are not product deploy authority and they do not replace route-specific
   authorization, promotion, backup-gate, or provider safety checks.
-- Runner lane registration audit records are the durable record for the first
-  Launchplane-controlled repository-runner registration host adapter. They live
-  in `launchplane_runner_lane_registration_audits`, are written through
-  `POST /v1/evidence/runner-lane-registration/audits`, and preserve dry-run or
-  apply evidence without storing GitHub runner registration tokens.
+- Runner lane lifecycle audit records are the durable record for the narrow
+  Launchplane-controlled repository-runner registration and retirement host
+  adapters. They retain the compatibility name
+  `launchplane_runner_lane_registration_audits`, are written through
+  `POST /v1/evidence/runner-lane-registration/audits`, and distinguish
+  `register` from `retire` through the typed operation field. Records preserve
+  dry-run or apply evidence without storing GitHub runner registration tokens or
+  other credentials.
 - Scoped agent write-intent evaluation is exposed at
   `POST /v1/agent/write-intents/evaluate`. It validates intent shape, maps the
   intent to an exact existing policy action, evaluates authorization, and returns
