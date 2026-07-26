@@ -1220,7 +1220,11 @@ state/
   product/context/instance lane across plan and apply while work is pending,
   running, or reconciliation-required. Expired work is recoverable only before a
   provider-effect checkpoint; later expiry preserves a reconciliation-required
-  lane fence for explicit operator inspection.
+  lane fence for explicit operator inspection. When the read-only provider
+  inspection terminates unsuccessfully, its checkpoint may contain the exact
+  inspection deployment id, request nonce, backup-record id, and one allowlisted
+  failure stage/code pair. Provider log text is not persisted in the operation
+  record.
 - Bootstrap, target replacement, production backup restore, and retained-volume
   backup import creation and worker claim also share one storage-level
   stable-lane reservation.

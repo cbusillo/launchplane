@@ -23,6 +23,7 @@ from control_plane.contracts.odoo_prod_retained_volume_backup_import import (
     OdooProdRetainedVolumeBackupImportApplyRequest,
     OdooProdRetainedVolumeBackupImportCompletionEvidence,
     OdooProdRetainedVolumeBackupImportInspectionEvidence,
+    OdooProdRetainedVolumeBackupImportInspectionFailureEvidence,
     OdooProdRetainedVolumeBackupImportPlan,
     OdooProdRetainedVolumeBackupImportRequest,
     OdooProdRetainedVolumeBackupImportResult,
@@ -329,6 +330,37 @@ def build_odoo_prod_retained_volume_backup_import_plan(
             inspection_evidence = (
                 OdooProdRetainedVolumeBackupImportInspectionEvidence.model_validate(raw_inspection)
             )
+        except dokploy_post_deploy.OdooRetainedVolumeBackupImportInspectionFailure as error:
+            try:
+                failure_evidence = (
+                    OdooProdRetainedVolumeBackupImportInspectionFailureEvidence.model_validate(
+                        error.evidence
+                    )
+                )
+            except ValidationError:
+                blockers.append("Retained-volume provider inspection did not complete.")
+            else:
+                if (
+                    failure_evidence.inspection_nonce != inspection_nonce
+                    or failure_evidence.backup_record_id != request.backup_record_id
+                ):
+                    blockers.append("Retained-volume provider inspection did not complete.")
+                else:
+                    phase_checkpoint(
+                        "inspection_started",
+                        {
+                            "inspection_deployment_id": (failure_evidence.inspection_deployment_id),
+                            "inspection_nonce": failure_evidence.inspection_nonce,
+                            "backup_record_id": failure_evidence.backup_record_id,
+                            "failure_stage": failure_evidence.failure_stage,
+                            "failure_code": failure_evidence.failure_code,
+                        },
+                    )
+                    blockers.append(
+                        "Retained-volume provider inspection failed at "
+                        f"{failure_evidence.failure_stage} "
+                        f"({failure_evidence.failure_code})."
+                    )
         except (click.ClickException, OSError, ValidationError):
             blockers.append("Retained-volume provider inspection did not complete.")
         if inspection_evidence is not None:

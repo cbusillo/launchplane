@@ -8,6 +8,9 @@ from typing import Literal
 
 import click
 
+from control_plane.contracts.odoo_prod_retained_volume_backup_import import (
+    ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_FAILURE_STAGE_BY_CODE,
+)
 from control_plane.dokploy import api
 from control_plane.dokploy.source import (
     DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS,
@@ -129,6 +132,9 @@ ODOO_BACKUP_RESTORE_RESULT_FIELDS = frozenset(
 ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_RESULT_MARKER = (
     "LAUNCHPLANE_ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_RESULT_B64"
 )
+ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_FAILURE_MARKER = (
+    "LAUNCHPLANE_ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_FAILURE"
+)
 ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_RESULT_FIELDS = frozenset(
     {
         "schema_version",
@@ -192,6 +198,16 @@ ODOO_RETAINED_VOLUME_BACKUP_IMPORT_APPLY_RESULT_FIELDS = frozenset(
         "source_filestore_size_bytes",
     }
 )
+
+
+class OdooRetainedVolumeBackupImportInspectionFailure(click.ClickException):
+    def __init__(self, *, evidence: api.JsonObject) -> None:
+        self.evidence = evidence
+        super().__init__(
+            "Dokploy Odoo retained-volume backup import inspection returned bounded failure evidence."
+        )
+
+
 OdooBackupRestorePhase = Literal[
     "database_restore",
     "filestore_stage",
@@ -965,6 +981,8 @@ def run_compose_odoo_retained_volume_backup_import_inspection(
         ),
         marker=ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_RESULT_MARKER,
         expected_fields=ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_RESULT_FIELDS,
+        failure_marker=ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_FAILURE_MARKER,
+        failure_identity=(inspection_nonce, backup_record_id),
         timeout_seconds=timeout_seconds,
         before_provider_mutation=before_provider_mutation,
     )
@@ -1072,6 +1090,8 @@ def _run_compose_odoo_retained_volume_backup_import_schedule(
     expected_fields: frozenset[str],
     timeout_seconds: int | None,
     before_provider_mutation: Callable[[str], None] | None,
+    failure_marker: str = "",
+    failure_identity: tuple[str, str] | None = None,
 ) -> tuple[api.JsonObject, str]:
     compose_id = target_definition.target_id.strip()
     compose_name = (
@@ -1147,13 +1167,38 @@ def _run_compose_odoo_retained_volume_backup_import_schedule(
         payload={"scheduleId": schedule_id},
         timeout_seconds=schedule_timeout_seconds,
     )
-    wait_result = api.wait_for_dokploy_schedule_deployment(
-        host=host,
-        token=token,
-        schedule_id=schedule_id,
-        before_key=api.deployment_key(latest_schedule_deployment),
-        timeout_seconds=schedule_timeout_seconds,
-    )
+    try:
+        wait_result = api.wait_for_dokploy_schedule_deployment(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            before_key=api.deployment_key(latest_schedule_deployment),
+            timeout_seconds=schedule_timeout_seconds,
+        )
+    except api.DokployDeploymentFailed as error:
+        if not failure_marker or failure_identity is None:
+            raise
+        try:
+            failure_log_lines = api.fetch_dokploy_deployment_logs(
+                host=host,
+                token=token,
+                deployment_id=error.deployment_id,
+                line_count=api.MAX_DOKPLOY_LOG_LINE_COUNT,
+            )
+            failure_evidence = _extract_retained_volume_inspection_failure(
+                {"logs": list(failure_log_lines)},
+                marker=failure_marker,
+            )
+        except (click.ClickException, OSError):
+            failure_evidence = {
+                "schema_version": 1,
+                "inspection_nonce": failure_identity[0],
+                "backup_record_id": failure_identity[1],
+                "failure_stage": "result",
+                "failure_code": "provider_schedule_failed_without_evidence",
+            }
+        failure_evidence["inspection_deployment_id"] = error.deployment_id
+        raise OdooRetainedVolumeBackupImportInspectionFailure(evidence=failure_evidence) from error
     deployment_id = api.deployment_key_from_wait_result(wait_result)
     if not deployment_id:
         raise click.ClickException(
@@ -1174,6 +1219,46 @@ def _run_compose_odoo_retained_volume_backup_import_schedule(
         ),
         deployment_id,
     )
+
+
+def _extract_retained_volume_inspection_failure(
+    payload: api.JsonValue,
+    *,
+    marker: str,
+) -> api.JsonObject:
+    bounded_values: list[str] = []
+    marker_prefix = f"{marker}="
+    for line in api.normalize_dokploy_log_payload(payload):
+        normalized_line = line.strip()
+        if normalized_line.startswith(marker_prefix):
+            bounded_values.append(normalized_line.removeprefix(marker_prefix).strip())
+    if len(bounded_values) != 1:
+        raise click.ClickException(
+            "Dokploy Odoo retained-volume backup import inspection returned no unique bounded failure evidence."
+        )
+    parts = bounded_values[0].split("|")
+    if len(parts) != 4:
+        raise click.ClickException(
+            "Dokploy Odoo retained-volume backup import inspection returned invalid bounded failure evidence."
+        )
+    inspection_nonce, backup_record_id, failure_stage, failure_code = parts
+    if (
+        len(inspection_nonce) != 64
+        or any(character not in "0123456789abcdef" for character in inspection_nonce)
+        or not backup_record_id
+        or ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_FAILURE_STAGE_BY_CODE.get(failure_code)
+        != failure_stage
+    ):
+        raise click.ClickException(
+            "Dokploy Odoo retained-volume backup import inspection returned invalid bounded failure evidence."
+        )
+    return {
+        "schema_version": 1,
+        "inspection_nonce": inspection_nonce,
+        "backup_record_id": backup_record_id,
+        "failure_stage": failure_stage,
+        "failure_code": failure_code,
+    }
 
 
 def _extract_bounded_schedule_result(
@@ -2434,11 +2519,14 @@ def _build_dokploy_odoo_retained_volume_backup_import_inspection_script(
     backup_dir_relative_path: str,
 ) -> str:
     return f"""#!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 compose_project={shlex.quote(compose_app_name)}
 inspection_nonce={shlex.quote(inspection_nonce)}
 backup_record_id={shlex.quote(backup_record_id)}
+failure_marker={shlex.quote(ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_FAILURE_MARKER)}
+failure_stage=active_runtime
+failure_code=active_runtime_inspection_failed
 active_db_volume={shlex.quote(active_db_volume)}
 active_data_volume={shlex.quote(active_data_volume)}
 active_log_volume={shlex.quote(active_log_volume)}
@@ -2451,6 +2539,24 @@ database_user={shlex.quote(database_user)}
 expected_source_compose_project={shlex.quote(expected_source_compose_project)}
 filestore_relative_path={shlex.quote(filestore_relative_path)}
 backup_dir_relative_path={shlex.quote(backup_dir_relative_path)}
+
+emit_inspection_failure() {{
+    local exit_status="$1"
+    if [ "${{exit_status}}" -ne 0 ]; then
+        printf '%s=%s|%s|%s|%s\n' \
+            "${{failure_marker}}" \
+            "${{inspection_nonce}}" \
+            "${{backup_record_id}}" \
+            "${{failure_stage}}" \
+            "${{failure_code}}"
+    fi
+    return "${{exit_status}}"
+}}
+
+trap 'emit_inspection_failure "$?"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 resolve_single_container() {{
     local service_name="$1"
@@ -2495,23 +2601,42 @@ container_mounts_volume() {{
         "${{container_id}}" | grep -Fx -- "${{volume_name}}" >/dev/null
 }}
 
+failure_stage=active_runtime
+failure_code=active_volume_missing
 require_volume "${{active_db_volume}}"
 require_volume "${{active_data_volume}}"
 require_volume "${{active_log_volume}}"
+
+failure_stage=source_safety
+failure_code=source_volume_missing
 require_volume "${{source_db_volume}}"
 require_volume "${{source_data_volume}}"
 
-if [ -n "$(docker ps -q --filter "volume=${{source_db_volume}}")" ]; then
+failure_code=source_volume_usage_read_failed
+source_db_container_ids=
+if ! source_db_container_ids=$(docker ps -q --filter "volume=${{source_db_volume}}"); then
+    exit 1
+fi
+source_data_container_ids=
+if ! source_data_container_ids=$(docker ps -q --filter "volume=${{source_data_volume}}"); then
+    exit 1
+fi
+failure_code=source_volume_in_use
+if [ -n "${{source_db_container_ids}}" ]; then
     echo "Retained source DB volume is mounted by a running container." >&2
     exit 1
 fi
-if [ -n "$(docker ps -q --filter "volume=${{source_data_volume}}")" ]; then
+if [ -n "${{source_data_container_ids}}" ]; then
     echo "Retained source data volume is mounted by a running container." >&2
     exit 1
 fi
 
+failure_stage=active_runtime
+failure_code=active_database_container_unavailable
 database_container_id=$(resolve_single_container_any_state database)
+failure_code=script_runner_container_unavailable
 script_runner_container_id=$(resolve_single_container script-runner)
+failure_code=active_runtime_inspection_failed
 postgres_image_id=$(docker inspect -f '{{{{.Image}}}}' "${{database_container_id}}")
 script_runner_image_id=$(docker inspect -f '{{{{.Image}}}}' "${{script_runner_container_id}}")
 postgres_binary_version=$(docker run --rm --read-only --network none \
@@ -2521,6 +2646,7 @@ active_database_user=$(docker inspect -f '{{{{range .Config.Env}}}}{{{{println .
 active_destination_database_name=$(docker inspect \
     -f '{{{{range .Config.Env}}}}{{{{println .}}}}{{{{end}}}}' \
     "${{script_runner_container_id}}" | sed -n 's/^ODOO_DB_NAME=//p' | tail -n 1)
+failure_code=active_runtime_identity_mismatch
 if [ "${{active_database_user}}" != "${{database_user}}" ]; then
     echo "Active PostgreSQL user does not match runtime authority." >&2
     exit 1
@@ -2529,12 +2655,14 @@ if [ "${{active_destination_database_name}}" != "${{destination_database_name}}"
     echo "Active destination database name does not match runtime authority." >&2
     exit 1
 fi
+failure_code=active_volume_mount_mismatch
 if ! container_mounts_volume "${{database_container_id}}" "${{active_db_volume}}" || \
    ! container_mounts_volume "${{script_runner_container_id}}" "${{active_data_volume}}" || \
    ! container_mounts_volume "${{script_runner_container_id}}" "${{active_log_volume}}"; then
     echo "Active container volume mounts do not match runtime authority." >&2
     exit 1
 fi
+failure_code=active_image_invalid
 case "${{postgres_image_id}}" in
     sha256:[0-9a-f][0-9a-f]*) ;;
     *) echo "Active PostgreSQL container did not expose an immutable image id." >&2; exit 1 ;;
@@ -2543,16 +2671,21 @@ case "${{script_runner_image_id}}" in
     sha256:[0-9a-f][0-9a-f]*) ;;
     *) echo "Active script-runner container did not expose an immutable image id." >&2; exit 1 ;;
 esac
+failure_code=active_postgres_version_mismatch
 case "${{postgres_binary_version}}" in
     "postgres (PostgreSQL) 17" | "postgres (PostgreSQL) 17."*) ;;
     *) echo "Active PostgreSQL image is not major version 17." >&2; exit 1 ;;
 esac
 
+failure_stage=source_safety
+failure_code=source_volume_label_read_failed
 source_db_project_label=$(volume_label "${{source_db_volume}}" com.docker.compose.project)
 source_db_role_label=$(volume_label "${{source_db_volume}}" com.docker.compose.volume)
 source_data_project_label=$(volume_label "${{source_data_volume}}" com.docker.compose.project)
 source_data_role_label=$(volume_label "${{source_data_volume}}" com.docker.compose.volume)
 
+failure_stage=source_database
+failure_code=source_postgres_metadata_read_failed
 source_pg_version=$(docker run --rm --read-only --network none --user 0:0 \
     --mount "type=volume,src=${{source_db_volume}},dst=/source,readonly" \
     --entrypoint /bin/bash "${{postgres_image_id}}" \
@@ -2582,6 +2715,7 @@ source_pg_checkpoint_timeline_id=$(printf '%s\n' "${{pg_controldata_output}}" | 
 source_pg_checkpoint_time=$(printf '%s\n' "${{pg_controldata_output}}" | \
     sed -n 's/^Time of latest checkpoint:[[:space:]]*//p' | head -n 1)
 
+failure_code=source_db_measurement_failed
 source_db_volume_used_bytes=$(docker run --rm --read-only --network none --user 0:0 \
     --mount "type=volume,src=${{source_db_volume}},dst=/source,readonly" \
     --entrypoint python3 "${{script_runner_image_id}}" -c '
@@ -2596,6 +2730,8 @@ for root, directories, files in os.walk("/source", followlinks=False):
 print(total)
 ')
 
+failure_stage=source_filestore
+failure_code=source_filestore_measurement_failed
 filestore_metrics=$(docker run --rm --read-only --network none --user 0:0 \
     --mount "type=volume,src=${{source_data_volume}},dst=/source-data,readonly" \
     --entrypoint python3 "${{script_runner_image_id}}" -c '
@@ -2624,12 +2760,19 @@ print(f"{{count}}:{{size}}")
 source_filestore_file_count=${{filestore_metrics%%:*}}
 source_filestore_size_bytes=${{filestore_metrics#*:}}
 
+failure_stage=destination
+failure_code=active_data_space_read_failed
 active_data_free_bytes=$(docker run --rm --read-only --network none --user 0:0 \
     --mount "type=volume,src=${{active_data_volume}},dst=/active-data,readonly" \
     --entrypoint python3 "${{script_runner_image_id}}" \
     -c 'import shutil; print(shutil.disk_usage("/active-data").free)')
 
-if docker volume inspect "${{staging_clone_volume}}" >/dev/null 2>&1; then
+failure_code=destination_check_failed
+staging_volume_names=
+if ! staging_volume_names=$(docker volume ls -q --filter "name=${{staging_clone_volume}}"); then
+    exit 1
+fi
+if printf '%s\n' "${{staging_volume_names}}" | grep -Fx -- "${{staging_clone_volume}}" >/dev/null; then
     staging_clone_volume_absent=false
 else
     staging_clone_volume_absent=true
@@ -2642,6 +2785,8 @@ import sys
 print("true" if not os.path.lexists(os.path.join("/active-data", sys.argv[1])) else "false")
 ' "${{backup_dir_relative_path}}")
 
+failure_stage=result
+failure_code=result_emit_failed
 docker exec -i \
     -e RESULT_MARKER={shlex.quote(ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_RESULT_MARKER)} \
     -e INSPECTION_NONCE="${{inspection_nonce}}" \

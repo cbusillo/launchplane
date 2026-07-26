@@ -1685,6 +1685,17 @@ execute inside that container or mount its corrupt database volume. The
 script-runner remains running-only because it emits the bounded result and
 writes the imported logical backup into the active data volume.
 
+If the provider inspection schedule terminates before it can emit that result,
+the service reads only the exact failed schedule deployment and accepts one
+nonce- and backup-record-bound failure marker. The operation checkpoint records
+only the request nonce, backup-record id, inspection deployment id, and a
+bounded failure stage/code pair; raw provider logs and command output are not
+copied into the plan, operation error, or API response. If the exact marker or
+its logs are unavailable, the same request and deployment are recorded with the
+generic bounded `result/provider_schedule_failed_without_evidence` pair. This
+distinguishes a provider inspection failure from a GitHub environment approval
+wait without weakening the fail-closed plan boundary.
+
 Run `Odoo Prod Retained Volume Backup Import Apply` only with the exact reviewed
 plan operation and fingerprint, a stable idempotency key, and confirmation phrase
 `import-retained-volumes-as-production-backup`. The service queues a dedicated
