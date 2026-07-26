@@ -430,6 +430,10 @@ class RunnerLaneLifecycleWorkflowTests(unittest.TestCase):
         self.assertIn("- retire", workflow_text)
         self.assertIn("retire ${TARGET_REPOSITORY} ${LANE_NAME}", workflow_text)
         self.assertEqual(workflow.permissions.get("id-token"), "write")
+        self.assertIn(
+            'approved_root="${RUNNER_REGISTRATION_ALLOWED_ROOT:-$HOME/actions-runners}"',
+            workflow_text,
+        )
         self.assertIn("/tmp/launchplane-runner-host-hygiene.lock", workflow_text)
         self.assertIn("runner-lane-retirement-executor", workflow_text)
         self.assertIn("if: always()", workflow_text)
