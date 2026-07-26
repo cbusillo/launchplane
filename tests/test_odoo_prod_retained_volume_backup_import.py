@@ -12,6 +12,7 @@ from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -229,6 +230,7 @@ class _Store:
             ),
         )
         self.backup_records: dict[str, BackupGateRecord] = {}
+        self.deployment_records: dict[str, DeploymentRecord] = {}
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != PRODUCT:
@@ -261,6 +263,12 @@ class _Store:
             raise FileNotFoundError(artifact_id)
         return self.artifact
 
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord:
+        try:
+            return self.deployment_records[record_id]
+        except KeyError as error:
+            raise FileNotFoundError(record_id) from error
+
     def read_backup_gate_record(self, record_id: str) -> BackupGateRecord:
         try:
             return self.backup_records[record_id]
@@ -281,14 +289,19 @@ class _Store:
         )
 
 
-def _target_payload(store: _Store) -> dict[str, object]:
+def _target_payload(
+    store: _Store,
+    *,
+    runtime_identity: RuntimeIdentity | None = None,
+) -> dict[str, object]:
+    resolved_runtime_identity = runtime_identity or store.runtime_identity
     live_env = {
         "ODOO_DB_NAME": DESTINATION_DATABASE_NAME,
         "ODOO_DB_USER": DATABASE_USER,
         "ODOO_DB_VOLUME": ACTIVE_DB_VOLUME,
         "ODOO_DATA_VOLUME": ACTIVE_DATA_VOLUME,
         "ODOO_LOG_VOLUME": ACTIVE_LOG_VOLUME,
-        **runtime_identity_env(store.runtime_identity),
+        **runtime_identity_env(resolved_runtime_identity),
     }
     return {
         "name": "example-prod",
@@ -296,6 +309,28 @@ def _target_payload(store: _Store) -> dict[str, object]:
         "serverId": "server-example",
         "env": "\n".join(f"{key}={value}" for key, value in live_env.items()),
     }
+
+
+def _failed_deployment_record(runtime_identity: RuntimeIdentity) -> DeploymentRecord:
+    return DeploymentRecord(
+        record_id=runtime_identity.deployment_record_id,
+        artifact_identity=ArtifactIdentityReference(artifact_id=runtime_identity.artifact_id),
+        context=runtime_identity.context,
+        instance=runtime_identity.instance,
+        source_git_ref=runtime_identity.source_git_ref,
+        resolved_target=ResolvedTargetEvidence(
+            target_type="compose",
+            target_id="compose-example-prod",
+            target_name="example-prod",
+        ),
+        runtime_identity=runtime_identity,
+        deploy=DeploymentEvidence(
+            target_name="example-prod",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            status="fail",
+        ),
+    )
 
 
 def _build_plan(store: _Store) -> OdooProdRetainedVolumeBackupImportPlan:
@@ -490,6 +525,147 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
         self.assertEqual(plan.plan_status, "blocked")
         self.assertEqual(plan.plan_fingerprint, "")
         self.assertTrue(any("ODOO_DB_VOLUME" in blocker for blocker in plan.blockers))
+        inspect_mock.assert_not_called()
+
+    def test_plan_accepts_recorded_failed_deployment_identity_for_repair(self) -> None:
+        store = _Store()
+        live_runtime_identity = store.runtime_identity.model_copy(
+            update={"deployment_record_id": "deployment-failed-replacement"}
+        )
+        store.deployment_records[live_runtime_identity.deployment_record_id] = (
+            _failed_deployment_record(live_runtime_identity)
+        )
+
+        def inspect(**kwargs: object) -> dict[str, object]:
+            return _inspection_payload(inspection_nonce=str(kwargs["inspection_nonce"]))
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.test", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_api.fetch_dokploy_target_payload",
+                return_value=_target_payload(
+                    store,
+                    runtime_identity=live_runtime_identity,
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_post_deploy.run_compose_odoo_retained_volume_backup_import_inspection",
+                side_effect=inspect,
+            ),
+        ):
+            plan = build_odoo_prod_retained_volume_backup_import_plan(
+                control_plane_root=Path("."),
+                record_store=store,
+                operation_id="plan-operation-1",
+                request=_request(),
+                phase_checkpoint=lambda _phase, _evidence: None,
+                provider_effect_checkpoint=lambda _phase, _effect: None,
+            )
+
+        self.assertEqual(plan.plan_status, "ready", plan.blockers)
+        self.assertEqual(plan.runtime_identity, live_runtime_identity)
+        self.assertTrue(any("recorded failed deployment" in warning for warning in plan.warnings))
+
+    def test_plan_rejects_unrecorded_or_changed_failed_deployment_identity(self) -> None:
+        authority_changes: tuple[dict[str, object] | None, ...] = (
+            None,
+            {"schema_version": 2},
+            {"product": "product-drifted"},
+            {"context": "context-drifted"},
+            {"instance": "testing"},
+            {"environment_kind": "preview"},
+            {"artifact_id": "artifact-drifted"},
+            {"source_git_ref": "source-drifted"},
+            {"image_reference": "ghcr.io/example/odoo@sha256:" + "9" * 64},
+            {"release_tuple_id": "release-drifted"},
+            {"preview_id": "preview-drifted"},
+            {"preview_generation_id": "generation-drifted"},
+            {"deployed_at": "2026-07-26T07:00:00Z"},
+        )
+        for authority_change in authority_changes:
+            with self.subTest(authority_change=authority_change):
+                store = _Store()
+                live_runtime_identity = store.runtime_identity.model_copy(
+                    update={
+                        "deployment_record_id": "deployment-failed-replacement",
+                        **(authority_change or {}),
+                    }
+                )
+                if authority_change is not None:
+                    store.deployment_records[live_runtime_identity.deployment_record_id] = (
+                        _failed_deployment_record(live_runtime_identity)
+                    )
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_source.read_dokploy_config",
+                        return_value=("https://dokploy.example.test", "token"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_api.fetch_dokploy_target_payload",
+                        return_value=_target_payload(
+                            store,
+                            runtime_identity=live_runtime_identity,
+                        ),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_post_deploy.run_compose_odoo_retained_volume_backup_import_inspection"
+                    ) as inspect_mock,
+                ):
+                    plan = build_odoo_prod_retained_volume_backup_import_plan(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        operation_id="plan-operation-1",
+                        request=_request(),
+                        phase_checkpoint=lambda _phase, _evidence: None,
+                        provider_effect_checkpoint=lambda _phase, _effect: None,
+                    )
+
+                self.assertEqual(plan.plan_status, "blocked")
+                self.assertTrue(
+                    any("runtime identity drifted" in blocker for blocker in plan.blockers)
+                )
+                inspect_mock.assert_not_called()
+
+    def test_plan_rejects_nonfailed_deployment_identity_provenance(self) -> None:
+        store = _Store()
+        live_runtime_identity = store.runtime_identity.model_copy(
+            update={"deployment_record_id": "deployment-not-failed"}
+        )
+        deployment_record = _failed_deployment_record(live_runtime_identity)
+        store.deployment_records[live_runtime_identity.deployment_record_id] = (
+            deployment_record.model_copy(
+                update={"deploy": deployment_record.deploy.model_copy(update={"status": "pass"})}
+            )
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.test", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_api.fetch_dokploy_target_payload",
+                return_value=_target_payload(
+                    store,
+                    runtime_identity=live_runtime_identity,
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_post_deploy.run_compose_odoo_retained_volume_backup_import_inspection"
+            ) as inspect_mock,
+        ):
+            plan = build_odoo_prod_retained_volume_backup_import_plan(
+                control_plane_root=Path("."),
+                record_store=store,
+                operation_id="plan-operation-1",
+                request=_request(),
+                phase_checkpoint=lambda _phase, _evidence: None,
+                provider_effect_checkpoint=lambda _phase, _effect: None,
+            )
+
+        self.assertEqual(plan.plan_status, "blocked")
         inspect_mock.assert_not_called()
 
     def test_plan_rejects_unbound_inspection_nonce(self) -> None:
@@ -692,6 +868,21 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
     def test_plan_fingerprint_changes_when_pg_control_changes(self) -> None:
         plan = _build_plan(_Store())
         changed = plan.model_copy(update={"source_pg_control_sha256": "9" * 64})
+        self.assertNotEqual(
+            build_odoo_prod_retained_volume_backup_import_plan_fingerprint(plan),
+            build_odoo_prod_retained_volume_backup_import_plan_fingerprint(changed),
+        )
+
+    def test_plan_fingerprint_binds_live_failed_deployment_identity(self) -> None:
+        plan = _build_plan(_Store())
+        assert plan.runtime_identity is not None
+        changed = plan.model_copy(
+            update={
+                "runtime_identity": plan.runtime_identity.model_copy(
+                    update={"deployment_record_id": "deployment-changed-after-review"}
+                )
+            }
+        )
         self.assertNotEqual(
             build_odoo_prod_retained_volume_backup_import_plan_fingerprint(plan),
             build_odoo_prod_retained_volume_backup_import_plan_fingerprint(changed),
