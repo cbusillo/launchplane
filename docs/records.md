@@ -1222,9 +1222,12 @@ state/
   provider-effect checkpoint; later expiry preserves a reconciliation-required
   lane fence for explicit operator inspection. When the read-only provider
   inspection terminates unsuccessfully, its checkpoint may contain the exact
-  inspection deployment id, request nonce, backup-record id, and one allowlisted
-  failure stage/code pair. Provider log text is not persisted in the operation
-  record.
+  inspection schedule/deployment ids when known, request nonce, backup-record
+  id, and one allowlisted failure stage/code pair. Provider log or exception
+  text is not persisted in the operation record. Pre-result failures use a
+  `provider_control` stage with distinct target, schedule, trigger, wait, and
+  identity codes; result-read and result-parse failures use bounded `result`
+  codes.
 - Bootstrap, target replacement, production backup restore, and retained-volume
   backup import creation and worker claim also share one storage-level
   stable-lane reservation.

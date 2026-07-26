@@ -19,6 +19,7 @@ ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_CONFIRMATION = (
     "import-retained-volumes-as-production-backup"
 )
 OdooProdRetainedVolumeBackupImportInspectionFailureStage = Literal[
+    "provider_control",
     "active_runtime",
     "source_safety",
     "source_database",
@@ -27,6 +28,17 @@ OdooProdRetainedVolumeBackupImportInspectionFailureStage = Literal[
     "result",
 ]
 OdooProdRetainedVolumeBackupImportInspectionFailureCode = Literal[
+    "provider_target_read_failed",
+    "provider_target_identity_mismatch",
+    "provider_schedule_runtime_resolution_failed",
+    "provider_schedule_upsert_failed",
+    "provider_schedule_identity_missing",
+    "provider_schedule_baseline_read_failed",
+    "provider_schedule_trigger_failed",
+    "provider_schedule_wait_failed",
+    "provider_deployment_identity_missing",
+    "provider_result_log_read_failed",
+    "provider_result_invalid",
     "active_volume_missing",
     "source_volume_missing",
     "source_volume_usage_read_failed",
@@ -45,9 +57,19 @@ OdooProdRetainedVolumeBackupImportInspectionFailureCode = Literal[
     "active_data_space_read_failed",
     "destination_check_failed",
     "result_emit_failed",
-    "provider_schedule_failed_without_evidence",
 ]
 ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_FAILURE_STAGE_BY_CODE: dict[str, str] = {
+    "provider_target_read_failed": "provider_control",
+    "provider_target_identity_mismatch": "provider_control",
+    "provider_schedule_runtime_resolution_failed": "provider_control",
+    "provider_schedule_upsert_failed": "provider_control",
+    "provider_schedule_identity_missing": "provider_control",
+    "provider_schedule_baseline_read_failed": "provider_control",
+    "provider_schedule_trigger_failed": "provider_control",
+    "provider_schedule_wait_failed": "provider_control",
+    "provider_deployment_identity_missing": "provider_control",
+    "provider_result_log_read_failed": "result",
+    "provider_result_invalid": "result",
     "active_volume_missing": "active_runtime",
     "source_volume_missing": "source_safety",
     "source_volume_usage_read_failed": "source_safety",
@@ -66,7 +88,6 @@ ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_FAILURE_STAGE_BY_CODE: dict[str, str] = 
     "active_data_space_read_failed": "destination",
     "destination_check_failed": "destination",
     "result_emit_failed": "result",
-    "provider_schedule_failed_without_evidence": "result",
 }
 
 
@@ -253,7 +274,16 @@ class OdooProdRetainedVolumeBackupImportInspectionFailureEvidence(BaseModel):
     backup_record_id: str = Field(min_length=1)
     failure_stage: OdooProdRetainedVolumeBackupImportInspectionFailureStage
     failure_code: OdooProdRetainedVolumeBackupImportInspectionFailureCode
-    inspection_deployment_id: str = Field(min_length=1)
+    inspection_schedule_id: str = Field(
+        default="",
+        max_length=200,
+        pattern=r"^$|^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+    )
+    inspection_deployment_id: str = Field(
+        default="",
+        max_length=200,
+        pattern=r"^$|^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+    )
 
     @model_validator(mode="after")
     def _validate_failure_stage_code_pair(
@@ -265,6 +295,10 @@ class OdooProdRetainedVolumeBackupImportInspectionFailureEvidence(BaseModel):
         ):
             raise ValueError(
                 "Odoo retained-volume backup import inspection failure stage/code mismatch."
+            )
+        if self.failure_stage != "provider_control" and not self.inspection_deployment_id:
+            raise ValueError(
+                "Odoo retained-volume backup import inspection runtime failure requires deployment evidence."
             )
         return self
 

@@ -1,15 +1,17 @@
 import base64
 import json
+import re
 import shlex
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 import click
 
 from control_plane.contracts.odoo_prod_retained_volume_backup_import import (
     ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_FAILURE_STAGE_BY_CODE,
+    OdooProdRetainedVolumeBackupImportInspectionEvidence,
 )
 from control_plane.dokploy import api
 from control_plane.dokploy.source import (
@@ -206,6 +208,71 @@ class OdooRetainedVolumeBackupImportInspectionFailure(click.ClickException):
         super().__init__(
             "Dokploy Odoo retained-volume backup import inspection returned bounded failure evidence."
         )
+
+
+_RetainedInspectionCallResult = TypeVar("_RetainedInspectionCallResult")
+_DOKPLOY_EVIDENCE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}")
+
+
+def _bounded_dokploy_evidence_id(value: str) -> str:
+    normalized_value = value.strip()
+    if not _DOKPLOY_EVIDENCE_ID_PATTERN.fullmatch(normalized_value):
+        return ""
+    return normalized_value
+
+
+def _retained_volume_inspection_provider_id(
+    value: str,
+    *,
+    failure_identity: tuple[str, str] | None,
+) -> str:
+    if failure_identity is None:
+        return value
+    return _bounded_dokploy_evidence_id(value)
+
+
+def _retained_volume_inspection_failure(
+    *,
+    failure_identity: tuple[str, str],
+    failure_code: str,
+    inspection_schedule_id: str = "",
+    inspection_deployment_id: str = "",
+) -> OdooRetainedVolumeBackupImportInspectionFailure:
+    failure_stage = ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_FAILURE_STAGE_BY_CODE[failure_code]
+    return OdooRetainedVolumeBackupImportInspectionFailure(
+        evidence={
+            "schema_version": 1,
+            "inspection_nonce": failure_identity[0],
+            "backup_record_id": failure_identity[1],
+            "failure_stage": failure_stage,
+            "failure_code": failure_code,
+            "inspection_schedule_id": _bounded_dokploy_evidence_id(inspection_schedule_id),
+            "inspection_deployment_id": _bounded_dokploy_evidence_id(inspection_deployment_id),
+        }
+    )
+
+
+def _run_retained_volume_inspection_provider_call(
+    *,
+    callback: Callable[[], _RetainedInspectionCallResult],
+    failure_identity: tuple[str, str] | None,
+    failure_code: str,
+    inspection_schedule_id: str = "",
+    inspection_deployment_id: str = "",
+) -> _RetainedInspectionCallResult:
+    try:
+        return callback()
+    except OdooRetainedVolumeBackupImportInspectionFailure:
+        raise
+    except Exception:
+        if failure_identity is None:
+            raise
+        raise _retained_volume_inspection_failure(
+            failure_identity=failure_identity,
+            failure_code=failure_code,
+            inspection_schedule_id=inspection_schedule_id,
+            inspection_deployment_id=inspection_deployment_id,
+        ) from None
 
 
 OdooBackupRestorePhase = Literal[
@@ -947,14 +1014,42 @@ def run_compose_odoo_retained_volume_backup_import_inspection(
     timeout_seconds: int | None = None,
     before_provider_mutation: Callable[[str], None] | None = None,
 ) -> api.JsonObject:
-    compose_app_name = _compose_app_name_for_restore(
-        host=host,
-        token=token,
-        target_definition=target_definition,
+    failure_identity = (inspection_nonce, backup_record_id)
+    compose_id = target_definition.target_id.strip()
+    compose_name = (
+        target_definition.target_name.strip()
+        or f"{target_definition.context}-{target_definition.instance}"
+    )
+    if not compose_id:
+        raise _retained_volume_inspection_failure(
+            failure_identity=failure_identity,
+            failure_code="provider_target_identity_mismatch",
+        )
+    target_payload = _run_retained_volume_inspection_provider_call(
+        callback=lambda: api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+        ),
+        failure_identity=failure_identity,
+        failure_code="provider_target_read_failed",
+    )
+    _, _, compose_app_name, _ = _run_retained_volume_inspection_provider_call(
+        callback=lambda: _resolve_dokploy_schedule_runtime(
+            host=host,
+            token=token,
+            compose_id=compose_id,
+            compose_name=compose_name,
+            target_payload=target_payload,
+        ),
+        failure_identity=failure_identity,
+        failure_code="provider_schedule_runtime_resolution_failed",
     )
     if compose_app_name != expected_compose_app_name.strip():
-        raise click.ClickException(
-            "Odoo retained-volume backup import compose project drifted before inspection."
+        raise _retained_volume_inspection_failure(
+            failure_identity=failure_identity,
+            failure_code="provider_target_identity_mismatch",
         )
     result, deployment_id = _run_compose_odoo_retained_volume_backup_import_schedule(
         host=host,
@@ -982,7 +1077,7 @@ def run_compose_odoo_retained_volume_backup_import_inspection(
         marker=ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_RESULT_MARKER,
         expected_fields=ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_RESULT_FIELDS,
         failure_marker=ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_FAILURE_MARKER,
-        failure_identity=(inspection_nonce, backup_record_id),
+        failure_identity=failure_identity,
         timeout_seconds=timeout_seconds,
         before_provider_mutation=before_provider_mutation,
     )
@@ -1102,23 +1197,33 @@ def _run_compose_odoo_retained_volume_backup_import_schedule(
         raise click.ClickException(
             "Odoo retained-volume backup import requires an exact compose target id."
         )
-    target_payload = api.fetch_dokploy_target_payload(
-        host=host,
-        token=token,
-        target_type="compose",
-        target_id=compose_id,
+    target_payload = _run_retained_volume_inspection_provider_call(
+        callback=lambda: api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+        ),
+        failure_identity=failure_identity,
+        failure_code="provider_target_read_failed",
     )
     schedule_timeout_seconds = (
         timeout_seconds
         or target_definition.deploy_timeout_seconds
         or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
     )
-    schedule_type, schedule_lookup_id, _, schedule_server_id = _resolve_dokploy_schedule_runtime(
-        host=host,
-        token=token,
-        compose_id=compose_id,
-        compose_name=compose_name,
-        target_payload=target_payload,
+    schedule_type, schedule_lookup_id, _, schedule_server_id = (
+        _run_retained_volume_inspection_provider_call(
+            callback=lambda: _resolve_dokploy_schedule_runtime(
+                host=host,
+                token=token,
+                compose_id=compose_id,
+                compose_name=compose_name,
+                target_payload=target_payload,
+            ),
+            failure_identity=failure_identity,
+            failure_code="provider_schedule_runtime_resolution_failed",
+        )
     )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
@@ -1138,87 +1243,190 @@ def _run_compose_odoo_retained_volume_backup_import_schedule(
     }
     if before_provider_mutation is not None:
         before_provider_mutation("schedule_upsert")
-    schedule = api.upsert_dokploy_schedule(
-        host=host,
-        token=token,
-        target_id=schedule_lookup_id,
-        schedule_type=schedule_type,
-        schedule_name=schedule_name,
-        app_name=str(schedule_payload["appName"]),
-        schedule_payload=schedule_payload,
+    schedule = _run_retained_volume_inspection_provider_call(
+        callback=lambda: api.upsert_dokploy_schedule(
+            host=host,
+            token=token,
+            target_id=schedule_lookup_id,
+            schedule_type=schedule_type,
+            schedule_name=schedule_name,
+            app_name=str(schedule_payload["appName"]),
+            schedule_payload=schedule_payload,
+        ),
+        failure_identity=failure_identity,
+        failure_code="provider_schedule_upsert_failed",
     )
-    schedule_id = api.schedule_key(schedule)
+    schedule_id = _retained_volume_inspection_provider_id(
+        _run_retained_volume_inspection_provider_call(
+            callback=lambda: api.schedule_key(schedule),
+            failure_identity=failure_identity,
+            failure_code="provider_schedule_identity_missing",
+        ),
+        failure_identity=failure_identity,
+    )
     if not schedule_id:
+        if failure_identity is not None:
+            raise _retained_volume_inspection_failure(
+                failure_identity=failure_identity,
+                failure_code="provider_schedule_identity_missing",
+            )
         raise click.ClickException(
             "Dokploy Odoo retained-volume backup import schedule has no schedule id."
         )
-    latest_schedule_deployment = api.latest_deployment_for_schedule(
-        host=host,
-        token=token,
-        schedule_id=schedule_id,
+    latest_schedule_deployment = _run_retained_volume_inspection_provider_call(
+        callback=lambda: api.latest_deployment_for_schedule(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+        ),
+        failure_identity=failure_identity,
+        failure_code="provider_schedule_baseline_read_failed",
+        inspection_schedule_id=schedule_id,
     )
+    raw_before_deployment_id = _run_retained_volume_inspection_provider_call(
+        callback=lambda: api.deployment_key(latest_schedule_deployment),
+        failure_identity=failure_identity,
+        failure_code="provider_schedule_baseline_read_failed",
+        inspection_schedule_id=schedule_id,
+    )
+    before_deployment_id = _retained_volume_inspection_provider_id(
+        raw_before_deployment_id,
+        failure_identity=failure_identity,
+    )
+    if (
+        failure_identity is not None
+        and latest_schedule_deployment is not None
+        and not before_deployment_id
+    ):
+        raise _retained_volume_inspection_failure(
+            failure_identity=failure_identity,
+            failure_code="provider_schedule_baseline_read_failed",
+            inspection_schedule_id=schedule_id,
+        )
     if before_provider_mutation is not None:
         before_provider_mutation("schedule_trigger")
-    api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.runManually",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-        timeout_seconds=schedule_timeout_seconds,
+    _run_retained_volume_inspection_provider_call(
+        callback=lambda: api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/schedule.runManually",
+            method="POST",
+            payload={"scheduleId": schedule_id},
+            timeout_seconds=schedule_timeout_seconds,
+        ),
+        failure_identity=failure_identity,
+        failure_code="provider_schedule_trigger_failed",
+        inspection_schedule_id=schedule_id,
     )
     try:
         wait_result = api.wait_for_dokploy_schedule_deployment(
             host=host,
             token=token,
             schedule_id=schedule_id,
-            before_key=api.deployment_key(latest_schedule_deployment),
+            before_key=before_deployment_id,
             timeout_seconds=schedule_timeout_seconds,
         )
     except api.DokployDeploymentFailed as error:
         if not failure_marker or failure_identity is None:
             raise
+        failed_deployment_id = _bounded_dokploy_evidence_id(error.deployment_id)
+        if not failed_deployment_id:
+            raise _retained_volume_inspection_failure(
+                failure_identity=failure_identity,
+                failure_code="provider_deployment_identity_missing",
+                inspection_schedule_id=schedule_id,
+            ) from None
         try:
             failure_log_lines = api.fetch_dokploy_deployment_logs(
                 host=host,
                 token=token,
-                deployment_id=error.deployment_id,
+                deployment_id=failed_deployment_id,
                 line_count=api.MAX_DOKPLOY_LOG_LINE_COUNT,
             )
+        except Exception:
+            raise _retained_volume_inspection_failure(
+                failure_identity=failure_identity,
+                failure_code="provider_result_log_read_failed",
+                inspection_schedule_id=schedule_id,
+                inspection_deployment_id=failed_deployment_id,
+            ) from None
+        try:
             failure_evidence = _extract_retained_volume_inspection_failure(
                 {"logs": list(failure_log_lines)},
                 marker=failure_marker,
             )
-        except (click.ClickException, OSError):
-            failure_evidence = {
-                "schema_version": 1,
-                "inspection_nonce": failure_identity[0],
-                "backup_record_id": failure_identity[1],
-                "failure_stage": "result",
-                "failure_code": "provider_schedule_failed_without_evidence",
-            }
-        failure_evidence["inspection_deployment_id"] = error.deployment_id
-        raise OdooRetainedVolumeBackupImportInspectionFailure(evidence=failure_evidence) from error
-    deployment_id = api.deployment_key_from_wait_result(wait_result)
+        except Exception:
+            raise _retained_volume_inspection_failure(
+                failure_identity=failure_identity,
+                failure_code="provider_result_invalid",
+                inspection_schedule_id=schedule_id,
+                inspection_deployment_id=failed_deployment_id,
+            ) from None
+        failure_evidence["inspection_schedule_id"] = schedule_id
+        failure_evidence["inspection_deployment_id"] = failed_deployment_id
+        raise OdooRetainedVolumeBackupImportInspectionFailure(evidence=failure_evidence) from None
+    except Exception:
+        if failure_identity is None:
+            raise
+        raise _retained_volume_inspection_failure(
+            failure_identity=failure_identity,
+            failure_code="provider_schedule_wait_failed",
+            inspection_schedule_id=schedule_id,
+        ) from None
+    deployment_id = _retained_volume_inspection_provider_id(
+        _run_retained_volume_inspection_provider_call(
+            callback=lambda: api.deployment_key_from_wait_result(wait_result),
+            failure_identity=failure_identity,
+            failure_code="provider_deployment_identity_missing",
+            inspection_schedule_id=schedule_id,
+        ),
+        failure_identity=failure_identity,
+    )
     if not deployment_id:
+        if failure_identity is not None:
+            raise _retained_volume_inspection_failure(
+                failure_identity=failure_identity,
+                failure_code="provider_deployment_identity_missing",
+                inspection_schedule_id=schedule_id,
+            )
         raise click.ClickException(
             "Dokploy Odoo retained-volume backup import did not return an exact deployment id."
         )
-    log_lines = api.fetch_dokploy_deployment_logs(
-        host=host,
-        token=token,
-        deployment_id=deployment_id,
-        line_count=api.MAX_DOKPLOY_LOG_LINE_COUNT,
+    log_lines = _run_retained_volume_inspection_provider_call(
+        callback=lambda: api.fetch_dokploy_deployment_logs(
+            host=host,
+            token=token,
+            deployment_id=deployment_id,
+            line_count=api.MAX_DOKPLOY_LOG_LINE_COUNT,
+        ),
+        failure_identity=failure_identity,
+        failure_code="provider_result_log_read_failed",
+        inspection_schedule_id=schedule_id,
+        inspection_deployment_id=deployment_id,
     )
-    return (
-        _extract_bounded_schedule_result(
+    result = _run_retained_volume_inspection_provider_call(
+        callback=lambda: _extract_bounded_schedule_result(
             {"logs": list(log_lines)},
             marker=marker,
             expected_fields=expected_fields,
             label="Odoo retained-volume backup import",
         ),
-        deployment_id,
+        failure_identity=failure_identity,
+        failure_code="provider_result_invalid",
+        inspection_schedule_id=schedule_id,
+        inspection_deployment_id=deployment_id,
     )
+    if failure_identity is not None:
+        _run_retained_volume_inspection_provider_call(
+            callback=lambda: OdooProdRetainedVolumeBackupImportInspectionEvidence.model_validate(
+                {**result, "inspection_deployment_id": deployment_id}
+            ),
+            failure_identity=failure_identity,
+            failure_code="provider_result_invalid",
+            inspection_schedule_id=schedule_id,
+            inspection_deployment_id=deployment_id,
+        )
+    return result, deployment_id
 
 
 def _extract_retained_volume_inspection_failure(

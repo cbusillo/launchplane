@@ -346,15 +346,23 @@ def build_odoo_prod_retained_volume_backup_import_plan(
                 ):
                     blockers.append("Retained-volume provider inspection did not complete.")
                 else:
+                    checkpoint_evidence = {
+                        "inspection_nonce": failure_evidence.inspection_nonce,
+                        "backup_record_id": failure_evidence.backup_record_id,
+                        "failure_stage": failure_evidence.failure_stage,
+                        "failure_code": failure_evidence.failure_code,
+                    }
+                    if failure_evidence.inspection_schedule_id:
+                        checkpoint_evidence["inspection_schedule_id"] = (
+                            failure_evidence.inspection_schedule_id
+                        )
+                    if failure_evidence.inspection_deployment_id:
+                        checkpoint_evidence["inspection_deployment_id"] = (
+                            failure_evidence.inspection_deployment_id
+                        )
                     phase_checkpoint(
                         "inspection_started",
-                        {
-                            "inspection_deployment_id": (failure_evidence.inspection_deployment_id),
-                            "inspection_nonce": failure_evidence.inspection_nonce,
-                            "backup_record_id": failure_evidence.backup_record_id,
-                            "failure_stage": failure_evidence.failure_stage,
-                            "failure_code": failure_evidence.failure_code,
-                        },
+                        checkpoint_evidence,
                     )
                     blockers.append(
                         "Retained-volume provider inspection failed at "
