@@ -15,6 +15,7 @@ import time
 from typing import Literal
 from urllib.error import HTTPError
 from urllib.error import URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import click
@@ -785,18 +786,24 @@ def _execute_apply_action(
             ),
             request.timeout_seconds,
         )
+    prune_filters = quote(
+        json.dumps({"until": {request.prune_until: True}}, separators=(",", ":")),
+        safe="",
+    )
     return remote_runner(
         (
             "flock",
             "-n",
             HOST_LOCK_PATH,
-            "docker",
-            "builder",
-            "prune",
-            "--force",
-            "--all",
-            "--filter",
-            f"until={request.prune_until}",
+            "curl",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--request",
+            "POST",
+            "--unix-socket",
+            "/var/run/docker.sock",
+            (f"http://localhost/v1.45/build/prune?all=true&filters={prune_filters}"),
         ),
         request.timeout_seconds,
     )

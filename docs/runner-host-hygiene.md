@@ -162,15 +162,19 @@ reuse history:
 
 ```bash
 flock -n /tmp/launchplane-runner-host-hygiene.lock \
-  docker builder prune --force --all --filter until=720h
+  curl --silent --show-error --fail --request POST \
+  --unix-socket /var/run/docker.sock \
+  'http://localhost/v1.45/build/prune?all=true&filters=<encoded-until-720h>'
 ```
 
 Operators can override the age bound through the workflow's `prune_until` input,
 but the executor enforces a minimum of `168h` and does not expose an unbounded
 default-builder prune. The age-bounded `--all` includes stale internal/frontend
 cache roots so their otherwise-reclaimable regular layers can be collected; it
-does not affect Docker images or volumes. Named Buildx builders use one audited
-command per builder, a seven-day age floor, and the runtime-configured
+does not affect Docker images or volumes. The executor uses the daemon-native
+Engine endpoint so per-job Docker/Buildx client isolation cannot redirect the
+cleanup to an empty client-local builder view. Named Buildx builders use one
+audited command per builder, a seven-day age floor, and the runtime-configured
 retained-space budget. The executor addresses the deterministic, allowlisted BuildKit
 container directly so the runner can retain its per-job isolated Docker config:
 
