@@ -411,7 +411,10 @@ operator can reconcile that lane without replacing another unreadable managed
 set. `LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON` owns
 additional exact-instance Odoo production inspection and enrollment grants
 without expanding the OPW-specific set or replacing another unreadable managed
-set. The
+set. `LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_OPERATION_READ_MANAGED_SET_JSON` owns
+separate exact-instance cross-operation read grants, such as allowing an
+immutable production apply worker to read its reviewed plan operation without
+replacing the broader production-enrollment set. The
 `Manage Launchplane Authorization` wrapper selects one of those explicit
 secrets and forwards it into the reusable worker, whose OIDC-minting job remains
 gated by the `launchplane-authz-admin` environment. Never replace the unreadable
@@ -1670,6 +1673,11 @@ proves the staging and destination paths absent, checks active data-volume free
 space, and binds all evidence into a SHA-256 plan fingerprint. PostgreSQL
 control tools are resolved from the image's versioned bindir rather than
 assuming an overridden shell entrypoint preserves the image's tool `PATH`.
+The fingerprint binds the conservative required-capacity calculation but not
+the volatile observed free-byte count. Apply remeasures live free space and
+blocks before backup-record or provider-import effects when it falls below the
+reviewed requirement, while harmless filesystem churn does not invalidate an
+otherwise identical plan.
 
 A failed target replacement can update the live target's runtime identity before
 post-deploy verification fails while production inventory correctly remains on

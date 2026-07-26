@@ -27,6 +27,7 @@ name: Manage Launchplane Authorization
           - odoo-opw-preview-feedback
           - odoo-opw-production-enrollment
           - odoo-production-enrollment
+          - odoo-production-operation-read
       reviewed_plan_sha256:
         description: Plan SHA-256 returned by the reviewed dry run; required for apply.
         required: false
@@ -143,3 +144,14 @@ jobs:
       related_issue: ${{ inputs.related_issue }}
     secrets:
       managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON }}
+
+  reconcile-odoo-production-operation-read:
+    if: ${{ inputs.managed_set == 'odoo-production-operation-read' }}
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    with:
+      mode: ${{ inputs.mode }}
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+      related_issue: ${{ inputs.related_issue }}
+    secrets:
+      managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_OPERATION_READ_MANAGED_SET_JSON }}

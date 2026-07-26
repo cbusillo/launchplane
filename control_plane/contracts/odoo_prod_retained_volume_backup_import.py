@@ -523,6 +523,7 @@ def build_odoo_prod_retained_volume_backup_import_plan_fingerprint(
             "plan_fingerprint",
             "inspection_nonce",
             "inspection_deployment_id",
+            "active_data_free_bytes",
             "blockers",
             "warnings",
             "steps",
