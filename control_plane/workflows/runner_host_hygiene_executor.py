@@ -794,6 +794,7 @@ def _execute_apply_action(
             "builder",
             "prune",
             "--force",
+            "--all",
             "--filter",
             f"until={request.prune_until}",
         ),
