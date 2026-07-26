@@ -14,6 +14,7 @@ APPLY_WRAPPER_PATH = Path(".github/workflows/odoo-prod-retained-volume-backup-im
 APPLY_WORKER_PATH = Path(
     ".github/workflows/reusable-odoo-prod-retained-volume-backup-import-apply.yml"
 )
+PINNED_WORKFLOW_SHA = "75c632d645f29775c5f2b1ab91f5318e1468000b"
 
 IMPORT_IDENTITY_INPUTS = {
     "product",
@@ -53,7 +54,9 @@ class OdooProdRetainedVolumeBackupImportWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             self.plan_wrapper.job_uses("plan"),
-            "./.github/workflows/reusable-odoo-prod-retained-volume-backup-import-plan.yml",
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-odoo-prod-retained-volume-backup-import-plan.yml@"
+            f"{PINNED_WORKFLOW_SHA}",
         )
         self.assertEqual(self.plan_wrapper.steps("plan"), ())
         concurrency = cast(YamlMapping, self.plan_wrapper.data["concurrency"])
@@ -81,7 +84,9 @@ class OdooProdRetainedVolumeBackupImportWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             self.apply_wrapper.job_uses("apply"),
-            "./.github/workflows/reusable-odoo-prod-retained-volume-backup-import-apply.yml",
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-odoo-prod-retained-volume-backup-import-apply.yml@"
+            f"{PINNED_WORKFLOW_SHA}",
         )
         self.assertEqual(self.apply_wrapper.steps("apply"), ())
 
