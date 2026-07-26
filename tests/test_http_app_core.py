@@ -1242,6 +1242,7 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             payload["reconcile_result"],
             {
                 "reconciled_bootstrap_ids": ["bootstrap-cm-testing"],
+                "reconciled_restore_ids": [],
                 "reconciled_replacement_ids": [],
                 "reconciled_count": 1,
             },

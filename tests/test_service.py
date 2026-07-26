@@ -5066,11 +5066,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(initial_payload["runtime"]["database_schema_revision"], "")
         self.assertEqual(
             initial_payload["runtime"]["compatible_database_schema_revisions"],
-            ["f4c6e8a0b2d4"],
+            ["a1c3e5f7b9d2"],
         )
         self.assertEqual(
             initial_payload["runtime"]["schema_migration_target_revision"],
-            "f4c6e8a0b2d4",
+            "a1c3e5f7b9d2",
         )
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")

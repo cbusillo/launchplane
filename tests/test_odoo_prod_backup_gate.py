@@ -288,6 +288,7 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
         self.assertEqual(result.verification_status, "pass")
         self.assertEqual(result.database_dump_sha256, "a" * 64)
         self.assertEqual(result.pg_restore_entry_count, 42)
+        self.assertTrue(result.verification_record_id.startswith("odoo-backup-verification-"))
         self.assertNotIn("backup_root", result.model_dump())
         self.assertNotIn("database_dump_path", result.model_dump())
         record_store.read_backup_gate_record.assert_called_once_with("backup-gate-cm-prod-1")
@@ -296,6 +297,15 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
             "/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-1/manifest.json",
         )
         self.assertEqual(run_verification_mock.call_args.kwargs["verification_nonce"], "c" * 64)
+        verification_record = record_store.write_backup_gate_record.call_args.args[0]
+        self.assertEqual(verification_record.record_id, result.verification_record_id)
+        self.assertEqual(verification_record.status, "pass")
+        self.assertEqual(verification_record.evidence["backup_record_id"], result.backup_record_id)
+        self.assertEqual(verification_record.evidence["verification_nonce"], "c" * 64)
+        self.assertEqual(
+            verification_record.evidence["database_dump_sha256"],
+            "a" * 64,
+        )
 
     def test_backup_verification_rejects_provider_result_for_different_request(self) -> None:
         record_store = self._record_store()
@@ -332,6 +342,12 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result.verification_status, "fail")
         self.assertEqual(result.failure_code, "provider_verification_failed")
+        verification_record = record_store.write_backup_gate_record.call_args.args[0]
+        self.assertEqual(verification_record.status, "fail")
+        self.assertEqual(
+            verification_record.evidence["failure_code"],
+            "provider_verification_failed",
+        )
 
     def test_backup_verification_rejects_path_authority_drift_before_provider_read(self) -> None:
         record_store = self._record_store()

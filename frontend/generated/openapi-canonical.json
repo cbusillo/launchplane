@@ -8473,6 +8473,44 @@
         "title": "OdooOverrideValue",
         "type": "object"
       },
+      "OdooProdBackupRestoreOperationStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "additionalProperties": true,
+            "title": "Operation",
+            "type": "object"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "operation"
+        ],
+        "title": "OdooProdBackupRestoreOperationStatusResponse",
+        "type": "object"
+      },
       "OdooStableBootstrapOperationStatusResponse": {
         "additionalProperties": false,
         "properties": {
@@ -8636,10 +8674,18 @@
             },
             "title": "Reconciled Replacement Ids",
             "type": "array"
+          },
+          "reconciled_restore_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reconciled Restore Ids",
+            "type": "array"
           }
         },
         "required": [
           "reconciled_bootstrap_ids",
+          "reconciled_restore_ids",
           "reconciled_replacement_ids",
           "reconciled_count"
         ],
@@ -28584,6 +28630,623 @@
           }
         },
         "summary": "Execute Odoo prod backup gate"
+      }
+    },
+    "/v1/drivers/odoo/prod-backup-restore-apply": {
+      "post": {
+        "operationId": "write_odoo_prod_backup_restore_apply",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required destructive restore operation idempotency key.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "OdooProdBackupRestoreApplyRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "backup_record_id": {
+                        "title": "Backup Record Id",
+                        "type": "string"
+                      },
+                      "confirmation": {
+                        "title": "Confirmation",
+                        "type": "string"
+                      },
+                      "context": {
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "expected_current_artifact_id": {
+                        "title": "Expected Current Artifact Id",
+                        "type": "string"
+                      },
+                      "expected_data_volume": {
+                        "title": "Expected Data Volume",
+                        "type": "string"
+                      },
+                      "expected_log_volume": {
+                        "title": "Expected Log Volume",
+                        "type": "string"
+                      },
+                      "expected_new_db_volume": {
+                        "title": "Expected New Db Volume",
+                        "type": "string"
+                      },
+                      "expected_old_db_volume": {
+                        "title": "Expected Old Db Volume",
+                        "type": "string"
+                      },
+                      "health_timeout_seconds": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Health Timeout Seconds"
+                      },
+                      "instance": {
+                        "const": "prod",
+                        "default": "prod",
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "no_cache": {
+                        "default": false,
+                        "title": "No Cache",
+                        "type": "boolean"
+                      },
+                      "plan_fingerprint": {
+                        "title": "Plan Fingerprint",
+                        "type": "string"
+                      },
+                      "product": {
+                        "title": "Product",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "default": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "timeout_seconds": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Timeout Seconds"
+                      },
+                      "verification_record_id": {
+                        "title": "Verification Record Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "product",
+                      "context",
+                      "backup_record_id",
+                      "verification_record_id",
+                      "expected_current_artifact_id",
+                      "expected_old_db_volume",
+                      "expected_new_db_volume",
+                      "expected_data_volume",
+                      "expected_log_volume",
+                      "plan_fingerprint",
+                      "confirmation"
+                    ],
+                    "title": "OdooProdBackupRestoreApplyRequest",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "restore": {
+                    "$ref": "#/$defs/OdooProdBackupRestoreApplyRequest"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "restore"
+                ],
+                "title": "OdooProdBackupRestoreApplyEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Enqueue verified Odoo production backup restore"
+      }
+    },
+    "/v1/drivers/odoo/prod-backup-restore-plan": {
+      "post": {
+        "operationId": "write_odoo_prod_backup_restore_plan",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "OdooProdBackupRestoreRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "backup_record_id": {
+                        "title": "Backup Record Id",
+                        "type": "string"
+                      },
+                      "context": {
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "expected_current_artifact_id": {
+                        "title": "Expected Current Artifact Id",
+                        "type": "string"
+                      },
+                      "expected_data_volume": {
+                        "title": "Expected Data Volume",
+                        "type": "string"
+                      },
+                      "expected_log_volume": {
+                        "title": "Expected Log Volume",
+                        "type": "string"
+                      },
+                      "expected_new_db_volume": {
+                        "title": "Expected New Db Volume",
+                        "type": "string"
+                      },
+                      "expected_old_db_volume": {
+                        "title": "Expected Old Db Volume",
+                        "type": "string"
+                      },
+                      "instance": {
+                        "const": "prod",
+                        "default": "prod",
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "product": {
+                        "title": "Product",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "default": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "verification_record_id": {
+                        "title": "Verification Record Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "product",
+                      "context",
+                      "backup_record_id",
+                      "verification_record_id",
+                      "expected_current_artifact_id",
+                      "expected_old_db_volume",
+                      "expected_new_db_volume",
+                      "expected_data_volume",
+                      "expected_log_volume"
+                    ],
+                    "title": "OdooProdBackupRestoreRequest",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "restore": {
+                    "$ref": "#/$defs/OdooProdBackupRestoreRequest"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "restore"
+                ],
+                "title": "OdooProdBackupRestorePlanEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Build verified Odoo production backup restore plan"
+      }
+    },
+    "/v1/drivers/odoo/prod-backup-restore/operations/{operation_id}": {
+      "get": {
+        "operationId": "read_odoo_prod_backup_restore_operation_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OdooProdBackupRestoreOperationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Odoo production backup restore operation status"
+      }
+    },
+    "/v1/drivers/odoo/prod-backup-restore/operations/{operation_id}/cancel": {
+      "post": {
+        "operationId": "cancel_odoo_prod_backup_restore_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DurableOperationCancellationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DurableOperationCancellationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Cancel pending Odoo production backup restore operation"
       }
     },
     "/v1/drivers/odoo/prod-backup-verification": {

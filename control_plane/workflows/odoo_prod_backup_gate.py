@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import secrets as python_secrets
 from pathlib import Path, PurePosixPath
@@ -17,11 +19,17 @@ from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
 
 BACKUP_GATE_SOURCE = "launchplane-odoo-prod-backup-gate"
+BACKUP_VERIFICATION_SOURCE = "launchplane-odoo-prod-backup-verification"
 _BACKUP_PATH_COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 BackupVerificationCheckStatus = Literal["not_run", "pass", "fail"]
 BackupVerificationFailureCode = Literal[
     "",
     "manifest_unreadable",
+    "manifest_missing",
+    "manifest_metadata_unreadable",
+    "manifest_too_large",
+    "manifest_read_error",
+    "manifest_decode_error",
     "manifest_identity_mismatch",
     "manifest_path_mismatch",
     "manifest_size_invalid",
@@ -34,6 +42,11 @@ BackupVerificationFailureCode = Literal[
     "filestore_top_level_mismatch",
     "staging_path_unavailable",
     "staging_space_insufficient",
+    "manifest_path_verification_error",
+    "manifest_read_verification_error",
+    "manifest_validation_error",
+    "artifact_path_verification_error",
+    "artifact_metadata_verification_error",
     "verification_error",
     "provider_verification_failed",
 ]
@@ -61,6 +74,8 @@ class OdooProdBackupVerificationStore(Protocol):
     ) -> DokployTargetIdRecord: ...
 
     def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
+
+    def write_backup_gate_record(self, record: BackupGateRecord) -> None: ...
 
 
 class OdooProdBackupGateRequest(BaseModel):
@@ -181,6 +196,7 @@ class OdooProdBackupVerificationResult(OdooProdBackupVerificationEvidence):
     context: str
     instance: str
     backup_record_id: str
+    verification_record_id: str
 
 
 def _read_target_definition(
@@ -303,6 +319,7 @@ def _require_verification_record_store(record_store: object) -> OdooProdBackupVe
         "read_dokploy_target_record",
         "read_dokploy_target_id_record",
         "read_backup_gate_record",
+        "write_backup_gate_record",
     )
     missing_methods = tuple(
         method_name
@@ -349,6 +366,68 @@ def _require_exact_passing_backup_record(
             "Odoo prod backup verification requires backup-gate evidence to match current DB-backed path authority."
         )
     return record
+
+
+def build_odoo_prod_backup_verification_record_id(
+    *,
+    context: str,
+    instance: str,
+    backup_record_id: str,
+    verification_nonce: str,
+    created_at: str,
+) -> str:
+    digest_input = json.dumps(
+        [
+            context.strip().lower(),
+            instance.strip().lower(),
+            backup_record_id.strip(),
+            verification_nonce.strip(),
+            created_at.strip(),
+        ],
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:16]
+    normalized_created_at = created_at.strip().replace(":", "").replace("+", "z")
+    return f"odoo-backup-verification-{normalized_created_at}-{digest}"
+
+
+def _write_backup_verification_record(
+    *,
+    record_store: OdooProdBackupVerificationStore,
+    request: OdooProdBackupVerificationRequest,
+    backup_record: BackupGateRecord,
+    expected_paths: dict[str, str],
+    evidence: OdooProdBackupVerificationEvidence,
+    verification_nonce: str,
+    created_at: str,
+) -> BackupGateRecord:
+    verification_record = BackupGateRecord(
+        record_id=build_odoo_prod_backup_verification_record_id(
+            context=request.context,
+            instance=request.instance,
+            backup_record_id=request.backup_record_id,
+            verification_nonce=verification_nonce,
+            created_at=created_at,
+        ),
+        context=request.context,
+        instance=request.instance,
+        created_at=created_at,
+        source=BACKUP_VERIFICATION_SOURCE,
+        required=True,
+        status=evidence.verification_status,
+        evidence={
+            "backup_record_id": request.backup_record_id,
+            "backup_record_created_at": backup_record.created_at,
+            "verification_nonce": verification_nonce,
+            **expected_paths,
+            **{
+                key: str(value).lower() if isinstance(value, bool) else str(value)
+                for key, value in evidence.model_dump(mode="json").items()
+            },
+        },
+    )
+    record_store.write_backup_gate_record(verification_record)
+    return verification_record
 
 
 def _write_backup_gate_record(
@@ -468,7 +547,7 @@ def execute_odoo_prod_backup_verification(
         runtime_values=runtime_values,
         backup_record_id=request.backup_record_id,
     )
-    _require_exact_passing_backup_record(
+    backup_record = _require_exact_passing_backup_record(
         record_store=typed_record_store,
         request=request,
         expected_paths=expected_paths,
@@ -504,9 +583,20 @@ def execute_odoo_prod_backup_verification(
             verification_status="fail",
             failure_code="provider_verification_failed",
         )
+    verification_created_at = utc_now_timestamp()
+    verification_record = _write_backup_verification_record(
+        record_store=typed_record_store,
+        request=request,
+        backup_record=backup_record,
+        expected_paths=expected_paths,
+        evidence=verification_evidence,
+        verification_nonce=verification_nonce,
+        created_at=verification_created_at,
+    )
     return OdooProdBackupVerificationResult(
         context=request.context,
         instance=request.instance,
         backup_record_id=request.backup_record_id,
+        verification_record_id=verification_record.record_id,
         **verification_evidence.model_dump(),
     )

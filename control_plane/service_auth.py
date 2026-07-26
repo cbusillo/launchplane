@@ -663,7 +663,9 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
         return "policy_admin"
     if "secret" in action_parts or normalized_action.endswith(".secret"):
         return "secret_backed"
-    if any(part in action_parts for part in ("destroy", "cleanup", "delete", "rollback")):
+    if any(
+        part in action_parts for part in ("destroy", "cleanup", "delete", "rollback", "restore")
+    ):
         return "destructive"
     if "prod" in action_parts or "promotion" in action_parts:
         return "prod"

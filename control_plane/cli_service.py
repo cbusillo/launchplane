@@ -534,8 +534,10 @@ def service_odoo_workers_reconcile(
     payload = {
         "status": "ok",
         "reconciled_bootstrap_ids": list(result.reconciled_bootstrap_ids),
+        "reconciled_restore_ids": list(result.reconciled_restore_ids),
         "reconciled_replacement_ids": list(result.reconciled_replacement_ids),
         "reconciled_count": len(result.reconciled_bootstrap_ids)
+        + len(result.reconciled_restore_ids)
         + len(result.reconciled_replacement_ids),
     }
     click.echo(json.dumps(payload, indent=2, sort_keys=True))

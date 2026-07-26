@@ -115,10 +115,13 @@ def execute_odoo_prod_backup_verification_result(
         record_store=cast(OdooProdBackupVerificationStore, record_store),
         request=request.backup_verification,
     )
-    records: dict[str, object] = {"backup_record_id": driver_result.backup_record_id}
+    records: dict[str, object] = {
+        "backup_record_id": driver_result.backup_record_id,
+        "backup_verification_record_id": driver_result.verification_record_id,
+    }
     result = driver_result.model_dump(
         mode="json",
-        exclude={"context", "instance", "backup_record_id"},
+        exclude={"context", "instance", "backup_record_id", "verification_record_id"},
     )
     return records, result
 

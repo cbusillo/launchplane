@@ -1639,8 +1639,8 @@ delete, deploy, change routes, or reinterpret a volume change as existing data.
 
 Use the `Odoo Prod Backup Verification` workflow to exercise the verification
 route through GitHub Actions OIDC. The workflow accepts an exact backup-gate
-record id, stores only the bounded response artifact, and fails if the response
-contains backup paths or an unbounded error. Verification recomputes the
+record id, stores a bounded workflow artifact, and returns the id of a separate
+durable verification record. Verification recomputes the
 expected paths from DB-backed runtime records, checks manifest identities,
 paths, sizes, and SHA-256 values, runs `pg_restore --list` plus a full archive
 render to `/dev/null`, validates safe tar members under the expected database
@@ -1648,8 +1648,54 @@ directory, and confirms enough free space on the Odoo data volume to stage the
 uncompressed filestore. Each provider result is bound to a fresh request nonce,
 the exact backup record id, and database name before Launchplane accepts it. The
 route returns hashes, counts, sizes, per-check statuses, and a bounded failure
-code only. This slice does not restore a database, extract a filestore, stop
+code only. If an unexpected verifier exception occurs, the active bounded check
+is marked `fail`; manifest processing additionally reports a bounded path,
+read, validation, artifact-path, or artifact-metadata subphase code. Operators
+can distinguish the manifest, hash, database archive, filestore archive, and
+staging-space phases without exposing provider paths or exception text.
+Filesystem metadata failures in the manifest phase map to the existing bounded
+manifest missing, metadata, size, read, or decode codes; artifact metadata
+failures map to `artifact_missing`. Raw I/O errors and private paths are not
+returned. Verification does not restore a database, extract a filestore, stop
 containers, or mutate served Odoo data.
+
+Production restore is a separate destructive authority. First run
+`Odoo Prod Backup Restore Plan` with the exact product, production context,
+passing backup record, passing durable verification record, current artifact,
+current corrupt database volume, fresh database volume, and unchanged data and
+log volumes. The planner reads all runtime authority from Launchplane records,
+requires the live target to match the old database/data/log snapshot, requires
+the fresh database volume name to be the DB-backed desired value and absent from
+the provider, and binds the verification hashes, counts, sizes, paths, target,
+domains, and runtime identity into the reviewed SHA-256 plan fingerprint.
+
+Run `Odoo Prod Backup Restore Apply` only with that exact fingerprint, a stable
+idempotency key, and confirmation phrase
+`restore-verified-production-backup`. The service creates a dedicated durable
+restore operation; routine existing-data target replacement cannot exercise
+this authority. The worker rechecks authorization before every provider effect
+and records before/after checkpoints for fresh database restore, filestore
+staging, web quiesce, filestore activation, runtime-environment update, deploy,
+post-deploy work, and verification. Once any provider effect starts, an expired
+lease is failed for manual review rather than retried automatically.
+
+The database phase creates the exact fresh volume and restores the complete
+archive with `pg_restore --exit-on-error`; it never runs `pg_resetwal` and never
+attaches or mutates the old corrupt database volume. Filestore staging validates
+every tar member again, rejects absolute/traversal/link/special entries, checks
+the reviewed member count and expanded size, and extracts into a sibling staging
+directory on the unchanged data volume. After the web service is stopped, the
+old filestore is moved to the reviewed quarantine path and the staged tree is
+activated. The data and log volume names cannot change. The old database volume
+and quarantined filestore remain available for explicit later cleanup.
+
+Apply passes only after deploy and post-deploy complete and Launchplane verifies
+the health endpoint, canonical page, logo route, and exact runtime identity.
+Deployment, inventory, release-tuple, phase checkpoint, authorization, provider
+result, and final verification evidence remain durable in Launchplane. A failed
+or interrupted operation must be inspected from its operation record before any
+new restore is planned; do not rerun a provider schedule or use target
+replacement as a recovery shortcut.
 
 Legacy backup-gate manifests created before manifest schema and hash fields were
 introduced remain verifiable: Launchplane validates their recorded identity,

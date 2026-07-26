@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "f4c6e8a0b2d4"
+EXPECTED_ALEMBIC_HEAD_REVISION = "a1c3e5f7b9d2"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -99,6 +99,16 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_odoo_stable_target_replacement_operations",
+        "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_odoo_prod_backup_restore_operations",
         "attempt",
         ("integer", "int4"),
     ),
@@ -220,6 +230,23 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     CriticalIndex(
         "launchplane_odoo_stable_target_replacement_operations",
         "launchplane_odoo_replacement_worker_claim_idx",
+        ("status", "lease_expires_at", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "launchplane_odoo_restore_operation_idempotency_idx",
+        ("idempotency_scope", "idempotency_key", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "launchplane_odoo_restore_active_lane_uidx",
+        ("product", "context", "instance"),
+        unique=True,
+        predicate_tokens=_ACTIVE_OPERATION_PREDICATE_TOKENS,
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "launchplane_odoo_restore_worker_claim_idx",
         ("status", "lease_expires_at", "updated_at"),
     ),
     CriticalIndex(

@@ -83,13 +83,14 @@ LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run python -m control_plane
 Do not run `alembic upgrade head` directly against the shared service database
 during a staged rollout. The authorization compatibility image was deployed at
 revision `f3b5d7e9a1c2` before this release advanced the migration target to the
-fenced `f4c6e8a0b2d4` schema. The full reconciliation image accepts f3 only as a
-serialized migration source; its ORM and runtime compatibility contract require
-f4. After the database reaches f4, rollback is supported only to the previously
-deployed compatibility image or another image that understands f4. The runtime
-status route reports the observed database revision, the image's f4-only runtime
-compatibility set, and its migration target so deployment verification can
-enforce this boundary.
+fenced `f4c6e8a0b2d4` schema, then to `a1c3e5f7b9d2` for the dedicated Odoo
+production backup-restore operation table. The full reconciliation image accepts
+older revisions only as serialized migration sources; its ORM and runtime
+compatibility contract requires a1. After the database reaches a1, rollback is
+supported only to an image that understands the restore-operation table. The
+runtime status route reports the observed database revision, the image's a1-only
+runtime compatibility set, and its migration target so deployment verification
+can enforce this boundary.
 
 JSONB `payload` columns remain durable evidence envelopes and original typed
 payload snapshots. Fields that the GUI or drivers need to filter, order, join,
@@ -1100,9 +1101,12 @@ state/
   `BackupGateRecord` written by the Odoo prod backup-gate source for the same
   context and prod instance. It recomputes backup paths from DB-backed runtime
   records and requires the record's path evidence to match before provider
-  inspection. The verification response is intentionally not another backup
-  record: it contains only bounded statuses, SHA-256 values, counts, and sizes,
-  and does not persist private paths or add restore authority.
+  inspection. Every verification attempt also writes a separate
+  `BackupGateRecord` from the Odoo backup-verification source. That durable
+  record binds the exact backup record, request nonce, database identity,
+  artifact paths, SHA-256 values, counts, sizes, and bounded per-check status.
+  A passing verification record is evidence for the dedicated restore planner;
+  it does not authorize routine target replacement or promotion.
 - VeriReel prod backup-gate records remain the promotion evidence and replay
   authority, but long-running backup-gate execution is queued separately in
   `launchplane_verireel_prod_backup_gate_operations` for DB-backed storage and
@@ -1177,13 +1181,25 @@ state/
   for a concurrent owner id to settle, then give that owner record its own
   bounded settle window before clearing abandoned empty or orphaned reservations
   so an interrupted writer cannot block the lane forever.
+- Odoo production backup restore apply writes dedicated operation records under
+  `odoo_prod_backup_restore_operations`. The immutable plan binds the exact
+  product/context/prod instance, passing backup and verification record ids and
+  timestamps, current artifact, old and fresh database volumes, unchanged data
+  and log volumes, archive paths, hashes, counts, sizes, staging/quarantine
+  paths, target, domains, and runtime identity. The operation stores the caller
+  idempotency scope, request fingerprint, reviewed plan fingerprint,
+  authorization provenance, lease ownership, monotonic phase checkpoints,
+  terminal result, and bounded error. A partial unique index permits only one
+  pending or running restore for a product/context/instance. Expired work may be
+  recovered only before a provider-effect phase; after any provider effect has
+  started, lease recovery fails the operation for explicit operator review.
 - Odoo target-replacement plan snapshots include the exact live values for
   `ODOO_DATA_VOLUME`, `ODOO_LOG_VOLUME`, and `ODOO_DB_VOLUME`. Existing-data
   plans compare those values with resolved DB-backed desired runtime authority
   and block on any difference before an apply operation can be created. Volume
   changes remain explicit rebuild/restore decisions rather than implicit
   `data_source_mode=existing` behavior.
-- New records for all three durable driver queues use schema version 2 and
+- New records for all four durable driver queues use schema version 2 and
   persist authorization provenance in the canonical operation payload: action,
   product, context, exact instances, managed set/rule ids, policy record id,
   revision, schema version, digest, source, authorization time, and normalized
@@ -1199,7 +1215,8 @@ state/
   instances, or caller mismatch terminates the operation with a stable
   `error_code` before provider mutation. Launchplane does not fabricate
   provenance for schema-v1 queued records.
-- Pending Odoo bootstrap, Odoo target-replacement, and VeriReel backup-gate
+- Pending Odoo bootstrap, Odoo target-replacement, Odoo backup-restore, and
+  VeriReel backup-gate
   operations expose authenticated `POST .../operations/{operation_id}/cancel`
   endpoints. Cancellation is idempotent after it commits, records the normalized
   caller, reason, timestamp, and trace id, releases the active-lane predicate,

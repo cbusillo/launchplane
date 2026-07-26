@@ -5672,6 +5672,7 @@ class FastApiOdooProdBackupVerificationTests(unittest.IsolatedAsyncioTestCase):
             context="cm",
             instance="prod",
             backup_record_id="backup-gate-cm-prod-run-1",
+            verification_record_id="odoo-backup-verification-cm-prod-run-1",
             verification_status="pass",
             manifest_status="pass",
             sha256_status="pass",
@@ -5712,7 +5713,13 @@ class FastApiOdooProdBackupVerificationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 202)
         payload = response.json()
-        self.assertEqual(payload["records"], {"backup_record_id": "backup-gate-cm-prod-run-1"})
+        self.assertEqual(
+            payload["records"],
+            {
+                "backup_record_id": "backup-gate-cm-prod-run-1",
+                "backup_verification_record_id": ("odoo-backup-verification-cm-prod-run-1"),
+            },
+        )
         self.assertEqual(payload["result"]["verification_status"], "pass")
         self.assertEqual(payload["result"]["database_dump_sha256"], "a" * 64)
         for private_field in (

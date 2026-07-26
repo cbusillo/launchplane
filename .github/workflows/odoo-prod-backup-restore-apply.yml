@@ -1,0 +1,88 @@
+---
+name: Odoo Prod Backup Restore Apply
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        required: true
+        type: string
+      context:
+        required: true
+        type: string
+      backup_record_id:
+        required: true
+        type: string
+      verification_record_id:
+        required: true
+        type: string
+      expected_current_artifact_id:
+        required: true
+        type: string
+      expected_old_db_volume:
+        required: true
+        type: string
+      expected_new_db_volume:
+        required: true
+        type: string
+      expected_data_volume:
+        required: true
+        type: string
+      expected_log_volume:
+        required: true
+        type: string
+      plan_fingerprint:
+        description: Exact SHA-256 fingerprint from the reviewed plan artifact.
+        required: true
+        type: string
+      confirmation:
+        description: Enter restore-verified-production-backup exactly.
+        required: true
+        type: string
+      idempotency_key:
+        description: Stable key reused only for this exact restore request.
+        required: true
+        type: string
+      no_cache:
+        required: false
+        default: false
+        type: boolean
+      timeout_seconds:
+        required: false
+        default: ""
+        type: string
+      health_timeout_seconds:
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    odoo-prod-backup-restore-apply-${{ inputs.product }}-${{ inputs.context }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-odoo-prod-backup-restore-apply.yml
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      backup_record_id: ${{ inputs.backup_record_id }}
+      verification_record_id: ${{ inputs.verification_record_id }}
+      expected_current_artifact_id: ${{ inputs.expected_current_artifact_id }}
+      expected_old_db_volume: ${{ inputs.expected_old_db_volume }}
+      expected_new_db_volume: ${{ inputs.expected_new_db_volume }}
+      expected_data_volume: ${{ inputs.expected_data_volume }}
+      expected_log_volume: ${{ inputs.expected_log_volume }}
+      plan_fingerprint: ${{ inputs.plan_fingerprint }}
+      confirmation: ${{ inputs.confirmation }}
+      idempotency_key: ${{ inputs.idempotency_key }}
+      no_cache: ${{ inputs.no_cache }}
+      timeout_seconds: ${{ inputs.timeout_seconds }}
+      health_timeout_seconds: ${{ inputs.health_timeout_seconds }}

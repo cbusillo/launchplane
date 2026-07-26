@@ -365,6 +365,21 @@ from control_plane.odoo_prod_backup_gate_http import (
     should_store_odoo_prod_backup_gate_idempotency,
     should_store_odoo_prod_backup_verification_idempotency,
 )
+from control_plane.odoo_prod_backup_restore_http import (
+    ODOO_PROD_BACKUP_RESTORE_APPLY_ROUTE as _ODOO_PROD_BACKUP_RESTORE_APPLY_ROUTE,
+    ODOO_PROD_BACKUP_RESTORE_PLAN_ROUTE as _ODOO_PROD_BACKUP_RESTORE_PLAN_ROUTE,
+    OdooProdBackupRestoreApplyEnvelope,
+    OdooProdBackupRestoreIdempotencyKeyReusedError,
+    OdooProdBackupRestoreLaneBusyError,
+    OdooProdBackupRestoreOperationActiveError,
+    OdooProdBackupRestorePlanChangedError,
+    OdooProdBackupRestorePlanEnvelope,
+    OdooProdBackupRestoreProductMismatchError,
+    OdooProdBackupRestoreRouteDependencyError,
+    enqueue_odoo_prod_backup_restore_operation,
+    odoo_prod_backup_restore_operation_payload,
+    resolve_odoo_prod_backup_restore_lane,
+)
 from control_plane.odoo_prod_promotion_http import (
     ODOO_PROD_PROMOTION_INPUTS_ROUTE as _ODOO_PROD_PROMOTION_INPUTS_ROUTE,
     ODOO_PROD_PROMOTION_ROUTE as _ODOO_PROD_PROMOTION_ROUTE,
@@ -422,6 +437,10 @@ from control_plane.odoo_target_replacement_apply_http import (
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
     build_odoo_stable_target_replacement_plan,
+)
+from control_plane.workflows.odoo_prod_backup_restore import (
+    OdooProdBackupRestoreStore,
+    build_odoo_prod_backup_restore_plan,
 )
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
 from control_plane.contracts.product_environment_read_model import (
@@ -608,6 +627,9 @@ _ODOO_STABLE_BOOTSTRAP_OPERATION_CANCEL_ROUTE = (
 )
 _ODOO_TARGET_REPLACEMENT_OPERATION_CANCEL_ROUTE = (
     "/v1/drivers/odoo/target-replacement/operations/{operation_id}/cancel"
+)
+_ODOO_PROD_BACKUP_RESTORE_OPERATION_CANCEL_ROUTE = (
+    "/v1/drivers/odoo/prod-backup-restore/operations/{operation_id}/cancel"
 )
 _VERIREEL_PROD_BACKUP_GATE_OPERATION_CANCEL_ROUTE = (
     "/v1/drivers/verireel/prod-backup-gate/operations/{operation_id}/cancel"
@@ -1129,6 +1151,7 @@ class OdooStableOperationWorkerReconcileResultResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reconciled_bootstrap_ids: tuple[str, ...]
+    reconciled_restore_ids: tuple[str, ...]
     reconciled_replacement_ids: tuple[str, ...]
     reconciled_count: int
 
@@ -4025,13 +4048,19 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         reconciled_bootstrap_ids = tuple(reconcile_result.reconciled_bootstrap_ids)
+        reconciled_restore_ids = tuple(reconcile_result.reconciled_restore_ids)
         reconciled_replacement_ids = tuple(reconcile_result.reconciled_replacement_ids)
         return OdooStableOperationWorkerReconcileResponse(
             trace_id=trace_id,
             reconcile_result=OdooStableOperationWorkerReconcileResultResponse(
                 reconciled_bootstrap_ids=reconciled_bootstrap_ids,
+                reconciled_restore_ids=reconciled_restore_ids,
                 reconciled_replacement_ids=reconciled_replacement_ids,
-                reconciled_count=len(reconciled_bootstrap_ids) + len(reconciled_replacement_ids),
+                reconciled_count=(
+                    len(reconciled_bootstrap_ids)
+                    + len(reconciled_restore_ids)
+                    + len(reconciled_replacement_ids)
+                ),
             ),
         )
 
@@ -6340,6 +6369,243 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    async def write_odoo_prod_backup_restore_plan(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            plan_request = OdooProdBackupRestorePlanEnvelope.model_validate(raw_payload)
+            lane = resolve_odoo_prod_backup_restore_lane(
+                record_store=record_store,
+                product=plan_request.product,
+                context=plan_request.restore.context,
+                instance=plan_request.restore.instance,
+            )
+        except OdooProdBackupRestoreRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_PROD_BACKUP_RESTORE_PLAN_ROUTE,
+            )
+        except OdooProdBackupRestoreProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValidationError, ValueError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_prod_backup_restore_plan,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
+            identity=identity,
+            product=plan_request.product,
+            context=lane.context,
+            instances=(lane.instance,),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read the requested Odoo production restore plan.",
+            )
+        try:
+            plan = build_odoo_prod_backup_restore_plan(
+                control_plane_root=resolved_control_plane_root,
+                record_store=cast(OdooProdBackupRestoreStore, record_store),
+                request=plan_request.restore,
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "backup_record_id": plan.backup_record_id,
+                "backup_verification_record_id": plan.verification_record_id,
+            },
+            result=plan.model_dump(mode="json"),
+        )
+
+    async def write_odoo_prod_backup_restore_apply(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", include_in_schema=False)
+        ] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            apply_request = OdooProdBackupRestoreApplyEnvelope.model_validate(raw_payload)
+            lane = resolve_odoo_prod_backup_restore_lane(
+                record_store=record_store,
+                product=apply_request.product,
+                context=apply_request.restore.context,
+                instance=apply_request.restore.instance,
+            )
+        except OdooProdBackupRestoreRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_PROD_BACKUP_RESTORE_APPLY_ROUTE,
+            )
+        except OdooProdBackupRestoreProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValidationError, ValueError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_prod_backup_restore_apply,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
+            identity=identity,
+            product=apply_request.product,
+            context=lane.context,
+            instances=(lane.instance,),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot apply the requested Odoo production backup restore.",
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        if not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Odoo production backup restore requires an Idempotency-Key header.",
+            )
+        created_at = utc_now_timestamp()
+        try:
+            operation_authorization = capture_durable_operation_authorization(
+                identity=identity,
+                action=native_routes._native_driver_route_authz_action(
+                    write_odoo_prod_backup_restore_apply
+                ),
+                product=apply_request.product,
+                context=lane.context,
+                instances=(lane.instance,),
+                policy_record=resolved_authz_policy_runtime.policy_record(updated_at=created_at),
+                authorized_at=created_at,
+            )
+        except DurableOperationAuthorizationCaptureError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authorization_provenance_unavailable",
+                message="Durable operation authorization provenance is unavailable.",
+            ) from error
+        try:
+            records, driver_result = enqueue_odoo_prod_backup_restore_operation(
+                control_plane_root=resolved_control_plane_root,
+                record_store=record_store,
+                request=apply_request,
+                idempotency_key=normalized_idempotency_key,
+                idempotency_scope=idempotency_scope(identity),
+                request_fingerprint=request_fingerprint(raw_payload),
+                created_at=created_at,
+                authorization=operation_authorization,
+            )
+        except OdooProdBackupRestorePlanChangedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="odoo_prod_backup_restore_plan_changed",
+                message=str(error),
+            ) from error
+        except OdooProdBackupRestoreIdempotencyKeyReusedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message="Idempotency-Key was used for a different production restore request.",
+            ) from error
+        except OdooProdBackupRestoreLaneBusyError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="odoo_stable_lane_operation_active",
+                message=str(error),
+            ) from error
+        except OdooProdBackupRestoreOperationActiveError as error:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "odoo_prod_backup_restore_operation_active",
+                        "message": str(error),
+                    },
+                    "operation": odoo_prod_backup_restore_operation_payload(error.operation),
+                },
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={key: str(value) for key, value in records.items()},
+            result=driver_result,
+        )
+
     def cancel_pending_durable_operation(
         *,
         trace_id: str,
@@ -6465,6 +6731,28 @@ def create_launchplane_fastapi_app(
             action="odoo_target_replacement_apply.execute",
             read_method_name="read_odoo_stable_target_replacement_operation_record",
             cancel_method_name=("cancel_pending_odoo_stable_target_replacement_operation_record"),
+            cancellation_request=cancellation_request,
+        )
+        return DurableOperationCancellationResponse(
+            trace_id=trace_id,
+            operation=operation.model_dump(mode="json"),
+        )
+
+    async def cancel_odoo_prod_backup_restore_operation(
+        operation_id: str,
+        cancellation_request: DurableOperationCancellationRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> DurableOperationCancellationResponse:
+        trace_id = next_trace_id()
+        operation = cancel_pending_durable_operation(
+            trace_id=trace_id,
+            record_store=record_store,
+            identity=identity,
+            operation_id=operation_id,
+            action="odoo_prod_backup_restore_apply.execute",
+            read_method_name="read_odoo_prod_backup_restore_operation_record",
+            cancel_method_name="cancel_pending_odoo_prod_backup_restore_operation_record",
             cancellation_request=cancellation_request,
         )
         return DurableOperationCancellationResponse(
@@ -17147,6 +17435,70 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _ODOO_PROD_BACKUP_RESTORE_PLAN_ROUTE,
+        write_odoo_prod_backup_restore_plan,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(OdooProdBackupRestorePlanEnvelope)
+                    }
+                },
+            },
+        },
+        operation_id="write_odoo_prod_backup_restore_plan",
+        summary="Build verified Odoo production backup restore plan",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _ODOO_PROD_BACKUP_RESTORE_APPLY_ROUTE,
+        write_odoo_prod_backup_restore_apply,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(OdooProdBackupRestoreApplyEnvelope)
+                    }
+                },
+            },
+            "parameters": [
+                {
+                    "name": "Idempotency-Key",
+                    "in": "header",
+                    "required": True,
+                    "schema": {"type": "string", "minLength": 1},
+                    "description": "Required destructive restore operation idempotency key.",
+                }
+            ],
+        },
+        operation_id="write_odoo_prod_backup_restore_apply",
+        summary="Enqueue verified Odoo production backup restore",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
         write_odoo_target_replacement_plan,
         methods=["POST"],
@@ -17225,6 +17577,12 @@ def create_launchplane_fastapi_app(
             cancel_odoo_target_replacement_operation,
             "cancel_odoo_target_replacement_operation",
             "Cancel pending Odoo target replacement operation",
+        ),
+        (
+            _ODOO_PROD_BACKUP_RESTORE_OPERATION_CANCEL_ROUTE,
+            cancel_odoo_prod_backup_restore_operation,
+            "cancel_odoo_prod_backup_restore_operation",
+            "Cancel pending Odoo production backup restore operation",
         ),
         (
             _VERIREEL_PROD_BACKUP_GATE_OPERATION_CANCEL_ROUTE,

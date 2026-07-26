@@ -1,6 +1,7 @@
 import json
 import logging
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from threading import Event
 from tempfile import TemporaryDirectory
@@ -12,6 +13,16 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
+)
+from control_plane.contracts.odoo_prod_backup_restore import (
+    ODOO_PROD_BACKUP_RESTORE_CONFIRMATION,
+    OdooProdBackupRestorePlan,
+    OdooProdBackupRestoreResult,
+    build_odoo_prod_backup_restore_plan_fingerprint,
+)
+from control_plane.contracts.odoo_prod_backup_restore_operation import (
+    OdooProdBackupRestoreCheckpoint,
+    OdooProdBackupRestoreOperationRecord,
 )
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
@@ -45,6 +56,12 @@ _BOOTSTRAP_AUTHORIZATION = durable_operation_authorization_payload(
 _REPLACEMENT_AUTHORIZATION = durable_operation_authorization_payload(
     action="odoo_target_replacement_apply.execute",
     managed_rule_id="cm-testing-target-replacement",
+)
+_RESTORE_AUTHORIZATION = durable_operation_authorization_payload(
+    action="odoo_prod_backup_restore_apply.execute",
+    managed_rule_id="cm-prod-backup-restore",
+    context="cm",
+    instances=("prod",),
 )
 
 
@@ -99,11 +116,103 @@ def _replacement_payload(operation_id: str = "operation-cm-testing") -> dict[str
     }
 
 
+def _restore_operation(
+    operation_id: str = "operation-cm-prod-restore",
+) -> OdooProdBackupRestoreOperationRecord:
+    provisional_plan = OdooProdBackupRestorePlan(
+        plan_status="blocked",
+        product="odoo-tenant-cm",
+        context="cm",
+        instance="prod",
+        backup_record_id="backup-20260614",
+        backup_record_created_at="2026-06-14T00:00:00Z",
+        verification_record_id="verification-backup-20260614",
+        verification_record_created_at="2026-07-25T00:00:00Z",
+        verification_nonce="c" * 64,
+        verification_status="pass",
+        manifest_status="pass",
+        sha256_status="pass",
+        pg_restore_status="pass",
+        tar_status="pass",
+        staging_space_status="pass",
+        target_id="compose-cm-prod",
+        target_name="cm-prod",
+        expected_current_artifact_id="artifact-cm-prod",
+        expected_source_git_ref="abc1234",
+        image_reference="ghcr.io/example/odoo@sha256:artifact",
+        database_name="cm_prod",
+        database_dump_path="/volumes/data/backups/cm_prod.dump",
+        filestore_archive_path="/volumes/data/backups/cm_prod-filestore.tar.gz",
+        manifest_path="/volumes/data/backups/manifest.json",
+        database_dump_sha256="a" * 64,
+        filestore_archive_sha256="b" * 64,
+        database_dump_size=1,
+        filestore_archive_size=1,
+        pg_restore_entry_count=1,
+        filestore_member_count=1,
+        filestore_unpacked_size=1,
+        data_volume_free_bytes=2,
+        staging_required_bytes=1,
+        old_db_volume="cm_prod_db_corrupt",
+        new_db_volume="cm_prod_db_restore",
+        data_volume="cm_prod_data",
+        log_volume="cm_prod_logs",
+        filestore_path="/volumes/data/filestore",
+        filestore_staging_path="/volumes/data/filestore/.restore",
+        filestore_quarantine_path="/volumes/data/filestore/cm_prod.quarantine",
+        base_url="https://prod.example.test",
+        health_url="https://prod.example.test/launchplane/health",
+        expected_domain_hosts=("prod.example.test",),
+        blockers=("fingerprint-pending",),
+    )
+    fingerprint = build_odoo_prod_backup_restore_plan_fingerprint(provisional_plan)
+    plan = OdooProdBackupRestorePlan.model_validate(
+        {
+            **provisional_plan.model_dump(mode="json"),
+            "plan_status": "ready",
+            "plan_fingerprint": fingerprint,
+            "blockers": [],
+        }
+    )
+    return OdooProdBackupRestoreOperationRecord.model_validate(
+        {
+            "operation_id": operation_id,
+            "product": "odoo-tenant-cm",
+            "context": "cm",
+            "instance": "prod",
+            "idempotency_key": "restore-cm-prod",
+            "idempotency_scope": "github-actions|example|restore.yml|subject-a",
+            "request_fingerprint": "fingerprint-restore",
+            "request": {
+                "product": "odoo-tenant-cm",
+                "context": "cm",
+                "instance": "prod",
+                "backup_record_id": "backup-20260614",
+                "verification_record_id": "verification-backup-20260614",
+                "expected_current_artifact_id": "artifact-cm-prod",
+                "expected_old_db_volume": "cm_prod_db_corrupt",
+                "expected_new_db_volume": "cm_prod_db_restore",
+                "expected_data_volume": "cm_prod_data",
+                "expected_log_volume": "cm_prod_logs",
+                "plan_fingerprint": fingerprint,
+                "confirmation": ODOO_PROD_BACKUP_RESTORE_CONFIRMATION,
+            },
+            "plan": plan.model_dump(mode="json"),
+            "authorization": _RESTORE_AUTHORIZATION,
+            "status": "pending",
+            "phase": "created",
+            "created_at": "2026-07-25T00:00:00Z",
+            "updated_at": "2026-07-25T00:00:00Z",
+        }
+    )
+
+
 class OdooStableOperationWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.authorization_policy_record = durable_operation_policy_record(
             _BOOTSTRAP_AUTHORIZATION,
             _REPLACEMENT_AUTHORIZATION,
+            _RESTORE_AUTHORIZATION,
         )
         self.authorization_policy_patcher = patch(
             "control_plane.workflows.odoo_stable_operation_worker.read_active_authz_policy_record",
@@ -111,6 +220,106 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
         )
         self.authorization_policy_patcher.start()
         self.addCleanup(self.authorization_policy_patcher.stop)
+
+    def test_worker_checkpoints_restore_provider_effects_before_completion(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            operation = _restore_operation()
+            store.write_odoo_prod_backup_restore_operation_record(operation)
+
+            def execute_restore(
+                *,
+                phase_checkpoint: Callable[[str, dict[str, str]], None],
+                provider_effect_checkpoint: Callable[[str, str], None],
+                **_: object,
+            ) -> OdooProdBackupRestoreResult:
+                phase_checkpoint("validated", {"plan_fingerprint": "fingerprint"})
+                provider_effect_checkpoint(
+                    "database_restore_started",
+                    "database_restore_schedule_trigger",
+                )
+                phase_checkpoint(
+                    "database_restored",
+                    {"new_db_volume": "cm_prod_db_restore"},
+                )
+                return OdooProdBackupRestoreResult(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="prod",
+                    backup_record_id="backup-20260614",
+                    verification_record_id="verification-backup-20260614",
+                    plan_fingerprint=operation.plan.plan_fingerprint,
+                    restore_status="pass",
+                    old_db_volume="cm_prod_db_corrupt",
+                    new_db_volume="cm_prod_db_restore",
+                    data_volume="cm_prod_data",
+                    log_volume="cm_prod_logs",
+                    database_dump_sha256="a" * 64,
+                    filestore_archive_sha256="b" * 64,
+                )
+
+            with patch(
+                "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_backup_restore_apply",
+                side_effect=execute_restore,
+            ):
+                worker_result = run_odoo_stable_operation_worker_once(
+                    record_store=store,
+                    control_plane_root_path=Path(temporary_directory_name),
+                    lease_owner="worker-a",
+                    lease_seconds=60,
+                    heartbeat_seconds=30,
+                )
+
+            stored = store.read_odoo_prod_backup_restore_operation_record(operation.operation_id)
+            self.assertEqual(worker_result.operation_kind, "odoo_prod_backup_restore")
+            self.assertEqual(stored.status, "pass")
+            self.assertEqual(stored.phase, "completed")
+            self.assertEqual(
+                [checkpoint.phase for checkpoint in stored.checkpoints],
+                ["validated", "database_restore_started", "database_restored"],
+            )
+            self.assertEqual(
+                stored.checkpoints[1].evidence["provider_effect"],
+                "database_restore_schedule_trigger",
+            )
+
+    def test_restore_lease_expiry_after_provider_effect_is_never_retried(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            operation = _restore_operation().model_copy(
+                update={
+                    "status": "running",
+                    "phase": "database_restore_started",
+                    "started_at": "2026-07-25T00:01:00Z",
+                    "updated_at": "2026-07-25T00:01:00Z",
+                    "lease_owner": "worker-a",
+                    "lease_expires_at": "2026-07-25T00:02:00Z",
+                    "heartbeat_at": "2026-07-25T00:01:00Z",
+                    "attempt": 1,
+                    "checkpoints": (
+                        OdooProdBackupRestoreCheckpoint(
+                            phase="database_restore_started",
+                            recorded_at="2026-07-25T00:01:00Z",
+                            evidence={"provider_effect": "database_restore_schedule_trigger"},
+                        ),
+                    ),
+                }
+            )
+            store.write_odoo_prod_backup_restore_operation_record(operation)
+
+            reconcile_result = reconcile_stale_odoo_stable_operation_records(
+                record_store=store,
+                now="2026-07-25T00:03:00Z",
+            )
+
+            stored = store.read_odoo_prod_backup_restore_operation_record(operation.operation_id)
+            self.assertEqual(
+                reconcile_result.reconciled_restore_ids,
+                (operation.operation_id,),
+            )
+            self.assertEqual(stored.status, "fail")
+            self.assertEqual(stored.phase, "failed")
+            self.assertIn("unsafe to retry automatically", stored.error_message)
 
     def test_worker_fails_closed_when_grant_is_removed_after_enqueue(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

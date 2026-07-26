@@ -19,6 +19,7 @@ DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
 DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME = "platform-odoo-bootstrap"
 DOKPLOY_ODOO_BACKUP_GATE_SCHEDULE_NAME = "platform-odoo-backup-gate"
 DOKPLOY_ODOO_BACKUP_VERIFICATION_SCHEDULE_NAME = "platform-odoo-backup-verification"
+DOKPLOY_ODOO_BACKUP_RESTORE_SCHEDULE_PREFIX = "platform-odoo-backup-restore"
 DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION = "0 0 31 2 *"
 DOKPLOY_RUNNING_DEPLOYMENT_STATUSES = {"pending", "queued", "running", "in_progress", "starting"}
 DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES = {"cancelled", "canceled"}
@@ -102,6 +103,16 @@ ODOO_BACKUP_VERIFICATION_RESULT_FIELDS = frozenset(
         "failure_code",
     }
 )
+ODOO_BACKUP_RESTORE_RESULT_MARKER = "LAUNCHPLANE_ODOO_BACKUP_RESTORE_RESULT_B64"
+ODOO_BACKUP_RESTORE_RESULT_FIELDS = frozenset(
+    {"schema_version", "operation_id", "phase", "evidence"}
+)
+OdooBackupRestorePhase = Literal[
+    "database_restore",
+    "filestore_stage",
+    "web_quiesce",
+    "filestore_activate",
+]
 
 
 def run_compose_post_deploy_update(
@@ -771,6 +782,350 @@ def extract_odoo_backup_verification_result(payload: api.JsonValue) -> api.JsonO
     return result
 
 
+def run_compose_odoo_backup_restore_database(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+    operation_id: str,
+    database_name: str,
+    database_dump_path: str,
+    database_dump_sha256: str,
+    old_db_volume: str,
+    new_db_volume: str,
+    data_volume: str,
+    log_volume: str,
+    timeout_seconds: int | None = None,
+    before_provider_mutation: Callable[[str], None] | None = None,
+) -> dict[str, str]:
+    return _run_compose_odoo_backup_restore_phase(
+        host=host,
+        token=token,
+        target_definition=target_definition,
+        operation_id=operation_id,
+        phase="database_restore",
+        script=_build_dokploy_odoo_backup_restore_database_script(
+            compose_app_name=_compose_app_name_for_restore(
+                host=host,
+                token=token,
+                target_definition=target_definition,
+            ),
+            operation_id=operation_id,
+            database_name=database_name,
+            database_dump_path=database_dump_path,
+            database_dump_sha256=database_dump_sha256,
+            old_db_volume=old_db_volume,
+            new_db_volume=new_db_volume,
+            data_volume=data_volume,
+            log_volume=log_volume,
+        ),
+        timeout_seconds=timeout_seconds,
+        before_provider_mutation=before_provider_mutation,
+    )
+
+
+def run_compose_odoo_backup_restore_filestore_stage(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+    operation_id: str,
+    database_name: str,
+    filestore_path: str,
+    filestore_archive_path: str,
+    filestore_archive_sha256: str,
+    filestore_member_count: int,
+    filestore_unpacked_size: int,
+    filestore_staging_path: str,
+    filestore_quarantine_path: str,
+    data_volume: str,
+    log_volume: str,
+    timeout_seconds: int | None = None,
+    before_provider_mutation: Callable[[str], None] | None = None,
+) -> dict[str, str]:
+    return _run_compose_odoo_backup_restore_phase(
+        host=host,
+        token=token,
+        target_definition=target_definition,
+        operation_id=operation_id,
+        phase="filestore_stage",
+        script=_build_dokploy_odoo_backup_restore_filestore_stage_script(
+            compose_app_name=_compose_app_name_for_restore(
+                host=host,
+                token=token,
+                target_definition=target_definition,
+            ),
+            operation_id=operation_id,
+            database_name=database_name,
+            filestore_path=filestore_path,
+            filestore_archive_path=filestore_archive_path,
+            filestore_archive_sha256=filestore_archive_sha256,
+            filestore_member_count=filestore_member_count,
+            filestore_unpacked_size=filestore_unpacked_size,
+            filestore_staging_path=filestore_staging_path,
+            filestore_quarantine_path=filestore_quarantine_path,
+            data_volume=data_volume,
+            log_volume=log_volume,
+        ),
+        timeout_seconds=timeout_seconds,
+        before_provider_mutation=before_provider_mutation,
+    )
+
+
+def run_compose_odoo_backup_restore_web_quiesce(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+    operation_id: str,
+    old_db_volume: str,
+    data_volume: str,
+    log_volume: str,
+    timeout_seconds: int | None = None,
+    before_provider_mutation: Callable[[str], None] | None = None,
+) -> dict[str, str]:
+    return _run_compose_odoo_backup_restore_phase(
+        host=host,
+        token=token,
+        target_definition=target_definition,
+        operation_id=operation_id,
+        phase="web_quiesce",
+        script=_build_dokploy_odoo_backup_restore_web_quiesce_script(
+            compose_app_name=_compose_app_name_for_restore(
+                host=host,
+                token=token,
+                target_definition=target_definition,
+            ),
+            operation_id=operation_id,
+            old_db_volume=old_db_volume,
+            data_volume=data_volume,
+            log_volume=log_volume,
+        ),
+        timeout_seconds=timeout_seconds,
+        before_provider_mutation=before_provider_mutation,
+    )
+
+
+def run_compose_odoo_backup_restore_filestore_activate(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+    operation_id: str,
+    database_name: str,
+    filestore_path: str,
+    filestore_staging_path: str,
+    filestore_quarantine_path: str,
+    data_volume: str,
+    log_volume: str,
+    timeout_seconds: int | None = None,
+    before_provider_mutation: Callable[[str], None] | None = None,
+) -> dict[str, str]:
+    return _run_compose_odoo_backup_restore_phase(
+        host=host,
+        token=token,
+        target_definition=target_definition,
+        operation_id=operation_id,
+        phase="filestore_activate",
+        script=_build_dokploy_odoo_backup_restore_filestore_activate_script(
+            compose_app_name=_compose_app_name_for_restore(
+                host=host,
+                token=token,
+                target_definition=target_definition,
+            ),
+            operation_id=operation_id,
+            database_name=database_name,
+            filestore_path=filestore_path,
+            filestore_staging_path=filestore_staging_path,
+            filestore_quarantine_path=filestore_quarantine_path,
+            data_volume=data_volume,
+            log_volume=log_volume,
+        ),
+        timeout_seconds=timeout_seconds,
+        before_provider_mutation=before_provider_mutation,
+    )
+
+
+def _compose_app_name_for_restore(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+) -> str:
+    compose_id = target_definition.target_id.strip()
+    compose_name = (
+        target_definition.target_name.strip()
+        or f"{target_definition.context}-{target_definition.instance}"
+    )
+    if not compose_id:
+        raise click.ClickException("Odoo backup restore requires a compose target id.")
+    target_payload = api.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type="compose",
+        target_id=compose_id,
+    )
+    _, _, compose_app_name, _ = _resolve_dokploy_schedule_runtime(
+        host=host,
+        token=token,
+        compose_id=compose_id,
+        compose_name=compose_name,
+        target_payload=target_payload,
+    )
+    return compose_app_name
+
+
+def _run_compose_odoo_backup_restore_phase(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+    operation_id: str,
+    phase: OdooBackupRestorePhase,
+    script: str,
+    timeout_seconds: int | None,
+    before_provider_mutation: Callable[[str], None] | None,
+) -> dict[str, str]:
+    compose_id = target_definition.target_id.strip()
+    compose_name = (
+        target_definition.target_name.strip()
+        or f"{target_definition.context}-{target_definition.instance}"
+    )
+    normalized_operation_id = operation_id.strip()
+    if not compose_id or not normalized_operation_id:
+        raise click.ClickException("Odoo backup restore phase requires target and operation ids.")
+    target_payload = api.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type="compose",
+        target_id=compose_id,
+    )
+    schedule_timeout_seconds = (
+        timeout_seconds
+        or target_definition.deploy_timeout_seconds
+        or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+    )
+    schedule_type, schedule_lookup_id, _, schedule_server_id = _resolve_dokploy_schedule_runtime(
+        host=host,
+        token=token,
+        compose_id=compose_id,
+        compose_name=compose_name,
+        target_payload=target_payload,
+    )
+    schedule_name = f"{DOKPLOY_ODOO_BACKUP_RESTORE_SCHEDULE_PREFIX}-{phase}"
+    schedule_app_name = (
+        f"platform-{target_definition.context}-{target_definition.instance}-odoo-backup-restore"
+    )
+    schedule_payload: api.JsonObject = {
+        "name": schedule_name,
+        "cronExpression": DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+        "appName": schedule_app_name,
+        "shellType": "bash",
+        "scheduleType": schedule_type,
+        "command": f"control-plane odoo backup restore {phase}",
+        "script": script,
+        "serverId": schedule_server_id,
+        "userId": schedule_lookup_id if schedule_type == "dokploy-server" else None,
+        "enabled": False,
+        "timezone": "UTC",
+    }
+    if before_provider_mutation is not None:
+        before_provider_mutation(f"{phase}_schedule_upsert")
+    schedule = api.upsert_dokploy_schedule(
+        host=host,
+        token=token,
+        target_id=schedule_lookup_id,
+        schedule_type=schedule_type,
+        schedule_name=schedule_name,
+        app_name=schedule_app_name,
+        schedule_payload=schedule_payload,
+    )
+    schedule_id = api.schedule_key(schedule)
+    if not schedule_id:
+        raise click.ClickException(f"Dokploy Odoo backup restore {phase} schedule has no id.")
+    latest_schedule_deployment = api.latest_deployment_for_schedule(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+    )
+    if before_provider_mutation is not None:
+        before_provider_mutation(f"{phase}_schedule_trigger")
+    api.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/schedule.runManually",
+        method="POST",
+        payload={"scheduleId": schedule_id},
+        timeout_seconds=schedule_timeout_seconds,
+    )
+    wait_result = api.wait_for_dokploy_schedule_deployment(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+        before_key=api.deployment_key(latest_schedule_deployment),
+        timeout_seconds=schedule_timeout_seconds,
+    )
+    deployment_id = api.deployment_key_from_wait_result(wait_result)
+    if not deployment_id:
+        raise click.ClickException(
+            f"Dokploy Odoo backup restore {phase} did not return a deployment id."
+        )
+    log_lines = api.fetch_dokploy_deployment_logs(
+        host=host,
+        token=token,
+        deployment_id=deployment_id,
+        line_count=api.MAX_DOKPLOY_LOG_LINE_COUNT,
+    )
+    return extract_odoo_backup_restore_result(
+        {"logs": list(log_lines)},
+        operation_id=normalized_operation_id,
+        phase=phase,
+    )
+
+
+def extract_odoo_backup_restore_result(
+    payload: api.JsonValue,
+    *,
+    operation_id: str,
+    phase: OdooBackupRestorePhase,
+) -> dict[str, str]:
+    encoded_results: list[str] = []
+    marker_prefix = f"{ODOO_BACKUP_RESTORE_RESULT_MARKER}="
+    for line in api.normalize_dokploy_log_payload(payload):
+        normalized_line = line.strip()
+        if normalized_line.startswith(marker_prefix):
+            encoded_results.append(normalized_line.removeprefix(marker_prefix).strip())
+    if len(encoded_results) != 1:
+        raise click.ClickException("Dokploy Odoo backup restore returned no unique bounded result.")
+    try:
+        decoded_payload = base64.b64decode(encoded_results[0], validate=True)
+        parsed_payload = json.loads(decoded_payload.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise click.ClickException(
+            "Dokploy Odoo backup restore returned an invalid bounded result."
+        ) from error
+    result = api.as_json_object(parsed_payload)
+    if result is None or set(result) != ODOO_BACKUP_RESTORE_RESULT_FIELDS:
+        raise click.ClickException(
+            "Dokploy Odoo backup restore returned an unexpected bounded result shape."
+        )
+    if result.get("schema_version") != 1:
+        raise click.ClickException("Dokploy Odoo backup restore returned an unsupported result.")
+    if result.get("operation_id") != operation_id or result.get("phase") != phase:
+        raise click.ClickException(
+            "Dokploy Odoo backup restore result did not match the exact operation phase."
+        )
+    evidence = api.as_json_object(result.get("evidence"))
+    if evidence is None or len(evidence) > 32:
+        raise click.ClickException("Dokploy Odoo backup restore evidence was not bounded.")
+    normalized_evidence: dict[str, str] = {}
+    for key, value in evidence.items():
+        if not isinstance(value, str) or len(key) > 100 or len(value) > 4096:
+            raise click.ClickException("Dokploy Odoo backup restore evidence was not bounded.")
+        normalized_evidence[key] = value
+    return normalized_evidence
+
+
 def extract_odoo_post_deploy_readback_markers(deployment: api.JsonObject | None) -> dict[str, str]:
     if deployment is None:
         return {}
@@ -1381,6 +1736,22 @@ def manifest_size(value):
     fail("manifest_size_invalid", "manifest_status")
 
 
+def path_size(path, failure_code, check):
+    try:
+        return path.stat().st_size
+    except OSError:
+        fail(failure_code, check)
+
+
+def require_regular_file(path, failure_code, check):
+    try:
+        invalid_file = path.is_symlink() or not path.is_file()
+    except OSError:
+        fail(failure_code, check)
+    if invalid_file:
+        fail(failure_code, check)
+
+
 verification_nonce = os.environ["VERIFICATION_NONCE"]
 backup_record_id = os.environ["BACKUP_RECORD_ID"]
 database_name = os.environ["DATABASE_NAME"]
@@ -1407,6 +1778,8 @@ result = {{
     "staging_required_bytes": 0,
     "failure_code": "verification_error",
 }}
+active_check = "manifest_status"
+unexpected_failure_code = "manifest_path_verification_error"
 
 try:
     filestore_root = Path(os.environ["FILESTORE_ROOT"])
@@ -1415,14 +1788,24 @@ try:
     filestore_archive_path = Path(os.environ["FILESTORE_ARCHIVE_PATH"])
     manifest_path = Path(os.environ["MANIFEST_PATH"])
 
-    if manifest_path.is_symlink() or not manifest_path.is_file():
-        fail("manifest_unreadable", "manifest_status")
-    if manifest_path.stat().st_size > 1024 * 1024:
-        fail("manifest_unreadable", "manifest_status")
+    require_regular_file(manifest_path, "manifest_missing", "manifest_status")
+    unexpected_failure_code = "manifest_read_verification_error"
+    if (
+        path_size(manifest_path, "manifest_metadata_unreadable", "manifest_status")
+        > 1024 * 1024
+    ):
+        fail("manifest_too_large", "manifest_status")
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        fail("manifest_unreadable", "manifest_status")
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        fail("manifest_decode_error", "manifest_status")
+    except OSError:
+        fail("manifest_read_error", "manifest_status")
+    try:
+        manifest = json.loads(manifest_text)
+    except json.JSONDecodeError:
+        fail("manifest_decode_error", "manifest_status")
+    unexpected_failure_code = "manifest_validation_error"
     if not isinstance(manifest, dict):
         fail("manifest_identity_mismatch", "manifest_status")
     manifest_schema_version = manifest.get("schema_version")
@@ -1447,15 +1830,16 @@ try:
     if manifest_schema_version == 1 and manifest_path_value != str(manifest_path):
         fail("manifest_path_mismatch", "manifest_status")
 
-    if (
-        database_dump_path.is_symlink()
-        or filestore_archive_path.is_symlink()
-        or not database_dump_path.is_file()
-        or not filestore_archive_path.is_file()
-    ):
-        fail("artifact_missing", "manifest_status")
-    result["database_dump_size"] = database_dump_path.stat().st_size
-    result["filestore_archive_size"] = filestore_archive_path.stat().st_size
+    unexpected_failure_code = "artifact_path_verification_error"
+    require_regular_file(database_dump_path, "artifact_missing", "manifest_status")
+    require_regular_file(filestore_archive_path, "artifact_missing", "manifest_status")
+    unexpected_failure_code = "artifact_metadata_verification_error"
+    result["database_dump_size"] = path_size(
+        database_dump_path, "artifact_missing", "manifest_status"
+    )
+    result["filestore_archive_size"] = path_size(
+        filestore_archive_path, "artifact_missing", "manifest_status"
+    )
     if (
         manifest_size(manifest.get("database_dump_size"))
         != result["database_dump_size"]
@@ -1465,6 +1849,8 @@ try:
         fail("artifact_size_mismatch", "manifest_status")
     result["manifest_status"] = "pass"
 
+    active_check = "sha256_status"
+    unexpected_failure_code = "verification_error"
     result["database_dump_sha256"] = file_sha256(database_dump_path)
     result["filestore_archive_sha256"] = file_sha256(filestore_archive_path)
     manifest_database_dump_sha256 = manifest.get("database_dump_sha256")
@@ -1482,6 +1868,7 @@ try:
             fail("artifact_hash_mismatch", "sha256_status")
     result["sha256_status"] = "pass"
 
+    active_check = "pg_restore_status"
     restore_list = subprocess.run(
         ["pg_restore", "--list", str(database_dump_path)],
         check=False,
@@ -1514,6 +1901,7 @@ try:
         fail("database_dump_invalid", "pg_restore_status")
     result["pg_restore_status"] = "pass"
 
+    active_check = "tar_status"
     seen_members = set()
     top_level_directory_seen = False
     try:
@@ -1545,6 +1933,7 @@ try:
         fail("filestore_top_level_mismatch", "tar_status")
     result["tar_status"] = "pass"
 
+    active_check = "staging_space_status"
     filestore_database_path = filestore_root
     if filestore_database_path.name != database_name:
         filestore_database_path = filestore_database_path / database_name
@@ -1561,7 +1950,8 @@ try:
 except VerificationFailure as error:
     result["failure_code"] = str(error)
 except Exception:
-    result["failure_code"] = "verification_error"
+    result[active_check] = "fail"
+    result["failure_code"] = unexpected_failure_code
 
 encoded_result = base64.b64encode(
     json.dumps(result, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -1569,6 +1959,627 @@ encoded_result = base64.b64encode(
 print(f"{{os.environ['RESULT_MARKER']}}={{encoded_result}}")
 PY
 """
+
+
+def _build_dokploy_odoo_backup_restore_database_script(
+    *,
+    compose_app_name: str,
+    operation_id: str,
+    database_name: str,
+    database_dump_path: str,
+    database_dump_sha256: str,
+    old_db_volume: str,
+    new_db_volume: str,
+    data_volume: str,
+    log_volume: str,
+) -> str:
+    header = "\n".join(
+        (
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            f"compose_project={shlex.quote(compose_app_name)}",
+            f"operation_id={shlex.quote(operation_id)}",
+            f"database_name={shlex.quote(database_name)}",
+            f"database_dump_path={shlex.quote(database_dump_path)}",
+            f"expected_database_dump_sha256={shlex.quote(database_dump_sha256)}",
+            f"old_db_volume={shlex.quote(old_db_volume)}",
+            f"new_db_volume={shlex.quote(new_db_volume)}",
+            f"data_volume={shlex.quote(data_volume)}",
+            f"log_volume={shlex.quote(log_volume)}",
+            f"result_marker={shlex.quote(ODOO_BACKUP_RESTORE_RESULT_MARKER)}",
+            "",
+        )
+    )
+    return (
+        header
+        + r"""resolve_container_id() {
+    local service_name="$1"
+    local container_id
+    container_id=$(docker ps -aq \
+        --filter "label=com.docker.compose.project=${compose_project}" \
+        --filter "label=com.docker.compose.service=${service_name}" | head -n 1)
+    if [ -z "${container_id}" ]; then
+        echo "Missing ${service_name} container for ${compose_project}." >&2
+        exit 1
+    fi
+    printf '%s' "${container_id}"
+}
+
+container_mount_source() {
+    local container_id="$1"
+    local destination="$2"
+    docker inspect "${container_id}" | python3 -c '
+import json
+import sys
+destination = sys.argv[1]
+payload = json.load(sys.stdin)
+mounts = payload[0].get("Mounts", []) if payload else []
+matches = [mount.get("Name") or mount.get("Source") or "" for mount in mounts if mount.get("Destination") == destination]
+if len(matches) != 1 or not matches[0]:
+    raise SystemExit(1)
+print(matches[0])
+' "${destination}"
+}
+
+require_mount() {
+    local container_id="$1"
+    local destination="$2"
+    local expected_source="$3"
+    local actual_source
+    actual_source=$(container_mount_source "${container_id}" "${destination}")
+    if [ "${actual_source}" != "${expected_source}" ]; then
+        echo "Unexpected mount source for ${destination}." >&2
+        exit 1
+    fi
+}
+
+database_container_id=$(resolve_container_id database)
+script_runner_container_id=$(resolve_container_id script-runner)
+web_container_id=$(resolve_container_id web)
+require_mount "${database_container_id}" /var/lib/postgresql/data "${old_db_volume}"
+require_mount "${script_runner_container_id}" /volumes/data "${data_volume}"
+require_mount "${web_container_id}" /volumes/data "${data_volume}"
+require_mount "${web_container_id}" /volumes/logs "${log_volume}"
+
+if docker volume inspect "${new_db_volume}" >/dev/null 2>&1; then
+    echo "Restore DB volume already exists; refusing to overwrite it." >&2
+    exit 1
+fi
+
+postgres_image=$(docker inspect -f '{{.Config.Image}}' "${database_container_id}")
+case "${postgres_image}" in
+    postgres:17 | postgres:17.* | postgres:17-* | postgres:17@*) ;;
+    *)
+        echo "Odoo backup restore requires the current PostgreSQL 17 image." >&2
+        exit 1
+        ;;
+esac
+
+db_user=""
+db_password=""
+while IFS= read -r env_line; do
+    case "${env_line}" in
+        POSTGRES_USER=*) db_user=${env_line#POSTGRES_USER=} ;;
+        POSTGRES_PASSWORD=*) db_password=${env_line#POSTGRES_PASSWORD=} ;;
+    esac
+done < <(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${database_container_id}")
+if [ -z "${db_user}" ] || [ -z "${db_password}" ]; then
+    echo "Current database container does not expose required PostgreSQL credentials." >&2
+    exit 1
+fi
+
+actual_database_dump_sha256=$(docker exec "${script_runner_container_id}" sha256sum "${database_dump_path}" | awk '{print $1}')
+if [ "${actual_database_dump_sha256}" != "${expected_database_dump_sha256}" ]; then
+    echo "Database dump hash changed after reviewed restore plan." >&2
+    exit 1
+fi
+
+network_name=$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "${script_runner_container_id}" | head -n 1)
+if [ -z "${network_name}" ]; then
+    echo "Script runner has no Docker network for restore staging." >&2
+    exit 1
+fi
+
+operation_digest=$(python3 - "${operation_id}" <<'PY'
+import hashlib
+import sys
+print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest()[:20])
+PY
+)
+restore_container_name="launchplane-odoo-restore-${operation_digest}"
+restore_database_host="launchplane-odoo-restore-db-${operation_digest}"
+
+docker volume create \
+    --label "launchplane.restore.operation=${operation_id}" \
+    --label "launchplane.restore.preserve=true" \
+    "${new_db_volume}" >/dev/null
+
+docker run --rm \
+    --volume "${new_db_volume}:/var/lib/postgresql/data" \
+    --entrypoint /bin/sh \
+    "${postgres_image}" \
+    -c 'test -z "$(ls -A /var/lib/postgresql/data)"'
+
+restore_container_started=0
+cleanup_restore_container() {
+    if [ "${restore_container_started}" = "1" ]; then
+        docker rm -f "${restore_container_name}" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup_restore_container EXIT
+
+docker run -d \
+    --name "${restore_container_name}" \
+    --network "${network_name}" \
+    --network-alias "${restore_database_host}" \
+    --volume "${new_db_volume}:/var/lib/postgresql/data" \
+    --env "POSTGRES_USER=${db_user}" \
+    --env "POSTGRES_PASSWORD=${db_password}" \
+    --env POSTGRES_DB=postgres \
+    "${postgres_image}" >/dev/null
+restore_container_started=1
+
+for _ in $(seq 1 90); do
+    if docker exec "${restore_container_name}" pg_isready -U "${db_user}" -d postgres -h 127.0.0.1 >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+docker exec "${restore_container_name}" pg_isready -U "${db_user}" -d postgres -h 127.0.0.1 >/dev/null
+
+case "${database_name}" in
+    postgres | template0 | template1)
+        echo "Refusing to restore into a PostgreSQL system database." >&2
+        exit 1
+        ;;
+esac
+docker exec "${restore_container_name}" createdb --username "${db_user}" "${database_name}"
+docker exec \
+    --env "PGPASSWORD=${db_password}" \
+    "${script_runner_container_id}" \
+    pg_restore \
+        --host "${restore_database_host}" \
+        --port 5432 \
+        --username "${db_user}" \
+        --dbname "${database_name}" \
+        --exit-on-error \
+        --no-owner \
+        --no-acl \
+        "${database_dump_path}"
+
+restored_table_count=$(docker exec \
+    --env "PGPASSWORD=${db_password}" \
+    "${restore_container_name}" \
+    psql --tuples-only --no-align --username "${db_user}" --dbname "${database_name}" \
+    --command "SELECT count(*) FROM pg_catalog.pg_class WHERE relkind IN ('r','p') AND relnamespace NOT IN (SELECT oid FROM pg_catalog.pg_namespace WHERE nspname LIKE 'pg_%' OR nspname = 'information_schema');")
+if ! [[ "${restored_table_count}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Restored database does not contain application tables." >&2
+    exit 1
+fi
+
+docker stop --time 60 "${restore_container_name}" >/dev/null
+docker rm "${restore_container_name}" >/dev/null
+restore_container_started=0
+trap - EXIT
+
+python3 - "${result_marker}" "${operation_id}" "${new_db_volume}" "${actual_database_dump_sha256}" "${restored_table_count}" "${postgres_image}" <<'PY'
+import base64
+import json
+import sys
+
+marker, operation_id, volume, digest, table_count, image = sys.argv[1:]
+payload = {
+    "schema_version": 1,
+    "operation_id": operation_id,
+    "phase": "database_restore",
+    "evidence": {
+        "new_db_volume": volume,
+        "database_dump_sha256": digest,
+        "restored_table_count": table_count,
+        "postgres_image": image,
+    },
+}
+encoded = base64.b64encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).decode()
+print(marker + "=" + encoded)
+PY
+"""
+    )
+
+
+def _build_dokploy_odoo_backup_restore_filestore_stage_script(
+    *,
+    compose_app_name: str,
+    operation_id: str,
+    database_name: str,
+    filestore_path: str,
+    filestore_archive_path: str,
+    filestore_archive_sha256: str,
+    filestore_member_count: int,
+    filestore_unpacked_size: int,
+    filestore_staging_path: str,
+    filestore_quarantine_path: str,
+    data_volume: str,
+    log_volume: str,
+) -> str:
+    header = "\n".join(
+        (
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            f"compose_project={shlex.quote(compose_app_name)}",
+            f"operation_id={shlex.quote(operation_id)}",
+            f"database_name={shlex.quote(database_name)}",
+            f"filestore_path={shlex.quote(filestore_path)}",
+            f"filestore_archive_path={shlex.quote(filestore_archive_path)}",
+            f"expected_filestore_archive_sha256={shlex.quote(filestore_archive_sha256)}",
+            f"expected_filestore_member_count={filestore_member_count}",
+            f"expected_filestore_unpacked_size={filestore_unpacked_size}",
+            f"filestore_staging_path={shlex.quote(filestore_staging_path)}",
+            f"filestore_quarantine_path={shlex.quote(filestore_quarantine_path)}",
+            f"data_volume={shlex.quote(data_volume)}",
+            f"log_volume={shlex.quote(log_volume)}",
+            f"result_marker={shlex.quote(ODOO_BACKUP_RESTORE_RESULT_MARKER)}",
+            "",
+        )
+    )
+    return (
+        header
+        + r"""resolve_container_id() {
+    local service_name="$1"
+    docker ps -aq \
+        --filter "label=com.docker.compose.project=${compose_project}" \
+        --filter "label=com.docker.compose.service=${service_name}" | head -n 1
+}
+
+container_mount_source() {
+    local container_id="$1"
+    local destination="$2"
+    docker inspect "${container_id}" | python3 -c '
+import json
+import sys
+destination = sys.argv[1]
+payload = json.load(sys.stdin)
+matches = [mount.get("Name") or mount.get("Source") or "" for mount in payload[0].get("Mounts", []) if mount.get("Destination") == destination]
+if len(matches) != 1 or not matches[0]:
+    raise SystemExit(1)
+print(matches[0])
+' "${destination}"
+}
+
+script_runner_container_id=$(resolve_container_id script-runner)
+web_container_id=$(resolve_container_id web)
+if [ -z "${script_runner_container_id}" ] || [ -z "${web_container_id}" ]; then
+    echo "Odoo backup restore requires script-runner and web containers." >&2
+    exit 1
+fi
+if [ "$(container_mount_source "${script_runner_container_id}" /volumes/data)" != "${data_volume}" ] || \
+   [ "$(container_mount_source "${web_container_id}" /volumes/data)" != "${data_volume}" ] || \
+   [ "$(container_mount_source "${web_container_id}" /volumes/logs)" != "${log_volume}" ]; then
+    echo "Odoo backup restore data/log volume authority changed." >&2
+    exit 1
+fi
+
+docker exec -u root -i \
+    --env "OPERATION_ID=${operation_id}" \
+    --env "DATABASE_NAME=${database_name}" \
+    --env "FILESTORE_PATH=${filestore_path}" \
+    --env "FILESTORE_ARCHIVE_PATH=${filestore_archive_path}" \
+    --env "EXPECTED_FILESTORE_ARCHIVE_SHA256=${expected_filestore_archive_sha256}" \
+    --env "EXPECTED_FILESTORE_MEMBER_COUNT=${expected_filestore_member_count}" \
+    --env "EXPECTED_FILESTORE_UNPACKED_SIZE=${expected_filestore_unpacked_size}" \
+    --env "FILESTORE_STAGING_PATH=${filestore_staging_path}" \
+    --env "FILESTORE_QUARANTINE_PATH=${filestore_quarantine_path}" \
+    "${script_runner_container_id}" \
+    python3 - <<'PY'
+import hashlib
+import os
+import shutil
+import tarfile
+from pathlib import Path, PurePosixPath
+
+database_name = os.environ["DATABASE_NAME"]
+filestore_root = Path(os.environ["FILESTORE_PATH"])
+archive_path = Path(os.environ["FILESTORE_ARCHIVE_PATH"])
+staging_path = Path(os.environ["FILESTORE_STAGING_PATH"])
+quarantine_path = Path(os.environ["FILESTORE_QUARANTINE_PATH"])
+current_path = filestore_root if filestore_root.name == database_name else filestore_root / database_name
+expected_member_count = int(os.environ["EXPECTED_FILESTORE_MEMBER_COUNT"])
+expected_unpacked_size = int(os.environ["EXPECTED_FILESTORE_UNPACKED_SIZE"])
+
+if not current_path.is_dir() or current_path.is_symlink():
+    raise SystemExit("Current filestore is unavailable for quarantine ownership evidence.")
+if staging_path.parent != current_path.parent or quarantine_path.parent != current_path.parent:
+    raise SystemExit("Filestore staging and quarantine paths must be siblings of the live filestore.")
+if staging_path.exists() or quarantine_path.exists():
+    raise SystemExit("Filestore staging or quarantine path already exists.")
+if archive_path.is_symlink() or not archive_path.is_file():
+    raise SystemExit("Filestore archive is unavailable.")
+
+digest = hashlib.sha256()
+with archive_path.open("rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+if digest.hexdigest() != os.environ["EXPECTED_FILESTORE_ARCHIVE_SHA256"]:
+    raise SystemExit("Filestore archive hash changed after reviewed restore plan.")
+if shutil.disk_usage(current_path.parent).free < expected_unpacked_size:
+    raise SystemExit("Insufficient data-volume space for filestore staging.")
+
+owner = current_path.stat()
+member_count = 0
+unpacked_size = 0
+seen = set()
+members = []
+with tarfile.open(archive_path, mode="r:gz") as archive:
+    for member in archive.getmembers():
+        member_path = PurePosixPath(member.name)
+        if (
+            member_path.is_absolute()
+            or not member_path.parts
+            or any(part in {"", ".", ".."} for part in member_path.parts)
+            or member_path.parts[0] != database_name
+            or (not member.isfile() and not member.isdir())
+        ):
+            raise SystemExit("Filestore archive contains an unsafe member.")
+        normalized = member_path.as_posix()
+        if normalized in seen:
+            raise SystemExit("Filestore archive contains duplicate members.")
+        seen.add(normalized)
+        members.append(member)
+        member_count += 1
+        if member.isfile():
+            unpacked_size += member.size
+    if member_count != expected_member_count or unpacked_size != expected_unpacked_size:
+        raise SystemExit("Filestore archive shape changed after reviewed restore plan.")
+    if database_name not in {PurePosixPath(member.name).as_posix().rstrip("/") for member in members if member.isdir()}:
+        raise SystemExit("Filestore archive lacks the expected top-level database directory.")
+    try:
+        staging_path.mkdir(mode=0o700)
+        for member in members:
+            relative_path = PurePosixPath(member.name)
+            destination = staging_path.joinpath(*relative_path.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if member.isdir():
+                destination.mkdir(exist_ok=True)
+            else:
+                source = archive.extractfile(member)
+                if source is None:
+                    raise SystemExit("Filestore archive member could not be read.")
+                with destination.open("xb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+            os.chmod(destination, member.mode & 0o777)
+            os.chown(destination, owner.st_uid, owner.st_gid)
+        os.chown(staging_path, owner.st_uid, owner.st_gid)
+    except BaseException:
+        shutil.rmtree(staging_path, ignore_errors=True)
+        raise
+PY
+
+python3 - "${result_marker}" "${operation_id}" "${filestore_staging_path}" "${filestore_archive_sha256}" "${filestore_member_count}" "${filestore_unpacked_size}" <<'PY'
+import base64
+import json
+import sys
+marker, operation_id, staging_path, digest, member_count, unpacked_size = sys.argv[1:]
+payload = {
+    "schema_version": 1,
+    "operation_id": operation_id,
+    "phase": "filestore_stage",
+    "evidence": {
+        "filestore_staging_path": staging_path,
+        "filestore_archive_sha256": digest,
+        "filestore_member_count": member_count,
+        "filestore_unpacked_size": unpacked_size,
+    },
+}
+encoded = base64.b64encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).decode()
+print(marker + "=" + encoded)
+PY
+"""
+    )
+
+
+def _build_dokploy_odoo_backup_restore_web_quiesce_script(
+    *,
+    compose_app_name: str,
+    operation_id: str,
+    old_db_volume: str,
+    data_volume: str,
+    log_volume: str,
+) -> str:
+    header = "\n".join(
+        (
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            f"compose_project={shlex.quote(compose_app_name)}",
+            f"operation_id={shlex.quote(operation_id)}",
+            f"old_db_volume={shlex.quote(old_db_volume)}",
+            f"data_volume={shlex.quote(data_volume)}",
+            f"log_volume={shlex.quote(log_volume)}",
+            f"result_marker={shlex.quote(ODOO_BACKUP_RESTORE_RESULT_MARKER)}",
+            "",
+        )
+    )
+    return (
+        header
+        + r"""resolve_container_id() {
+    local service_name="$1"
+    docker ps -aq \
+        --filter "label=com.docker.compose.project=${compose_project}" \
+        --filter "label=com.docker.compose.service=${service_name}" | head -n 1
+}
+
+container_mount_source() {
+    docker inspect "$1" | python3 -c '
+import json
+import sys
+payload = json.load(sys.stdin)
+matches = [mount.get("Name") or mount.get("Source") or "" for mount in payload[0].get("Mounts", []) if mount.get("Destination") == sys.argv[1]]
+if len(matches) != 1 or not matches[0]:
+    raise SystemExit(1)
+print(matches[0])
+' "$2"
+}
+
+database_container_id=$(resolve_container_id database)
+web_container_id=$(resolve_container_id web)
+if [ -z "${database_container_id}" ] || [ -z "${web_container_id}" ]; then
+    echo "Odoo backup restore requires database and web containers." >&2
+    exit 1
+fi
+if [ "$(container_mount_source "${database_container_id}" /var/lib/postgresql/data)" != "${old_db_volume}" ] || \
+   [ "$(container_mount_source "${web_container_id}" /volumes/data)" != "${data_volume}" ] || \
+   [ "$(container_mount_source "${web_container_id}" /volumes/logs)" != "${log_volume}" ]; then
+    echo "Odoo backup restore live volume authority changed before quiesce." >&2
+    exit 1
+fi
+
+web_was_running=false
+if [ "$(docker inspect -f '{{.State.Status}}' "${web_container_id}")" = "running" ]; then
+    web_was_running=true
+    docker stop --time 60 "${web_container_id}" >/dev/null
+fi
+if [ "$(docker inspect -f '{{.State.Status}}' "${web_container_id}")" = "running" ]; then
+    echo "Odoo web container did not quiesce." >&2
+    exit 1
+fi
+
+python3 - "${result_marker}" "${operation_id}" "${web_was_running}" <<'PY'
+import base64
+import json
+import sys
+marker, operation_id, web_was_running = sys.argv[1:]
+payload = {
+    "schema_version": 1,
+    "operation_id": operation_id,
+    "phase": "web_quiesce",
+    "evidence": {"web_was_running": web_was_running},
+}
+encoded = base64.b64encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).decode()
+print(marker + "=" + encoded)
+PY
+"""
+    )
+
+
+def _build_dokploy_odoo_backup_restore_filestore_activate_script(
+    *,
+    compose_app_name: str,
+    operation_id: str,
+    database_name: str,
+    filestore_path: str,
+    filestore_staging_path: str,
+    filestore_quarantine_path: str,
+    data_volume: str,
+    log_volume: str,
+) -> str:
+    header = "\n".join(
+        (
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            f"compose_project={shlex.quote(compose_app_name)}",
+            f"operation_id={shlex.quote(operation_id)}",
+            f"database_name={shlex.quote(database_name)}",
+            f"filestore_path={shlex.quote(filestore_path)}",
+            f"filestore_staging_path={shlex.quote(filestore_staging_path)}",
+            f"filestore_quarantine_path={shlex.quote(filestore_quarantine_path)}",
+            f"data_volume={shlex.quote(data_volume)}",
+            f"log_volume={shlex.quote(log_volume)}",
+            f"result_marker={shlex.quote(ODOO_BACKUP_RESTORE_RESULT_MARKER)}",
+            "",
+        )
+    )
+    return (
+        header
+        + r"""resolve_container_id() {
+    local service_name="$1"
+    docker ps -aq \
+        --filter "label=com.docker.compose.project=${compose_project}" \
+        --filter "label=com.docker.compose.service=${service_name}" | head -n 1
+}
+
+container_mount_source() {
+    docker inspect "$1" | python3 -c '
+import json
+import sys
+payload = json.load(sys.stdin)
+matches = [mount.get("Name") or mount.get("Source") or "" for mount in payload[0].get("Mounts", []) if mount.get("Destination") == sys.argv[1]]
+if len(matches) != 1 or not matches[0]:
+    raise SystemExit(1)
+print(matches[0])
+' "$2"
+}
+
+script_runner_container_id=$(resolve_container_id script-runner)
+web_container_id=$(resolve_container_id web)
+if [ -z "${script_runner_container_id}" ] || [ -z "${web_container_id}" ]; then
+    echo "Odoo backup restore requires script-runner and web containers." >&2
+    exit 1
+fi
+if [ "$(docker inspect -f '{{.State.Status}}' "${web_container_id}")" = "running" ]; then
+    echo "Odoo web container must remain quiesced during filestore activation." >&2
+    exit 1
+fi
+if [ "$(container_mount_source "${script_runner_container_id}" /volumes/data)" != "${data_volume}" ] || \
+   [ "$(container_mount_source "${web_container_id}" /volumes/data)" != "${data_volume}" ] || \
+   [ "$(container_mount_source "${web_container_id}" /volumes/logs)" != "${log_volume}" ]; then
+    echo "Odoo backup restore data/log volume authority changed before activation." >&2
+    exit 1
+fi
+
+docker exec -u root -i \
+    --env "DATABASE_NAME=${database_name}" \
+    --env "FILESTORE_PATH=${filestore_path}" \
+    --env "FILESTORE_STAGING_PATH=${filestore_staging_path}" \
+    --env "FILESTORE_QUARANTINE_PATH=${filestore_quarantine_path}" \
+    --env "RESULT_MARKER=${result_marker}" \
+    --env "OPERATION_ID=${operation_id}" \
+    "${script_runner_container_id}" \
+    python3 - <<'PY'
+import base64
+import json
+import os
+import sys
+from pathlib import Path
+
+database_name = os.environ["DATABASE_NAME"]
+filestore_root = Path(os.environ["FILESTORE_PATH"])
+staging_path = Path(os.environ["FILESTORE_STAGING_PATH"])
+quarantine_path = Path(os.environ["FILESTORE_QUARANTINE_PATH"])
+live_path = filestore_root if filestore_root.name == database_name else filestore_root / database_name
+staged_path = staging_path / database_name
+
+if staging_path.parent != live_path.parent or quarantine_path.parent != live_path.parent:
+    raise SystemExit("Filestore activation paths are not siblings of the live filestore.")
+if live_path.is_symlink() or staged_path.is_symlink():
+    raise SystemExit("Live or staged filestore cannot be a symlink.")
+if not live_path.is_dir() or not staged_path.is_dir():
+    raise SystemExit("Live or staged filestore is unavailable.")
+if quarantine_path.exists() or quarantine_path.is_symlink():
+    raise SystemExit("Filestore quarantine path already exists.")
+
+live_path.rename(quarantine_path)
+try:
+    staged_path.rename(live_path)
+except Exception:
+    quarantine_path.rename(live_path)
+    raise SystemExit("Filestore activation failed; restored the prior live path.")
+try:
+    staging_path.rmdir()
+except OSError:
+    pass
+
+payload = {
+    "schema_version": 1,
+    "operation_id": os.environ["OPERATION_ID"],
+    "phase": "filestore_activate",
+    "evidence": {
+        "filestore_live_path": str(live_path),
+        "filestore_quarantine_path": str(quarantine_path),
+    },
+}
+encoded = base64.b64encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).decode()
+print(os.environ["RESULT_MARKER"] + "=" + encoded)
+PY
+"""
+    )
 
 
 def _render_docker_exec_environment_lines(environment_values: Mapping[str, str]) -> str:
