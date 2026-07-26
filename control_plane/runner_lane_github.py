@@ -102,6 +102,58 @@ class GitHubRunnerLaneRegistrationTokenFetcher:
         )
 
 
+class GitHubRunnerLaneRetirer:
+    def __init__(self, *, transport: MergeTrainGitHubTransport) -> None:
+        self.transport = transport
+
+    def delete_runner(self, *, repository: str, runner_id: int) -> None:
+        if runner_id <= 0:
+            raise ValueError("GitHub runner id must be positive.")
+        repository_path = _repository_path(repository)
+        try:
+            self.transport.request(
+                method="DELETE",
+                path=f"/repos/{repository_path}/actions/runners/{runner_id}",
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code != 404:
+                raise
+
+
+class GitHubRepositoryActiveRunReader:
+    ACTIVE_STATUSES = ("queued", "in_progress", "waiting", "pending", "requested")
+
+    def __init__(self, *, transport: MergeTrainGitHubTransport) -> None:
+        self.transport = transport
+
+    def read_active_run_ids(self, *, repository: str) -> tuple[int, ...]:
+        repository_path = _repository_path(repository)
+        run_ids: set[int] = set()
+        for status in self.ACTIVE_STATUSES:
+            page = 1
+            while True:
+                query = urlencode({"status": status, "per_page": "100", "page": str(page)})
+                payload = self.transport.request(
+                    method="GET",
+                    path=f"/repos/{repository_path}/actions/runs?{query}",
+                )
+                payload_object = _json_object(payload, "GitHub workflow run list response")
+                runs_payload = payload_object.get("workflow_runs")
+                if not isinstance(runs_payload, list):
+                    raise MergeTrainGitHubError(
+                        "GitHub workflow run list response must include workflow_runs."
+                    )
+                for run_payload in runs_payload:
+                    run = _json_object(run_payload, "GitHub workflow run entry")
+                    run_ids.add(
+                        _required_int(run.get("id"), "GitHub workflow run entry requires id.")
+                    )
+                if len(runs_payload) < 100:
+                    break
+                page += 1
+        return tuple(sorted(run_ids))
+
+
 def _runner_lane_record(
     *, repository: str, observed_at: str, payload: dict[str, object]
 ) -> RunnerLaneRecord:

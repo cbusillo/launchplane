@@ -338,15 +338,17 @@ default-daemon action supplies its retained-space ceiling instead; its required
 `prune_until` value is recorded with the request but is not applied when the
 size budget is present.
 
-Runner lane registration uses a separate manual ops-lane workflow,
+Runner lane lifecycle uses a separate manual ops-lane workflow,
 `.github/workflows/runner-lane-registration.yml`. It shares the same approved
-host, execution-lane, and service-user variables, but it does not prune Docker
-state or restart existing services. Its first slice creates a new repo-scoped
-Actions runner lane under an allowlisted registration root, starts only the
-matching `launchplane-runner@<lane>.service` supervisor, and verifies the lane
-through GitHub inventory before writing a completed registration audit.
-Existing-lane adoption, stale-lane removal, and generic runner service restarts
-remain outside this slice.
+host, execution-lane, service-user variables, and host lock, but it does not
+prune Docker state. Registration creates one repo-scoped Actions runner below
+the approved root and starts only the matching
+`launchplane-runner@<lane>.service`. Retirement requires an exact idle managed
+lane, stops and disables that exact root-authorized service, rechecks repository
+activity and GitHub identity, deletes only that runner registration, and removes
+the verified inactive directory. The shared lock prevents runner lifecycle and
+Docker hygiene mutations from interleaving. Existing-lane adoption,
+remove/recreate, generic restarts, and scaling remain outside this slice.
 
 ## Host Replacement Runbook
 

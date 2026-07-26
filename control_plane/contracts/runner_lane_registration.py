@@ -10,15 +10,21 @@ from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
 
 RunnerLaneRegistrationPlanStatus = Literal["ready", "blocked"]
 RunnerLaneRegistrationAuditStatus = Literal["planned", "completed", "failed"]
+RunnerLaneLifecycleOperation = Literal["register", "retire"]
 RunnerLaneRegistrationBlockerCode = Literal[
     "audit_record_key_missing",
     "host_not_allowed",
     "inventory_repository_mismatch",
     "label_missing",
     "lane_already_exists",
+    "lane_ambiguous",
+    "lane_busy",
+    "lane_missing",
     "mutate_not_requested",
     "registration_root_not_allowed",
+    "repository_runs_active",
     "repository_not_allowed",
+    "target_worker_active",
 ]
 
 
@@ -51,11 +57,14 @@ class RunnerLaneRegistrationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
+    operation: RunnerLaneLifecycleOperation = "register"
     repository: str
     host_name: str
     lane_name: str
     registration_root: str
     labels: tuple[str, ...]
+    active_run_ids: tuple[int, ...] = ()
+    target_worker_active: bool = False
     mutate: bool = False
     audit_record_key: str = ""
 
@@ -83,10 +92,13 @@ class RunnerLaneRegistrationRequest(BaseModel):
             )
         )
         self.labels = _normalized_labels(self.labels)
+        self.active_run_ids = tuple(sorted(set(self.active_run_ids)))
+        if any(run_id <= 0 for run_id in self.active_run_ids):
+            raise ValueError("runner lane lifecycle active run ids must be positive")
         self.audit_record_key = self.audit_record_key.strip()
         if not self.repository:
             raise ValueError("runner lane registration requires repository")
-        if not self.labels:
+        if self.operation == "register" and not self.labels:
             raise ValueError("runner lane registration requires labels")
         return self
 
@@ -109,12 +121,15 @@ class RunnerLaneRegistrationPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
+    operation: RunnerLaneLifecycleOperation = "register"
     status: RunnerLaneRegistrationPlanStatus
     repository: str
     host_name: str
     lane_name: str
     registration_root: str
     labels: tuple[str, ...]
+    active_run_ids: tuple[int, ...] = ()
+    target_worker_active: bool = False
     mutate: bool
     audit_record_key: str
     blockers: tuple[RunnerLaneRegistrationBlocker, ...] = ()
@@ -137,6 +152,7 @@ class RunnerLaneRegistrationPlan(BaseModel):
             "runner lane registration plan requires registration_root",
         )
         self.labels = _normalized_labels(self.labels)
+        self.active_run_ids = tuple(sorted(set(self.active_run_ids)))
         self.audit_record_key = self.audit_record_key.strip()
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
@@ -174,6 +190,8 @@ class RunnerLaneRegistrationAuditRecord(BaseModel):
             raise ValueError("runner lane registration audit key must match plan")
         if self.request.repository != self.plan.repository:
             raise ValueError("runner lane registration audit request must match plan repository")
+        if self.request.operation != self.plan.operation:
+            raise ValueError("runner lane registration audit request must match plan operation")
         if self.request.lane_name != self.plan.lane_name:
             raise ValueError("runner lane registration audit request must match plan lane")
         if self.pre_inventory.repository != self.request.repository:
@@ -217,6 +235,8 @@ def plan_runner_lane_registration(
     request: RunnerLaneRegistrationRequest,
     inventory: RunnerLaneInventory,
 ) -> RunnerLaneRegistrationPlan:
+    if request.operation != "register":
+        raise ValueError("runner lane registration planner requires register operation")
     blockers: list[RunnerLaneRegistrationBlocker] = []
     inventory_repository = _normalized_repository(inventory.repository)
     if not policy.allowed_repositories or request.repository not in policy.allowed_repositories:
@@ -287,12 +307,15 @@ def plan_runner_lane_registration(
 
     status: RunnerLaneRegistrationPlanStatus = "blocked" if blockers else "ready"
     return RunnerLaneRegistrationPlan(
+        operation="register",
         status=status,
         repository=request.repository,
         host_name=request.host_name,
         lane_name=request.lane_name,
         registration_root=request.registration_root,
         labels=request.labels,
+        active_run_ids=request.active_run_ids,
+        target_worker_active=request.target_worker_active,
         mutate=request.mutate,
         audit_record_key=request.audit_record_key,
         blockers=tuple(blockers),
@@ -305,6 +328,129 @@ def plan_runner_lane_registration(
     )
 
 
+def plan_runner_lane_retirement(
+    *,
+    policy: RunnerLaneRegistrationPolicy,
+    request: RunnerLaneRegistrationRequest,
+    inventory: RunnerLaneInventory,
+) -> RunnerLaneRegistrationPlan:
+    if request.operation != "retire":
+        raise ValueError("runner lane retirement planner requires retire operation")
+    blockers: list[RunnerLaneRegistrationBlocker] = []
+    inventory_repository = _normalized_repository(inventory.repository)
+    if not policy.allowed_repositories or request.repository not in policy.allowed_repositories:
+        blockers.append(
+            _blocker(
+                "repository_not_allowed",
+                f"repository is not opted into runner lane retirement: {request.repository}",
+            )
+        )
+    if not policy.approved_hosts or request.host_name.lower() not in policy.approved_hosts:
+        blockers.append(
+            _blocker(
+                "host_not_allowed",
+                f"runner host is not approved for lane retirement: {request.host_name}",
+            )
+        )
+    if not _path_under_allowed_roots(
+        path=request.registration_root,
+        allowed_roots=policy.allowed_registration_roots,
+    ):
+        blockers.append(
+            _blocker(
+                "registration_root_not_allowed",
+                "runner registration root is not under an allowed root: "
+                f"{request.registration_root}",
+            )
+        )
+    if policy.require_audit_record and not request.audit_record_key:
+        blockers.append(
+            _blocker(
+                "audit_record_key_missing",
+                "runner lane retirement requires an audit record key",
+            )
+        )
+    if not request.mutate:
+        blockers.append(
+            _blocker(
+                "mutate_not_requested",
+                "runner lane retirement is dry-run only until mutate is explicitly requested",
+            )
+        )
+    if inventory_repository != request.repository:
+        blockers.append(
+            _blocker(
+                "inventory_repository_mismatch",
+                f"runner lane inventory repository does not match request: {inventory_repository}",
+            )
+        )
+    matching_lanes = tuple(
+        lane for lane in inventory.lanes if lane.name.strip().lower() == request.lane_name
+    )
+    if not matching_lanes:
+        blockers.append(
+            _blocker("lane_missing", f"runner lane does not exist: {request.lane_name}")
+        )
+    elif len(matching_lanes) > 1:
+        blockers.append(
+            _blocker(
+                "lane_ambiguous",
+                f"runner lane inventory contains duplicate lane name: {request.lane_name}",
+            )
+        )
+    else:
+        lane = matching_lanes[0]
+        if lane.busy:
+            blockers.append(_blocker("lane_busy", f"runner lane is busy: {request.lane_name}"))
+        observed_labels = set(_normalized_labels(lane.labels))
+        for label in policy.required_labels:
+            if label not in observed_labels:
+                blockers.append(
+                    _blocker(
+                        "label_missing",
+                        f"runner lane retirement requires managed label: {label}",
+                    )
+                )
+    if request.active_run_ids:
+        blockers.append(
+            _blocker(
+                "repository_runs_active",
+                "runner lane retirement requires no active repository runs: "
+                + ", ".join(str(run_id) for run_id in request.active_run_ids),
+            )
+        )
+    if request.target_worker_active:
+        blockers.append(
+            _blocker(
+                "target_worker_active",
+                f"runner lane still has an active worker process: {request.lane_name}",
+            )
+        )
+
+    status: RunnerLaneRegistrationPlanStatus = "blocked" if blockers else "ready"
+    plan_labels = matching_lanes[0].labels if len(matching_lanes) == 1 else request.labels
+    return RunnerLaneRegistrationPlan(
+        operation="retire",
+        status=status,
+        repository=request.repository,
+        host_name=request.host_name,
+        lane_name=request.lane_name,
+        registration_root=request.registration_root,
+        labels=plan_labels,
+        active_run_ids=request.active_run_ids,
+        target_worker_active=request.target_worker_active,
+        mutate=request.mutate,
+        audit_record_key=request.audit_record_key,
+        blockers=tuple(blockers),
+        next_steps=_retirement_next_steps(status=status),
+        summary=(
+            "runner lane retirement plan is ready"
+            if status == "ready"
+            else "runner lane retirement plan is blocked"
+        ),
+    )
+
+
 def _next_steps(*, status: RunnerLaneRegistrationPlanStatus) -> tuple[str, ...]:
     if status == "blocked":
         return ("resolve blockers before registering any GitHub runner lane",)
@@ -312,6 +458,16 @@ def _next_steps(*, status: RunnerLaneRegistrationPlanStatus) -> tuple[str, ...]:
         "request a short-lived GitHub runner registration token",
         "configure the runner under the approved registration root",
         "verify GitHub sees the lane online",
+    )
+
+
+def _retirement_next_steps(*, status: RunnerLaneRegistrationPlanStatus) -> tuple[str, ...]:
+    if status == "blocked":
+        return ("resolve blockers before retiring any GitHub runner lane",)
+    return (
+        "stop and disable the exact supervised runner service",
+        "delete the exact GitHub runner registration",
+        "remove the verified retired runner directory",
     )
 
 

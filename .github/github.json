@@ -138,6 +138,7 @@
     "Preview Lifecycle",
     "Public Ingress Monitor",
     "Runner Host Hygiene",
+    "Runner Lane Lifecycle",
     "External Route Binding Reconcile",
     "Reusable External Route Binding Reconcile",
     "Route Binding Reconcile",

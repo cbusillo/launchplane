@@ -215,11 +215,17 @@ mismatch, or failed baseline readiness produce `decision: blocked` with
 `policy_ready: false` and must be resolved before any host mutation can be
 considered.
 
-## Registration Executor
+## Lifecycle Executors
 
-The first narrow host adapter for creating a repo-scoped runner lane is the
-manual ops-lane workflow `.github/workflows/runner-lane-registration.yml` and its
-CLI entrypoint:
+The narrow host adapters for creating and retiring a repo-scoped runner lane
+share the manual ops-lane workflow
+`.github/workflows/runner-lane-registration.yml`. The filename remains stable so
+the existing exact GitHub OIDC workflow identity and service-backed audit grant
+do not broaden during the lifecycle expansion. Operators select `register` or
+`retire`; both operations share one non-canceling per-repository/per-lane
+concurrency group and the runner-host hygiene lock.
+
+The registration CLI entrypoint is:
 
 ```bash
 uv run launchplane work-graph runner-lane-registration-executor \
@@ -255,17 +261,49 @@ GitHub's runner `config.sh` still requires the token as a command-line option,
 so the ops lane must treat same-user process inspection on the host as privileged
 and keep unrelated workloads off the constrained service user during mutation.
 
-This slice only creates a new lane. Existing-lane adoption, stale-lane removal,
-remove/recreate, runner work-directory pruning, and service restarts remain
-future maintainer capabilities. The earlier proof path briefly started `run.sh`
-from inside the GitHub Actions job, but that can produce transient online
-evidence and leave the runner offline after job cleanup. That shortcut remains
-disabled; the runner must be supervised outside the Actions job process tree.
+The retirement CLI entrypoint is:
+
+```bash
+uv run launchplane work-graph runner-lane-retirement-executor \
+  --repository owner/name \
+  --host-name chris-testing \
+  --execution-lane chris-testing-ops-gate \
+  --service-user launchplane-runner-hygiene \
+  --lane-name product-runner-1 \
+  --registration-root /home/launchplane-runner-hygiene/actions-runners \
+  --audit-record-key runner-lane-retirement/2026-07-26/product/dry-run \
+  --allowed-repository owner/name \
+  --approved-host chris-testing \
+  --allowed-registration-root /home/launchplane-runner-hygiene/actions-runners \
+  --required-label launchplane \
+  --required-label launchplane-managed \
+  --inventory-file runner-inventory.json
+```
+
+Retirement is dry-run by default and mutating CLI use requires service-backed
+audit delivery. A ready retirement requires one exact idle GitHub lane with the
+managed labels, no active repository workflow runs, no target `Runner.Worker`,
+an approved host/root, and an audit key. The mutating executor verifies the
+canonical runner directory and owner, stops and disables only the exact
+root-authorized systemd unit, verifies target processes stopped, then re-reads
+repository runs and GitHub inventory before deleting the unchanged runner ID.
+It verifies GitHub no longer lists the lane and removes the inactive runner
+directory only when `lsof` finds no open files. Any pre-delete failure restores
+the supervised service when the GitHub registration remains present. If the
+terminal service audit cannot be delivered after mutation, the executor returns
+`audit_delivery_pending` and embeds the complete terminal audit in the uploaded
+workflow result so the job fails visibly without discarding the outcome record.
+
+Existing-lane adoption, remove/recreate, generic service restarts, and automatic
+scaling remain future maintainer capabilities. The earlier proof path briefly
+started `run.sh` from inside the GitHub Actions job, but that can produce
+transient online evidence and leave the runner offline after job cleanup. That
+shortcut remains disabled; the runner must be supervised outside the Actions
+job process tree.
 
 The manual workflow defaults `registration_root` to `auto`, which resolves to
-`$HOME/actions-runners` for the constrained service user. Operators may pass an
-absolute root explicitly, but the service user must already be able to create
-lane directories below that root.
+the approved root in `LAUNCHPLANE_RUNNER_REGISTRATION_ALLOWED_ROOT`. An explicit
+root must match that value exactly.
 
 The manual workflow requires the repository secret
 `LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN` for cross-repository runner
@@ -281,9 +319,11 @@ and `systemctl is-active` on that template. Durable service-backed audit
 persistence is available through
 `POST /v1/evidence/runner-lane-registration/audits` under
 `runner_lane_registration_audit.write`; descriptor-backed operator routing for
-registration planning remains a later slice. The workflow still uploads the JSON
-artifact so operators can inspect the exact plan/result packet for cm-website or
-any other product proof.
+registration planning remains a later slice. Retirement reuses the same route
+with `operation: retire`, preserving the exact authorized workflow identity and
+persisted audit table while distinguishing lifecycle intent in the typed record.
+The workflow still uploads the JSON artifact so operators can inspect the exact
+plan/result packet.
 
 The current host bootstrap uses a root-owned template that runs the packaged
 service wrapper rather than the interactive runner script:
@@ -332,6 +372,26 @@ Validate sudoers changes with `visudo -cf`. If a host cannot support sudoers
 argument regex, use a tiny root-owned helper that validates the lane name before
 calling `systemctl`; do not broaden the rule to arbitrary `systemctl`, shell,
 file-write, or generic restart authority.
+
+Retirement uses the reviewed root-owned
+`/usr/local/sbin/launchplane-runner-service-retire` helper. Install the checked-in
+`scripts/runner-lane-service-retire.sh` at that path with root ownership and mode
+`0755`. Its root-owned mode-`0600`
+`/etc/launchplane/runner-lane-retirement-targets` file contains tab-separated
+`repository`, `lane`, `registration_root`, and `service_user` bindings. The
+helper rejects symlinked or non-root-owned configuration, verifies the invoking
+sudo user, canonical root, systemd unit user, and unit `ExecStart`, then stops
+and disables only that exact unit. A sudoers entry may grant only this helper;
+the root-owned target file remains the runtime authority for each approved
+retirement:
+
+```sudoers
+launchplane-runner-hygiene ALL=(root) NOPASSWD: NOSETENV: /usr/local/sbin/launchplane-runner-service-retire *
+```
+
+Validate the helper, target file, and candidate sudoers policy before the
+mutating lifecycle dispatch. Remove a completed one-time target binding after
+post-retirement verification so stale host authority does not accumulate.
 
 ## Supervised Runner Maintainer Plan
 
