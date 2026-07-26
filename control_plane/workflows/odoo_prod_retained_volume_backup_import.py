@@ -15,6 +15,7 @@ from control_plane.contracts.artifact_identity import (
     artifact_manifest_matches_image_repository,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -65,6 +66,8 @@ class OdooProdRetainedVolumeBackupImportStore(Protocol):
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
     ) -> EnvironmentInventory: ...
+
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
 
@@ -241,6 +244,13 @@ def build_odoo_prod_retained_volume_backup_import_plan(
         token = ""
         blockers.append("Exact live target evidence could not be read.")
     live_env = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    live_target_name = str(target_payload.get("name") or "").strip()
+    target_name = target_record.target_name.strip() or live_target_name
+    if target_record.target_name.strip() and live_target_name != target_record.target_name.strip():
+        blockers.append("Live target name drifted from the DB-backed target record.")
+    target_compose_project = str(target_payload.get("appName") or "").strip()
+    if not target_name or not target_compose_project:
+        blockers.append("Exact live target name and compose project are required.")
     for key, expected_value in (
         ("ODOO_DB_NAME", destination_database_name),
         ("ODOO_DB_USER", database_user),
@@ -250,22 +260,36 @@ def build_odoo_prod_retained_volume_backup_import_plan(
     ):
         if expected_value and live_env.get(key, "").strip() != expected_value:
             blockers.append(f"Live {key} drifted from DB-backed runtime authority.")
+    accepted_runtime_identity = runtime_identity
     if runtime_identity is not None:
         live_runtime_identity = parse_runtime_identity_payload(
             live_env.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", "")
         )
-        if live_runtime_identity != runtime_identity:
+        if live_runtime_identity is None or not _live_runtime_identity_env_matches(
+            live_env=live_env,
+            live_runtime_identity=live_runtime_identity,
+        ):
             blockers.append(
                 "Live target runtime identity drifted from production inventory authority."
             )
-
-    live_target_name = str(target_payload.get("name") or "").strip()
-    target_name = target_record.target_name.strip() or live_target_name
-    if target_record.target_name.strip() and live_target_name != target_record.target_name.strip():
-        blockers.append("Live target name drifted from the DB-backed target record.")
-    target_compose_project = str(target_payload.get("appName") or "").strip()
-    if not target_name or not target_compose_project:
-        blockers.append("Exact live target name and compose project are required.")
+        elif live_runtime_identity == runtime_identity:
+            accepted_runtime_identity = live_runtime_identity
+        elif _recorded_failed_deployment_matches_live_identity(
+            record_store=record_store,
+            live_runtime_identity=live_runtime_identity,
+            inventory_runtime_identity=runtime_identity,
+            target_id=target_id_record.target_id,
+            target_name=target_name,
+        ):
+            accepted_runtime_identity = live_runtime_identity
+            warnings.append(
+                "Live runtime identity belongs to a recorded failed deployment; "
+                "the import plan is bound to that exact repair state."
+            )
+        else:
+            blockers.append(
+                "Live target runtime identity drifted from production inventory authority."
+            )
 
     inspection_evidence: OdooProdRetainedVolumeBackupImportInspectionEvidence | None = None
     if not blockers:
@@ -352,7 +376,7 @@ def build_odoo_prod_retained_volume_backup_import_plan(
         "backup_record_id": request.backup_record_id,
         "expected_current_artifact_id": request.expected_current_artifact_id,
         "inventory_updated_at": inventory.updated_at,
-        "runtime_identity": runtime_identity,
+        "runtime_identity": accepted_runtime_identity,
         "active_db_volume": request.expected_active_db_volume,
         "active_data_volume": request.expected_active_data_volume,
         "active_log_volume": request.expected_active_log_volume,
@@ -822,6 +846,70 @@ def _validate_runtime_identity(
         or runtime_identity.source_git_ref != inventory.source_git_ref
     ):
         blockers.append("Current production runtime identity is internally inconsistent.")
+
+
+def _live_runtime_identity_env_matches(
+    *,
+    live_env: dict[str, str],
+    live_runtime_identity: RuntimeIdentity,
+) -> bool:
+    return all(
+        live_env.get(key, "").strip() == expected_value
+        for key, expected_value in (
+            (
+                "LAUNCHPLANE_DEPLOYMENT_RECORD_ID",
+                live_runtime_identity.deployment_record_id,
+            ),
+            ("LAUNCHPLANE_ARTIFACT_ID", live_runtime_identity.artifact_id),
+            ("LAUNCHPLANE_SOURCE_GIT_REF", live_runtime_identity.source_git_ref),
+        )
+    )
+
+
+def _recorded_failed_deployment_matches_live_identity(
+    *,
+    record_store: OdooProdRetainedVolumeBackupImportStore,
+    live_runtime_identity: RuntimeIdentity,
+    inventory_runtime_identity: RuntimeIdentity,
+    target_id: str,
+    target_name: str,
+) -> bool:
+    if (
+        live_runtime_identity.deployment_record_id
+        == inventory_runtime_identity.deployment_record_id
+        or live_runtime_identity.deployed_at.strip()
+        or live_runtime_identity.model_dump(
+            mode="json",
+            exclude={"deployment_record_id", "deployed_at"},
+        )
+        != inventory_runtime_identity.model_dump(
+            mode="json",
+            exclude={"deployment_record_id", "deployed_at"},
+        )
+    ):
+        return False
+    try:
+        deployment_record = record_store.read_deployment_record(
+            live_runtime_identity.deployment_record_id
+        )
+    except FileNotFoundError:
+        return False
+    resolved_target = deployment_record.resolved_target
+    artifact_identity = deployment_record.artifact_identity
+    return (
+        deployment_record.record_id == live_runtime_identity.deployment_record_id
+        and deployment_record.context == live_runtime_identity.context
+        and deployment_record.instance == live_runtime_identity.instance
+        and deployment_record.source_git_ref == live_runtime_identity.source_git_ref
+        and artifact_identity is not None
+        and artifact_identity.artifact_id == live_runtime_identity.artifact_id
+        and deployment_record.runtime_identity == live_runtime_identity
+        and deployment_record.deploy.status == "fail"
+        and resolved_target is not None
+        and resolved_target.target_type == "compose"
+        and resolved_target.target_id == target_id
+        and resolved_target.target_name == target_name
+    )
 
 
 def _artifact_image_reference(manifest: ArtifactIdentityManifest) -> str:

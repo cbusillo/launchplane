@@ -1668,6 +1668,16 @@ cluster state to be exactly `shut down`, counts and sizes the source filestore,
 proves the staging and destination paths absent, checks active data-volume free
 space, and binds all evidence into a SHA-256 plan fingerprint.
 
+A failed target replacement can update the live target's runtime identity before
+post-deploy verification fails while production inventory correctly remains on
+the last successful deployment. Retained-volume import accepts that repair state
+only when every identity field except `deployment_record_id` and `deployed_at`
+still matches inventory, `deployed_at` is empty, and the live deployment id
+resolves to an exact failed deployment record for the same target, artifact, and
+source. The accepted live identity is included in the reviewed plan fingerprint,
+so another replacement attempt invalidates apply. This exception neither marks
+the failed deployment successful nor advances production inventory.
+
 Run `Odoo Prod Retained Volume Backup Import Apply` only with the exact reviewed
 plan operation and fingerprint, a stable idempotency key, and confirmation phrase
 `import-retained-volumes-as-production-backup`. The service queues a dedicated
