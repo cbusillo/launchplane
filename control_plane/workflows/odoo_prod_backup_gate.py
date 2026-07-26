@@ -110,6 +110,19 @@ class OdooProdBackupGateResult(BaseModel):
     error_message: str = ""
 
 
+class OdooProdBackupCaptureEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    backup_nonce: str = Field(pattern=r"^[0-9a-f]{64}$")
+    backup_record_id: str = Field(min_length=1)
+    database_name: str = Field(min_length=1)
+    database_dump_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    filestore_archive_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    database_dump_size: int = Field(gt=0)
+    filestore_archive_size: int = Field(gt=0)
+
+
 class OdooProdBackupVerificationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -272,9 +285,8 @@ def _backup_paths(*, runtime_values: dict[str, str], backup_record_id: str) -> d
         )
     if not _BACKUP_PATH_COMPONENT_PATTERN.fullmatch(backup_record_id):
         raise click.ClickException("Odoo prod backup workflow requires a path-safe record id.")
-    backup_root = _normalized_runtime_path(
+    backup_root = _normalized_backup_root(
         runtime_values.get("ODOO_BACKUP_ROOT", ""),
-        label="ODOO_BACKUP_ROOT",
     )
     if not backup_root:
         raise click.ClickException(
@@ -294,6 +306,19 @@ def _backup_paths(*, runtime_values: dict[str, str], backup_record_id: str) -> d
         "filestore_archive_path": f"{backup_dir}/{database_name}-filestore.tar.gz",
         "manifest_path": f"{backup_dir}/manifest.json",
     }
+
+
+def _normalized_backup_root(raw_value: str) -> str:
+    backup_root = _normalized_runtime_path(raw_value, label="ODOO_BACKUP_ROOT")
+    if not backup_root:
+        return ""
+    allowed_root = PurePosixPath(dokploy_post_deploy.DEFAULT_ODOO_BACKUP_ROOT)
+    backup_root_path = PurePosixPath(backup_root)
+    if backup_root_path != allowed_root and allowed_root not in backup_root_path.parents:
+        raise click.ClickException(
+            "Odoo prod backup workflow requires ODOO_BACKUP_ROOT to stay within the dedicated Launchplane backup root."
+        )
+    return backup_root
 
 
 def _normalized_runtime_path(raw_value: str, *, label: str) -> str:
@@ -409,24 +434,44 @@ def execute_odoo_prod_backup_gate(
         status="pending",
         evidence={},
     )
+    backup_nonce = python_secrets.token_hex(32)
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
-        dokploy_post_deploy.run_compose_odoo_backup_gate(
+        raw_capture_evidence = dokploy_post_deploy.run_compose_odoo_backup_gate(
             host=host,
             token=token,
             target_definition=target_definition,
+            backup_nonce=backup_nonce,
             backup_record_id=request.backup_record_id,
             database_name=evidence["database_name"],
             filestore_path=evidence["filestore_path"],
             backup_root=evidence["backup_root"],
             timeout_seconds=request.timeout_seconds,
         )
+        try:
+            capture_evidence = OdooProdBackupCaptureEvidence.model_validate(raw_capture_evidence)
+        except ValidationError as error:
+            raise click.ClickException(
+                "Dokploy Odoo backup gate returned invalid bounded completion evidence."
+            ) from error
+        if (
+            capture_evidence.backup_nonce != backup_nonce
+            or capture_evidence.backup_record_id != request.backup_record_id
+            or capture_evidence.database_name != evidence["database_name"]
+        ):
+            raise click.ClickException(
+                "Dokploy Odoo backup gate result did not match the exact request."
+            )
     except (click.ClickException, OSError) as error:
         _write_backup_gate_record(
             record_store=typed_record_store,
             request=request,
             status="fail",
-            evidence={**evidence, "error_message": str(error)},
+            evidence={
+                **evidence,
+                "backup_nonce": backup_nonce,
+                "error_message": str(error),
+            },
         )
         return OdooProdBackupGateResult(
             context=request.context,
@@ -439,11 +484,12 @@ def execute_odoo_prod_backup_gate(
             manifest_path=evidence.get("manifest_path", ""),
             error_message=str(error),
         )
+    captured_evidence = {key: str(value) for key, value in capture_evidence.model_dump().items()}
     _write_backup_gate_record(
         record_store=typed_record_store,
         request=request,
         status="pass",
-        evidence=evidence,
+        evidence={**evidence, **captured_evidence},
     )
     return OdooProdBackupGateResult(
         context=request.context,

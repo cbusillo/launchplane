@@ -3001,6 +3001,19 @@ domains = ["cm-testing.shinycomputers.com"]
         target_definition = control_plane_dokploy.DokployTargetDefinition(
             context="cm", instance="prod", target_id="compose-123", target_name="cm-prod"
         )
+        backup_result: dict[str, object] = {
+            "schema_version": 1,
+            "backup_nonce": "c" * 64,
+            "backup_record_id": "backup-gate-cm-prod-1",
+            "database_name": "cm",
+            "database_dump_sha256": "a" * 64,
+            "filestore_archive_sha256": "b" * 64,
+            "database_dump_size": 4096,
+            "filestore_archive_size": 8192,
+        }
+        encoded_result = base64.b64encode(
+            json.dumps(backup_result, sort_keys=True).encode()
+        ).decode()
         schedule_payloads: list[dict[str, object]] = []
         request_paths: list[str] = []
 
@@ -3027,23 +3040,31 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
-                side_effect=lambda **_kwargs: None,
+                return_value="deployment=schedule-after status=done",
             ),
             patch(
                 "control_plane.dokploy.api.dokploy_request",
                 side_effect=capture_request_path,
             ),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
+                return_value=(
+                    f"{control_plane_dokploy.ODOO_BACKUP_GATE_RESULT_MARKER}={encoded_result}",
+                ),
+            ) as fetch_logs_mock,
         ):
-            control_plane_dokploy.run_compose_odoo_backup_gate(
+            result = control_plane_dokploy.run_compose_odoo_backup_gate(
                 host="https://dokploy.example.com",
                 token="secret-token",
                 target_definition=target_definition,
+                backup_nonce="c" * 64,
                 backup_record_id="backup-gate-cm-prod-1",
                 database_name="cm",
                 filestore_path="/volumes/data/filestore",
                 backup_root="/volumes/data/backups/launchplane",
             )
 
+        self.assertEqual(result, backup_result)
         self.assertEqual(len(schedule_payloads), 1)
         self.assertEqual(
             schedule_payloads[0]["name"],
@@ -3063,10 +3084,67 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertIn("manifest.json", script)
         self.assertIn('"database_dump_sha256"', script)
         self.assertIn('"filestore_archive_sha256"', script)
+        self.assertIn(
+            'script_runner_uid=$(docker exec "${script_runner_container_id}" id -u)', script
+        )
+        self.assertIn('-o "$SCRIPT_RUNNER_UID" -g "$SCRIPT_RUNNER_GID"', script)
+        self.assertIn("RESULT_MARKER", script)
+        self.assertIn("BACKUP_NONCE", script)
         self.assertIn("docker exec -i", script)
         manifest_script = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
         compile(manifest_script, "embedded-odoo-backup-manifest.py", "exec")
         self.assertIn("/api/schedule.runManually", request_paths)
+        fetch_logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            deployment_id="schedule-after",
+            line_count=control_plane_dokploy.MAX_DOKPLOY_LOG_LINE_COUNT,
+        )
+
+    def test_run_compose_odoo_backup_gate_rejects_done_schedule_without_completion_evidence(
+        self,
+    ) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="cm", instance="prod", target_id="compose-123", target_name="cm-prod"
+        )
+
+        with (
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": "cm-prod-app", "serverId": "server-123"},
+            ),
+            patch(
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-123"},
+            ),
+            patch(
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
+                return_value={"deploymentId": "schedule-before"},
+            ),
+            patch(
+                "control_plane.dokploy.api.dokploy_request",
+                return_value={"ok": True},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                return_value="deployment=schedule-after status=done",
+            ),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
+                return_value=("pg_dump: Permission denied",),
+            ),
+            self.assertRaisesRegex(click.ClickException, "no unique bounded result"),
+        ):
+            control_plane_dokploy.run_compose_odoo_backup_gate(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                backup_nonce="c" * 64,
+                backup_record_id="backup-gate-cm-prod-1",
+                database_name="cm",
+                filestore_path="/volumes/data/filestore",
+                backup_root="/volumes/data/backups/launchplane",
+            )
 
     def test_run_compose_odoo_backup_verification_returns_only_bounded_evidence(
         self,
