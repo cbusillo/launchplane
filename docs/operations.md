@@ -1678,6 +1678,13 @@ source. The accepted live identity is included in the reviewed plan fingerprint,
 so another replacement attempt invalidates apply. This exception neither marks
 the failed deployment successful nor advances production inventory.
 
+The active database container may be stopped or restarting during this repair.
+Plan and apply therefore resolve exactly one database container across all
+states and use only `docker inspect` evidence from it; they never start or
+execute inside that container or mount its corrupt database volume. The
+script-runner remains running-only because it emits the bounded result and
+writes the imported logical backup into the active data volume.
+
 Run `Odoo Prod Retained Volume Backup Import Apply` only with the exact reviewed
 plan operation and fingerprint, a stable idempotency key, and confirmation phrase
 `import-retained-volumes-as-production-backup`. The service queues a dedicated

@@ -1016,6 +1016,13 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
         self.assertIn("container_mounts_volume", combined)
         self.assertIn("active_destination_database_name", combined)
         self.assertIn('"postgres (PostgreSQL) 17."*', combined)
+        self.assertEqual(
+            combined.count("resolve_single_container_any_state database"),
+            2,
+        )
+        self.assertEqual(combined.count("resolve_single_container script-runner"), 2)
+        self.assertNotIn("resolve_single_container_any_state script-runner", combined)
+        self.assertEqual(combined.count("docker ps -aq"), 2)
         self.assertIn("created_staging_clone_volume", apply_script)
         self.assertIn('mkdir -m 700 "$backup_dir"', apply_script)
         self.assertIn("pg_dump --host /var/run/postgresql", apply_script)
