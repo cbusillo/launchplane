@@ -2465,6 +2465,19 @@ resolve_single_container() {{
     printf '%s' "${{container_ids}}"
 }}
 
+resolve_single_container_any_state() {{
+    local service_name="$1"
+    local container_ids
+    container_ids=$(docker ps -aq \
+        --filter "label=com.docker.compose.project=${{compose_project}}" \
+        --filter "label=com.docker.compose.service=${{service_name}}")
+    if [ "$(printf '%s\n' "${{container_ids}}" | sed '/^$/d' | wc -l | tr -d ' ')" != "1" ]; then
+        echo "Expected exactly one ${{service_name}} container for ${{compose_project}}." >&2
+        exit 1
+    fi
+    printf '%s' "${{container_ids}}"
+}}
+
 require_volume() {{
     docker volume inspect "$1" >/dev/null
 }}
@@ -2497,7 +2510,7 @@ if [ -n "$(docker ps -q --filter "volume=${{source_data_volume}}")" ]; then
     exit 1
 fi
 
-database_container_id=$(resolve_single_container database)
+database_container_id=$(resolve_single_container_any_state database)
 script_runner_container_id=$(resolve_single_container script-runner)
 postgres_image_id=$(docker inspect -f '{{{{.Image}}}}' "${{database_container_id}}")
 script_runner_image_id=$(docker inspect -f '{{{{.Image}}}}' "${{script_runner_container_id}}")
@@ -2807,6 +2820,19 @@ resolve_single_container() {{
     printf '%s' "${{container_ids}}"
 }}
 
+resolve_single_container_any_state() {{
+    local service_name="$1"
+    local container_ids
+    container_ids=$(docker ps -aq \
+        --filter "label=com.docker.compose.project=${{compose_project}}" \
+        --filter "label=com.docker.compose.service=${{service_name}}")
+    if [ "$(printf '%s\n' "${{container_ids}}" | sed '/^$/d' | wc -l | tr -d ' ')" != "1" ]; then
+        echo "Expected exactly one ${{service_name}} container for ${{compose_project}}." >&2
+        exit 1
+    fi
+    printf '%s' "${{container_ids}}"
+}}
+
 volume_label() {{
     local volume_name="$1"
     local label_name="$2"
@@ -2844,7 +2870,7 @@ if [ "$(volume_label "${{source_db_volume}}" com.docker.compose.project)" != \
     exit 1
 fi
 
-database_container_id=$(resolve_single_container database)
+database_container_id=$(resolve_single_container_any_state database)
 script_runner_container_id=$(resolve_single_container script-runner)
 postgres_image_id=$(docker inspect -f '{{{{.Image}}}}' "${{database_container_id}}")
 script_runner_image_id=$(docker inspect -f '{{{{.Image}}}}' "${{script_runner_container_id}}")
