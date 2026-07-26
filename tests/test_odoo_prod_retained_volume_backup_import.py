@@ -492,6 +492,16 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
                     {**base_payload, field_name: "unsafe/provider/id"}
                 )
 
+        accepted = OdooProdRetainedVolumeBackupImportInspectionFailureEvidence.model_validate(
+            {
+                **base_payload,
+                "inspection_schedule_id": "_schedule-id",
+                "inspection_deployment_id": "-deployment-id",
+            }
+        )
+        self.assertEqual(accepted.inspection_schedule_id, "_schedule-id")
+        self.assertEqual(accepted.inspection_deployment_id, "-deployment-id")
+
     def test_request_rejects_source_or_staging_volume_aliases(self) -> None:
         payload = _request().model_dump()
         payload["source_db_volume"] = ACTIVE_DB_VOLUME
@@ -1210,6 +1220,11 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
         self.assertIn("pg_dump --host /var/run/postgresql", apply_script)
         self.assertIn("tarfile.open", apply_script)
         self.assertIn("schema_version", apply_script)
+        volume_label_command = (
+            'docker volume inspect -f "{{ index .Labels \\"${label_name}\\" }}" "${volume_name}"'
+        )
+        self.assertIn(volume_label_command, inspection_script)
+        self.assertIn(volume_label_command, apply_script)
         self.assertIn("set -Eeuo pipefail", inspection_script)
         self.assertIn("trap 'emit_inspection_failure \"$?\"' EXIT", inspection_script)
         self.assertIn("trap 'exit 143' TERM", inspection_script)
