@@ -169,7 +169,11 @@ class _CommandRunner:
                     break
             return RemoteCommandResult(
                 returncode=0,
-                stdout=(f"{apparent_bytes}\n{allocated_bytes}\n{self._runner_workdir_status}\n"),
+                stdout=(
+                    f"{apparent_bytes}\n{allocated_bytes}\n"
+                    if self._runner_workdir_status == "complete"
+                    else f"{apparent_bytes}\n{allocated_bytes}\npartial\n"
+                ),
             )
         if command_tuple[:3] == ("docker", "image", "inspect"):
             if not self._pruned or self._image_present_after:
@@ -375,7 +379,12 @@ class RunnerHostHygieneWorkflowTests(unittest.TestCase):
         self.assertIn("--runner-workdir-root", workflow_text)
         self.assertIn("--audit-spool-root", workflow_text)
         self.assertIn("--audit-artifact-file", workflow_text)
-        self.assertIn("      - name: Upload executor result\n        if: always()\n", workflow_text)
+        self.assertIn("    timeout-minutes: 180\n", workflow_text)
+        self.assertIn(
+            "      - name: Upload executor result\n"
+            "        if: always() && steps.executor.outcome != 'skipped'\n",
+            workflow_text,
+        )
         self.assertIn('    - cron: "17 10 * * 1-6"\n', workflow_text)
         self.assertIn('    - cron: "17 10 * * 0"\n', workflow_text)
         self.assertIn('if [ "$SCHEDULE_EXPRESSION" = "17 10 * * 0" ]; then\n', workflow_text)
@@ -385,6 +394,7 @@ class RunnerHostHygieneWorkflowTests(unittest.TestCase):
         self.assertIn("--max-used-space-bytes", workflow_text)
         self.assertIn("maintenance_failures=$((maintenance_failures + 1))", workflow_text)
         self.assertIn("scheduled hygiene action(s) failed", workflow_text)
+        self.assertIn("BuildKit cache budgets must not repeat a builder.", workflow_text)
 
 
 class RunnerHostHygieneExecutorTests(unittest.TestCase):
@@ -467,6 +477,15 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             "odoo-docker-chris-testing",
         )
         self.assertEqual(audit_poster.audits[0].request.max_used_space_bytes, 64_424_509_440)
+
+    def test_executor_rejects_prune_age_below_retention_floor(self) -> None:
+        with self.assertRaisesRegex(ValueError, "retain at least 168 hours"):
+            _request(mutate=True, prune_until="167h")
+
+    def test_executor_normalizes_prune_age_hours(self) -> None:
+        request = _request(mutate=True, prune_until="168H")
+
+        self.assertEqual(request.prune_until, "168h")
 
     def test_executor_blocks_unallowlisted_buildx_builder(self) -> None:
         command_runner = _CommandRunner()
@@ -711,7 +730,8 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertIn('run_du_measurement "$allocated_file" -s -B1 -x', helper_text)
         self.assertIn("((du_status == 1))", helper_text)
         self.assertIn("measurement_partial=1", helper_text)
-        self.assertIn("((record_count == expected_count))", helper_text)
+        self.assertIn("((record_count <= expected_count))", helper_text)
+        self.assertIn("else\n  /usr/bin/printf '%s\\n%s\\n'", helper_text)
         subprocess.run(
             ("/bin/bash", "-n", str(helper_path)),
             capture_output=True,
@@ -1446,6 +1466,15 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             validate_local_executor_environment(
                 request=_request(mutate=True),
                 current_user="root",
+                current_host="chris-testing",
+            )
+
+    def test_executor_environment_requires_host_to_match_approved_host(self) -> None:
+        with self.assertRaisesRegex(Exception, "host must match the approved host"):
+            validate_local_executor_environment(
+                request=_request(mutate=True),
+                current_user="launchplane-runner-hygiene",
+                current_host="other-host",
             )
 
     def test_executor_environment_requires_repository_scope_to_match_github_repository(
@@ -1456,6 +1485,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 request=_request(mutate=True),
                 env={"GITHUB_REPOSITORY": "cbusillo/other"},
                 current_user="launchplane-runner-hygiene",
+                current_host="chris-testing",
             )
 
     @staticmethod
@@ -1464,6 +1494,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             request=_request(mutate=True),
             env={},
             current_user="launchplane-runner-hygiene",
+            current_host="chris-testing.example.test",
         )
 
     def test_local_command_runner_returns_structured_timeout_result(self) -> None:
@@ -1560,6 +1591,7 @@ def _request(
     target_buildkit_builder: str = "",
     allowed_buildkit_builders: tuple[str, ...] = (),
     max_used_space_bytes: int = 0,
+    prune_until: str = "168h",
     audit_record_key: str = "runner-host-hygiene/2026-05-23/chris-testing",
     runner_workdir_roots: tuple[RunnerWorkdirRoot, ...] = (
         RunnerWorkdirRoot(key="legacy", path="/opt/actions-runners"),
@@ -1580,6 +1612,7 @@ def _request(
         target_buildkit_state_volumes=target_buildkit_state_volumes,
         allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
         mutate=mutate,
+        prune_until=prune_until,
         runner_workdir_roots=runner_workdir_roots,
         idle_observation_interval_seconds=0,
         resolve_action_started=resolve_action_started,

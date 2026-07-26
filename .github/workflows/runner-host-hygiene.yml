@@ -42,7 +42,7 @@ name: Runner Host Hygiene
         default: "0"
         type: string
       prune_until:
-        description: Docker builder prune age filter
+        description: Docker prune age filter in whole hours, minimum 168h
         required: false
         default: 168h
         type: string
@@ -68,6 +68,7 @@ concurrency:
 
 jobs:
   runner-host-hygiene:
+    timeout-minutes: 180
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}
@@ -119,6 +120,7 @@ jobs:
           fi
 
       - name: Run approved runner host hygiene executor
+        id: executor
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -190,6 +192,7 @@ jobs:
           allowed_builder_args=()
           buildkit_builder_names=()
           buildkit_builder_budgets=()
+          declare -A seen_buildkit_builder_names=()
           IFS=',' read -r -a builder_budgets <<< "$RUNNER_BUILDKIT_CACHE_BUDGETS"
           for builder_budget in "${builder_budgets[@]}"; do
             trimmed="${builder_budget#"${builder_budget%%[![:space:]]*}"}"
@@ -210,6 +213,11 @@ jobs:
               echo "BuildKit cache budgets require a safe builder and positive bytes." >&2
               exit 1
             fi
+            if [ -n "${seen_buildkit_builder_names[$builder_name]:-}" ]; then
+              echo "BuildKit cache budgets must not repeat a builder." >&2
+              exit 1
+            fi
+            seen_buildkit_builder_names["$builder_name"]=1
             buildkit_builder_names+=("$builder_name")
             buildkit_builder_budgets+=("$budget_bytes")
             allowed_builder_args+=(--allowed-buildkit-builder "$builder_name")
@@ -374,7 +382,7 @@ jobs:
             "${target_builder_args[@]}"
 
       - name: Upload executor result
-        if: always()
+        if: always() && steps.executor.outcome != 'skipped'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runner-host-hygiene-result

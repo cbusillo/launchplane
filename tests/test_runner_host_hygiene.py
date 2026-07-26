@@ -1386,6 +1386,86 @@ class RunnerHostHygieneApplyPlanCliTests(unittest.TestCase):
             "planned runner host hygiene apply; no host mutation was executed",
         )
 
+    def test_cli_builds_allowlisted_buildx_apply_plan(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            report_file = Path(temp_dir) / "report.json"
+            report_file.write_text(
+                json.dumps({"report": _healthy_report().model_dump(mode="json")}),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-host-hygiene-apply-plan",
+                    "--action",
+                    "prune_docker_cache",
+                    "--host-name",
+                    "chris-testing",
+                    "--mutate",
+                    "--audit-record-key",
+                    "runner-host-hygiene/2026-07-26/chris-testing",
+                    "--approved-host",
+                    "chris-testing",
+                    "--allow-docker-cache-prune",
+                    "--target-buildkit-builder",
+                    "odoo-docker-chris-testing",
+                    "--allowed-buildkit-builder",
+                    "odoo-docker-chris-testing",
+                    "--max-used-space-bytes",
+                    "64424509440",
+                    "--retained-warm-builder",
+                    "odoo-docker-chris-testing",
+                    "--report-file",
+                    report_file.as_posix(),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["plan"]["status"], "ready")
+        self.assertEqual(
+            payload["request"]["target_buildkit_builder"],
+            "odoo-docker-chris-testing",
+        )
+        self.assertEqual(payload["request"]["max_used_space_bytes"], 64_424_509_440)
+
+    def test_cli_builds_dangling_image_apply_plan(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            report_file = Path(temp_dir) / "report.json"
+            report_file.write_text(
+                json.dumps({"report": _healthy_report().model_dump(mode="json")}),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-host-hygiene-apply-plan",
+                    "--action",
+                    "prune_dangling_images",
+                    "--host-name",
+                    "chris-testing",
+                    "--mutate",
+                    "--audit-record-key",
+                    "runner-host-hygiene/2026-07-26/chris-testing-images",
+                    "--approved-host",
+                    "chris-testing",
+                    "--allow-dangling-image-prune",
+                    "--retained-warm-builder",
+                    "odoo-docker-chris-testing",
+                    "--report-file",
+                    report_file.as_posix(),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["plan"]["status"], "ready")
+        self.assertEqual(payload["request"]["action"], "prune_dangling_images")
+
     def test_cli_builds_adapter_boundary_from_apply_plan_file(self) -> None:
         with TemporaryDirectory() as temp_dir:
             apply_plan = _ready_apply_plan()

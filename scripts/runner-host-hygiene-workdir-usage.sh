@@ -112,7 +112,11 @@ sum_du_output() {
     total=$((total + size))
     record_count=$((record_count + 1))
   done <"$output_file"
-  ((record_count == expected_count))
+  if ((measurement_partial > 0)); then
+    ((record_count <= expected_count))
+  else
+    ((record_count == expected_count))
+  fi
   /usr/bin/printf '%s\n' "$total"
 }
 
@@ -123,5 +127,7 @@ allocated_bytes="$(sum_du_output "$allocated_file" "$workdir_count")"
 measurement_status="complete"
 if ((measurement_partial > 0)); then
   measurement_status="partial"
+  /usr/bin/printf '%s\n%s\n%s\n' "$apparent_bytes" "$allocated_bytes" "$measurement_status"
+else
+  /usr/bin/printf '%s\n%s\n' "$apparent_bytes" "$allocated_bytes"
 fi
-/usr/bin/printf '%s\n%s\n%s\n' "$apparent_bytes" "$allocated_bytes" "$measurement_status"

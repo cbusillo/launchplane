@@ -49,6 +49,7 @@ from control_plane.workflows.runner_host_hygiene_audit_spool import (
 
 AUDIT_ROUTE_PATH = "/v1/evidence/runner-host-hygiene/audits"
 DEFAULT_PRUNE_UNTIL = "168h"
+MINIMUM_PRUNE_UNTIL_HOURS = 168
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
 _RUNNER_WORKDIR_USAGE_HELPER = "/usr/local/sbin/launchplane-runner-workdir-usage"
 _DOCKER_DISK_USAGE_COMMAND = (
@@ -278,6 +279,15 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
             raise ValueError("runner host hygiene executor requires retained_warm_builders")
         if not self.prune_until:
             raise ValueError("runner host hygiene executor requires prune_until")
+        prune_until_match = re.fullmatch(r"([1-9][0-9]*)h", self.prune_until.lower())
+        if prune_until_match is None:
+            raise ValueError("runner host hygiene prune_until must be a whole-hour duration")
+        prune_until_hours = int(prune_until_match.group(1))
+        if prune_until_hours < MINIMUM_PRUNE_UNTIL_HOURS:
+            raise ValueError(
+                "runner host hygiene prune_until must retain at least 168 hours of cache"
+            )
+        self.prune_until = f"{prune_until_hours}h"
         if not self.runner_workdir_roots:
             raise ValueError("runner host hygiene executor requires runner_workdir_roots")
         return self
@@ -883,12 +893,21 @@ def validate_local_executor_environment(
     request: RunnerHostHygieneExecutorRequest,
     env: Mapping[str, str] | None = None,
     current_user: str | None = None,
+    current_host: str | None = None,
 ) -> None:
     resolved_env = os.environ if env is None else env
     resolved_current_user = current_user or pwd.getpwuid(os.geteuid()).pw_name
+    resolved_current_host = current_host or socket.gethostname()
     if resolved_current_user != request.service_user:
         raise click.ClickException(
             "Runner host hygiene executor user must match the approved service user."
+        )
+    if (
+        resolved_current_host.strip().lower().split(".", maxsplit=1)[0]
+        != (request.host_name.lower().split(".", maxsplit=1)[0])
+    ):
+        raise click.ClickException(
+            "Runner host hygiene executor host must match the approved host."
         )
     github_repository = resolved_env.get("GITHUB_REPOSITORY", "").strip()
     if github_repository and github_repository != request.repository_scope:

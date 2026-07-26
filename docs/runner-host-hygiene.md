@@ -214,6 +214,9 @@ The workflow requires these repository variables:
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_BUILDKIT_CACHE_BUDGETS`, as comma-separated
   `builder=bytes` entries. Builder identities and byte budgets are runtime
   authority; production code contains no real builder names or capacities.
+  Each builder may appear only once. The byte value is a pressure target for
+  cache eligible under the age filter, not permission to delete recent or
+  in-use cache merely to force the observed total below the target.
 
 The executor fails closed unless the process user matches the requested service
 user, the GitHub repository matches the requested repository scope, retained
@@ -227,9 +230,11 @@ Cache and image maintenance may proceed when the report has unrelated attention
 findings so cleanup can remediate pressure; host identity, warm-image retention,
 audit durability, exact builder allowlists, and the idle gate remain mandatory.
 Mutating runs write a `planned` audit before mutation, then write `completed`
-only when the bounded mutation command succeeds and post-apply evidence is
-healthy. The CLI exits nonzero when a requested mutation is blocked, fails, or
-leaves audit delivery pending. It does not run `docker system prune`, `docker
+only when the bounded mutation command succeeds and action-specific safety
+postconditions pass. Unrelated report attention remains visible in post-apply
+evidence and the completion message rather than blocking the cleanup intended
+to remediate it. The CLI exits nonzero when a requested mutation is blocked,
+fails, or leaves audit delivery pending. It does not run `docker system prune`, `docker
 image prune -a`, generic `docker volume prune`, runner work-directory deletion,
 runner service restart, builder deletion, or automatic rollback. Operators
 should use the captured image and volume inventory to decide any later
@@ -244,7 +249,9 @@ depth-two `_work` registration directories through the root-owned
 `/usr/local/sbin/launchplane-runner-workdir-usage` helper. Install that helper
 from `scripts/runner-host-hygiene-workdir-usage.sh` only from a reviewed merged
 revision. The helper performs two read-only GNU `du` measurements and emits only
-the apparent and allocated byte totals. A configured root with no matching
+the apparent and allocated byte totals for a complete measurement. It adds a
+third `partial` line only when a retried traversal still races with live
+workspace changes. A configured root with no matching
 registration fails closed instead of silently reporting zero usage.
 
 The helper reads exact public-key/path bindings from the root-owned mode-`0600`
@@ -281,9 +288,10 @@ the complete policy with `visudo -cf`. The helper independently verifies the
 config directory and opened config file owner, group, mode, exact binding,
 canonical root path, same-filesystem traversal, and non-empty registration set.
 Its stdout contract is apparent bytes, allocated bytes, and a final
-`complete`/`partial` status line. A transient `du` race is retried once; a
-second partial traversal remains visible in typed report findings rather than
-being presented as an authoritative total. Do not grant generic passwordless
+optional `partial` status line; two lines therefore remain compatible with the
+previous executor. A transient `du` race is retried once; a second partial
+traversal remains visible in typed report findings rather than being presented
+as an authoritative total. Do not grant generic passwordless
 `du`, `find`, shell, or arbitrary-path sudo. The helper suppresses path-bearing
 errors, and the executor treats any denied or failed privileged measurement as
 incomplete evidence. A service-user-controlled helper, config directory,
@@ -294,6 +302,17 @@ any sibling worker still blocks a shared-host mutation. If a prior run stopped
 after the durable `action_started` marker, an operator may manually dispatch with
 `resolve_action_started=true`. That path captures current post evidence and
 writes a terminal failed audit without repeating the privileged action.
+
+Deploy the Launchplane service revision that understands the expanded audit
+contract before installing the matching helper or dispatching this workflow.
+Only after one audited dry run and each replacement mutation succeed should the
+legacy host-local Docker timers be disabled. A service still running the prior
+strict audit schema rejects the new evidence with HTTP 422; that blocks mutation
+by design rather than silently operating without accepted evidence.
+
+Cache and image prune requests accept whole-hour age filters no shorter than
+`168h`. The scheduled default-builder action is deliberately more conservative
+at `720h`; named warm builders and dangling images use `168h`.
 
 Runner lane registration uses a separate manual ops-lane workflow,
 `.github/workflows/runner-lane-registration.yml`. It shares the same approved
