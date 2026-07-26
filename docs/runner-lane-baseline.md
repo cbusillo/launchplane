@@ -302,8 +302,9 @@ shortcut remains disabled; the runner must be supervised outside the Actions
 job process tree.
 
 The manual workflow defaults `registration_root` to `auto`, which resolves to
-the approved root in `LAUNCHPLANE_RUNNER_REGISTRATION_ALLOWED_ROOT`. An explicit
-root must match that value exactly.
+`LAUNCHPLANE_RUNNER_REGISTRATION_ALLOWED_ROOT` when configured, otherwise to
+`$HOME/actions-runners` for the constrained service user. An explicit root must
+match that resolved approved root exactly.
 
 The manual workflow requires the repository secret
 `LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN` for cross-repository runner

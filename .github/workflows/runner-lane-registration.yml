@@ -95,7 +95,6 @@ jobs:
             RUNNER_REGISTRATION_HOST \
             RUNNER_REGISTRATION_EXECUTION_LANE \
             RUNNER_REGISTRATION_SERVICE_USER \
-            RUNNER_REGISTRATION_ALLOWED_ROOT \
             LAUNCHPLANE_SERVICE_URL; do
             if [ -z "${!required_name:-}" ]; then
               echo "Missing ${required_name}." >&2
@@ -168,7 +167,7 @@ jobs:
           MUTATE_REQUESTED: ${{ inputs.mutate }}
         run: |
           set -euo pipefail
-          approved_root="$RUNNER_REGISTRATION_ALLOWED_ROOT"
+          approved_root="${RUNNER_REGISTRATION_ALLOWED_ROOT:-$HOME/actions-runners}"
           jq -n \
             --arg audit_record_key "$AUDIT_RECORD_KEY" \
             --arg message \
@@ -234,7 +233,7 @@ jobs:
           MUTATE_REQUESTED: ${{ inputs.mutate }}
         run: |
           set -euo pipefail
-          approved_root="$RUNNER_REGISTRATION_ALLOWED_ROOT"
+          approved_root="${RUNNER_REGISTRATION_ALLOWED_ROOT:-$HOME/actions-runners}"
           jq -n \
             --arg audit_record_key "$AUDIT_RECORD_KEY" \
             --arg message \
