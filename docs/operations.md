@@ -1666,7 +1666,9 @@ source volumes read-only, verifies their compose project and `odoo_db` /
 `PG_VERSION`, `pg_control` SHA-256 and checkpoint metadata, requires the source
 cluster state to be exactly `shut down`, counts and sizes the source filestore,
 proves the staging and destination paths absent, checks active data-volume free
-space, and binds all evidence into a SHA-256 plan fingerprint.
+space, and binds all evidence into a SHA-256 plan fingerprint. PostgreSQL
+control tools are resolved from the image's versioned bindir rather than
+assuming an overridden shell entrypoint preserves the image's tool `PATH`.
 
 A failed target replacement can update the live target's runtime identity before
 post-deploy verification fails while production inventory correctly remains on

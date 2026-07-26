@@ -1208,6 +1208,10 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
         self.assertIn("container_mounts_volume", combined)
         self.assertIn("active_destination_database_name", combined)
         self.assertIn('"postgres (PostgreSQL) 17."*', combined)
+        self.assertIn(
+            'export PATH="/usr/lib/postgresql/${PG_MAJOR:-17}/bin:$PATH"',
+            inspection_script,
+        )
         self.assertEqual(
             combined.count("resolve_single_container_any_state database"),
             2,

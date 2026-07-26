@@ -2970,7 +2970,8 @@ source_pg_control_size=$(docker run --rm --read-only --network none --user 0:0 \
 pg_controldata_output=$(docker run --rm --read-only --network none --user 0:0 \
     --mount "type=volume,src=${{source_db_volume}},dst=/source,readonly" \
     --entrypoint /bin/bash "${{postgres_image_id}}" \
-    -lc 'LC_ALL=C pg_controldata /source')
+    -lc 'export PATH="/usr/lib/postgresql/${{PG_MAJOR:-17}}/bin:$PATH"; \
+        LC_ALL=C pg_controldata /source')
 source_pg_system_identifier=$(printf '%s\n' "${{pg_controldata_output}}" | \
     sed -n 's/^Database system identifier:[[:space:]]*//p' | head -n 1)
 source_pg_cluster_state=$(printf '%s\n' "${{pg_controldata_output}}" | \
