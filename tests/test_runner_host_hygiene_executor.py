@@ -383,8 +383,13 @@ class RunnerHostHygieneWorkflowTests(unittest.TestCase):
         self.assertIn('if [ "$SCHEDULE_EXPRESSION" = "17 10 * * 0" ]; then\n', workflow_text)
         self.assertIn("prune_dangling_images", workflow_text)
         self.assertIn("RUNNER_BUILDKIT_CACHE_BUDGETS", workflow_text)
+        self.assertIn("RUNNER_DEFAULT_CACHE_BUDGET_BYTES", workflow_text)
         self.assertIn("--target-buildkit-builder", workflow_text)
         self.assertIn("--max-used-space-bytes", workflow_text)
+        self.assertIn(
+            '--max-used-space-bytes "$RUNNER_DEFAULT_CACHE_BUDGET_BYTES"',
+            workflow_text,
+        )
         self.assertIn("maintenance_failures=$((maintenance_failures + 1))", workflow_text)
         self.assertIn("scheduled hygiene action(s) failed", workflow_text)
         self.assertIn("BuildKit cache budgets must not repeat a builder.", workflow_text)
@@ -428,7 +433,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 "/var/run/docker.sock",
                 (
                     "http://localhost/v1.45/build/prune?all=true&filters="
-                    "%7B%22until%22%3A%7B%22168h%22%3Atrue%7D%7D"
+                    "%7B%22until%22%3A%5B%22168h%22%5D%7D"
                 ),
             ),
             command_runner.commands,
@@ -473,6 +478,31 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             "odoo-docker-chris-testing",
         )
         self.assertEqual(audit_poster.audits[0].request.max_used_space_bytes, 64_424_509_440)
+
+    def test_executor_bounds_default_daemon_cache_without_age_filter(self) -> None:
+        command_runner = _CommandRunner()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(mutate=True, max_used_space_bytes=17_179_869_184),
+            remote_runner=command_runner,
+            audit_poster=_AuditPoster(),
+        )
+
+        self.assertEqual(result.status, "completed")
+        prune_command = next(
+            command
+            for command in command_runner.commands
+            if command[:5] == _ENGINE_PRUNE_PREFIX
+        )
+        self.assertEqual(
+            prune_command[-1],
+            "http://localhost/v1.45/build/prune?all=true&keep-storage=17179869184",
+        )
+        self.assertNotIn("filters", prune_command[-1])
+
+    def test_executor_rejects_unsafe_default_daemon_cache_budget(self) -> None:
+        with self.assertRaisesRegex(ValueError, "retain at least 8 GiB"):
+            _request(mutate=True, max_used_space_bytes=(8 * 1024**3) - 1)
 
     def test_executor_rejects_prune_age_below_retention_floor(self) -> None:
         with self.assertRaisesRegex(ValueError, "retain at least 168 hours"):

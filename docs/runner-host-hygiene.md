@@ -157,26 +157,31 @@ The report-only schedule generates an audit key under
 uses separate keys for default cache, dangling images, and each runtime-approved
 Buildx builder. The workflow attempts every scheduled action even when an
 earlier action is blocked or fails, then fails the aggregate job after all
-per-action audits have been recorded. Default Docker cache keeps 30 days of
-reuse history:
+per-action audits have been recorded. Default Docker cache uses an
+operator-configured LRU retained-space ceiling:
 
 ```bash
 flock -n /tmp/launchplane-runner-host-hygiene.lock \
   curl --silent --show-error --fail --request POST \
   --unix-socket /var/run/docker.sock \
-  'http://localhost/v1.45/build/prune?all=true&filters=<encoded-until-720h>'
+  'http://localhost/v1.45/build/prune?all=true&keep-storage=<approved-bytes>'
 ```
 
-Operators can override the age bound through the workflow's `prune_until` input,
-but the executor enforces a minimum of `168h` and does not expose an unbounded
-default-builder prune. The age-bounded `--all` includes stale internal/frontend
-cache roots so their otherwise-reclaimable regular layers can be collected; it
-does not affect Docker images or volumes. The executor uses the daemon-native
-Engine endpoint so per-job Docker/Buildx client isolation cannot redirect the
-cleanup to an empty client-local builder view. Named Buildx builders use one
-audited command per builder, a seven-day age floor, and the runtime-configured
-retained-space budget. The executor addresses the deterministic, allowlisted BuildKit
-container directly so the runner can retain its per-job isolated Docker config:
+The default daemon cache budget uses BuildKit's least-recently-used ordering and
+does not combine the ceiling with an age filter. An age-only filter cannot
+release old parent layers while a newer excluded child still depends on them;
+the size-bounded pass can release the least-recently-used leaf first and then
+collect newly unreferenced parents. The executor enforces an 8 GiB minimum for
+this ceiling and uses the daemon-native Engine endpoint so per-job
+Docker/Buildx client isolation cannot redirect cleanup to an empty client-local
+builder view. The action cannot affect Docker images, volumes, or named Buildx
+builders. Direct executor calls without a default-cache budget retain the
+age-only behavior and enforce a minimum `prune_until` of `168h`.
+
+Named Buildx builders use one audited command per builder, a seven-day age
+floor, and the runtime-configured retained-space budget. The executor addresses
+the deterministic, allowlisted BuildKit container directly so the runner can
+retain its per-job isolated Docker config:
 
 ```bash
 flock -n /tmp/launchplane-runner-host-hygiene.lock \
@@ -230,6 +235,10 @@ The workflow requires these repository variables:
   Each builder may appear only once. The byte value is a pressure target for
   cache eligible under the age filter, not permission to delete recent or
   in-use cache merely to force the observed total below the target.
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_DEFAULT_CACHE_BUDGET_BYTES`, as the positive
+  retained-space ceiling for the daemon-global default BuildKit cache. The
+  executor rejects values below 8 GiB. Capacity remains runtime authority;
+  production code contains no host-specific cache budget.
 
 The executor fails closed unless the process user matches the requested service
 user, the GitHub repository matches the requested repository scope, retained
@@ -324,8 +333,10 @@ strict audit schema rejects the new evidence with HTTP 422; that blocks mutation
 by design rather than silently operating without accepted evidence.
 
 Cache and image prune requests accept whole-hour age filters no shorter than
-`168h`. The scheduled default-builder action is deliberately more conservative
-at `720h`; named warm builders and dangling images use `168h`.
+`168h`. Named warm builders and dangling images use `168h`. The scheduled
+default-daemon action supplies its retained-space ceiling instead; its required
+`prune_until` value is recorded with the request but is not applied when the
+size budget is present.
 
 Runner lane registration uses a separate manual ops-lane workflow,
 `.github/workflows/runner-lane-registration.yml`. It shares the same approved

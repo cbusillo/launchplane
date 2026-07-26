@@ -51,6 +51,7 @@ from control_plane.workflows.runner_host_hygiene_audit_spool import (
 AUDIT_ROUTE_PATH = "/v1/evidence/runner-host-hygiene/audits"
 DEFAULT_PRUNE_UNTIL = "168h"
 MINIMUM_PRUNE_UNTIL_HOURS = 168
+MINIMUM_DEFAULT_CACHE_KEEP_STORAGE_BYTES = 8 * 1024**3
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
 _BUILDCTL_STORAGE_MB_BYTES = 1_000_000
 _RUNNER_WORKDIR_USAGE_HELPER = "/usr/local/sbin/launchplane-runner-workdir-usage"
@@ -263,8 +264,12 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
             or self.max_used_space_bytes
         ):
             raise ValueError("BuildKit volume removal requests cannot include builder cache inputs")
-        if not self.target_buildkit_builder and self.max_used_space_bytes:
-            raise ValueError("max_used_space_bytes requires a target BuildKit builder")
+        if (
+            not self.target_buildkit_builder
+            and self.max_used_space_bytes
+            and self.max_used_space_bytes < MINIMUM_DEFAULT_CACHE_KEEP_STORAGE_BYTES
+        ):
+            raise ValueError("default Docker cache budget must retain at least 8 GiB")
         if not self.target_buildkit_builder and self.allowed_buildkit_builders:
             raise ValueError("allowed BuildKit builders require a target BuildKit builder")
         if not self.host_name:
@@ -786,10 +791,20 @@ def _execute_apply_action(
             ),
             request.timeout_seconds,
         )
-    prune_filters = quote(
-        json.dumps({"until": {request.prune_until: True}}, separators=(",", ":")),
-        safe="",
-    )
+    if request.max_used_space_bytes:
+        prune_url = (
+            "http://localhost/v1.45/build/prune?all=true&keep-storage="
+            f"{request.max_used_space_bytes}"
+        )
+    else:
+        prune_filters = quote(
+            json.dumps({"until": [request.prune_until]}, separators=(",", ":")),
+            safe="",
+        )
+        prune_url = (
+            "http://localhost/v1.45/build/prune?all=true&filters="
+            f"{prune_filters}"
+        )
     return remote_runner(
         (
             "flock",
@@ -803,7 +818,7 @@ def _execute_apply_action(
             "POST",
             "--unix-socket",
             "/var/run/docker.sock",
-            (f"http://localhost/v1.45/build/prune?all=true&filters={prune_filters}"),
+            prune_url,
         ),
         request.timeout_seconds,
     )

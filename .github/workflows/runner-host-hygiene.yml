@@ -89,6 +89,8 @@ jobs:
         }}
       RUNNER_BUILDKIT_CACHE_BUDGETS: >-
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_BUILDKIT_CACHE_BUDGETS }}
+      RUNNER_DEFAULT_CACHE_BUDGET_BYTES: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_DEFAULT_CACHE_BUDGET_BYTES }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -114,6 +116,11 @@ jobs:
           require_env RUNNER_RETAINED_WARM_BUILDERS
           require_env RUNNER_WORKDIR_ROOTS
           require_env RUNNER_BUILDKIT_CACHE_BUDGETS
+          require_env RUNNER_DEFAULT_CACHE_BUDGET_BYTES
+          if [[ ! "$RUNNER_DEFAULT_CACHE_BUDGET_BYTES" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Default Docker cache budget must be positive bytes." >&2
+            exit 1
+          fi
           if [ "$(id -un)" != "$RUNNER_SERVICE_USER" ]; then
             echo "Runner must execute as ${RUNNER_SERVICE_USER}." >&2
             exit 1
@@ -301,7 +308,8 @@ jobs:
                 "${audit_prefix}-scheduled-default-cache-${GITHUB_RUN_ID}" \
                 720h \
                 --mutate \
-                default-cache; then
+                default-cache \
+                --max-used-space-bytes "$RUNNER_DEFAULT_CACHE_BUDGET_BYTES"; then
                 maintenance_failures=$((maintenance_failures + 1))
               fi
               if ! run_hygiene \
@@ -337,7 +345,8 @@ jobs:
                 "${audit_prefix}-scheduled-report-${GITHUB_RUN_ID}" \
                 720h \
                 --dry-run \
-                report
+                report \
+                --max-used-space-bytes "$RUNNER_DEFAULT_CACHE_BUDGET_BYTES"
             fi
             exit 0
           fi
@@ -369,6 +378,10 @@ jobs:
               "${allowed_builder_args[@]}"
               --target-buildkit-builder "$target_builder"
               --max-used-space-bytes "$matched_budget"
+            )
+          elif [ "$apply_action" = "prune_docker_cache" ]; then
+            target_builder_args=(
+              --max-used-space-bytes "$RUNNER_DEFAULT_CACHE_BUDGET_BYTES"
             )
           fi
 
