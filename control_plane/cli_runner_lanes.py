@@ -980,7 +980,7 @@ def runner_host_hygiene_report(
     type=click.IntRange(min=0),
     default=0,
     show_default=True,
-    help="Positive Buildx cache budget required with a target builder.",
+    help="Retained cache bytes for the default daemon cache or a target builder.",
 )
 @click.option(
     "--allow-docker-cache-prune/--disallow-docker-cache-prune",
@@ -1367,7 +1367,7 @@ def runner_host_hygiene_adapter_boundary_plan(
     default=0,
     show_default=True,
     type=click.IntRange(min=0),
-    help="Maximum retained cache bytes for the targeted Buildx builder.",
+    help="Retained cache bytes for the default daemon cache or targeted Buildx builder.",
 )
 @click.option(
     "--mutate/--dry-run",
