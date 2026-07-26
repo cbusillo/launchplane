@@ -33,6 +33,19 @@ type JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
 type JsonObject = dict[str, JsonValue]
 
 
+class DokployDeploymentFailed(click.ClickException):
+    def __init__(
+        self,
+        *,
+        deployment_id: str,
+        deployment_status: str,
+        message_prefix: str,
+    ) -> None:
+        self.deployment_id = deployment_id
+        self.deployment_status = deployment_status
+        super().__init__(f"{message_prefix}: deployment={deployment_id} status={deployment_status}")
+
+
 def trigger_deployment(
     *,
     host: str,
@@ -906,8 +919,10 @@ def _wait_for_deployment_status(
             if latest_status in success_statuses:
                 return f"deployment={latest_key} status={latest_status}"
             if latest_status in failure_statuses:
-                raise click.ClickException(
-                    f"{failure_message_prefix}: deployment={latest_key} status={latest_status}"
+                raise DokployDeploymentFailed(
+                    deployment_id=latest_key,
+                    deployment_status=latest_status,
+                    message_prefix=failure_message_prefix,
                 )
         time.sleep(3)
 

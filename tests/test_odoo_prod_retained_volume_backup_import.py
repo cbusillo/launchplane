@@ -4,8 +4,11 @@ import subprocess
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import patch
+
+import click
 
 from control_plane.contracts.artifact_identity import (
     ArtifactImageReference,
@@ -333,6 +336,29 @@ def _failed_deployment_record(runtime_identity: RuntimeIdentity) -> DeploymentRe
     )
 
 
+def _run_provider_inspection(target: DokployTargetDefinition) -> dokploy_api.JsonObject:
+    return dokploy_post_deploy.run_compose_odoo_retained_volume_backup_import_inspection(
+        host="https://dokploy.example.test",
+        token="token",
+        target_definition=target,
+        expected_compose_app_name=ACTIVE_COMPOSE_PROJECT,
+        inspection_nonce="e" * 64,
+        backup_record_id=BACKUP_RECORD_ID,
+        active_db_volume=ACTIVE_DB_VOLUME,
+        active_data_volume=ACTIVE_DATA_VOLUME,
+        active_log_volume=ACTIVE_LOG_VOLUME,
+        source_db_volume=SOURCE_DB_VOLUME,
+        source_data_volume=SOURCE_DATA_VOLUME,
+        staging_clone_volume=STAGING_CLONE_VOLUME,
+        source_database_name=SOURCE_DATABASE_NAME,
+        destination_database_name=DESTINATION_DATABASE_NAME,
+        database_user=DATABASE_USER,
+        expected_source_compose_project=SOURCE_COMPOSE_PROJECT,
+        filestore_relative_path="filestore",
+        backup_dir_relative_path="backups/example",
+    )
+
+
 def _build_plan(store: _Store) -> OdooProdRetainedVolumeBackupImportPlan:
     def inspect(**kwargs: object) -> dict[str, object]:
         callback = kwargs.get("before_provider_mutation")
@@ -526,6 +552,109 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
         self.assertEqual(plan.plan_fingerprint, "")
         self.assertTrue(any("ODOO_DB_VOLUME" in blocker for blocker in plan.blockers))
         inspect_mock.assert_not_called()
+
+    def test_plan_persists_bounded_provider_inspection_failure(self) -> None:
+        store = _Store()
+        checkpoints: list[tuple[str, dict[str, str]]] = []
+        inspection_nonces: list[str] = []
+
+        def inspect(**kwargs: object) -> dict[str, object]:
+            inspection_nonces.append(str(kwargs["inspection_nonce"]))
+            raise dokploy_post_deploy.OdooRetainedVolumeBackupImportInspectionFailure(
+                evidence={
+                    "schema_version": 1,
+                    "inspection_nonce": inspection_nonces[-1],
+                    "backup_record_id": BACKUP_RECORD_ID,
+                    "failure_stage": "source_database",
+                    "failure_code": "source_postgres_metadata_read_failed",
+                    "inspection_deployment_id": "deployment-inspection-failed",
+                }
+            )
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.test", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_api.fetch_dokploy_target_payload",
+                return_value=_target_payload(store),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_post_deploy.run_compose_odoo_retained_volume_backup_import_inspection",
+                side_effect=inspect,
+            ),
+        ):
+            plan = build_odoo_prod_retained_volume_backup_import_plan(
+                control_plane_root=Path("."),
+                record_store=store,
+                operation_id="plan-operation-1",
+                request=_request(),
+                phase_checkpoint=lambda phase, evidence: checkpoints.append((phase, evidence)),
+                provider_effect_checkpoint=lambda _phase, _effect: None,
+            )
+
+        self.assertEqual(plan.plan_status, "blocked")
+        self.assertIn(
+            "Retained-volume provider inspection failed at source_database "
+            "(source_postgres_metadata_read_failed).",
+            plan.blockers,
+        )
+        self.assertIn(
+            (
+                "inspection_started",
+                {
+                    "inspection_deployment_id": "deployment-inspection-failed",
+                    "inspection_nonce": inspection_nonces[0],
+                    "backup_record_id": BACKUP_RECORD_ID,
+                    "failure_stage": "source_database",
+                    "failure_code": "source_postgres_metadata_read_failed",
+                },
+            ),
+            checkpoints,
+        )
+
+    def test_plan_rejects_unbound_provider_inspection_failure(self) -> None:
+        store = _Store()
+        checkpoints: list[tuple[str, dict[str, str]]] = []
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.test", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_api.fetch_dokploy_target_payload",
+                return_value=_target_payload(store),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_post_deploy.run_compose_odoo_retained_volume_backup_import_inspection",
+                side_effect=(
+                    dokploy_post_deploy.OdooRetainedVolumeBackupImportInspectionFailure(
+                        evidence={
+                            "schema_version": 1,
+                            "inspection_nonce": "0" * 64,
+                            "backup_record_id": BACKUP_RECORD_ID,
+                            "failure_stage": "source_database",
+                            "failure_code": "source_postgres_metadata_read_failed",
+                            "inspection_deployment_id": "deployment-inspection-failed",
+                        }
+                    )
+                ),
+            ),
+        ):
+            plan = build_odoo_prod_retained_volume_backup_import_plan(
+                control_plane_root=Path("."),
+                record_store=store,
+                operation_id="plan-operation-1",
+                request=_request(),
+                phase_checkpoint=lambda phase, evidence: checkpoints.append((phase, evidence)),
+                provider_effect_checkpoint=lambda _phase, _effect: None,
+            )
+
+        self.assertEqual(plan.plan_status, "blocked")
+        self.assertIn("Retained-volume provider inspection did not complete.", plan.blockers)
+        self.assertEqual(checkpoints, [])
 
     def test_plan_accepts_recorded_failed_deployment_identity_for_repair(self) -> None:
         store = _Store()
@@ -1028,6 +1157,34 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
         self.assertIn("pg_dump --host /var/run/postgresql", apply_script)
         self.assertIn("tarfile.open", apply_script)
         self.assertIn("schema_version", apply_script)
+        self.assertIn("set -Eeuo pipefail", inspection_script)
+        self.assertIn("trap 'emit_inspection_failure \"$?\"' EXIT", inspection_script)
+        self.assertIn("trap 'exit 143' TERM", inspection_script)
+        self.assertIn(
+            dokploy_post_deploy.ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_FAILURE_MARKER,
+            inspection_script,
+        )
+        for failure_code in (
+            "active_volume_missing",
+            "source_volume_missing",
+            "source_volume_in_use",
+            "active_database_container_unavailable",
+            "script_runner_container_unavailable",
+            "active_runtime_inspection_failed",
+            "active_runtime_identity_mismatch",
+            "active_volume_mount_mismatch",
+            "active_image_invalid",
+            "active_postgres_version_mismatch",
+            "source_volume_label_read_failed",
+            "source_volume_usage_read_failed",
+            "source_postgres_metadata_read_failed",
+            "source_db_measurement_failed",
+            "source_filestore_measurement_failed",
+            "active_data_space_read_failed",
+            "destination_check_failed",
+            "result_emit_failed",
+        ):
+            self.assertIn(f"failure_code={failure_code}", inspection_script)
         self.assertIn("trap cleanup EXIT", apply_script)
         self.assertNotIn('docker volume rm "${staging_clone_volume}"', apply_script)
         for script in (inspection_script, apply_script):
@@ -1039,6 +1196,27 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(syntax_check.returncode, 0, msg=syntax_check.stderr)
+
+        with TemporaryDirectory() as temp_dir:
+            docker_stub = Path(temp_dir) / "docker"
+            docker_stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            docker_stub.chmod(0o700)
+            failed_inspection = subprocess.run(
+                ["bash"],
+                input=inspection_script,
+                capture_output=True,
+                text=True,
+                check=False,
+                env={"PATH": f"{temp_dir}:/usr/bin:/bin"},
+            )
+        self.assertEqual(failed_inspection.returncode, 1)
+        self.assertEqual(
+            failed_inspection.stdout.splitlines(),
+            [
+                f"{dokploy_post_deploy.ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_FAILURE_MARKER}="
+                f"{'e' * 64}|{BACKUP_RECORD_ID}|active_runtime|active_volume_missing"
+            ],
+        )
 
     def test_provider_inspection_binds_exact_schedule_deployment(self) -> None:
         target = DokployTargetDefinition(
@@ -1083,26 +1261,7 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
                 ),
             ) as logs_mock,
         ):
-            result = dokploy_post_deploy.run_compose_odoo_retained_volume_backup_import_inspection(
-                host="https://dokploy.example.test",
-                token="token",
-                target_definition=target,
-                expected_compose_app_name=ACTIVE_COMPOSE_PROJECT,
-                inspection_nonce="e" * 64,
-                backup_record_id=BACKUP_RECORD_ID,
-                active_db_volume=ACTIVE_DB_VOLUME,
-                active_data_volume=ACTIVE_DATA_VOLUME,
-                active_log_volume=ACTIVE_LOG_VOLUME,
-                source_db_volume=SOURCE_DB_VOLUME,
-                source_data_volume=SOURCE_DATA_VOLUME,
-                staging_clone_volume=STAGING_CLONE_VOLUME,
-                source_database_name=SOURCE_DATABASE_NAME,
-                destination_database_name=DESTINATION_DATABASE_NAME,
-                database_user=DATABASE_USER,
-                expected_source_compose_project=SOURCE_COMPOSE_PROJECT,
-                filestore_relative_path="filestore",
-                backup_dir_relative_path="backups/example",
-            )
+            result = _run_provider_inspection(target)
 
         self.assertEqual(result["inspection_deployment_id"], "exact-deployment")
         logs_mock.assert_called_once_with(
@@ -1111,6 +1270,143 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
             deployment_id="exact-deployment",
             line_count=dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT,
         )
+
+    def test_provider_inspection_returns_bounded_terminal_failure(self) -> None:
+        target = DokployTargetDefinition(
+            context=CONTEXT,
+            instance="prod",
+            target_id="compose-example-prod",
+            target_name="example-prod",
+        )
+        failure_line = (
+            f"{dokploy_post_deploy.ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_FAILURE_MARKER}="
+            f"{'e' * 64}|{BACKUP_RECORD_ID}|source_database|"
+            "source_postgres_metadata_read_failed"
+        )
+        with (
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": ACTIVE_COMPOSE_PROJECT, "serverId": "server-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.latest_deployment_for_schedule",
+                return_value={"deploymentId": "before"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.dokploy_request",
+                return_value={"ok": True},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.wait_for_dokploy_schedule_deployment",
+                side_effect=dokploy_api.DokployDeploymentFailed(
+                    deployment_id="failed-deployment",
+                    deployment_status="failed",
+                    message_prefix="Dokploy schedule deployment failed",
+                ),
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_deployment_logs",
+                return_value=("private provider output", failure_line),
+            ) as logs_mock,
+        ):
+            with self.assertRaises(
+                dokploy_post_deploy.OdooRetainedVolumeBackupImportInspectionFailure
+            ) as raised:
+                _run_provider_inspection(target)
+
+        self.assertEqual(
+            raised.exception.evidence,
+            {
+                "schema_version": 1,
+                "inspection_nonce": "e" * 64,
+                "backup_record_id": BACKUP_RECORD_ID,
+                "failure_stage": "source_database",
+                "failure_code": "source_postgres_metadata_read_failed",
+                "inspection_deployment_id": "failed-deployment",
+            },
+        )
+        self.assertNotIn("private provider output", str(raised.exception))
+        logs_mock.assert_called_once_with(
+            host="https://dokploy.example.test",
+            token="token",
+            deployment_id="failed-deployment",
+            line_count=dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT,
+        )
+
+    def test_provider_inspection_bounds_unavailable_failure_logs(self) -> None:
+        target = DokployTargetDefinition(
+            context=CONTEXT,
+            instance="prod",
+            target_id="compose-example-prod",
+            target_name="example-prod",
+        )
+        with (
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": ACTIVE_COMPOSE_PROJECT, "serverId": "server-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.latest_deployment_for_schedule",
+                return_value={"deploymentId": "before"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.dokploy_request",
+                return_value={"ok": True},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.wait_for_dokploy_schedule_deployment",
+                side_effect=dokploy_api.DokployDeploymentFailed(
+                    deployment_id="failed-deployment",
+                    deployment_status="failed",
+                    message_prefix="Dokploy schedule deployment failed",
+                ),
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_deployment_logs",
+                side_effect=click.ClickException("private-secret-bearing-provider-body"),
+            ),
+        ):
+            with self.assertRaises(
+                dokploy_post_deploy.OdooRetainedVolumeBackupImportInspectionFailure
+            ) as raised:
+                _run_provider_inspection(target)
+
+        self.assertEqual(
+            raised.exception.evidence,
+            {
+                "schema_version": 1,
+                "inspection_nonce": "e" * 64,
+                "backup_record_id": BACKUP_RECORD_ID,
+                "failure_stage": "result",
+                "failure_code": "provider_schedule_failed_without_evidence",
+                "inspection_deployment_id": "failed-deployment",
+            },
+        )
+        self.assertNotIn("private-secret-bearing-provider-body", str(raised.exception))
+
+    def test_provider_inspection_rejects_invalid_or_duplicate_failure_markers(self) -> None:
+        marker = dokploy_post_deploy.ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_FAILURE_MARKER
+        invalid_pair = f"{marker}={'e' * 64}|{BACKUP_RECORD_ID}|result|source_volume_missing"
+        valid = f"{marker}={'e' * 64}|{BACKUP_RECORD_ID}|source_safety|source_volume_missing"
+
+        with self.assertRaisesRegex(click.ClickException, "invalid bounded failure evidence"):
+            dokploy_post_deploy._extract_retained_volume_inspection_failure(
+                {"logs": [invalid_pair]},
+                marker=marker,
+            )
+        with self.assertRaisesRegex(click.ClickException, "no unique bounded failure evidence"):
+            dokploy_post_deploy._extract_retained_volume_inspection_failure(
+                {"logs": [valid, valid]},
+                marker=marker,
+            )
 
 
 if __name__ == "__main__":

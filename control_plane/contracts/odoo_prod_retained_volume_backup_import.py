@@ -18,6 +18,56 @@ _DOCKER_IMAGE_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_CONFIRMATION = (
     "import-retained-volumes-as-production-backup"
 )
+OdooProdRetainedVolumeBackupImportInspectionFailureStage = Literal[
+    "active_runtime",
+    "source_safety",
+    "source_database",
+    "source_filestore",
+    "destination",
+    "result",
+]
+OdooProdRetainedVolumeBackupImportInspectionFailureCode = Literal[
+    "active_volume_missing",
+    "source_volume_missing",
+    "source_volume_usage_read_failed",
+    "source_volume_in_use",
+    "active_database_container_unavailable",
+    "script_runner_container_unavailable",
+    "active_runtime_inspection_failed",
+    "active_runtime_identity_mismatch",
+    "active_volume_mount_mismatch",
+    "active_image_invalid",
+    "active_postgres_version_mismatch",
+    "source_volume_label_read_failed",
+    "source_postgres_metadata_read_failed",
+    "source_db_measurement_failed",
+    "source_filestore_measurement_failed",
+    "active_data_space_read_failed",
+    "destination_check_failed",
+    "result_emit_failed",
+    "provider_schedule_failed_without_evidence",
+]
+ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_FAILURE_STAGE_BY_CODE: dict[str, str] = {
+    "active_volume_missing": "active_runtime",
+    "source_volume_missing": "source_safety",
+    "source_volume_usage_read_failed": "source_safety",
+    "source_volume_in_use": "source_safety",
+    "active_database_container_unavailable": "active_runtime",
+    "script_runner_container_unavailable": "active_runtime",
+    "active_runtime_inspection_failed": "active_runtime",
+    "active_runtime_identity_mismatch": "active_runtime",
+    "active_volume_mount_mismatch": "active_runtime",
+    "active_image_invalid": "active_runtime",
+    "active_postgres_version_mismatch": "active_runtime",
+    "source_volume_label_read_failed": "source_safety",
+    "source_postgres_metadata_read_failed": "source_database",
+    "source_db_measurement_failed": "source_database",
+    "source_filestore_measurement_failed": "source_filestore",
+    "active_data_space_read_failed": "destination",
+    "destination_check_failed": "destination",
+    "result_emit_failed": "result",
+    "provider_schedule_failed_without_evidence": "result",
+}
 
 
 class OdooProdRetainedVolumeBackupImportRequest(BaseModel):
@@ -193,6 +243,30 @@ class OdooProdRetainedVolumeBackupImportInspectionEvidence(BaseModel):
     postgres_image_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     script_runner_image_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     inspection_deployment_id: str = Field(min_length=1)
+
+
+class OdooProdRetainedVolumeBackupImportInspectionFailureEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: Literal[1] = 1
+    inspection_nonce: str = Field(pattern=r"^[0-9a-f]{64}$")
+    backup_record_id: str = Field(min_length=1)
+    failure_stage: OdooProdRetainedVolumeBackupImportInspectionFailureStage
+    failure_code: OdooProdRetainedVolumeBackupImportInspectionFailureCode
+    inspection_deployment_id: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_failure_stage_code_pair(
+        self,
+    ) -> "OdooProdRetainedVolumeBackupImportInspectionFailureEvidence":
+        if (
+            ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_FAILURE_STAGE_BY_CODE.get(self.failure_code)
+            != self.failure_stage
+        ):
+            raise ValueError(
+                "Odoo retained-volume backup import inspection failure stage/code mismatch."
+            )
+        return self
 
 
 class OdooProdRetainedVolumeBackupImportPlan(BaseModel):

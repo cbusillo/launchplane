@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy import JsonValue
+from control_plane.dokploy import api as dokploy_api
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
@@ -138,6 +139,33 @@ class _FakeDokployTargetStore:
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_wait_for_schedule_deployment_exposes_exact_terminal_failure(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
+                return_value={
+                    "deploymentId": "deployment-failed",
+                    "status": "failed",
+                },
+            ),
+            patch("control_plane.dokploy.api.time.sleep"),
+        ):
+            with self.assertRaises(dokploy_api.DokployDeploymentFailed) as raised:
+                control_plane_dokploy.wait_for_dokploy_schedule_deployment(
+                    host="https://dokploy.example",
+                    token="token",
+                    schedule_id="schedule-one",
+                    before_key="deployment-before",
+                    timeout_seconds=30,
+                )
+
+        self.assertEqual(raised.exception.deployment_id, "deployment-failed")
+        self.assertEqual(raised.exception.deployment_status, "failed")
+        self.assertEqual(
+            raised.exception.format_message(),
+            "Dokploy schedule deployment failed: deployment=deployment-failed status=failed",
+        )
+
     def test_wait_for_target_deployment_tracks_exact_operation_title(self) -> None:
         exact_deployment = {
             "deploymentId": "deployment-exact",
