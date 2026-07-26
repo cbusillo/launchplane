@@ -277,12 +277,12 @@ class OdooProdRetainedVolumeBackupImportInspectionFailureEvidence(BaseModel):
     inspection_schedule_id: str = Field(
         default="",
         max_length=200,
-        pattern=r"^$|^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+        pattern=r"^$|^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,199}$",
     )
     inspection_deployment_id: str = Field(
         default="",
         max_length=200,
-        pattern=r"^$|^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+        pattern=r"^$|^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,199}$",
     )
 
     @model_validator(mode="after")

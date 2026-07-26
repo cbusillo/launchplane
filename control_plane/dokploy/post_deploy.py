@@ -211,7 +211,7 @@ class OdooRetainedVolumeBackupImportInspectionFailure(click.ClickException):
 
 
 _RetainedInspectionCallResult = TypeVar("_RetainedInspectionCallResult")
-_DOKPLOY_EVIDENCE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}")
+_DOKPLOY_EVIDENCE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._:-]{0,199}")
 
 
 def _bounded_dokploy_evidence_id(value: str) -> str:
@@ -2799,7 +2799,7 @@ require_volume() {{
 volume_label() {{
     local volume_name="$1"
     local label_name="$2"
-    docker volume inspect -f "{{{{ index .Labels \"${{label_name}}\" }}}}" "${{volume_name}}"
+    docker volume inspect -f "{{{{ index .Labels \\"${{label_name}}\\" }}}}" "${{volume_name}}"
 }}
 
 container_mounts_volume() {{
@@ -3189,7 +3189,7 @@ resolve_single_container_any_state() {{
 volume_label() {{
     local volume_name="$1"
     local label_name="$2"
-    docker volume inspect -f "{{{{ index .Labels \"${{label_name}}\" }}}}" "${{volume_name}}"
+    docker volume inspect -f "{{{{ index .Labels \\"${{label_name}}\\" }}}}" "${{volume_name}}"
 }}
 
 container_mounts_volume() {{
