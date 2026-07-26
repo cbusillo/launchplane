@@ -428,7 +428,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 "/var/run/docker.sock",
                 (
                     "http://localhost/v1.45/build/prune?all=true&filters="
-                    "%7B%22until%22%3A%7B%22168h%22%3Atrue%7D%7D"
+                    "%7B%22until%22%3A%5B%22168h%22%5D%7D"
                 ),
             ),
             command_runner.commands,

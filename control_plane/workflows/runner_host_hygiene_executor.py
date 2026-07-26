@@ -787,7 +787,7 @@ def _execute_apply_action(
             request.timeout_seconds,
         )
     prune_filters = quote(
-        json.dumps({"until": {request.prune_until: True}}, separators=(",", ":")),
+        json.dumps({"until": [request.prune_until]}, separators=(",", ":")),
         safe="",
     )
     return remote_runner(
