@@ -1783,13 +1783,15 @@ Run `Odoo Prod Backup Restore Apply` only with that exact fingerprint, a stable
 idempotency key, and confirmation phrase
 `restore-verified-production-backup`. The service creates a dedicated durable
 restore operation; routine existing-data target replacement cannot exercise
-this authority. The worker rechecks authorization after claim and immediately
-before the first provider effect, then records before/after checkpoints for fresh
-database restore, filestore staging, web quiesce, filestore activation,
-runtime-environment update, deploy, post-deploy work, and verification. Once any
-provider effect starts, an expired lease moves to `reconciliation_required`,
-keeps the shared lane fenced, and requires exact provider inspection rather than
-automatic retry.
+this authority. The workflow derives the canonical bounded operation-status
+route from the accepted path-safe operation id instead of requiring a redundant
+service-supplied poll URL. The worker rechecks authorization after claim and
+immediately before the first provider effect, then records before/after
+checkpoints for fresh database restore, filestore staging, web quiesce,
+filestore activation, runtime-environment update, deploy, post-deploy work, and
+verification. Once any provider effect starts, an expired lease moves to
+`reconciliation_required`, keeps the shared lane fenced, and requires exact
+provider inspection rather than automatic retry.
 
 The database phase creates the exact fresh volume and restores the complete
 archive with `pg_restore --exit-on-error`; it never runs `pg_resetwal` and never

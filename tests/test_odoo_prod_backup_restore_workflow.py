@@ -144,7 +144,7 @@ class OdooProdBackupRestoreWorkflowTests(unittest.TestCase):
             [
                 "/v1/drivers/odoo/prod-backup-restore-plan",
                 "/v1/drivers/odoo/prod-backup-restore-apply",
-                "${{ steps.create_restore.outputs.poll_url }}",
+                "${{ steps.restore_metadata.outputs.poll_url }}",
             ],
         )
         for request_step in request_steps:
@@ -162,6 +162,20 @@ class OdooProdBackupRestoreWorkflowTests(unittest.TestCase):
             request_steps[2].with_values["poll-result-statuses"],
             "pending,running",
         )
+        self.assertEqual(
+            request_steps[1].with_values["output-paths"],
+            "operation_id=result.operation_id",
+        )
+
+        metadata_step = self.apply_worker.step_named("apply", "Validate restore operation metadata")
+        assert metadata_step is not None
+        self.assertEqual(metadata_step.data["id"], "restore_metadata")
+        self.assertIn("Restore operation ID must be path-safe", metadata_step.run)
+        self.assertIn(
+            "/v1/drivers/odoo/prod-backup-restore/operations/${OPERATION_ID}",
+            metadata_step.run,
+        )
+        self.assertIn('echo "poll_url=${poll_url}" >> "$GITHUB_OUTPUT"', metadata_step.run)
 
         validate_step = self.apply_worker.step_named("apply", "Validate destructive restore inputs")
         assert validate_step is not None
