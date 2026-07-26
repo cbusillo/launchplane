@@ -99,6 +99,19 @@ def _passing_verification_evidence() -> dict[str, object]:
     }
 
 
+def _passing_backup_capture_evidence() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "backup_nonce": "c" * 64,
+        "backup_record_id": "backup-gate-cm-prod-1",
+        "database_name": "cm",
+        "database_dump_sha256": "a" * 64,
+        "filestore_archive_sha256": "b" * 64,
+        "database_dump_size": 4096,
+        "filestore_archive_size": 8192,
+    }
+
+
 class OdooProdBackupGateWorkflowTests(unittest.TestCase):
     def test_backup_gate_request_accepts_profile_owned_context(self) -> None:
         request = OdooProdBackupGateRequest(
@@ -130,8 +143,13 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_gate"
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_gate",
+                return_value=_passing_backup_capture_evidence(),
             ) as run_backup_mock,
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.python_secrets.token_hex",
+                return_value="c" * 64,
+            ),
             patch(
                 "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
                 return_value=_runtime_values(),
@@ -154,6 +172,7 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
         )
         run_backup_mock.assert_called_once()
         self.assertEqual(run_backup_mock.call_args.kwargs["database_name"], "cm")
+        self.assertEqual(run_backup_mock.call_args.kwargs["backup_nonce"], "c" * 64)
         self.assertEqual(
             run_backup_mock.call_args.kwargs["filestore_path"],
             "/volumes/data/filestore",
@@ -173,6 +192,46 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
             final_record.evidence["filestore_archive_path"],
             "/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-1/cm-filestore.tar.gz",
         )
+        self.assertEqual(final_record.evidence["backup_nonce"], "c" * 64)
+        self.assertEqual(final_record.evidence["database_dump_sha256"], "a" * 64)
+        self.assertEqual(final_record.evidence["database_dump_size"], "4096")
+
+    def test_backup_gate_rejects_provider_result_for_different_request(self) -> None:
+        record_store = self._record_store()
+        provider_evidence = _passing_backup_capture_evidence()
+        provider_evidence["backup_nonce"] = "d" * 64
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_gate",
+                return_value=provider_evidence,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.python_secrets.token_hex",
+                return_value="c" * 64,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value=_runtime_values(),
+            ),
+        ):
+            result = execute_odoo_prod_backup_gate(
+                control_plane_root=Path("/control-plane"),
+                record_store=record_store,
+                request=OdooProdBackupGateRequest(
+                    context="cm",
+                    backup_record_id="backup-gate-cm-prod-1",
+                ),
+            )
+
+        self.assertEqual(result.backup_status, "fail")
+        final_record = record_store.write_backup_gate_record.call_args_list[-1].args[0]
+        self.assertEqual(final_record.status, "fail")
+        self.assertIn("did not match the exact request", final_record.evidence["error_message"])
 
     def test_failed_backup_gate_writes_fail_record_without_evidence(self) -> None:
         record_store = self._record_store()
@@ -242,6 +301,29 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
                 return_value=runtime_values,
             ),
             self.assertRaises(click.ClickException),
+        ):
+            execute_odoo_prod_backup_gate(
+                control_plane_root=Path("/control-plane"),
+                record_store=record_store,
+                request=OdooProdBackupGateRequest(
+                    context="cm",
+                    backup_record_id="backup-gate-cm-prod-1",
+                ),
+            )
+
+        record_store.write_backup_gate_record.assert_not_called()
+
+    def test_backup_gate_rejects_backup_root_outside_dedicated_launchplane_path(self) -> None:
+        record_store = self._record_store()
+        runtime_values = _runtime_values()
+        runtime_values["ODOO_BACKUP_ROOT"] = "/volumes/data"
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value=runtime_values,
+            ),
+            self.assertRaisesRegex(click.ClickException, "dedicated Launchplane backup root"),
         ):
             execute_odoo_prod_backup_gate(
                 control_plane_root=Path("/control-plane"),

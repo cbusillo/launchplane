@@ -1095,7 +1095,12 @@ state/
   concrete backup evidence such as snapshot or archive identifiers.
 - Odoo prod backup-gate records are created by the Launchplane Odoo driver after
   a real compose-local DB dump and filestore archive capture. They should not be
-  synthesized with generic operator assertions for release drills.
+  synthesized with generic operator assertions for release drills. Passing
+  records include the request nonce, exact backup/database identity, non-empty
+  artifact sizes, and SHA-256 values returned by the exact Dokploy schedule
+  deployment. Dokploy terminal status alone is not backup evidence; a missing,
+  duplicate, malformed, or mismatched bounded completion marker writes a failed
+  gate record.
 - Odoo backup verification accepts only the exact required, passing
   `BackupGateRecord` written by the Odoo prod backup-gate source for the same
   context and prod instance. It recomputes backup paths from DB-backed runtime
