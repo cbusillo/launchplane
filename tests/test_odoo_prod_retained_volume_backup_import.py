@@ -983,7 +983,11 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
             callback = cast(Callable[[str], None], kwargs["before_provider_mutation"])
             callback("schedule_upsert")
             callback("schedule_trigger")
-            return _inspection_payload(inspection_nonce=str(kwargs["inspection_nonce"]))
+            payload = _inspection_payload(inspection_nonce=str(kwargs["inspection_nonce"]))
+            payload["active_data_free_bytes"] = (
+                cast(int, payload["active_data_free_bytes"]) - 1_048_576
+            )
+            return payload
 
         def apply_provider(**kwargs: object) -> dict[str, object]:
             callback = cast(Callable[[str], None], kwargs["before_provider_mutation"])
@@ -1057,10 +1061,66 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
             ["schedule_upsert", "schedule_trigger", "schedule_upsert", "schedule_trigger"],
         )
 
+    def test_apply_blocks_insufficient_reinspection_space_before_import(self) -> None:
+        store = _Store()
+        reviewed_plan = _build_plan(store)
+        apply_request = OdooProdRetainedVolumeBackupImportApplyRequest(
+            **_request().model_dump(),
+            plan_operation_id="retained-import-plan-operation-1",
+            plan_fingerprint=reviewed_plan.plan_fingerprint,
+            confirmation=ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_CONFIRMATION,
+        )
+
+        def inspect(**kwargs: object) -> dict[str, object]:
+            payload = _inspection_payload(inspection_nonce=str(kwargs["inspection_nonce"]))
+            payload["active_data_free_bytes"] = 1
+            return payload
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.test", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_api.fetch_dokploy_target_payload",
+                return_value=_target_payload(store),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_post_deploy.run_compose_odoo_retained_volume_backup_import_inspection",
+                side_effect=inspect,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_retained_volume_backup_import.dokploy_post_deploy.run_compose_odoo_retained_volume_backup_import_apply"
+            ) as apply_provider_mock,
+        ):
+            with self.assertRaisesRegex(click.ClickException, "lacks conservative space"):
+                execute_odoo_prod_retained_volume_backup_import_apply(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    operation_id="retained-import-apply-1",
+                    reviewed_plan=reviewed_plan,
+                    request=apply_request,
+                    phase_checkpoint=lambda _phase, _evidence: None,
+                    provider_effect_checkpoint=lambda _phase, _effect: None,
+                )
+
+        self.assertNotIn(BACKUP_RECORD_ID, store.backup_records)
+        apply_provider_mock.assert_not_called()
+
     def test_plan_fingerprint_changes_when_pg_control_changes(self) -> None:
         plan = _build_plan(_Store())
         changed = plan.model_copy(update={"source_pg_control_sha256": "9" * 64})
         self.assertNotEqual(
+            build_odoo_prod_retained_volume_backup_import_plan_fingerprint(plan),
+            build_odoo_prod_retained_volume_backup_import_plan_fingerprint(changed),
+        )
+
+    def test_plan_fingerprint_ignores_volatile_active_data_free_bytes(self) -> None:
+        plan = _build_plan(_Store())
+        changed = plan.model_copy(
+            update={"active_data_free_bytes": plan.active_data_free_bytes - 1_048_576}
+        )
+        self.assertEqual(
             build_odoo_prod_retained_volume_backup_import_plan_fingerprint(plan),
             build_odoo_prod_retained_volume_backup_import_plan_fingerprint(changed),
         )
