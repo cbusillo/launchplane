@@ -51,6 +51,7 @@ AUDIT_ROUTE_PATH = "/v1/evidence/runner-host-hygiene/audits"
 DEFAULT_PRUNE_UNTIL = "168h"
 MINIMUM_PRUNE_UNTIL_HOURS = 168
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
+_BUILDCTL_STORAGE_MB_BYTES = 1_000_000
 _RUNNER_WORKDIR_USAGE_HELPER = "/usr/local/sbin/launchplane-runner-workdir-usage"
 _DOCKER_DISK_USAGE_COMMAND = (
     "curl",
@@ -740,30 +741,47 @@ def _execute_apply_action(
             request.timeout_seconds,
         )
     if request.target_buildkit_builder:
-        buildx_help = remote_runner(
-            ("docker", "buildx", "prune", "--help"),
+        buildkit_container = f"buildx_buildkit_{request.target_buildkit_builder}0"
+        container_state = remote_runner(
+            ("docker", "inspect", "--format", "{{.State.Running}}", buildkit_container),
             request.timeout_seconds,
         )
-        if buildx_help.returncode != 0 or "--max-used-space" not in buildx_help.stdout:
+        if container_state.returncode != 0 or container_state.stdout.strip() != "true":
             return RemoteCommandResult(
                 returncode=1,
-                stderr="Docker Buildx does not support bounded --max-used-space pruning",
+                stderr="allowlisted BuildKit cache container is not running",
             )
+        buildctl_help = remote_runner(
+            ("docker", "exec", buildkit_container, "buildctl", "prune", "--help"),
+            request.timeout_seconds,
+        )
+        if (
+            buildctl_help.returncode != 0
+            or "--keep-duration" not in buildctl_help.stdout
+            or "--keep-storage" not in buildctl_help.stdout
+        ):
+            return RemoteCommandResult(
+                returncode=1,
+                stderr="BuildKit does not support bounded duration and storage pruning",
+            )
+        keep_storage_mb = (
+            request.max_used_space_bytes + _BUILDCTL_STORAGE_MB_BYTES - 1
+        ) // _BUILDCTL_STORAGE_MB_BYTES
         return remote_runner(
             (
                 "flock",
                 "-n",
                 HOST_LOCK_PATH,
                 "docker",
-                "buildx",
+                "exec",
+                buildkit_container,
+                "buildctl",
                 "prune",
-                "--builder",
-                request.target_buildkit_builder,
-                "--force",
-                "--filter",
-                f"until={request.prune_until}",
-                "--max-used-space",
-                str(request.max_used_space_bytes),
+                "--all",
+                "--keep-duration",
+                request.prune_until,
+                "--keep-storage",
+                str(keep_storage_mb),
             ),
             request.timeout_seconds,
         )
@@ -776,6 +794,7 @@ def _execute_apply_action(
             "builder",
             "prune",
             "--force",
+            "--all",
             "--filter",
             f"until={request.prune_until}",
         ),

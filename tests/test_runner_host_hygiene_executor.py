@@ -63,7 +63,7 @@ class _CommandRunner:
         volume_inventory: str | None = None,
         runner_workdir_bytes: int = 0,
         runner_workdir_usage: Mapping[str, tuple[int, int]] | None = None,
-        buildx_max_used_space_supported: bool = True,
+        buildctl_bounded_prune_supported: bool = True,
         runner_workdir_status: Literal["complete", "partial"] = "complete",
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
@@ -114,7 +114,7 @@ class _CommandRunner:
         )
         self._runner_workdir_bytes = runner_workdir_bytes
         self._runner_workdir_usage = dict(runner_workdir_usage or {})
-        self._buildx_max_used_space_supported = buildx_max_used_space_supported
+        self._buildctl_bounded_prune_supported = buildctl_bounded_prune_supported
         self._runner_workdir_status = runner_workdir_status
         self._pruned = False
         self.removed_volumes: list[str] = []
@@ -181,12 +181,18 @@ class _CommandRunner:
             return RemoteCommandResult(returncode=1, stderr="image missing")
         if command_tuple[:2] == ("bash", "-lc") and "pgrep -af" in command_tuple[2]:
             return RemoteCommandResult(returncode=0, stdout=self._active_build_processes)
-        if command_tuple == ("docker", "buildx", "prune", "--help"):
+        if command_tuple[:4] == ("docker", "inspect", "--format", "{{.State.Running}}"):
+            return RemoteCommandResult(returncode=0, stdout="true\n")
+        if command_tuple[:2] == ("docker", "exec") and command_tuple[3:] == (
+            "buildctl",
+            "prune",
+            "--help",
+        ):
             return RemoteCommandResult(
                 returncode=0,
                 stdout=(
-                    "--max-used-space bytes\n"
-                    if self._buildx_max_used_space_supported
+                    "--keep-duration value\n--keep-storage value\n"
+                    if self._buildctl_bounded_prune_supported
                     else "--filter filter\n"
                 ),
             )
@@ -223,9 +229,9 @@ class _CommandRunner:
             "-n",
             "/tmp/launchplane-runner-host-hygiene.lock",
             "docker",
-            "buildx",
-            "prune",
-            "--builder",
+            "exec",
+            "buildx_buildkit_odoo-docker-chris-testing0",
+            "buildctl",
         ):
             self._pruned = True
             return RemoteCommandResult(
@@ -429,13 +435,11 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 "builder",
                 "prune",
                 "--force",
+                "--all",
                 "--filter",
                 "until=168h",
             ),
             command_runner.commands,
-        )
-        self.assertNotIn(
-            ("docker", "builder", "prune", "--all", "--force"), command_runner.commands
         )
 
     def test_executor_bounds_one_allowlisted_buildx_builder(self) -> None:
@@ -460,15 +464,15 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 "-n",
                 "/tmp/launchplane-runner-host-hygiene.lock",
                 "docker",
-                "buildx",
+                "exec",
+                "buildx_buildkit_odoo-docker-chris-testing0",
+                "buildctl",
                 "prune",
-                "--builder",
-                "odoo-docker-chris-testing",
-                "--force",
-                "--filter",
-                "until=168h",
-                "--max-used-space",
-                "64424509440",
+                "--all",
+                "--keep-duration",
+                "168h",
+                "--keep-storage",
+                "64425",
             ),
             command_runner.commands,
         )
@@ -506,8 +510,8 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             any(command[4:6] == ("buildx", "prune") for command in command_runner.commands)
         )
 
-    def test_executor_fails_before_prune_when_buildx_lacks_bounded_space_flag(self) -> None:
-        command_runner = _CommandRunner(buildx_max_used_space_supported=False)
+    def test_executor_fails_before_prune_when_buildctl_lacks_bounded_flags(self) -> None:
+        command_runner = _CommandRunner(buildctl_bounded_prune_supported=False)
 
         result = execute_runner_host_hygiene_executor(
             request=_request(
@@ -521,18 +525,19 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "failed")
-        self.assertIn("does not support bounded", result.message)
+        self.assertIn("does not support bounded duration and storage", result.message)
         self.assertFalse(
             any(
-                command[:7]
+                command[:8]
                 == (
                     "flock",
                     "-n",
                     "/tmp/launchplane-runner-host-hygiene.lock",
                     "docker",
-                    "buildx",
+                    "exec",
+                    "buildx_buildkit_odoo-docker-chris-testing0",
+                    "buildctl",
                     "prune",
-                    "--builder",
                 )
                 for command in command_runner.commands
             )

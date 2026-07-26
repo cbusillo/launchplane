@@ -162,22 +162,31 @@ reuse history:
 
 ```bash
 flock -n /tmp/launchplane-runner-host-hygiene.lock \
-  docker builder prune --force --filter until=720h
+  docker builder prune --force --all --filter until=720h
 ```
 
 Operators can override the age bound through the workflow's `prune_until` input,
-but the executor does not expose an unbounded `--all` prune. Named Buildx
-builders use one audited command per builder, a seven-day age floor, and the
-runtime-configured retained-space budget:
+but the executor enforces a minimum of `168h` and does not expose an unbounded
+default-builder prune. The age-bounded `--all` includes stale internal/frontend
+cache roots so their otherwise-reclaimable regular layers can be collected; it
+does not affect Docker images or volumes. Named Buildx builders use one audited
+command per builder, a seven-day age floor, and the runtime-configured
+retained-space budget. The executor addresses the deterministic, allowlisted BuildKit
+container directly so the runner can retain its per-job isolated Docker config:
 
 ```bash
 flock -n /tmp/launchplane-runner-host-hygiene.lock \
-  docker buildx prune \
-  --builder <approved-builder> \
-  --force \
-  --filter until=168h \
-  --max-used-space <approved-bytes>
+  docker exec buildx_buildkit_<approved-builder>0 \
+  buildctl prune \
+  --all \
+  --keep-duration 168h \
+  --keep-storage <approved-megabytes>
 ```
+
+The byte budget is rounded up to BuildKit's whole-megabyte `--keep-storage`
+unit. The executor first verifies that the exact container is running and that
+its `buildctl` supports both bounded flags. It never reconstructs or imports
+host-persistent Buildx client metadata into the isolated job configuration.
 
 The separate `prune_dangling_images` action runs `docker image prune --force
 --filter until=168h`. It never supplies `-a` or `--all`, so tagged retained warm
