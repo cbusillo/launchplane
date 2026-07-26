@@ -1351,9 +1351,12 @@ def _run_compose_odoo_retained_volume_backup_import_schedule(
                 inspection_deployment_id=failed_deployment_id,
             ) from None
         try:
-            failure_evidence = _extract_retained_volume_inspection_failure(
-                {"logs": list(failure_log_lines)},
-                marker=failure_marker,
+            failure_evidence = _validate_retained_volume_inspection_failure_identity(
+                _extract_retained_volume_inspection_failure(
+                    {"logs": list(failure_log_lines)},
+                    marker=failure_marker,
+                ),
+                failure_identity=failure_identity,
             )
         except Exception:
             raise _retained_volume_inspection_failure(
@@ -1404,6 +1407,30 @@ def _run_compose_odoo_retained_volume_backup_import_schedule(
         inspection_schedule_id=schedule_id,
         inspection_deployment_id=deployment_id,
     )
+    if failure_marker and failure_identity is not None:
+        try:
+            completed_failure_evidence = _find_retained_volume_inspection_failure(
+                {"logs": list(log_lines)},
+                marker=failure_marker,
+            )
+            if completed_failure_evidence is not None:
+                completed_failure_evidence = _validate_retained_volume_inspection_failure_identity(
+                    completed_failure_evidence,
+                    failure_identity=failure_identity,
+                )
+        except Exception:
+            raise _retained_volume_inspection_failure(
+                failure_identity=failure_identity,
+                failure_code="provider_result_invalid",
+                inspection_schedule_id=schedule_id,
+                inspection_deployment_id=deployment_id,
+            ) from None
+        if completed_failure_evidence is not None:
+            completed_failure_evidence["inspection_schedule_id"] = schedule_id
+            completed_failure_evidence["inspection_deployment_id"] = deployment_id
+            raise OdooRetainedVolumeBackupImportInspectionFailure(
+                evidence=completed_failure_evidence
+            ) from None
     result = _run_retained_volume_inspection_provider_call(
         callback=lambda: _extract_bounded_schedule_result(
             {"logs": list(log_lines)},
@@ -1434,12 +1461,30 @@ def _extract_retained_volume_inspection_failure(
     *,
     marker: str,
 ) -> api.JsonObject:
+    failure_evidence = _find_retained_volume_inspection_failure(
+        payload,
+        marker=marker,
+    )
+    if failure_evidence is None:
+        raise click.ClickException(
+            "Dokploy Odoo retained-volume backup import inspection returned no unique bounded failure evidence."
+        )
+    return failure_evidence
+
+
+def _find_retained_volume_inspection_failure(
+    payload: api.JsonValue,
+    *,
+    marker: str,
+) -> api.JsonObject | None:
     bounded_values: list[str] = []
     marker_prefix = f"{marker}="
     for line in api.normalize_dokploy_log_payload(payload):
         normalized_line = line.strip()
         if normalized_line.startswith(marker_prefix):
             bounded_values.append(normalized_line.removeprefix(marker_prefix).strip())
+    if not bounded_values:
+        return None
     if len(bounded_values) != 1:
         raise click.ClickException(
             "Dokploy Odoo retained-volume backup import inspection returned no unique bounded failure evidence."
@@ -1467,6 +1512,22 @@ def _extract_retained_volume_inspection_failure(
         "failure_stage": failure_stage,
         "failure_code": failure_code,
     }
+
+
+def _validate_retained_volume_inspection_failure_identity(
+    failure_evidence: api.JsonObject,
+    *,
+    failure_identity: tuple[str, str],
+) -> api.JsonObject:
+    inspection_nonce, backup_record_id = failure_identity
+    if (
+        failure_evidence.get("inspection_nonce") != inspection_nonce
+        or failure_evidence.get("backup_record_id") != backup_record_id
+    ):
+        raise click.ClickException(
+            "Dokploy Odoo retained-volume backup import inspection returned invalid bounded failure evidence."
+        )
+    return failure_evidence
 
 
 def _extract_bounded_schedule_result(

@@ -1406,6 +1406,69 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
             line_count=dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT,
         )
 
+    def test_provider_inspection_returns_bounded_failure_from_done_deployment(self) -> None:
+        target = DokployTargetDefinition(
+            context=CONTEXT,
+            instance="prod",
+            target_id="compose-example-prod",
+            target_name="example-prod",
+        )
+        failure_line = (
+            f"{dokploy_post_deploy.ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_FAILURE_MARKER}="
+            f"{'e' * 64}|{BACKUP_RECORD_ID}|source_database|"
+            "source_postgres_metadata_read_failed"
+        )
+        with (
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": ACTIVE_COMPOSE_PROJECT, "serverId": "server-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.latest_deployment_for_schedule",
+                return_value={"deploymentId": "before"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.dokploy_request",
+                return_value={"ok": True},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.wait_for_dokploy_schedule_deployment",
+                return_value="deployment=done-deployment status=done",
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_deployment_logs",
+                return_value=("private provider output", failure_line),
+            ) as logs_mock,
+        ):
+            with self.assertRaises(
+                dokploy_post_deploy.OdooRetainedVolumeBackupImportInspectionFailure
+            ) as raised:
+                _run_provider_inspection(target)
+
+        self.assertEqual(
+            raised.exception.evidence,
+            {
+                "schema_version": 1,
+                "inspection_nonce": "e" * 64,
+                "backup_record_id": BACKUP_RECORD_ID,
+                "failure_stage": "source_database",
+                "failure_code": "source_postgres_metadata_read_failed",
+                "inspection_schedule_id": "schedule-1",
+                "inspection_deployment_id": "done-deployment",
+            },
+        )
+        self.assertNotIn("private provider output", str(raised.exception))
+        logs_mock.assert_called_once_with(
+            host="https://dokploy.example.test",
+            token="token",
+            deployment_id="done-deployment",
+            line_count=dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT,
+        )
+
     def test_provider_inspection_bounds_control_failures(self) -> None:
         target = DokployTargetDefinition(
             context=CONTEXT,
@@ -1607,6 +1670,62 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
         )
         self.assertNotIn("private provider output", str(raised.exception))
 
+    def test_provider_inspection_rejects_mismatched_done_failure_marker(self) -> None:
+        target = DokployTargetDefinition(
+            context=CONTEXT,
+            instance="prod",
+            target_id="compose-example-prod",
+            target_name="example-prod",
+        )
+        mismatched_failure_line = (
+            f"{dokploy_post_deploy.ODOO_RETAINED_VOLUME_BACKUP_IMPORT_INSPECT_FAILURE_MARKER}="
+            f"{'f' * 64}|other-backup|source_database|"
+            "source_postgres_metadata_read_failed"
+        )
+        with (
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": ACTIVE_COMPOSE_PROJECT, "serverId": "server-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-1"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.latest_deployment_for_schedule",
+                return_value={"deploymentId": "before"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.dokploy_request",
+                return_value={"ok": True},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.wait_for_dokploy_schedule_deployment",
+                return_value="deployment=done-deployment status=done",
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_deployment_logs",
+                return_value=(mismatched_failure_line,),
+            ),
+        ):
+            with self.assertRaises(
+                dokploy_post_deploy.OdooRetainedVolumeBackupImportInspectionFailure
+            ) as raised:
+                _run_provider_inspection(target)
+
+        self.assertEqual(
+            raised.exception.evidence,
+            {
+                "schema_version": 1,
+                "inspection_nonce": "e" * 64,
+                "backup_record_id": BACKUP_RECORD_ID,
+                "failure_stage": "result",
+                "failure_code": "provider_result_invalid",
+                "inspection_schedule_id": "schedule-1",
+                "inspection_deployment_id": "done-deployment",
+            },
+        )
+
     def test_provider_inspection_bounds_unavailable_failure_logs(self) -> None:
         target = DokployTargetDefinition(
             context=CONTEXT,
@@ -1678,6 +1797,12 @@ class OdooProdRetainedVolumeBackupImportTests(unittest.TestCase):
                 {"logs": [valid, valid]},
                 marker=marker,
             )
+        self.assertIsNone(
+            dokploy_post_deploy._find_retained_volume_inspection_failure(
+                {"logs": ["provider output without a failure marker"]},
+                marker=marker,
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -1685,11 +1685,13 @@ execute inside that container or mount its corrupt database volume. The
 script-runner remains running-only because it emits the bounded result and
 writes the imported logical backup into the active data volume.
 
-If the provider inspection schedule terminates before it can emit that result,
-the service reads only the exact failed schedule deployment and accepts one
-nonce- and backup-record-bound failure marker. The operation checkpoint records
-only the request nonce, backup-record id, inspection deployment id, and a
-bounded failure stage/code pair; raw provider logs and command output are not
+If the provider inspection schedule emits a failure instead of its result, the
+service reads only that exact schedule deployment and accepts one nonce- and
+backup-record-bound failure marker. The marker is honored whether Dokploy marks
+the deployment failed or records it as done, because provider terminal status
+does not reliably preserve the script exit status. The operation checkpoint
+records only the request nonce, backup-record id, inspection deployment id, and
+a bounded failure stage/code pair; raw provider logs and command output are not
 copied into the plan, operation error, or API response. An unreadable exact log
 is recorded as `result/provider_result_log_read_failed`; a missing, duplicate,
 or invalid marker is recorded as `result/provider_result_invalid`. This
