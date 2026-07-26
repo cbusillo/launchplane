@@ -5844,6 +5844,7 @@ env_var = "GH_TOKEN"
                     "merge_train_batch_candidates": 1,
                     "merge_train_controller_states": 0,
                     "odoo_prod_backup_restore_operations": 0,
+                    "odoo_prod_retained_volume_backup_import_operations": 0,
                     "merge_train_batch_landing_plans": 1,
                     "merge_train_stack_collapse_plans": 1,
                     "merge_train_policies": 1,

@@ -63,6 +63,12 @@ from control_plane.contracts.odoo_prod_backup_restore_operation import (
     OdooProdBackupRestoreOperationPhase,
     OdooProdBackupRestoreOperationRecord,
 )
+from control_plane.contracts.odoo_prod_retained_volume_backup_import_operation import (
+    ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_PHASE_SEQUENCE,
+    OdooProdRetainedVolumeBackupImportCheckpoint,
+    OdooProdRetainedVolumeBackupImportOperationPhase,
+    OdooProdRetainedVolumeBackupImportOperationRecord,
+)
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -3056,6 +3062,288 @@ class FilesystemRecordStore:
                     }
                 )
             self.write_odoo_prod_backup_restore_operation_record(recovered_record)
+        return tuple(affected_operation_ids)
+
+    def write_odoo_prod_retained_volume_backup_import_operation_record(
+        self, record: OdooProdRetainedVolumeBackupImportOperationRecord
+    ) -> Path:
+        return self._write_model(
+            "odoo_prod_retained_volume_backup_import_operations",
+            record.operation_id,
+            record,
+        )
+
+    def read_odoo_prod_retained_volume_backup_import_operation_record(
+        self, operation_id: str
+    ) -> OdooProdRetainedVolumeBackupImportOperationRecord:
+        return OdooProdRetainedVolumeBackupImportOperationRecord.model_validate(
+            self._read_model(
+                OdooProdRetainedVolumeBackupImportOperationRecord,
+                "odoo_prod_retained_volume_backup_import_operations",
+                operation_id,
+            ).model_dump(mode="json")
+        )
+
+    def list_odoo_prod_retained_volume_backup_import_operation_records(
+        self,
+        *,
+        operation_kind: str = "",
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        idempotency_scope: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooProdRetainedVolumeBackupImportOperationRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                OdooProdRetainedVolumeBackupImportOperationRecord,
+                "odoo_prod_retained_volume_backup_import_operations",
+            )
+            if (not operation_kind or record.operation_kind == operation_kind)
+            and (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+            and (not idempotency_key or record.idempotency_key == idempotency_key)
+            and (not idempotency_scope or record.idempotency_scope == idempotency_scope)
+            and (not statuses or record.status in statuses)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.operation_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def cancel_pending_odoo_prod_retained_volume_backup_import_operation_record(
+        self, record: OdooProdRetainedVolumeBackupImportOperationRecord
+    ) -> bool:
+        if record.status != "cancelled" or record.phase != "cancelled":
+            raise ValueError(
+                "Odoo retained-volume backup import cancellation requires a cancelled record."
+            )
+        with self._exclusive_record_lock(
+            "odoo_prod_retained_volume_backup_import_operations",
+            record.operation_id,
+        ):
+            current_record = self.read_odoo_prod_retained_volume_backup_import_operation_record(
+                record.operation_id
+            )
+            if current_record.status != "pending":
+                return False
+            self.write_odoo_prod_retained_volume_backup_import_operation_record(record)
+            return True
+
+    def create_odoo_prod_retained_volume_backup_import_operation_record_if_no_active_lane(
+        self, record: OdooProdRetainedVolumeBackupImportOperationRecord
+    ) -> tuple[OdooProdRetainedVolumeBackupImportOperationRecord, bool]:
+        reservation_id = hashlib.sha256(
+            f"{record.product}\0{record.context}\0{record.instance}".encode("utf-8")
+        ).hexdigest()
+        with self._exclusive_record_lock(
+            "odoo_prod_retained_volume_backup_import_lane_reservations",
+            reservation_id,
+        ):
+            active_records = self.list_odoo_prod_retained_volume_backup_import_operation_records(
+                product=record.product,
+                context_name=record.context,
+                instance_name=record.instance,
+                statuses=("pending", "running"),
+                limit=1,
+            )
+            if active_records:
+                return active_records[0], False
+            self.write_odoo_prod_retained_volume_backup_import_operation_record(record)
+            return record, True
+
+    def claim_next_odoo_prod_retained_volume_backup_import_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> OdooProdRetainedVolumeBackupImportOperationRecord | None:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner or not lease_expires_at.strip() or not claimed_at.strip():
+            raise ValueError("Odoo retained-volume backup import claim requires lease evidence.")
+        pending_records = self.list_odoo_prod_retained_volume_backup_import_operation_records(
+            statuses=("pending",)
+        )
+        for record in sorted(
+            pending_records,
+            key=lambda item: (item.created_at, item.operation_id),
+        ):
+            with self._exclusive_record_lock(
+                "odoo_prod_retained_volume_backup_import_operations",
+                record.operation_id,
+            ):
+                current_record = self.read_odoo_prod_retained_volume_backup_import_operation_record(
+                    record.operation_id
+                )
+                if current_record.status != "pending":
+                    continue
+                claimed_record = current_record.model_copy(
+                    update={
+                        "status": "running",
+                        "phase": "running",
+                        "started_at": current_record.started_at or claimed_at,
+                        "updated_at": claimed_at,
+                        "lease_owner": normalized_lease_owner,
+                        "lease_expires_at": lease_expires_at.strip(),
+                        "heartbeat_at": claimed_at.strip(),
+                        "attempt": current_record.attempt + 1,
+                    }
+                )
+                self.write_odoo_prod_retained_volume_backup_import_operation_record(claimed_record)
+                return claimed_record
+        return None
+
+    def heartbeat_odoo_prod_retained_volume_backup_import_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        with self._exclusive_record_lock(
+            "odoo_prod_retained_volume_backup_import_operations",
+            operation_id,
+        ):
+            record = self.read_odoo_prod_retained_volume_backup_import_operation_record(
+                operation_id
+            )
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= heartbeat_at.strip()
+            ):
+                return False
+            heartbeat_record = record.model_copy(
+                update={
+                    "heartbeat_at": heartbeat_at.strip(),
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "updated_at": heartbeat_at.strip(),
+                }
+            )
+            self.write_odoo_prod_retained_volume_backup_import_operation_record(heartbeat_record)
+            return True
+
+    def checkpoint_odoo_prod_retained_volume_backup_import_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        phase: OdooProdRetainedVolumeBackupImportOperationPhase,
+        checkpointed_at: str,
+        evidence: dict[str, str],
+    ) -> OdooProdRetainedVolumeBackupImportOperationRecord | None:
+        with self._exclusive_record_lock(
+            "odoo_prod_retained_volume_backup_import_operations",
+            operation_id,
+        ):
+            record = self.read_odoo_prod_retained_volume_backup_import_operation_record(
+                operation_id
+            )
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= checkpointed_at.strip()
+            ):
+                return None
+            phase_indexes = {
+                phase_name: index
+                for index, phase_name in enumerate(
+                    ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_PHASE_SEQUENCE
+                )
+            }
+            if phase_indexes[phase] < phase_indexes[record.phase]:
+                return None
+            checkpoint = OdooProdRetainedVolumeBackupImportCheckpoint(
+                phase=phase,
+                recorded_at=checkpointed_at,
+                evidence=evidence,
+            )
+            checkpointed_record = record.model_copy(
+                update={
+                    "phase": phase,
+                    "checkpoints": (*record.checkpoints, checkpoint),
+                    "updated_at": checkpointed_at,
+                }
+            )
+            self.write_odoo_prod_retained_volume_backup_import_operation_record(checkpointed_record)
+            return checkpointed_record
+
+    def complete_odoo_prod_retained_volume_backup_import_operation_record(
+        self,
+        *,
+        record: OdooProdRetainedVolumeBackupImportOperationRecord,
+        lease_owner: str,
+    ) -> bool:
+        with self._exclusive_record_lock(
+            "odoo_prod_retained_volume_backup_import_operations",
+            record.operation_id,
+        ):
+            current_record = self.read_odoo_prod_retained_volume_backup_import_operation_record(
+                record.operation_id
+            )
+            completed_at = _utc_now_timestamp()
+            if (
+                current_record.status != "running"
+                or current_record.lease_owner != lease_owner.strip()
+                or not current_record.lease_expires_at
+                or current_record.lease_expires_at <= completed_at
+            ):
+                return False
+            self.write_odoo_prod_retained_volume_backup_import_operation_record(record)
+            return True
+
+    def recover_expired_odoo_prod_retained_volume_backup_import_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]:
+        affected_operation_ids: list[str] = []
+        for record in self.list_odoo_prod_retained_volume_backup_import_operation_records(
+            statuses=("running",)
+        ):
+            if record.lease_expires_at and record.lease_expires_at >= now:
+                continue
+            affected_operation_ids.append(record.operation_id)
+            if record.phase in safe_phases and record.attempt < max_attempts:
+                recovered_record = record.model_copy(
+                    update={
+                        "status": "pending",
+                        "phase": "created",
+                        "checkpoints": (),
+                        "started_at": "",
+                        "updated_at": now,
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                    }
+                )
+            else:
+                recovered_record = record.model_copy(
+                    update={
+                        "status": "fail",
+                        "phase": "failed",
+                        "updated_at": now,
+                        "finished_at": now,
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                        "error_message": (
+                            "Odoo retained-volume backup import lease expired in "
+                            f"phase {record.phase!r}; unsafe to retry automatically."
+                        ),
+                    }
+                )
+            self.write_odoo_prod_retained_volume_backup_import_operation_record(recovered_record)
         return tuple(affected_operation_ids)
 
     def write_verireel_prod_backup_gate_operation_record(

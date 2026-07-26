@@ -489,6 +489,13 @@ Odoo exposes:
 - PR preview desired state, refresh, readiness, inventory, and destroy through
   the generic-web preview lifecycle
 - prod backup gate
+- prod backup verification and guarded restore plan/apply
+- retained-volume backup import plan/apply through distinct
+  `odoo_prod_retained_volume_backup_import_plan.execute` and
+  `odoo_prod_retained_volume_backup_import_apply.execute` scopes; the plan is
+  read-only for Odoo data but is a `safe_write` because it creates and runs a
+  disabled provider inspection schedule, while apply creates only recovery
+  staging and standard backup artifacts and performs no target cutover
 - testing-to-prod promotion
 - prod rollback
 

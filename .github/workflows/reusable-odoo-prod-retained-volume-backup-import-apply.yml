@@ -1,0 +1,307 @@
+---
+name: Reusable Odoo Prod Retained Volume Backup Import Apply
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        required: true
+        type: string
+      context:
+        required: true
+        type: string
+      backup_record_id:
+        required: true
+        type: string
+      expected_current_artifact_id:
+        required: true
+        type: string
+      expected_active_db_volume:
+        required: true
+        type: string
+      expected_active_data_volume:
+        required: true
+        type: string
+      expected_active_log_volume:
+        required: true
+        type: string
+      source_db_volume:
+        required: true
+        type: string
+      source_data_volume:
+        required: true
+        type: string
+      source_database_name:
+        required: true
+        type: string
+      expected_destination_database_name:
+        required: true
+        type: string
+      expected_database_user:
+        required: true
+        type: string
+      staging_clone_volume:
+        required: true
+        type: string
+      expected_source_compose_project:
+        required: true
+        type: string
+      plan_operation_id:
+        required: true
+        type: string
+      plan_fingerprint:
+        required: true
+        type: string
+      confirmation:
+        required: true
+        type: string
+      idempotency_key:
+        required: true
+        type: string
+      timeout_seconds:
+        required: false
+        default: ""
+        type: string
+      launchplane_url:
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    env:
+      PRODUCT: ${{ inputs.product }}
+      CONTEXT: ${{ inputs.context }}
+      BACKUP_RECORD_ID: ${{ inputs.backup_record_id }}
+      EXPECTED_CURRENT_ARTIFACT_ID: ${{ inputs.expected_current_artifact_id }}
+      EXPECTED_ACTIVE_DB_VOLUME: ${{ inputs.expected_active_db_volume }}
+      EXPECTED_ACTIVE_DATA_VOLUME: ${{ inputs.expected_active_data_volume }}
+      EXPECTED_ACTIVE_LOG_VOLUME: ${{ inputs.expected_active_log_volume }}
+      SOURCE_DB_VOLUME: ${{ inputs.source_db_volume }}
+      SOURCE_DATA_VOLUME: ${{ inputs.source_data_volume }}
+      SOURCE_DATABASE_NAME: ${{ inputs.source_database_name }}
+      EXPECTED_DESTINATION_DATABASE_NAME: ${{ inputs.expected_destination_database_name }}
+      EXPECTED_DATABASE_USER: ${{ inputs.expected_database_user }}
+      STAGING_CLONE_VOLUME: ${{ inputs.staging_clone_volume }}
+      EXPECTED_SOURCE_COMPOSE_PROJECT: ${{ inputs.expected_source_compose_project }}
+      PLAN_OPERATION_ID: ${{ inputs.plan_operation_id }}
+      PLAN_FINGERPRINT: ${{ inputs.plan_fingerprint }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+    steps:
+      - name: Validate retained-volume import inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRMATION" != "import-retained-volumes-as-production-backup" ]; then
+            echo 'Exact retained-volume import confirmation is required.' >&2
+            exit 1
+          fi
+          if ! [[ "$PLAN_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'PLAN_FINGERPRINT must be a SHA-256 value.' >&2
+            exit 1
+          fi
+          for scalar in \
+            PRODUCT CONTEXT BACKUP_RECORD_ID EXPECTED_CURRENT_ARTIFACT_ID \
+            EXPECTED_ACTIVE_DB_VOLUME EXPECTED_ACTIVE_DATA_VOLUME \
+            EXPECTED_ACTIVE_LOG_VOLUME SOURCE_DB_VOLUME SOURCE_DATA_VOLUME \
+            SOURCE_DATABASE_NAME EXPECTED_DESTINATION_DATABASE_NAME \
+            EXPECTED_DATABASE_USER STAGING_CLONE_VOLUME \
+            EXPECTED_SOURCE_COMPOSE_PROJECT PLAN_OPERATION_ID; do
+            value="${!scalar}"
+            if [ -z "$value" ]; then
+              echo "${scalar} is required." >&2
+              exit 1
+            fi
+            case "$value" in
+              *$'\n'* | *$'\r'*) echo "${scalar} must be single-line." >&2; exit 1 ;;
+            esac
+          done
+          if [ -n "$TIMEOUT_SECONDS" ] && ! [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+            echo 'TIMEOUT_SECONDS must be empty or a positive integer.' >&2
+            exit 1
+          fi
+
+      - name: Re-read reviewed retained-volume plan
+        id: reviewed_plan
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: >-
+            ${{ inputs.launchplane_audience || vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: >-
+            /v1/drivers/odoo/prod-retained-volume-backup-import/operations/${{ inputs.plan_operation_id }}
+          fail-result-paths: operation.status=fail,operation.status=cancelled
+          log-response-body: "false"
+          response-output-file: reviewed-retained-volume-plan.json
+
+      - name: Enforce reviewed retained-volume plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e \
+            --arg operation_id "$PLAN_OPERATION_ID" \
+            --arg fingerprint "$PLAN_FINGERPRINT" \
+            --arg backup_record_id "$BACKUP_RECORD_ID" \
+            '
+              .status == "ok" and
+              .operation.operation_id == $operation_id and
+              .operation.operation_kind == "plan" and
+              .operation.status == "pass" and
+              .result.plan_status == "ready" and
+              .result.plan_fingerprint == $fingerprint and
+              .result.backup_record_id == $backup_record_id and
+              .result.staging_clone_volume_absent == true and
+              .result.backup_destination_absent == true
+            ' reviewed-retained-volume-plan.json >/dev/null
+
+      - name: Build exact retained-volume apply request
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .launchplane
+          timeout_json=null
+          if [ -n "$TIMEOUT_SECONDS" ]; then
+            timeout_json="$TIMEOUT_SECONDS"
+          fi
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg backup_record_id "$BACKUP_RECORD_ID" \
+            --arg artifact_id "$EXPECTED_CURRENT_ARTIFACT_ID" \
+            --arg active_db "$EXPECTED_ACTIVE_DB_VOLUME" \
+            --arg active_data "$EXPECTED_ACTIVE_DATA_VOLUME" \
+            --arg active_log "$EXPECTED_ACTIVE_LOG_VOLUME" \
+            --arg source_db "$SOURCE_DB_VOLUME" \
+            --arg source_data "$SOURCE_DATA_VOLUME" \
+            --arg source_database "$SOURCE_DATABASE_NAME" \
+            --arg destination_database "$EXPECTED_DESTINATION_DATABASE_NAME" \
+            --arg database_user "$EXPECTED_DATABASE_USER" \
+            --arg staging_volume "$STAGING_CLONE_VOLUME" \
+            --arg source_project "$EXPECTED_SOURCE_COMPOSE_PROJECT" \
+            --arg plan_operation_id "$PLAN_OPERATION_ID" \
+            --arg plan_fingerprint "$PLAN_FINGERPRINT" \
+            --arg confirmation "$CONFIRMATION" \
+            --argjson timeout_seconds "$timeout_json" \
+            '{
+              schema_version: 1,
+              product: $product,
+              backup_import: {
+                schema_version: 1,
+                product: $product,
+                context: $context,
+                instance: "prod",
+                backup_record_id: $backup_record_id,
+                expected_current_artifact_id: $artifact_id,
+                expected_active_db_volume: $active_db,
+                expected_active_data_volume: $active_data,
+                expected_active_log_volume: $active_log,
+                source_db_volume: $source_db,
+                source_data_volume: $source_data,
+                source_database_name: $source_database,
+                expected_destination_database_name: $destination_database,
+                expected_database_user: $database_user,
+                staging_clone_volume: $staging_volume,
+                expected_source_compose_project: $source_project,
+                plan_operation_id: $plan_operation_id,
+                plan_fingerprint: $plan_fingerprint,
+                confirmation: $confirmation,
+                timeout_seconds: $timeout_seconds
+              }
+            }' > .launchplane/odoo-retained-volume-backup-import-apply-payload.json
+
+      - name: Create retained-volume backup import operation
+        id: create_import
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: >-
+            ${{ inputs.launchplane_audience || vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/drivers/odoo/prod-retained-volume-backup-import-apply
+          payload-file: .launchplane/odoo-retained-volume-backup-import-apply-payload.json
+          idempotency-key: ${{ inputs.idempotency_key }}
+          output-paths: >-
+            poll_url=result.poll_url,operation_id=result.operation_id
+          fail-result-paths: ""
+          log-response-body: "false"
+          response-output-file: retained-volume-import-create.json
+
+      - name: Poll retained-volume backup import operation
+        id: poll_import
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: >-
+            ${{ inputs.launchplane_audience || vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: ${{ steps.create_import.outputs.poll_url }}
+          poll-result-path: operation.status
+          poll-result-statuses: pending,running
+          poll-interval-ms: 15000
+          poll-timeout-ms: 7200000
+          fail-result-paths: operation.status=fail,operation.status=cancelled
+          log-response-body: "false"
+          response-output-file: odoo-prod-retained-volume-backup-import-result.json
+
+      - name: Verify retained-volume backup import result
+        env:
+          STATUS_CODE: ${{ steps.poll_import.outputs.status-code }}
+          OPERATION_ID: ${{ steps.create_import.outputs.operation_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$STATUS_CODE" != "200" ]; then
+            echo "Retained-volume import failed with HTTP ${STATUS_CODE}." >&2
+            exit 1
+          fi
+          jq -e \
+            --arg operation_id "$OPERATION_ID" \
+            --arg fingerprint "$PLAN_FINGERPRINT" \
+            --arg backup_record_id "$BACKUP_RECORD_ID" \
+            --arg source_db "$SOURCE_DB_VOLUME" \
+            --arg source_data "$SOURCE_DATA_VOLUME" \
+            --arg staging_volume "$STAGING_CLONE_VOLUME" \
+            '
+              .status == "ok" and
+              .operation.operation_id == $operation_id and
+              .operation.operation_kind == "apply" and
+              .operation.status == "pass" and
+              .result.import_status == "pass" and
+              .result.backup_status == "pass" and
+              .result.plan_fingerprint == $fingerprint and
+              .result.backup_record_id == $backup_record_id and
+              .result.source_db_volume == $source_db and
+              .result.source_data_volume == $source_data and
+              .result.staging_clone_volume == $staging_volume and
+              (.result.schedule_deployment_id | length) > 0 and
+              (.result.database_dump_sha256 | test("^[0-9a-f]{64}$")) and
+              (.result.filestore_archive_sha256 | test("^[0-9a-f]{64}$"))
+            ' odoo-prod-retained-volume-backup-import-result.json >/dev/null
+          jq '{status, trace_id, operation, result}' \
+            odoo-prod-retained-volume-backup-import-result.json
+
+      - name: Upload retained-volume backup import evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: odoo-prod-retained-volume-backup-import-result
+          path: |
+            reviewed-retained-volume-plan.json
+            odoo-prod-retained-volume-backup-import-result.json
+          if-no-files-found: ignore
+          retention-days: 30

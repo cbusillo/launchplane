@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from threading import Event
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import patch
 
 from click import ClickException
@@ -23,6 +24,9 @@ from control_plane.contracts.odoo_prod_backup_restore import (
 from control_plane.contracts.odoo_prod_backup_restore_operation import (
     OdooProdBackupRestoreCheckpoint,
     OdooProdBackupRestoreOperationRecord,
+)
+from control_plane.contracts.odoo_prod_retained_volume_backup_import import (
+    OdooProdRetainedVolumeBackupImportPlan,
 )
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
@@ -47,6 +51,11 @@ from tests.support.durable_operations import (
     durable_operation_authorization_payload,
     durable_operation_policy_record,
 )
+from tests.test_odoo_prod_retained_volume_backup_import import (
+    _Store as _RetainedImportStore,
+    _build_plan as _build_retained_import_plan,
+    _operation as _retained_import_operation,
+)
 
 
 _BOOTSTRAP_AUTHORIZATION = durable_operation_authorization_payload(
@@ -61,6 +70,20 @@ _RESTORE_AUTHORIZATION = durable_operation_authorization_payload(
     action="odoo_prod_backup_restore_apply.execute",
     managed_rule_id="cm-prod-backup-restore",
     context="cm",
+    instances=("prod",),
+)
+_RETAINED_PLAN_AUTHORIZATION = durable_operation_authorization_payload(
+    action="odoo_prod_retained_volume_backup_import_plan.execute",
+    managed_rule_id="retained-import-plan",
+    product="example-odoo-product",
+    context="example-context",
+    instances=("prod",),
+)
+_RETAINED_APPLY_AUTHORIZATION = durable_operation_authorization_payload(
+    action="odoo_prod_retained_volume_backup_import_apply.execute",
+    managed_rule_id="retained-import-apply",
+    product="example-odoo-product",
+    context="example-context",
     instances=("prod",),
 )
 
@@ -213,13 +236,120 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             _BOOTSTRAP_AUTHORIZATION,
             _REPLACEMENT_AUTHORIZATION,
             _RESTORE_AUTHORIZATION,
+            _RETAINED_PLAN_AUTHORIZATION,
+            _RETAINED_APPLY_AUTHORIZATION,
         )
         self.authorization_policy_patcher = patch(
             "control_plane.workflows.odoo_stable_operation_worker.read_active_authz_policy_record",
             return_value=self.authorization_policy_record,
         )
-        self.authorization_policy_patcher.start()
+        self.authorization_policy_read_mock = self.authorization_policy_patcher.start()
         self.addCleanup(self.authorization_policy_patcher.stop)
+
+    def test_worker_rechecks_authorization_before_each_retained_plan_provider_effect(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            operation = _retained_import_operation(
+                operation_kind="plan",
+                operation_id="retained-import-plan-operation-1",
+            )
+            store.write_odoo_prod_retained_volume_backup_import_operation_record(operation)
+            plan = _build_retained_import_plan(_RetainedImportStore())
+
+            def build_plan(
+                **kwargs: object,
+            ) -> OdooProdRetainedVolumeBackupImportPlan:
+                phase_checkpoint = cast(
+                    Callable[[str, dict[str, str]], None],
+                    kwargs["phase_checkpoint"],
+                )
+                provider_checkpoint = cast(
+                    Callable[[str, str], None],
+                    kwargs["provider_effect_checkpoint"],
+                )
+                provider_checkpoint("inspection_started", "schedule_upsert")
+                provider_checkpoint("inspection_started", "schedule_trigger")
+                phase_checkpoint(
+                    "planned",
+                    {"plan_fingerprint": plan.plan_fingerprint},
+                )
+                return plan
+
+            with patch(
+                "control_plane.workflows.odoo_stable_operation_worker.build_odoo_prod_retained_volume_backup_import_plan",
+                side_effect=build_plan,
+            ):
+                worker_result = run_odoo_stable_operation_worker_once(
+                    record_store=store,
+                    control_plane_root_path=Path(temporary_directory_name),
+                    lease_owner="worker-a",
+                    lease_seconds=30,
+                    heartbeat_seconds=10,
+                )
+
+            stored = store.read_odoo_prod_retained_volume_backup_import_operation_record(
+                operation.operation_id
+            )
+
+        self.assertEqual(
+            worker_result.operation_kind,
+            "odoo_prod_retained_volume_backup_import_plan",
+        )
+        self.assertEqual(stored.status, "pass")
+        self.assertEqual(stored.phase, "completed")
+        self.assertEqual(stored.result, plan)
+        provider_effects = [
+            checkpoint.evidence.get("provider_effect")
+            for checkpoint in stored.checkpoints
+            if checkpoint.evidence.get("provider_effect")
+        ]
+        self.assertEqual(provider_effects, ["schedule_upsert", "schedule_trigger"])
+        self.assertGreaterEqual(self.authorization_policy_read_mock.call_count, 3)
+
+    def test_worker_marks_blocked_retained_import_plan_failed(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            operation = _retained_import_operation(
+                operation_kind="plan",
+                operation_id="retained-import-plan-operation-blocked",
+            )
+            store.write_odoo_prod_retained_volume_backup_import_operation_record(operation)
+            ready_plan = _build_retained_import_plan(_RetainedImportStore())
+            blocked_plan = OdooProdRetainedVolumeBackupImportPlan.model_validate(
+                {
+                    **ready_plan.model_dump(mode="json"),
+                    "plan_status": "blocked",
+                    "plan_fingerprint": "",
+                    "blockers": ["Retained source evidence drifted."],
+                }
+            )
+
+            with patch(
+                "control_plane.workflows.odoo_stable_operation_worker.build_odoo_prod_retained_volume_backup_import_plan",
+                return_value=blocked_plan,
+            ):
+                worker_result = run_odoo_stable_operation_worker_once(
+                    record_store=store,
+                    control_plane_root_path=Path(temporary_directory_name),
+                    lease_owner="worker-1",
+                    lease_seconds=30,
+                    heartbeat_seconds=1,
+                )
+
+            terminal = store.read_odoo_prod_retained_volume_backup_import_operation_record(
+                operation.operation_id
+            )
+            self.assertEqual(worker_result.status, "worked")
+            self.assertEqual(
+                worker_result.operation_kind,
+                "odoo_prod_retained_volume_backup_import_plan",
+            )
+            self.assertEqual(terminal.status, "fail")
+            self.assertEqual(terminal.phase, "failed")
+            self.assertEqual(terminal.result, blocked_plan)
+            self.assertIn("source evidence drifted", terminal.error_message.lower())
 
     def test_worker_checkpoints_restore_provider_effects_before_completion(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

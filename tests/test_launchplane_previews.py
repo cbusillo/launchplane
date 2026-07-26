@@ -66,6 +66,9 @@ from control_plane.workflows.launchplane import (
     parse_preview_request_metadata,
     resolve_launchplane_preview_base_url,
 )
+from control_plane.workflows.odoo_prod_backup_gate import (
+    RETAINED_VOLUME_BACKUP_IMPORT_SOURCE,
+)
 
 
 CLI_MAIN = cast(Command, main)
@@ -1457,6 +1460,15 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertEqual(evidence_check["label"], "Prod backup gate")
         self.assertEqual(evidence_check["status"], "fail")
         self.assertIn("failed", evidence_check["detail"])
+
+    def test_launchplane_promotion_backup_gate_check_rejects_recovery_import(self) -> None:
+        evidence_check = control_plane_cli._launchplane_promotion_backup_gate_evidence_check(
+            _backup_gate_record(source=RETAINED_VOLUME_BACKUP_IMPORT_SOURCE)
+        )
+
+        self.assertEqual(evidence_check["label"], "Prod backup gate")
+        self.assertEqual(evidence_check["status"], "pending")
+        self.assertIn("recovery-only", evidence_check["detail"])
 
     def test_launchplane_previews_ingest_pr_event_persists_preview_enablement_record(self) -> None:
         runner = CliRunner()

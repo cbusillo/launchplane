@@ -38,6 +38,7 @@ from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_prod_backup_gate import (
     BACKUP_GATE_SOURCE,
     BACKUP_VERIFICATION_SOURCE,
+    RETAINED_VOLUME_BACKUP_IMPORT_SOURCE,
 )
 from control_plane.workflows.odoo_prod_backup_restore import (
     build_odoo_prod_backup_restore_plan,
@@ -340,6 +341,32 @@ class OdooProdBackupRestorePlanTests(unittest.TestCase):
         self.assertEqual(plan.new_db_volume, NEW_DB_VOLUME)
         self.assertEqual(plan.data_volume, DATA_VOLUME)
         self.assertIn(".quarantine-", plan.filestore_quarantine_path)
+
+    def test_ready_plan_accepts_verified_retained_volume_backup_source(self) -> None:
+        store = _Store()
+        store.backup_records[BACKUP_RECORD_ID] = store.backup_records[BACKUP_RECORD_ID].model_copy(
+            update={"source": RETAINED_VOLUME_BACKUP_IMPORT_SOURCE}
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "example-prod",
+                    "env": dokploy_api.serialize_dokploy_env_text(_live_env()),
+                },
+            ),
+        ):
+            plan = build_odoo_prod_backup_restore_plan(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(),
+            )
+
+        self.assertEqual(plan.plan_status, "ready")
 
     def test_plan_blocks_data_volume_drift(self) -> None:
         store = _Store()

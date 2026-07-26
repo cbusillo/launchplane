@@ -1652,6 +1652,48 @@ plan also resolves desired volume authority from DB-backed runtime records and
 blocks when any desired value differs from the live target. It does not create,
 delete, deploy, change routes, or reinterpret a volume change as existing data.
 
+When production recovery starts from retained physical volumes and no valid
+logical backup exists, use the dedicated retained-volume backup import actions;
+do not add import flags to routine backup or restore. First run
+`Odoo Prod Retained Volume Backup Import Plan` with the exact product, production
+context and instance, current artifact, active database/data/log volumes, source
+database/data volumes, source database name, destination database name, expected
+database owner, fresh staging-clone volume, source compose project, and a new
+backup-record id. Every value is an operator request field checked against
+DB-backed current authority or read-only provider evidence. The plan mounts the
+source volumes read-only, verifies their compose project and `odoo_db` /
+`odoo_data` roles, proves PostgreSQL major version 17, captures the exact
+`PG_VERSION`, `pg_control` SHA-256 and checkpoint metadata, requires the source
+cluster state to be exactly `shut down`, counts and sizes the source filestore,
+proves the staging and destination paths absent, checks active data-volume free
+space, and binds all evidence into a SHA-256 plan fingerprint.
+
+Run `Odoo Prod Retained Volume Backup Import Apply` only with the exact reviewed
+plan operation and fingerprint, a stable idempotency key, and confirmation phrase
+`import-retained-volumes-as-production-backup`. The service queues a dedicated
+durable operation and rechecks the recorded authorization before every provider
+effect. Apply re-runs the plan and fails closed on authority or provider drift.
+It never starts PostgreSQL on, or writes to, either retained source volume. It
+copies the source database volume read-only into the fresh staging volume while
+preserving ownership, verifies the copied `pg_control` fingerprint, and starts
+PostgreSQL 17 only from that clone in an isolated named container and network.
+After proving the requested source database exists, it writes a custom-format
+dump and source-filestore archive into the active data volume's standard
+Launchplane backup directory. Artifact names and the schema-v1 manifest use the
+destination database identity; the archived filestore has that identity as its
+top-level directory. Launchplane verifies sizes and SHA-256 values and accepts
+only nonce-, request-, and exact schedule-deployment-bound completion evidence.
+
+The clone container and network are removed on exit, while the staging clone
+volume remains labeled for explicit recovery inspection. A passing import writes
+a distinct retained-volume-import backup-gate source. Standard backup
+verification and guarded restore accept that source, but routine production
+promotion accepts only its ordinary backup-before-promote source. This action
+does not update the live target, runtime environment, deployment, inventory, or
+release tuple and performs no cutover. Inspect or cancel it through the deployed
+service operation endpoint; never rerun its provider schedule directly or use a
+local checkout as a live-target fallback.
+
 Use the `Odoo Prod Backup Verification` workflow to exercise the verification
 route through GitHub Actions OIDC. The workflow accepts an exact backup-gate
 record id, stores a bounded workflow artifact, and returns the id of a separate

@@ -27,6 +27,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
     execute_odoo_stable_target_replacement_apply,
 )
+from control_plane.workflows.odoo_prod_backup_gate import BACKUP_GATE_SOURCE
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.inventory import build_environment_inventory
 
@@ -130,6 +131,16 @@ def execute_odoo_prod_promotion(
         artifact_manifest = record_store.read_artifact_manifest(request.artifact_id)
         source_tuple = _read_source_tuple(record_store=record_store, request=request)
         backup_gate = record_store.read_backup_gate_record(request.backup_record_id)
+        if (
+            backup_gate.source != BACKUP_GATE_SOURCE
+            or not backup_gate.required
+            or backup_gate.status != "pass"
+            or backup_gate.context != request.context
+            or backup_gate.instance != request.to_instance
+        ):
+            raise click.ClickException(
+                "Odoo prod promotion requires the exact passing ordinary production backup gate."
+            )
         pending_record = _build_promotion_record(
             record_id=promotion_record_id,
             request=request,

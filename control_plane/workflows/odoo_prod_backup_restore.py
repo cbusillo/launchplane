@@ -50,8 +50,8 @@ from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
 from control_plane.workflows.odoo_prod_backup_gate import (
-    BACKUP_GATE_SOURCE,
     BACKUP_VERIFICATION_SOURCE,
+    VERIFIABLE_BACKUP_GATE_SOURCES,
 )
 from control_plane.workflows.odoo_verification import (
     OdooVerificationEvidence,
@@ -243,7 +243,7 @@ def build_odoo_prod_backup_restore_plan(
     backup_record = _read_backup_record(
         record_store=record_store,
         record_id=request.backup_record_id,
-        source=BACKUP_GATE_SOURCE,
+        sources=VERIFIABLE_BACKUP_GATE_SOURCES,
         context=request.context,
         instance=request.instance,
         label="backup gate",
@@ -258,7 +258,7 @@ def build_odoo_prod_backup_restore_plan(
     verification_record = _read_backup_record(
         record_store=record_store,
         record_id=request.verification_record_id,
-        source=BACKUP_VERIFICATION_SOURCE,
+        sources=frozenset({BACKUP_VERIFICATION_SOURCE}),
         context=request.context,
         instance=request.instance,
         label="backup verification",
@@ -1050,7 +1050,7 @@ def _read_backup_record(
     *,
     record_store: OdooProdBackupRestoreStore,
     record_id: str,
-    source: str,
+    sources: frozenset[str],
     context: str,
     instance: str,
     label: str,
@@ -1065,7 +1065,7 @@ def _read_backup_record(
         record.record_id != record_id
         or record.context != context
         or record.instance != instance
-        or record.source != source
+        or record.source not in sources
         or not record.required
         or record.status != "pass"
     ):

@@ -1,0 +1,277 @@
+---
+name: Reusable Odoo Prod Retained Volume Backup Import Plan
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        required: true
+        type: string
+      context:
+        required: true
+        type: string
+      backup_record_id:
+        required: true
+        type: string
+      expected_current_artifact_id:
+        required: true
+        type: string
+      expected_active_db_volume:
+        required: true
+        type: string
+      expected_active_data_volume:
+        required: true
+        type: string
+      expected_active_log_volume:
+        required: true
+        type: string
+      source_db_volume:
+        required: true
+        type: string
+      source_data_volume:
+        required: true
+        type: string
+      source_database_name:
+        required: true
+        type: string
+      expected_destination_database_name:
+        required: true
+        type: string
+      expected_database_user:
+        required: true
+        type: string
+      staging_clone_volume:
+        required: true
+        type: string
+      expected_source_compose_project:
+        required: true
+        type: string
+      idempotency_key:
+        required: true
+        type: string
+      launchplane_url:
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    env:
+      PRODUCT: ${{ inputs.product }}
+      CONTEXT: ${{ inputs.context }}
+      BACKUP_RECORD_ID: ${{ inputs.backup_record_id }}
+      EXPECTED_CURRENT_ARTIFACT_ID: ${{ inputs.expected_current_artifact_id }}
+      EXPECTED_ACTIVE_DB_VOLUME: ${{ inputs.expected_active_db_volume }}
+      EXPECTED_ACTIVE_DATA_VOLUME: ${{ inputs.expected_active_data_volume }}
+      EXPECTED_ACTIVE_LOG_VOLUME: ${{ inputs.expected_active_log_volume }}
+      SOURCE_DB_VOLUME: ${{ inputs.source_db_volume }}
+      SOURCE_DATA_VOLUME: ${{ inputs.source_data_volume }}
+      SOURCE_DATABASE_NAME: ${{ inputs.source_database_name }}
+      EXPECTED_DESTINATION_DATABASE_NAME: ${{ inputs.expected_destination_database_name }}
+      EXPECTED_DATABASE_USER: ${{ inputs.expected_database_user }}
+      STAGING_CLONE_VOLUME: ${{ inputs.staging_clone_volume }}
+      EXPECTED_SOURCE_COMPOSE_PROJECT: ${{ inputs.expected_source_compose_project }}
+    steps:
+      - name: Build exact retained-volume plan request
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .launchplane
+          for scalar in \
+            PRODUCT CONTEXT BACKUP_RECORD_ID EXPECTED_CURRENT_ARTIFACT_ID \
+            EXPECTED_ACTIVE_DB_VOLUME EXPECTED_ACTIVE_DATA_VOLUME \
+            EXPECTED_ACTIVE_LOG_VOLUME SOURCE_DB_VOLUME SOURCE_DATA_VOLUME \
+            SOURCE_DATABASE_NAME EXPECTED_DESTINATION_DATABASE_NAME \
+            EXPECTED_DATABASE_USER STAGING_CLONE_VOLUME \
+            EXPECTED_SOURCE_COMPOSE_PROJECT; do
+            value="${!scalar}"
+            if [ -z "$value" ]; then
+              echo "${scalar} is required." >&2
+              exit 1
+            fi
+            case "$value" in
+              *$'\n'* | *$'\r'*)
+                echo "${scalar} must be single-line." >&2
+                exit 1
+                ;;
+            esac
+          done
+          for scalar in \
+            BACKUP_RECORD_ID EXPECTED_ACTIVE_DB_VOLUME \
+            EXPECTED_ACTIVE_DATA_VOLUME EXPECTED_ACTIVE_LOG_VOLUME \
+            SOURCE_DB_VOLUME SOURCE_DATA_VOLUME SOURCE_DATABASE_NAME \
+            EXPECTED_DESTINATION_DATABASE_NAME EXPECTED_DATABASE_USER \
+            STAGING_CLONE_VOLUME EXPECTED_SOURCE_COMPOSE_PROJECT; do
+            value="${!scalar}"
+            if ! [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "${scalar} is not path-safe." >&2
+              exit 1
+            fi
+          done
+          if [ "$SOURCE_DATABASE_NAME" = "$EXPECTED_DESTINATION_DATABASE_NAME" ]; then
+            echo 'Source and destination database names must differ.' >&2
+            exit 1
+          fi
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg backup_record_id "$BACKUP_RECORD_ID" \
+            --arg expected_current_artifact_id "$EXPECTED_CURRENT_ARTIFACT_ID" \
+            --arg expected_active_db_volume "$EXPECTED_ACTIVE_DB_VOLUME" \
+            --arg expected_active_data_volume "$EXPECTED_ACTIVE_DATA_VOLUME" \
+            --arg expected_active_log_volume "$EXPECTED_ACTIVE_LOG_VOLUME" \
+            --arg source_db_volume "$SOURCE_DB_VOLUME" \
+            --arg source_data_volume "$SOURCE_DATA_VOLUME" \
+            --arg source_database_name "$SOURCE_DATABASE_NAME" \
+            --arg destination_database_name "$EXPECTED_DESTINATION_DATABASE_NAME" \
+            --arg database_user "$EXPECTED_DATABASE_USER" \
+            --arg staging_clone_volume "$STAGING_CLONE_VOLUME" \
+            --arg source_compose_project "$EXPECTED_SOURCE_COMPOSE_PROJECT" \
+            '{
+              schema_version: 1,
+              product: $product,
+              backup_import: {
+                schema_version: 1,
+                product: $product,
+                context: $context,
+                instance: "prod",
+                backup_record_id: $backup_record_id,
+                expected_current_artifact_id: $expected_current_artifact_id,
+                expected_active_db_volume: $expected_active_db_volume,
+                expected_active_data_volume: $expected_active_data_volume,
+                expected_active_log_volume: $expected_active_log_volume,
+                source_db_volume: $source_db_volume,
+                source_data_volume: $source_data_volume,
+                source_database_name: $source_database_name,
+                expected_destination_database_name: $destination_database_name,
+                expected_database_user: $database_user,
+                staging_clone_volume: $staging_clone_volume,
+                expected_source_compose_project: $source_compose_project
+              }
+            }' > .launchplane/odoo-retained-volume-backup-import-plan-payload.json
+
+      - name: Create durable retained-volume plan operation
+        id: create_plan
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: >-
+            ${{ inputs.launchplane_audience || vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/drivers/odoo/prod-retained-volume-backup-import-plan
+          payload-file: .launchplane/odoo-retained-volume-backup-import-plan-payload.json
+          idempotency-key: ${{ inputs.idempotency_key }}
+          output-paths: >-
+            poll_url=result.poll_url,operation_id=result.operation_id
+          fail-result-paths: ""
+          log-response-body: "false"
+          response-output-file: retained-volume-plan-create.json
+
+      - name: Poll retained-volume plan operation
+        id: poll_plan
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: >-
+            ${{ inputs.launchplane_audience || vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          method: GET
+          route-path: ${{ steps.create_plan.outputs.poll_url }}
+          poll-result-path: operation.status
+          poll-result-statuses: pending,running
+          poll-interval-ms: 15000
+          poll-timeout-ms: 1800000
+          fail-result-paths: operation.status=fail,operation.status=cancelled
+          log-response-body: "false"
+          response-output-file: odoo-prod-retained-volume-backup-import-plan.json
+
+      - name: Verify reviewed retained-volume plan
+        env:
+          STATUS_CODE: ${{ steps.poll_plan.outputs.status-code }}
+          OPERATION_ID: ${{ steps.create_plan.outputs.operation_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$STATUS_CODE" != "200" ]; then
+            echo "Retained-volume plan failed with HTTP ${STATUS_CODE}." >&2
+            exit 1
+          fi
+          if ! jq -e \
+            --arg operation_id "$OPERATION_ID" \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg backup_record_id "$BACKUP_RECORD_ID" \
+            --arg artifact_id "$EXPECTED_CURRENT_ARTIFACT_ID" \
+            --arg active_db "$EXPECTED_ACTIVE_DB_VOLUME" \
+            --arg active_data "$EXPECTED_ACTIVE_DATA_VOLUME" \
+            --arg active_log "$EXPECTED_ACTIVE_LOG_VOLUME" \
+            --arg source_db "$SOURCE_DB_VOLUME" \
+            --arg source_data "$SOURCE_DATA_VOLUME" \
+            --arg source_database "$SOURCE_DATABASE_NAME" \
+            --arg destination_database "$EXPECTED_DESTINATION_DATABASE_NAME" \
+            --arg database_user "$EXPECTED_DATABASE_USER" \
+            --arg staging_volume "$STAGING_CLONE_VOLUME" \
+            --arg source_project "$EXPECTED_SOURCE_COMPOSE_PROJECT" \
+            '
+              .status == "ok" and
+              .operation.operation_id == $operation_id and
+              .operation.operation_kind == "plan" and
+              .operation.status == "pass" and
+              .result.plan_status == "ready" and
+              (.result.plan_fingerprint | test("^[0-9a-f]{64}$")) and
+              .result.product == $product and
+              .result.context == $context and
+              .result.instance == "prod" and
+              .result.backup_record_id == $backup_record_id and
+              .result.expected_current_artifact_id == $artifact_id and
+              .result.active_db_volume == $active_db and
+              .result.active_data_volume == $active_data and
+              .result.active_log_volume == $active_log and
+              .result.source_db_volume == $source_db and
+              .result.source_data_volume == $source_data and
+              .result.source_database_name == $source_database and
+              .result.destination_database_name == $destination_database and
+              .result.database_user == $database_user and
+              .result.staging_clone_volume == $staging_volume and
+              .result.expected_source_compose_project == $source_project and
+              .result.source_db_project_label == $source_project and
+              .result.source_data_project_label == $source_project and
+              .result.source_db_role_label == "odoo_db" and
+              .result.source_data_role_label == "odoo_data" and
+              .result.source_pg_version == "17" and
+              (.result.source_pg_control_sha256 | test("^[0-9a-f]{64}$")) and
+              (.result.postgres_image_id | test("^sha256:[0-9a-f]{64}$")) and
+              (.result.script_runner_image_id | test("^sha256:[0-9a-f]{64}$")) and
+              .result.source_filestore_file_count >= 0 and
+              .result.source_filestore_size_bytes >= 0 and
+              .result.staging_clone_volume_absent == true and
+              .result.backup_destination_absent == true and
+              .result.active_data_free_bytes >= .result.active_data_required_bytes
+            ' odoo-prod-retained-volume-backup-import-plan.json >/dev/null; then
+            echo 'Launchplane did not return the exact ready retained-volume plan.' >&2
+            jq -c '{status, operation: .operation.status, result: {plan_status: .result.plan_status, blockers: .result.blockers}}' \
+              odoo-prod-retained-volume-backup-import-plan.json >&2
+            exit 1
+          fi
+          jq '{status, trace_id, operation, result}' \
+            odoo-prod-retained-volume-backup-import-plan.json
+
+      - name: Upload reviewed retained-volume plan
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: odoo-prod-retained-volume-backup-import-plan
+          path: odoo-prod-retained-volume-backup-import-plan.json
+          if-no-files-found: ignore
+          retention-days: 30

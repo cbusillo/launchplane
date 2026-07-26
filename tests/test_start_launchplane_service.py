@@ -22,7 +22,7 @@ if [ "$1" = "run" ] && [ "$2" = "python" ]; then
   if [ "${UV_SCHEMA_STATUS:-0}" = "2" ]; then
     exit 2
   fi
-  printf '%s\n' "${UV_SCHEMA_REVISION:-a1c3e5f7b9d2}"
+  printf '%s\n' "${UV_SCHEMA_REVISION:-b3d5f7a9c1e4}"
   exit 0
 fi
 """,

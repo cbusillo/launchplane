@@ -12,6 +12,9 @@ from control_plane.contracts.driver_descriptor import DriverContextView, DriverD
 from control_plane.contracts.odoo_prod_backup_restore_operation import (
     OdooProdBackupRestoreOperationRecord,
 )
+from control_plane.contracts.odoo_prod_retained_volume_backup_import_operation import (
+    OdooProdRetainedVolumeBackupImportOperationRecord,
+)
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -38,6 +41,11 @@ from control_plane.http_routes.support import (
 )
 from control_plane.odoo_stable_bootstrap_http import ODOO_STABLE_BOOTSTRAP_ROUTE
 from control_plane.odoo_prod_backup_restore_http import ODOO_PROD_BACKUP_RESTORE_APPLY_ROUTE
+from control_plane.odoo_prod_retained_volume_backup_import_http import (
+    ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_APPLY_ROUTE,
+    ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_STATUS_ROUTE,
+    ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_PLAN_ROUTE,
+)
 from control_plane.odoo_target_replacement_apply_http import (
     ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
 )
@@ -84,6 +92,15 @@ class OdooStableTargetReplacementOperationStatusResponse(BaseModel):
 
 
 class OdooProdBackupRestoreOperationStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    operation: dict[str, object]
+    result: dict[str, object] | None = None
+
+
+class OdooProdRetainedVolumeBackupImportOperationStatusResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok"] = "ok"
@@ -196,6 +213,12 @@ class OdooProdBackupRestoreOperationReadStore(Protocol):
     ) -> OdooProdBackupRestoreOperationRecord: ...
 
 
+class OdooProdRetainedVolumeBackupImportOperationReadStore(Protocol):
+    def read_odoo_prod_retained_volume_backup_import_operation_record(
+        self, operation_id: str
+    ) -> OdooProdRetainedVolumeBackupImportOperationRecord: ...
+
+
 def require_odoo_stable_bootstrap_operation_read_store(
     record_store: object,
 ) -> OdooStableBootstrapOperationReadStore:
@@ -238,6 +261,23 @@ def require_odoo_prod_backup_restore_operation_read_store(
             "operation status reads: read_odoo_prod_backup_restore_operation_record"
         )
     return cast(OdooProdBackupRestoreOperationReadStore, record_store)
+
+
+def require_odoo_prod_retained_volume_backup_import_operation_read_store(
+    record_store: object,
+) -> OdooProdRetainedVolumeBackupImportOperationReadStore:
+    read_record = getattr(
+        record_store,
+        "read_odoo_prod_retained_volume_backup_import_operation_record",
+        None,
+    )
+    if not callable(read_record):
+        raise TypeError(
+            "Launchplane record store does not support Odoo retained-volume backup import "
+            "operation status reads: "
+            "read_odoo_prod_retained_volume_backup_import_operation_record"
+        )
+    return cast(OdooProdRetainedVolumeBackupImportOperationReadStore, record_store)
 
 
 def require_tracked_target_logs_store(
@@ -301,6 +341,16 @@ def odoo_prod_backup_restore_operation_status_payload(
 ) -> dict[str, object]:
     payload = operation.model_dump(mode="json")
     payload["poll_url"] = ODOO_PROD_BACKUP_RESTORE_OPERATION_STATUS_ROUTE.format(
+        operation_id=operation.operation_id.strip()
+    )
+    return payload
+
+
+def odoo_prod_retained_volume_backup_import_operation_status_payload(
+    operation: OdooProdRetainedVolumeBackupImportOperationRecord,
+) -> dict[str, object]:
+    payload = operation.model_dump(mode="json")
+    payload["poll_url"] = ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_STATUS_ROUTE.format(
         operation_id=operation.operation_id.strip()
     )
     return payload
@@ -483,6 +533,63 @@ def register_operation_status_read_routes(
             result=result,
         )
 
+    def read_odoo_prod_retained_volume_backup_import_operation_status(
+        operation_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+    ) -> OdooProdRetainedVolumeBackupImportOperationStatusResponse:
+        trace_id = dependencies.next_trace_id()
+        try:
+            operation_store = require_odoo_prod_retained_volume_backup_import_operation_read_store(
+                record_store
+            )
+            operation = (
+                operation_store.read_odoo_prod_retained_volume_backup_import_operation_record(
+                    operation_id
+                )
+            )
+        except TypeError as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise dependencies.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        route_path = (
+            ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_PLAN_ROUTE
+            if operation.operation_kind == "plan"
+            else ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_APPLY_ROUTE
+        )
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action=native_routes._descriptor_driver_route_authz_action(route_path),
+            product=operation.product,
+            context=operation.context,
+            target=AuthorizationTarget(scope="instance", instances=(operation.instance,)),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot read Odoo retained-volume backup import operation "
+                    "status for the requested product/context."
+                ),
+            )
+        result = operation.result.model_dump(mode="json") if operation.result else None
+        return OdooProdRetainedVolumeBackupImportOperationStatusResponse(
+            trace_id=trace_id,
+            operation=(odoo_prod_retained_volume_backup_import_operation_status_payload(operation)),
+            result=result,
+        )
+
     app.add_api_route(
         ODOO_STABLE_BOOTSTRAP_OPERATION_STATUS_ROUTE,
         read_odoo_stable_bootstrap_operation_status,
@@ -523,6 +630,22 @@ def register_operation_status_read_routes(
         response_model_exclude_none=True,
         operation_id="read_odoo_prod_backup_restore_operation_status",
         summary="Read Odoo production backup restore operation status",
+        responses={
+            401: {"model": dependencies.error_response_model},
+            403: {"model": dependencies.error_response_model},
+            404: {"model": dependencies.error_response_model},
+            503: {"model": dependencies.error_response_model},
+        },
+    )
+
+    app.add_api_route(
+        ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_STATUS_ROUTE,
+        read_odoo_prod_retained_volume_backup_import_operation_status,
+        methods=["GET"],
+        response_model=OdooProdRetainedVolumeBackupImportOperationStatusResponse,
+        response_model_exclude_none=True,
+        operation_id="read_odoo_prod_retained_volume_backup_import_operation_status",
+        summary="Read Odoo retained-volume backup import operation status",
         responses={
             401: {"model": dependencies.error_response_model},
             403: {"model": dependencies.error_response_model},

@@ -355,6 +355,10 @@ class FastApiReadRouteRegistrarTests(unittest.TestCase):
                     "GET",
                     "/v1/drivers/odoo/prod-backup-restore/operations/{operation_id}",
                 ),
+                (
+                    "GET",
+                    "/v1/drivers/odoo/prod-retained-volume-backup-import/operations/{operation_id}",
+                ),
                 ("GET", "/v1/artifacts/protected"),
                 ("GET", "/v1/drivers"),
             ],

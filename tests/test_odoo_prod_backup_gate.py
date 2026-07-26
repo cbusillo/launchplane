@@ -9,6 +9,7 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.workflows.odoo_prod_backup_gate import (
+    RETAINED_VOLUME_BACKUP_IMPORT_SOURCE,
     OdooProdBackupGateRequest,
     OdooProdBackupVerificationRequest,
     execute_odoo_prod_backup_gate,
@@ -388,6 +389,41 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
             verification_record.evidence["database_dump_sha256"],
             "a" * 64,
         )
+
+    def test_backup_verification_accepts_retained_volume_import_source(self) -> None:
+        record_store = self._record_store()
+        record_store.read_backup_gate_record.return_value = _passing_backup_record().model_copy(
+            update={"source": RETAINED_VOLUME_BACKUP_IMPORT_SOURCE}
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_verification",
+                return_value=_passing_verification_evidence(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.python_secrets.token_hex",
+                return_value="c" * 64,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value=_runtime_values(),
+            ),
+        ):
+            result = execute_odoo_prod_backup_verification(
+                control_plane_root=Path("/control-plane"),
+                record_store=record_store,
+                request=OdooProdBackupVerificationRequest(
+                    context="cm",
+                    backup_record_id="backup-gate-cm-prod-1",
+                ),
+            )
+
+        self.assertEqual(result.verification_status, "pass")
 
     def test_backup_verification_rejects_provider_result_for_different_request(self) -> None:
         record_store = self._record_store()

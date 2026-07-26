@@ -380,6 +380,22 @@ from control_plane.odoo_prod_backup_restore_http import (
     odoo_prod_backup_restore_operation_payload,
     resolve_odoo_prod_backup_restore_lane,
 )
+from control_plane.odoo_prod_retained_volume_backup_import_http import (
+    ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_APPLY_ROUTE as _ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_APPLY_ROUTE,
+    ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_PLAN_ROUTE as _ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_PLAN_ROUTE,
+    OdooProdRetainedVolumeBackupImportApplyEnvelope,
+    OdooProdRetainedVolumeBackupImportIdempotencyKeyReusedError,
+    OdooProdRetainedVolumeBackupImportLaneBusyError,
+    OdooProdRetainedVolumeBackupImportOperationActiveError,
+    OdooProdRetainedVolumeBackupImportPlanChangedError,
+    OdooProdRetainedVolumeBackupImportPlanEnvelope,
+    OdooProdRetainedVolumeBackupImportProductMismatchError,
+    OdooProdRetainedVolumeBackupImportRouteDependencyError,
+    enqueue_odoo_prod_retained_volume_backup_import_apply_operation,
+    enqueue_odoo_prod_retained_volume_backup_import_plan_operation,
+    operation_payload as odoo_prod_retained_volume_backup_import_operation_payload,
+    resolve_odoo_prod_retained_volume_backup_import_lane,
+)
 from control_plane.odoo_prod_promotion_http import (
     ODOO_PROD_PROMOTION_INPUTS_ROUTE as _ODOO_PROD_PROMOTION_INPUTS_ROUTE,
     ODOO_PROD_PROMOTION_ROUTE as _ODOO_PROD_PROMOTION_ROUTE,
@@ -630,6 +646,9 @@ _ODOO_TARGET_REPLACEMENT_OPERATION_CANCEL_ROUTE = (
 )
 _ODOO_PROD_BACKUP_RESTORE_OPERATION_CANCEL_ROUTE = (
     "/v1/drivers/odoo/prod-backup-restore/operations/{operation_id}/cancel"
+)
+_ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_CANCEL_ROUTE = (
+    "/v1/drivers/odoo/prod-retained-volume-backup-import/operations/{operation_id}/cancel"
 )
 _VERIREEL_PROD_BACKUP_GATE_OPERATION_CANCEL_ROUTE = (
     "/v1/drivers/verireel/prod-backup-gate/operations/{operation_id}/cancel"
@@ -6606,6 +6625,311 @@ def create_launchplane_fastapi_app(
             result=driver_result,
         )
 
+    async def write_odoo_prod_retained_volume_backup_import_plan(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", include_in_schema=False)
+        ] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            plan_request = OdooProdRetainedVolumeBackupImportPlanEnvelope.model_validate(
+                raw_payload
+            )
+            lane = resolve_odoo_prod_retained_volume_backup_import_lane(
+                record_store=record_store,
+                product=plan_request.product,
+                context=plan_request.backup_import.context,
+                instance=plan_request.backup_import.instance,
+            )
+        except OdooProdRetainedVolumeBackupImportRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_PLAN_ROUTE,
+            )
+        except OdooProdRetainedVolumeBackupImportProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValidationError, ValueError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_prod_retained_volume_backup_import_plan,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
+            identity=identity,
+            product=plan_request.product,
+            context=lane.context,
+            instances=(lane.instance,),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot plan the requested retained-volume backup import.",
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        if not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Retained-volume backup import planning requires an Idempotency-Key header.",
+            )
+        created_at = utc_now_timestamp()
+        try:
+            operation_authorization = capture_durable_operation_authorization(
+                identity=identity,
+                action=native_routes._native_driver_route_authz_action(
+                    write_odoo_prod_retained_volume_backup_import_plan
+                ),
+                product=plan_request.product,
+                context=lane.context,
+                instances=(lane.instance,),
+                policy_record=resolved_authz_policy_runtime.policy_record(updated_at=created_at),
+                authorized_at=created_at,
+            )
+        except DurableOperationAuthorizationCaptureError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authorization_provenance_unavailable",
+                message="Durable operation authorization provenance is unavailable.",
+            ) from error
+        try:
+            records, driver_result = enqueue_odoo_prod_retained_volume_backup_import_plan_operation(
+                record_store=record_store,
+                request=plan_request,
+                idempotency_key=normalized_idempotency_key,
+                idempotency_scope=idempotency_scope(identity),
+                request_fingerprint=request_fingerprint(raw_payload),
+                created_at=created_at,
+                authorization=operation_authorization,
+            )
+        except OdooProdRetainedVolumeBackupImportIdempotencyKeyReusedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message="Idempotency-Key was used for a different retained-volume plan request.",
+            ) from error
+        except OdooProdRetainedVolumeBackupImportLaneBusyError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="odoo_stable_lane_operation_active",
+                message=str(error),
+            ) from error
+        except OdooProdRetainedVolumeBackupImportOperationActiveError as error:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "odoo_retained_volume_backup_import_operation_active",
+                        "message": str(error),
+                    },
+                    "operation": odoo_prod_retained_volume_backup_import_operation_payload(
+                        error.operation
+                    ),
+                },
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={key: str(value) for key, value in records.items()},
+            result=driver_result,
+        )
+
+    async def write_odoo_prod_retained_volume_backup_import_apply(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", include_in_schema=False)
+        ] = "",
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            apply_request = OdooProdRetainedVolumeBackupImportApplyEnvelope.model_validate(
+                raw_payload
+            )
+            lane = resolve_odoo_prod_retained_volume_backup_import_lane(
+                record_store=record_store,
+                product=apply_request.product,
+                context=apply_request.backup_import.context,
+                instance=apply_request.backup_import.instance,
+            )
+        except OdooProdRetainedVolumeBackupImportRouteDependencyError:
+            return driver_route_dependency_not_found_response(
+                trace_id=trace_id,
+                route_path=_ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_APPLY_ROUTE,
+            )
+        except OdooProdRetainedVolumeBackupImportProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except (ValidationError, ValueError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not native_routes._native_driver_route_authorization_allows(
+            endpoint=write_odoo_prod_retained_volume_backup_import_apply,
+            authorization_allows=resolved_authz_policy_runtime.policy.allows,
+            identity=identity,
+            product=apply_request.product,
+            context=lane.context,
+            instances=(lane.instance,),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot apply the requested retained-volume backup import.",
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        if not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Retained-volume backup import apply requires an Idempotency-Key header.",
+            )
+        created_at = utc_now_timestamp()
+        try:
+            operation_authorization = capture_durable_operation_authorization(
+                identity=identity,
+                action=native_routes._native_driver_route_authz_action(
+                    write_odoo_prod_retained_volume_backup_import_apply
+                ),
+                product=apply_request.product,
+                context=lane.context,
+                instances=(lane.instance,),
+                policy_record=resolved_authz_policy_runtime.policy_record(updated_at=created_at),
+                authorized_at=created_at,
+            )
+        except DurableOperationAuthorizationCaptureError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authorization_provenance_unavailable",
+                message="Durable operation authorization provenance is unavailable.",
+            ) from error
+        try:
+            records, driver_result = (
+                enqueue_odoo_prod_retained_volume_backup_import_apply_operation(
+                    record_store=record_store,
+                    request=apply_request,
+                    idempotency_key=normalized_idempotency_key,
+                    idempotency_scope=idempotency_scope(identity),
+                    request_fingerprint=request_fingerprint(raw_payload),
+                    created_at=created_at,
+                    authorization=operation_authorization,
+                )
+            )
+        except OdooProdRetainedVolumeBackupImportPlanChangedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="odoo_retained_volume_backup_import_plan_changed",
+                message=str(error),
+            ) from error
+        except OdooProdRetainedVolumeBackupImportIdempotencyKeyReusedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message="Idempotency-Key was used for a different retained-volume apply request.",
+            ) from error
+        except OdooProdRetainedVolumeBackupImportLaneBusyError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="odoo_stable_lane_operation_active",
+                message=str(error),
+            ) from error
+        except OdooProdRetainedVolumeBackupImportOperationActiveError as error:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "odoo_retained_volume_backup_import_operation_active",
+                        "message": str(error),
+                    },
+                    "operation": odoo_prod_retained_volume_backup_import_operation_payload(
+                        error.operation
+                    ),
+                },
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={key: str(value) for key, value in records.items()},
+            result=driver_result,
+        )
+
     def cancel_pending_durable_operation(
         *,
         trace_id: str,
@@ -6753,6 +7077,56 @@ def create_launchplane_fastapi_app(
             action="odoo_prod_backup_restore_apply.execute",
             read_method_name="read_odoo_prod_backup_restore_operation_record",
             cancel_method_name="cancel_pending_odoo_prod_backup_restore_operation_record",
+            cancellation_request=cancellation_request,
+        )
+        return DurableOperationCancellationResponse(
+            trace_id=trace_id,
+            operation=operation.model_dump(mode="json"),
+        )
+
+    async def cancel_odoo_prod_retained_volume_backup_import_operation(
+        operation_id: str,
+        cancellation_request: DurableOperationCancellationRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> DurableOperationCancellationResponse:
+        trace_id = next_trace_id()
+        read_operation = getattr(
+            record_store,
+            "read_odoo_prod_retained_volume_backup_import_operation_record",
+            None,
+        )
+        if not callable(read_operation):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Durable operation cancellation requires database-backed storage.",
+            )
+        try:
+            existing_operation = read_operation(operation_id.strip())
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Durable operation was not found.",
+            ) from error
+        action = (
+            "odoo_prod_retained_volume_backup_import_plan.execute"
+            if existing_operation.operation_kind == "plan"
+            else "odoo_prod_retained_volume_backup_import_apply.execute"
+        )
+        operation = cancel_pending_durable_operation(
+            trace_id=trace_id,
+            record_store=record_store,
+            identity=identity,
+            operation_id=operation_id,
+            action=action,
+            read_method_name=("read_odoo_prod_retained_volume_backup_import_operation_record"),
+            cancel_method_name=(
+                "cancel_pending_odoo_prod_retained_volume_backup_import_operation_record"
+            ),
             cancellation_request=cancellation_request,
         )
         return DurableOperationCancellationResponse(
@@ -17499,6 +17873,84 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_PLAN_ROUTE,
+        write_odoo_prod_retained_volume_backup_import_plan,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(
+                            OdooProdRetainedVolumeBackupImportPlanEnvelope
+                        )
+                    }
+                },
+            },
+            "parameters": [
+                {
+                    "name": "Idempotency-Key",
+                    "in": "header",
+                    "required": True,
+                    "schema": {"type": "string", "minLength": 1},
+                    "description": "Required durable retained-volume inspection idempotency key.",
+                }
+            ],
+        },
+        operation_id="write_odoo_prod_retained_volume_backup_import_plan",
+        summary="Enqueue Odoo retained-volume backup import plan",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_APPLY_ROUTE,
+        write_odoo_prod_retained_volume_backup_import_apply,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(
+                            OdooProdRetainedVolumeBackupImportApplyEnvelope
+                        )
+                    }
+                },
+            },
+            "parameters": [
+                {
+                    "name": "Idempotency-Key",
+                    "in": "header",
+                    "required": True,
+                    "schema": {"type": "string", "minLength": 1},
+                    "description": "Required retained-volume backup import apply idempotency key.",
+                }
+            ],
+        },
+        operation_id="write_odoo_prod_retained_volume_backup_import_apply",
+        summary="Enqueue Odoo retained-volume backup import apply",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
         write_odoo_target_replacement_plan,
         methods=["POST"],
@@ -17583,6 +18035,12 @@ def create_launchplane_fastapi_app(
             cancel_odoo_prod_backup_restore_operation,
             "cancel_odoo_prod_backup_restore_operation",
             "Cancel pending Odoo production backup restore operation",
+        ),
+        (
+            _ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_CANCEL_ROUTE,
+            cancel_odoo_prod_retained_volume_backup_import_operation,
+            "cancel_odoo_prod_retained_volume_backup_import_operation",
+            "Cancel pending Odoo retained-volume backup import operation",
         ),
         (
             _VERIREEL_PROD_BACKUP_GATE_OPERATION_CANCEL_ROUTE,

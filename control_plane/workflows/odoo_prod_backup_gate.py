@@ -20,6 +20,10 @@ from control_plane.dokploy import post_deploy as dokploy_post_deploy
 
 BACKUP_GATE_SOURCE = "launchplane-odoo-prod-backup-gate"
 BACKUP_VERIFICATION_SOURCE = "launchplane-odoo-prod-backup-verification"
+RETAINED_VOLUME_BACKUP_IMPORT_SOURCE = "launchplane-odoo-prod-retained-volume-backup-import"
+VERIFIABLE_BACKUP_GATE_SOURCES = frozenset(
+    {BACKUP_GATE_SOURCE, RETAINED_VOLUME_BACKUP_IMPORT_SOURCE}
+)
 _BACKUP_PATH_COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 BackupVerificationCheckStatus = Literal["not_run", "pass", "fail"]
 BackupVerificationFailureCode = Literal[
@@ -370,7 +374,7 @@ def _require_exact_passing_backup_record(
         record.record_id != request.backup_record_id
         or record.context != request.context
         or record.instance != request.instance
-        or record.source != BACKUP_GATE_SOURCE
+        or record.source not in VERIFIABLE_BACKUP_GATE_SOURCES
         or not record.required
         or record.status != "pass"
     ):

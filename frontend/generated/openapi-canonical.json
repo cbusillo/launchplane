@@ -8511,6 +8511,44 @@
         "title": "OdooProdBackupRestoreOperationStatusResponse",
         "type": "object"
       },
+      "OdooProdRetainedVolumeBackupImportOperationStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "additionalProperties": true,
+            "title": "Operation",
+            "type": "object"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "operation"
+        ],
+        "title": "OdooProdRetainedVolumeBackupImportOperationStatusResponse",
+        "type": "object"
+      },
       "OdooStableBootstrapOperationStatusResponse": {
         "additionalProperties": false,
         "properties": {
@@ -30061,6 +30099,671 @@
           }
         },
         "summary": "Execute Odoo prod promotion run"
+      }
+    },
+    "/v1/drivers/odoo/prod-retained-volume-backup-import-apply": {
+      "post": {
+        "operationId": "write_odoo_prod_retained_volume_backup_import_apply",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required retained-volume backup import apply idempotency key.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "OdooProdRetainedVolumeBackupImportApplyRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "backup_record_id": {
+                        "title": "Backup Record Id",
+                        "type": "string"
+                      },
+                      "confirmation": {
+                        "title": "Confirmation",
+                        "type": "string"
+                      },
+                      "context": {
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "expected_active_data_volume": {
+                        "title": "Expected Active Data Volume",
+                        "type": "string"
+                      },
+                      "expected_active_db_volume": {
+                        "title": "Expected Active Db Volume",
+                        "type": "string"
+                      },
+                      "expected_active_log_volume": {
+                        "title": "Expected Active Log Volume",
+                        "type": "string"
+                      },
+                      "expected_current_artifact_id": {
+                        "title": "Expected Current Artifact Id",
+                        "type": "string"
+                      },
+                      "expected_database_user": {
+                        "title": "Expected Database User",
+                        "type": "string"
+                      },
+                      "expected_destination_database_name": {
+                        "title": "Expected Destination Database Name",
+                        "type": "string"
+                      },
+                      "expected_source_compose_project": {
+                        "title": "Expected Source Compose Project",
+                        "type": "string"
+                      },
+                      "instance": {
+                        "const": "prod",
+                        "default": "prod",
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "plan_fingerprint": {
+                        "title": "Plan Fingerprint",
+                        "type": "string"
+                      },
+                      "plan_operation_id": {
+                        "title": "Plan Operation Id",
+                        "type": "string"
+                      },
+                      "product": {
+                        "title": "Product",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "default": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "source_data_volume": {
+                        "title": "Source Data Volume",
+                        "type": "string"
+                      },
+                      "source_database_name": {
+                        "title": "Source Database Name",
+                        "type": "string"
+                      },
+                      "source_db_volume": {
+                        "title": "Source Db Volume",
+                        "type": "string"
+                      },
+                      "staging_clone_volume": {
+                        "title": "Staging Clone Volume",
+                        "type": "string"
+                      },
+                      "timeout_seconds": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Timeout Seconds"
+                      }
+                    },
+                    "required": [
+                      "product",
+                      "context",
+                      "backup_record_id",
+                      "expected_current_artifact_id",
+                      "expected_active_db_volume",
+                      "expected_active_data_volume",
+                      "expected_active_log_volume",
+                      "source_db_volume",
+                      "source_data_volume",
+                      "source_database_name",
+                      "expected_destination_database_name",
+                      "expected_database_user",
+                      "staging_clone_volume",
+                      "expected_source_compose_project",
+                      "plan_operation_id",
+                      "plan_fingerprint",
+                      "confirmation"
+                    ],
+                    "title": "OdooProdRetainedVolumeBackupImportApplyRequest",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "backup_import": {
+                    "$ref": "#/$defs/OdooProdRetainedVolumeBackupImportApplyRequest"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "backup_import"
+                ],
+                "title": "OdooProdRetainedVolumeBackupImportApplyEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Enqueue Odoo retained-volume backup import apply"
+      }
+    },
+    "/v1/drivers/odoo/prod-retained-volume-backup-import-plan": {
+      "post": {
+        "operationId": "write_odoo_prod_retained_volume_backup_import_plan",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required durable retained-volume inspection idempotency key.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "OdooProdRetainedVolumeBackupImportRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "backup_record_id": {
+                        "title": "Backup Record Id",
+                        "type": "string"
+                      },
+                      "context": {
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "expected_active_data_volume": {
+                        "title": "Expected Active Data Volume",
+                        "type": "string"
+                      },
+                      "expected_active_db_volume": {
+                        "title": "Expected Active Db Volume",
+                        "type": "string"
+                      },
+                      "expected_active_log_volume": {
+                        "title": "Expected Active Log Volume",
+                        "type": "string"
+                      },
+                      "expected_current_artifact_id": {
+                        "title": "Expected Current Artifact Id",
+                        "type": "string"
+                      },
+                      "expected_database_user": {
+                        "title": "Expected Database User",
+                        "type": "string"
+                      },
+                      "expected_destination_database_name": {
+                        "title": "Expected Destination Database Name",
+                        "type": "string"
+                      },
+                      "expected_source_compose_project": {
+                        "title": "Expected Source Compose Project",
+                        "type": "string"
+                      },
+                      "instance": {
+                        "const": "prod",
+                        "default": "prod",
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "product": {
+                        "title": "Product",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "default": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "source_data_volume": {
+                        "title": "Source Data Volume",
+                        "type": "string"
+                      },
+                      "source_database_name": {
+                        "title": "Source Database Name",
+                        "type": "string"
+                      },
+                      "source_db_volume": {
+                        "title": "Source Db Volume",
+                        "type": "string"
+                      },
+                      "staging_clone_volume": {
+                        "title": "Staging Clone Volume",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "product",
+                      "context",
+                      "backup_record_id",
+                      "expected_current_artifact_id",
+                      "expected_active_db_volume",
+                      "expected_active_data_volume",
+                      "expected_active_log_volume",
+                      "source_db_volume",
+                      "source_data_volume",
+                      "source_database_name",
+                      "expected_destination_database_name",
+                      "expected_database_user",
+                      "staging_clone_volume",
+                      "expected_source_compose_project"
+                    ],
+                    "title": "OdooProdRetainedVolumeBackupImportRequest",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "backup_import": {
+                    "$ref": "#/$defs/OdooProdRetainedVolumeBackupImportRequest"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "backup_import"
+                ],
+                "title": "OdooProdRetainedVolumeBackupImportPlanEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Enqueue Odoo retained-volume backup import plan"
+      }
+    },
+    "/v1/drivers/odoo/prod-retained-volume-backup-import/operations/{operation_id}": {
+      "get": {
+        "operationId": "read_odoo_prod_retained_volume_backup_import_operation_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OdooProdRetainedVolumeBackupImportOperationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Odoo retained-volume backup import operation status"
+      }
+    },
+    "/v1/drivers/odoo/prod-retained-volume-backup-import/operations/{operation_id}/cancel": {
+      "post": {
+        "operationId": "cancel_odoo_prod_retained_volume_backup_import_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DurableOperationCancellationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DurableOperationCancellationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Cancel pending Odoo retained-volume backup import operation"
       }
     },
     "/v1/drivers/odoo/prod-rollback": {
