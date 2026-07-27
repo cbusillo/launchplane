@@ -415,6 +415,10 @@ set. `LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_OPERATION_READ_MANAGED_SET_JSON` owns
 separate exact-instance cross-operation read grants, such as allowing an
 immutable production apply worker to read its reviewed plan operation without
 replacing the broader production-enrollment set. The
+`LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_BACKUP_RESTORE_MANAGED_SET_JSON` owns the
+separate exact-instance destructive restore apply grant for the immutable
+production restore wrapper and worker without replacing the broader
+production-enrollment set. The
 `Manage Launchplane Authorization` wrapper selects one of those explicit
 secrets and forwards it into the reusable worker, whose OIDC-minting job remains
 gated by the `launchplane-authz-admin` environment. Never replace the unreadable
