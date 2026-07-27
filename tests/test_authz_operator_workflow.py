@@ -31,6 +31,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             managed_set_input["options"],
             [
                 "primary",
+                "product-health-monitoring",
                 "odoo-route-binding",
                 "odoo-external-route-binding",
                 "odoo-testing-ingress-route",
@@ -47,6 +48,10 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             "reconcile-primary": (
                 "${{ inputs.managed_set == 'primary' }}",
                 "${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-product-health-monitoring": (
+                "${{ inputs.managed_set == 'product-health-monitoring' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON }}",
             ),
             "reconcile-odoo-route-binding": (
                 "${{ inputs.managed_set == 'odoo-route-binding' }}",

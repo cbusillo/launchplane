@@ -19,6 +19,7 @@ name: Manage Launchplane Authorization
         type: choice
         options:
           - primary
+          - product-health-monitoring
           - odoo-route-binding
           - odoo-external-route-binding
           - odoo-testing-ingress-route
@@ -57,6 +58,17 @@ jobs:
       related_issue: ${{ inputs.related_issue }}
     secrets:
       managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}
+
+  reconcile-product-health-monitoring:
+    if: ${{ inputs.managed_set == 'product-health-monitoring' }}
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    with:
+      mode: ${{ inputs.mode }}
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+      related_issue: ${{ inputs.related_issue }}
+    secrets:
+      managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON }}
 
   reconcile-odoo-route-binding:
     if: ${{ inputs.managed_set == 'odoo-route-binding' }}
