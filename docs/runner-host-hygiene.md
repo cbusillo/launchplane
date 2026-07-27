@@ -138,6 +138,9 @@ workflow artifact; bearer tokens and raw authorization headers are never part of
 the envelope. A permanently rejected planned audit (for example, authorization,
 route, or idempotency conflict) blocks mutation; a retryable transport/service
 failure may proceed only because the planned intent is already durable locally.
+Generated run-cache mutation is stricter: it requires both the durable host
+spool and accepted service delivery of the planned audit before the privileged
+helper can run. A pending or rejected planned record leaves that action blocked.
 
 ## Approved Ops-Lane Executor
 
@@ -154,8 +157,9 @@ be hidden by a later action failure.
 
 The report-only schedule generates an audit key under
 `runner-host-hygiene/<date>/<host>-scheduled-report-<run-id>`. Sunday maintenance
-uses separate keys for default cache, dangling images, and each runtime-approved
-Buildx builder. The workflow attempts every scheduled action even when an
+uses separate keys for default cache, dangling images, each runtime-approved
+Buildx builder, and each runtime-approved generated run cache. The workflow
+attempts every scheduled action even when an
 earlier action is blocked or fails, then fails the aggregate job after all
 per-action audits have been recorded. Default Docker cache uses an
 operator-configured LRU retained-space ceiling:
@@ -201,6 +205,19 @@ The separate `prune_dangling_images` action runs `docker image prune --force
 --filter until=168h`. It never supplies `-a` or `--all`, so tagged retained warm
 images remain outside that action.
 
+The `prune_generated_run_cache` action is narrower than runner work-directory
+cleanup. It addresses only top-level directories whose names match a
+root-owned configured run-cache prefix and numeric GitHub Actions run id. Before
+the planned audit becomes mutation authority, Launchplane records apparent and
+allocated bytes, age buckets, last cleanup and growth evidence, two local
+open-handle observations per run, two `Runner.Worker` counts for the configured
+owner, and the source repository's live GitHub run state. Cleanup remains
+blocked unless the exact run is completed, old enough, free of open handles,
+the owning user is idle in both samples, the class is above its high-water
+limit, and its cooldown has expired. The helper deletes only selected
+completed-run directories and records the lower post-cleanup size; it never
+touches sibling Cargo, Bazel disk, package, credential, or configuration roots.
+
 Launchplane's PostgreSQL integration job mounts `/var/lib/postgresql/data` as a
 bounded tmpfs. The official PostgreSQL image declares that path as a volume;
 overriding it keeps ephemeral test data out of durable anonymous Docker volumes
@@ -226,6 +243,12 @@ The workflow requires these repository variables:
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RUNNER_WORKDIR_ROOTS`, as comma-separated
   public-key/absolute-path pairs such as `legacy=/srv/runners`. The keys appear
   in evidence; absolute paths remain executor-local runtime input.
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_GENERATED_RUN_CACHE_ROOTS`, as comma-separated
+  `key=/absolute/path|owner/repository|high-bytes|low-bytes|min-age-hours|cooldown-hours`
+  entries. Only the public key, run ids, and bounded measurements enter audit
+  evidence; the absolute path and repository identity remain executor-local
+  runtime authority. High water must be positive, low water must be smaller,
+  and minimum age must be at least one hour.
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_ALLOWED_BUILDKIT_STATE_VOLUMES` for any
   approved BuildKit state-volume retirement target. Leave it empty when no
   named volume cleanup has been reviewed.
@@ -240,6 +263,12 @@ The workflow requires these repository variables:
   executor rejects values below 8 GiB. Capacity remains runtime authority;
   production code contains no host-specific cache budget.
 
+Public source repositories need no GitHub credential for generated-cache run
+state. Private source repositories require the optional
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_READ_TOKEN` secret, scoped only to
+Actions-read access for the exact source repositories. Do not reuse runner
+registration or administration credentials for this evidence path.
+
 The executor fails closed unless the process user matches the requested service
 user, the GitHub repository matches the requested repository scope, retained
 warm builders are present in pre-apply evidence, the apply plan is ready, no
@@ -247,7 +276,11 @@ active Docker build client or another Actions `Runner.Worker` process is observe
 in two consecutive local samples. Manual mutations additionally require
 `mutate=true`. Monday-through-Saturday scheduled runs stop at the
 `mutate_not_requested` blocker, while the Sunday maintenance schedule supplies
-explicit mutation intent only for the bounded cache and dangling-image actions.
+explicit mutation intent for bounded Docker, dangling-image, named-builder, and
+generated completed-run cache actions. Shared Docker actions require full-host
+idle. Generated run-cache actions instead require two idle observations for the
+configured owning user plus two zero-handle observations for every exact target;
+unrelated users and lanes do not block that isolated cache class.
 Cache and image maintenance may proceed when the report has unrelated attention
 findings so cleanup can remediate pressure; host identity, warm-image retention,
 audit durability, exact builder allowlists, and the idle gate remain mandatory.
@@ -318,6 +351,53 @@ as an authoritative total. Do not grant generic passwordless
 errors, and the executor treats any denied or failed privileged measurement as
 incomplete evidence. A service-user-controlled helper, config directory,
 config file, or sudo environment invalidates this security boundary.
+
+Generated run-cache inventory and cleanup use the separate root-owned helper
+`/usr/local/sbin/launchplane-generated-run-cache`, installed only from
+`scripts/runner-host-hygiene-generated-run-cache.sh` in a reviewed merged
+revision. Its mode-`0600` config file is
+`/etc/launchplane/runner-host-hygiene-generated-caches`; each line binds the
+runtime public key and path to the expected owner, group, root mode, exact
+top-level directory prefix, minimum age, high water, low water, and cooldown:
+
+```text
+public-key=/srv/generated-cache|runner-user|runner-group|755|run-cache-|1|21474836480|4294967296|1
+```
+
+Install the helper and prepared binding file as root, then add only the two
+argument-bounded helper forms to the existing hygiene sudoers policy:
+
+```bash
+install -o root -g root -m 0755 \
+  scripts/runner-host-hygiene-generated-run-cache.sh \
+  /usr/local/sbin/launchplane-generated-run-cache
+install -o root -g root -m 0600 <prepared-generated-cache-bindings> \
+  /etc/launchplane/runner-host-hygiene-generated-caches
+```
+
+```sudoers
+Cmnd_Alias LAUNCHPLANE_GENERATED_CACHE_OBSERVE = /usr/local/sbin/launchplane-generated-run-cache ^observe [a-z0-9][a-z0-9._-]{0,63}=/[^[:space:]]+ ([2-9]|10) ([0-9]|[1-5][0-9]|60)$
+Cmnd_Alias LAUNCHPLANE_GENERATED_CACHE_PRUNE = /usr/local/sbin/launchplane-generated-run-cache ^prune [a-z0-9][a-z0-9._-]{0,63}=/[^[:space:]]+ ([2-9]|10) ([0-9]|[1-5][0-9]|60) [1-9][0-9]*(,[1-9][0-9]*)*$
+<service-user> ALL=(root) NOPASSWD: NOSETENV: LAUNCHPLANE_GENERATED_CACHE_OBSERVE, LAUNCHPLANE_GENERATED_CACHE_PRUNE
+```
+
+Validate the candidate and complete sudoers policy with `visudo -cf`. The
+helper independently revalidates the root-owned config and fixed retention
+policy, canonical root,
+owner/group/mode, top-level name shape, same-filesystem traversal, absence of
+symlinks, age floor, owner idle samples, and exact target open handles. It emits
+only public keys, numeric run ids, counts, sizes, ages, and booleans. Deleting
+completed run-scoped generated data has no byte-for-byte rollback; recovery is
+regeneration in a later run, while the durable `action_started` envelope
+prevents an uncertain action from being repeated automatically.
+
+The helper fails closed when mount discovery is unavailable or incomplete. A
+cleanup attempt that removes data but cannot reach the configured low-water
+target persists its reclaimed-byte and target receipt without advancing the
+successful-cleanup cooldown, so a corrected follow-up can run immediately.
+Grant the prune form only to the dedicated hygiene workflow service account;
+direct interactive helper invocation is unsupported because the workflow owns
+the accepted planned and terminal audit sequence.
 
 The executor excludes only its own ancestor `Runner.Worker` from the idle gate;
 any sibling worker still blocks a shared-host mutation. If a prior run stopped

@@ -20,15 +20,18 @@ import click
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
+from control_plane.workflows.runner_host_hygiene_executor import GeneratedRunCacheRoot
 from control_plane.workflows.runner_host_hygiene_executor import RunnerWorkdirRoot
 from control_plane.workflows.runner_host_hygiene_executor import AuditDeliveryError
 from control_plane.workflows.runner_host_hygiene_executor import (
     build_refreshing_service_audit_poster,
 )
+from control_plane.workflows.runner_host_hygiene_executor import build_github_run_state_reader
 from control_plane.workflows.runner_host_hygiene_executor import (
     execute_runner_host_hygiene_executor,
 )
 from control_plane.workflows.runner_host_hygiene_executor import _DOCKER_DISK_USAGE_COMMAND
+from control_plane.workflows.runner_host_hygiene_executor import _GENERATED_RUN_CACHE_HELPER
 from control_plane.workflows.runner_host_hygiene_executor import _parse_docker_disk_usage
 from control_plane.workflows.runner_host_hygiene_executor import _RUNNER_WORKDIR_USAGE_HELPER
 from control_plane.workflows.runner_host_hygiene_executor import validate_local_executor_environment
@@ -52,6 +55,15 @@ _ENGINE_PRUNE_PREFIX = (
     "curl",
     "--silent",
 )
+_GENERATED_CACHE_PRUNE_PREFIX = (
+    "flock",
+    "-n",
+    "/tmp/launchplane-runner-host-hygiene.lock",
+    "/usr/bin/sudo",
+    "-n",
+    _GENERATED_RUN_CACHE_HELPER,
+    "prune",
+)
 
 
 class _CommandRunner:
@@ -72,6 +84,8 @@ class _CommandRunner:
         runner_workdir_usage: Mapping[str, tuple[int, int]] | None = None,
         buildctl_bounded_prune_supported: bool = True,
         runner_workdir_status: Literal["complete", "partial"] = "complete",
+        generated_cache_before: str = "",
+        generated_cache_after: str = "",
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
         self._prune_returncode = prune_returncode
@@ -123,6 +137,9 @@ class _CommandRunner:
         self._runner_workdir_usage = dict(runner_workdir_usage or {})
         self._buildctl_bounded_prune_supported = buildctl_bounded_prune_supported
         self._runner_workdir_status = runner_workdir_status
+        self._generated_cache_before = generated_cache_before
+        self._generated_cache_after = generated_cache_after
+        self._generated_cache_pruned = False
         self._pruned = False
         self.removed_volumes: list[str] = []
 
@@ -182,6 +199,20 @@ class _CommandRunner:
                     else f"{apparent_bytes}\n{allocated_bytes}\npartial\n"
                 ),
             )
+        if command_tuple[:4] == (
+            "/usr/bin/sudo",
+            "-n",
+            _GENERATED_RUN_CACHE_HELPER,
+            "observe",
+        ):
+            return RemoteCommandResult(
+                returncode=0,
+                stdout=(
+                    self._generated_cache_after
+                    if self._generated_cache_pruned
+                    else self._generated_cache_before
+                ),
+            )
         if command_tuple[:3] == ("docker", "image", "inspect"):
             if not self._pruned or self._image_present_after:
                 return RemoteCommandResult(returncode=0, stdout="[]\n")
@@ -205,6 +236,12 @@ class _CommandRunner:
             )
         if command_tuple[:5] == _ENGINE_PRUNE_PREFIX:
             self._pruned = True
+            return RemoteCommandResult(
+                returncode=self._prune_returncode,
+                stderr=self._prune_stderr,
+            )
+        if command_tuple[:7] == _GENERATED_CACHE_PRUNE_PREFIX:
+            self._generated_cache_pruned = True
             return RemoteCommandResult(
                 returncode=self._prune_returncode,
                 stderr=self._prune_stderr,
@@ -393,6 +430,12 @@ class RunnerHostHygieneWorkflowTests(unittest.TestCase):
         self.assertIn("maintenance_failures=$((maintenance_failures + 1))", workflow_text)
         self.assertIn("scheduled hygiene action(s) failed", workflow_text)
         self.assertIn("BuildKit cache budgets must not repeat a builder.", workflow_text)
+        self.assertIn("LAUNCHPLANE_RUNNER_HOST_HYGIENE_GENERATED_RUN_CACHE_ROOTS", workflow_text)
+        self.assertIn("prune_generated_run_cache", workflow_text)
+        self.assertIn("--generated-run-cache-root", workflow_text)
+        self.assertIn("--target-generated-cache-key", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN", workflow_text)
+        self.assertIn("LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_READ_TOKEN", workflow_text)
 
 
 class RunnerHostHygieneExecutorTests(unittest.TestCase):
@@ -490,9 +533,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         prune_command = next(
-            command
-            for command in command_runner.commands
-            if command[:5] == _ENGINE_PRUNE_PREFIX
+            command for command in command_runner.commands if command[:5] == _ENGINE_PRUNE_PREFIX
         )
         self.assertEqual(
             prune_command[-1],
@@ -702,6 +743,255 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         assert post_apply_report is not None
         self.assertEqual(post_apply_report.runner_workdir_bytes, 12_345_678)
 
+    def test_generated_run_cache_prune_uses_completed_idle_targets(self) -> None:
+        root = GeneratedRunCacheRoot(
+            key="codex-lab-runs",
+            path="/home/gha/.cache/codex-ci",
+            source_repository="cbusillo/codex-lab",
+            high_water_bytes=100,
+            low_water_bytes=10,
+            minimum_age_hours=1,
+            cooldown_hours=1,
+        )
+        command_runner = _CommandRunner(
+            generated_cache_before=_generated_cache_evidence(
+                entries=((101, 80, 80, 7_200, (0, 0)), (102, 40, 40, 5_400, (0, 0))),
+                worker_observations=(0, 0),
+            ),
+            generated_cache_after=_generated_cache_evidence(
+                entries=(),
+                worker_observations=(0, 0),
+                last_cleanup_epoch_seconds=1_000,
+                last_reclaimed_bytes=120,
+            ),
+        )
+        audit_poster = _AuditPoster()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = execute_runner_host_hygiene_executor(
+                request=_request(
+                    mutate=True,
+                    action="prune_generated_run_cache",
+                    generated_run_cache_roots=(root,),
+                    target_generated_cache_key=root.key,
+                ),
+                remote_runner=command_runner,
+                audit_poster=audit_poster,
+                audit_spool=RunnerHostHygieneAuditSpool(
+                    root=Path(temporary_directory),
+                    artifact_file=Path(temporary_directory) / "artifact.json",
+                ),
+                github_run_state_reader=lambda _repository, run_ids: {
+                    run_id: "completed" for run_id in run_ids
+                },
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(
+            audit_poster.audits[0].request.target_generated_cache_run_ids,
+            (101, 102),
+        )
+        prune_command = next(
+            command
+            for command in command_runner.commands
+            if command[:7] == _GENERATED_CACHE_PRUNE_PREFIX
+        )
+        self.assertEqual(prune_command[-1], "101,102")
+        self.assertFalse(any(command[:2] == ("bash", "-lc") for command in command_runner.commands))
+        serialized_audits = json.dumps(
+            [audit.model_dump(mode="json") for audit in audit_poster.audits]
+        )
+        self.assertNotIn(root.path, serialized_audits)
+        self.assertNotIn(root.source_repository, serialized_audits)
+
+    def test_generated_run_cache_prune_blocks_busy_owner(self) -> None:
+        root = GeneratedRunCacheRoot(
+            key="codex-lab-runs",
+            path="/home/gha/.cache/codex-ci",
+            source_repository="cbusillo/codex-lab",
+            high_water_bytes=100,
+            low_water_bytes=10,
+            minimum_age_hours=1,
+            cooldown_hours=1,
+        )
+        command_runner = _CommandRunner(
+            generated_cache_before=_generated_cache_evidence(
+                entries=((101, 120, 120, 7_200, (0, 0)),),
+                worker_observations=(1, 1),
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = execute_runner_host_hygiene_executor(
+                request=_request(
+                    mutate=True,
+                    action="prune_generated_run_cache",
+                    generated_run_cache_roots=(root,),
+                    target_generated_cache_key=root.key,
+                ),
+                remote_runner=command_runner,
+                audit_poster=_AuditPoster(),
+                audit_spool=RunnerHostHygieneAuditSpool(
+                    root=Path(temporary_directory),
+                    artifact_file=Path(temporary_directory) / "artifact.json",
+                ),
+                github_run_state_reader=lambda _repository, run_ids: {
+                    run_id: "completed" for run_id in run_ids
+                },
+            )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(
+            any(command[:7] == _GENERATED_CACHE_PRUNE_PREFIX for command in command_runner.commands)
+        )
+
+    def test_generated_run_cache_prune_blocks_unknown_github_state(self) -> None:
+        root = GeneratedRunCacheRoot(
+            key="codex-lab-runs",
+            path="/home/gha/.cache/codex-ci",
+            source_repository="cbusillo/codex-lab",
+            high_water_bytes=100,
+            low_water_bytes=10,
+            minimum_age_hours=1,
+            cooldown_hours=1,
+        )
+        command_runner = _CommandRunner(
+            generated_cache_before=_generated_cache_evidence(
+                entries=((101, 120, 120, 7_200, (0, 0)),),
+                worker_observations=(0, 0),
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = execute_runner_host_hygiene_executor(
+                request=_request(
+                    mutate=True,
+                    action="prune_generated_run_cache",
+                    generated_run_cache_roots=(root,),
+                    target_generated_cache_key=root.key,
+                ),
+                remote_runner=command_runner,
+                audit_poster=_AuditPoster(),
+                audit_spool=RunnerHostHygieneAuditSpool(
+                    root=Path(temporary_directory),
+                    artifact_file=Path(temporary_directory) / "artifact.json",
+                ),
+                github_run_state_reader=lambda _repository, run_ids: {
+                    run_id: "unknown" for run_id in run_ids
+                },
+            )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(
+            any(command[:7] == _GENERATED_CACHE_PRUNE_PREFIX for command in command_runner.commands)
+        )
+
+    def test_generated_run_cache_mutation_requires_durable_spool(self) -> None:
+        root = GeneratedRunCacheRoot(
+            key="codex-lab-runs",
+            path="/home/gha/.cache/codex-ci",
+            source_repository="cbusillo/codex-lab",
+            high_water_bytes=100,
+            low_water_bytes=10,
+            minimum_age_hours=1,
+            cooldown_hours=1,
+        )
+
+        with self.assertRaisesRegex(click.ClickException, "requires durable"):
+            execute_runner_host_hygiene_executor(
+                request=_request(
+                    mutate=True,
+                    action="prune_generated_run_cache",
+                    generated_run_cache_roots=(root,),
+                    target_generated_cache_key=root.key,
+                ),
+                remote_runner=_CommandRunner(),
+                audit_poster=_AuditPoster(),
+            )
+
+    def test_generated_run_cache_below_high_water_is_not_needed(self) -> None:
+        root = GeneratedRunCacheRoot(
+            key="codex-lab-runs",
+            path="/home/gha/.cache/codex-ci",
+            source_repository="cbusillo/codex-lab",
+            high_water_bytes=100,
+            low_water_bytes=10,
+            minimum_age_hours=1,
+            cooldown_hours=1,
+        )
+        command_runner = _CommandRunner(
+            generated_cache_before=_generated_cache_evidence(
+                entries=((101, 80, 80, 7_200, (0, 0)),),
+                worker_observations=(0, 0),
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = execute_runner_host_hygiene_executor(
+                request=_request(
+                    mutate=True,
+                    action="prune_generated_run_cache",
+                    generated_run_cache_roots=(root,),
+                    target_generated_cache_key=root.key,
+                ),
+                remote_runner=command_runner,
+                audit_poster=_AuditPoster(),
+                audit_spool=RunnerHostHygieneAuditSpool(
+                    root=Path(temporary_directory),
+                    artifact_file=Path(temporary_directory) / "artifact.json",
+                ),
+                github_run_state_reader=lambda _repository, run_ids: {
+                    run_id: "completed" for run_id in run_ids
+                },
+            )
+
+        self.assertEqual(result.status, "not_needed")
+        self.assertFalse(
+            any(command[:7] == _GENERATED_CACHE_PRUNE_PREFIX for command in command_runner.commands)
+        )
+
+    def test_generated_run_cache_above_high_water_during_cooldown_is_blocked(self) -> None:
+        root = GeneratedRunCacheRoot(
+            key="codex-lab-runs",
+            path="/home/gha/.cache/codex-ci",
+            source_repository="cbusillo/codex-lab",
+            high_water_bytes=100,
+            low_water_bytes=10,
+            minimum_age_hours=1,
+            cooldown_hours=1,
+        )
+        command_runner = _CommandRunner(
+            generated_cache_before=_generated_cache_evidence(
+                entries=((101, 120, 120, 7_200, (0, 0)),),
+                worker_observations=(0, 0),
+                last_cleanup_epoch_seconds=9_900,
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = execute_runner_host_hygiene_executor(
+                request=_request(
+                    mutate=True,
+                    action="prune_generated_run_cache",
+                    generated_run_cache_roots=(root,),
+                    target_generated_cache_key=root.key,
+                ),
+                remote_runner=command_runner,
+                audit_poster=_AuditPoster(),
+                audit_spool=RunnerHostHygieneAuditSpool(
+                    root=Path(temporary_directory),
+                    artifact_file=Path(temporary_directory) / "artifact.json",
+                ),
+                github_run_state_reader=lambda _repository, run_ids: {
+                    run_id: "completed" for run_id in run_ids
+                },
+            )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(
+            any(command[:7] == _GENERATED_CACHE_PRUNE_PREFIX for command in command_runner.commands)
+        )
+
     def test_cache_prune_completes_when_unrelated_workdir_evidence_is_partial(self) -> None:
         command_runner = _CommandRunner(runner_workdir_status="partial")
 
@@ -759,6 +1049,40 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertIn("measurement_partial=1", helper_text)
         self.assertIn("((record_count <= expected_count))", helper_text)
         self.assertIn("else\n  /usr/bin/printf '%s\\n%s\\n'", helper_text)
+        subprocess.run(
+            ("/bin/bash", "-n", str(helper_path)),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def test_generated_run_cache_helper_security_invariants_are_pinned(self) -> None:
+        helper_path = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "runner-host-hygiene-generated-run-cache.sh"
+        )
+        helper_text = helper_path.read_text(encoding="utf-8")
+
+        self.assertEqual(
+            _GENERATED_RUN_CACHE_HELPER,
+            "/usr/local/sbin/launchplane-generated-run-cache",
+        )
+        self.assertTrue(helper_path.stat().st_mode & 0o111)
+        self.assertTrue(helper_text.startswith("#!/bin/bash\nset -euo pipefail\n"))
+        self.assertIn('readonly config_directory="/etc/launchplane"', helper_text)
+        self.assertIn("/proc/self/fd/4", helper_text)
+        self.assertIn("owner_worker_observations", helper_text)
+        self.assertIn("open_handle_observations", helper_text)
+        self.assertIn("--one-file-system", helper_text)
+        self.assertIn("candidate_low_water < candidate_high_water", helper_text)
+        self.assertIn("entry_identity_by_name", helper_text)
+        self.assertIn("entry_version_by_name", helper_text)
+        self.assertIn("last_attempt_epoch_seconds", helper_text)
+        self.assertNotIn('findmnt -rn -R -o TARGET --target "$entry_path" || true', helper_text)
+        self.assertIn(".launchplane-generated-run-cache-prune.", helper_text)
+        self.assertIn("last_removed_run_ids", helper_text)
+        self.assertIn('/usr/bin/sync -f "$state_file"', helper_text)
         subprocess.run(
             ("/bin/bash", "-n", str(helper_path)),
             capture_output=True,
@@ -1575,6 +1899,36 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             ["Bearer first-token", "Bearer second-token"],
         )
 
+    def test_github_run_state_reader_supports_public_repository_without_token(self) -> None:
+        class _Response:
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b'{"status":"completed"}'
+
+        observed_authorization: list[str | None] = []
+
+        def fake_urlopen(request: Request, timeout: int) -> _Response:
+            self.assertEqual(timeout, 30)
+            observed_authorization.append(request.get_header("Authorization"))
+            self.assertIn("/repos/cbusillo/codex-lab/actions/runs/101", request.full_url)
+            return _Response()
+
+        reader = build_github_run_state_reader(bearer_token="")
+        with patch(
+            "control_plane.workflows.runner_host_hygiene_executor.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            states = reader("cbusillo/codex-lab", (101,))
+
+        self.assertEqual(states, {101: "completed"})
+        self.assertEqual(observed_authorization, [None])
+
     def test_service_audit_poster_marks_route_not_found_non_retryable(self) -> None:
         poster = build_refreshing_service_audit_poster(
             service_url="https://launchplane.example",
@@ -1605,6 +1959,7 @@ def _request(
     action: Literal[
         "prune_docker_cache",
         "prune_dangling_images",
+        "prune_generated_run_cache",
         "remove_buildkit_state_volumes",
         "prune_runner_workdir",
         "restart_runner_service",
@@ -1619,6 +1974,8 @@ def _request(
     runner_workdir_roots: tuple[RunnerWorkdirRoot, ...] = (
         RunnerWorkdirRoot(key="legacy", path="/opt/actions-runners"),
     ),
+    generated_run_cache_roots: tuple[GeneratedRunCacheRoot, ...] = (),
+    target_generated_cache_key: str = "",
     resolve_action_started: bool = False,
 ) -> RunnerHostHygieneExecutorRequest:
     return RunnerHostHygieneExecutorRequest(
@@ -1637,6 +1994,8 @@ def _request(
         mutate=mutate,
         prune_until=prune_until,
         runner_workdir_roots=runner_workdir_roots,
+        generated_run_cache_roots=generated_run_cache_roots,
+        target_generated_cache_key=target_generated_cache_key,
         idle_observation_interval_seconds=0,
         resolve_action_started=resolve_action_started,
     )
@@ -1655,6 +2014,54 @@ def _planned_audit() -> RunnerHostHygieneApplyAuditRecord:
 
 def _json_lines(*rows: dict[str, object]) -> str:
     return "".join(f"{json.dumps(row)}\n" for row in rows)
+
+
+def _generated_cache_evidence(
+    *,
+    entries: tuple[tuple[int, int, int, int, tuple[int, ...]], ...],
+    worker_observations: tuple[int, ...],
+    last_cleanup_epoch_seconds: int = 0,
+    last_reclaimed_bytes: int = 0,
+) -> str:
+    allocated_bytes = sum(entry[2] for entry in entries)
+    apparent_bytes = sum(entry[1] for entry in entries)
+    rows: list[dict[str, object]] = [
+        {
+            "record_type": "summary",
+            "cache_key": "codex-lab-runs",
+            "observed_epoch_seconds": 10_000,
+            "apparent_bytes": apparent_bytes,
+            "allocated_bytes": allocated_bytes,
+            "entry_count": len(entries),
+            "measurement_status": "complete",
+            "owner_valid": True,
+            "mode_valid": True,
+            "symlink_safe": True,
+            "owner_worker_observations": list(worker_observations),
+            "entries_truncated": False,
+            "minimum_age_hours": 1,
+            "high_water_bytes": 100,
+            "low_water_bytes": 10,
+            "cooldown_hours": 1,
+            "last_cleanup_epoch_seconds": last_cleanup_epoch_seconds,
+            "last_reclaimed_bytes": last_reclaimed_bytes,
+            "last_post_cleanup_allocated_bytes": allocated_bytes,
+            "last_removed_run_ids": [],
+        }
+    ]
+    rows.extend(
+        {
+            "record_type": "entry",
+            "cache_key": "codex-lab-runs",
+            "run_id": run_id,
+            "apparent_bytes": apparent,
+            "allocated_bytes": allocated,
+            "age_seconds": age_seconds,
+            "open_handle_observations": list(handle_observations),
+        }
+        for run_id, apparent, allocated, age_seconds, handle_observations in entries
+    )
+    return _json_lines(*rows)
 
 
 def _docker_disk_usage_json(
