@@ -11,6 +11,7 @@ RunnerHostHygieneStatus = Literal["healthy", "attention"]
 RunnerHostHygieneApplyAction = Literal[
     "prune_docker_cache",
     "prune_dangling_images",
+    "prune_generated_run_cache",
     "remove_buildkit_state_volumes",
     "prune_runner_workdir",
     "restart_runner_service",
@@ -45,12 +46,28 @@ RunnerHostHygieneApplyBlockerCode = Literal[
     "target_volume_not_requested",
     "target_builder_budget_missing",
     "target_builder_not_allowlisted",
+    "target_generated_cache_below_high_water",
+    "target_generated_cache_budget_invalid",
+    "target_generated_cache_cooldown_active",
+    "target_generated_cache_key_missing",
+    "target_generated_cache_missing_from_report",
+    "target_generated_cache_not_allowlisted",
+    "target_generated_cache_owner_busy",
+    "target_generated_cache_run_active",
+    "target_generated_cache_run_missing",
+    "target_generated_cache_run_not_idle",
+    "target_generated_cache_run_too_recent",
+    "target_generated_cache_runs_missing",
+    "target_generated_cache_safety_failed",
     "retained_warm_builder_missing_from_report",
     "warm_builder_not_retained",
 ]
 RunnerHostHygieneFindingCode = Literal[
     "docker_reclaimable_above_limit",
     "free_disk_below_minimum",
+    "generated_cache_above_limit",
+    "generated_cache_measurement_partial",
+    "generated_cache_safety_failed",
     "orphan_buildkit_present",
     "required_warm_builder_missing",
     "runner_workdir_above_limit",
@@ -59,6 +76,7 @@ RunnerHostHygieneFindingCode = Literal[
 RunnerHostHygienePrivilegedScope = Literal[
     "docker_cache",
     "docker_volume",
+    "generated_cache",
     "runner_service",
     "runner_workdir",
 ]
@@ -82,6 +100,21 @@ RunnerHostHygieneAdapterBoundaryBlockerCode = Literal[
 ]
 
 
+class RunnerHostHygieneGeneratedCacheBudget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cache_key: str
+    high_water_bytes: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _normalize_budget(self) -> "RunnerHostHygieneGeneratedCacheBudget":
+        self.cache_key = _required_public_token(
+            self.cache_key,
+            "runner host hygiene generated cache budget requires cache_key",
+        )
+        return self
+
+
 class RunnerHostHygienePolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -89,12 +122,20 @@ class RunnerHostHygienePolicy(BaseModel):
     minimum_free_disk_bytes: int = Field(default=0, ge=0)
     maximum_docker_reclaimable_bytes: int | None = Field(default=None, ge=0)
     maximum_runner_workdir_bytes: int | None = Field(default=None, ge=0)
+    generated_cache_budgets: tuple[RunnerHostHygieneGeneratedCacheBudget, ...] = ()
     required_warm_builders: tuple[str, ...] = ()
     allow_orphan_buildkit: bool = False
 
     @model_validator(mode="after")
     def _normalize_policy(self) -> "RunnerHostHygienePolicy":
         self.required_warm_builders = _normalized_tokens(self.required_warm_builders)
+        self.generated_cache_budgets = tuple(
+            sorted(self.generated_cache_budgets, key=lambda item: item.cache_key)
+        )
+        if len({item.cache_key for item in self.generated_cache_budgets}) != len(
+            self.generated_cache_budgets
+        ):
+            raise ValueError("runner host hygiene generated cache budgets must be unique")
         return self
 
 
@@ -133,6 +174,72 @@ class RunnerHostHygieneRunnerWorkdirUsage(BaseModel):
         return self
 
 
+class RunnerHostHygieneGeneratedCacheAgeBucket(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bucket: Literal["under_1h", "1h_to_24h", "1d_to_7d", "7d_to_30d", "30d_or_more"]
+    entry_count: int = Field(default=0, ge=0)
+    apparent_bytes: int = Field(default=0, ge=0)
+    allocated_bytes: int = Field(default=0, ge=0)
+
+
+class RunnerHostHygieneGeneratedCacheEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: int = Field(ge=1)
+    apparent_bytes: int = Field(default=0, ge=0)
+    allocated_bytes: int = Field(default=0, ge=0)
+    age_seconds: int = Field(default=0, ge=0)
+    open_handle_observations: tuple[int, ...] = ()
+    github_run_state: Literal["completed", "active", "unknown"] = "unknown"
+
+    @model_validator(mode="after")
+    def _normalize_entry(self) -> "RunnerHostHygieneGeneratedCacheEntry":
+        if any(value < 0 for value in self.open_handle_observations):
+            raise ValueError("generated cache open-handle observations cannot be negative")
+        return self
+
+
+class RunnerHostHygieneGeneratedCacheUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cache_key: str
+    apparent_bytes: int = Field(default=0, ge=0)
+    allocated_bytes: int = Field(default=0, ge=0)
+    entry_count: int = Field(default=0, ge=0)
+    measurement_status: Literal["complete", "partial"] = "complete"
+    owner_valid: bool = False
+    mode_valid: bool = False
+    symlink_safe: bool = False
+    owner_worker_observations: tuple[int, ...] = ()
+    age_buckets: tuple[RunnerHostHygieneGeneratedCacheAgeBucket, ...] = ()
+    entries: tuple[RunnerHostHygieneGeneratedCacheEntry, ...] = ()
+    entries_truncated: bool = False
+    last_cleanup_epoch_seconds: int = Field(default=0, ge=0)
+    last_reclaimed_bytes: int = Field(default=0, ge=0)
+    last_post_cleanup_allocated_bytes: int = Field(default=0, ge=0)
+    last_removed_run_ids: tuple[int, ...] = ()
+    estimated_daily_growth_bytes: int = Field(default=0, ge=0)
+    cooldown_remaining_seconds: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _normalize_usage(self) -> "RunnerHostHygieneGeneratedCacheUsage":
+        self.cache_key = _required_public_token(
+            self.cache_key,
+            "runner host hygiene generated cache usage requires cache_key",
+        )
+        if any(value < 0 for value in self.owner_worker_observations):
+            raise ValueError("generated cache worker observations cannot be negative")
+        self.age_buckets = tuple(sorted(self.age_buckets, key=lambda item: item.bucket))
+        self.entries = tuple(sorted(self.entries, key=lambda item: item.run_id))
+        self.last_removed_run_ids = tuple(sorted(set(self.last_removed_run_ids)))
+        if any(run_id <= 0 for run_id in self.last_removed_run_ids):
+            raise ValueError("generated cache cleanup history run ids must be positive")
+        if self.entry_count < len(self.entries):
+            raise ValueError("generated cache entry_count cannot be smaller than entries")
+        return self
+
+
 class RunnerHostHygieneObservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -146,6 +253,9 @@ class RunnerHostHygieneObservation(BaseModel):
     runner_workdir_bytes: int = Field(default=0, ge=0)
     runner_workdir_allocated_bytes: int = Field(default=0, ge=0)
     runner_workdir_usage: tuple[RunnerHostHygieneRunnerWorkdirUsage, ...] = ()
+    generated_cache_apparent_bytes: int = Field(default=0, ge=0)
+    generated_cache_allocated_bytes: int = Field(default=0, ge=0)
+    generated_cache_usage: tuple[RunnerHostHygieneGeneratedCacheUsage, ...] = ()
     docker_toolchain: "RunnerHostDockerToolchainObservation | None" = None
     warm_builders: tuple[str, ...] = ()
     image_inventory: tuple["RunnerHostHygieneImageInventoryItem", ...] = ()
@@ -165,6 +275,9 @@ class RunnerHostHygieneObservation(BaseModel):
         self.warm_builders = _normalized_tokens(self.warm_builders)
         self.runner_workdir_usage = tuple(
             sorted(self.runner_workdir_usage, key=lambda item: item.root_key)
+        )
+        self.generated_cache_usage = tuple(
+            sorted(self.generated_cache_usage, key=lambda item: item.cache_key)
         )
         self.image_inventory = _sorted_image_inventory(self.image_inventory)
         self.volume_inventory = _sorted_volume_inventory(self.volume_inventory)
@@ -281,6 +394,9 @@ class RunnerHostHygieneReport(BaseModel):
     runner_workdir_bytes: int = Field(default=0, ge=0)
     runner_workdir_allocated_bytes: int = Field(default=0, ge=0)
     runner_workdir_usage: tuple[RunnerHostHygieneRunnerWorkdirUsage, ...] = ()
+    generated_cache_apparent_bytes: int = Field(default=0, ge=0)
+    generated_cache_allocated_bytes: int = Field(default=0, ge=0)
+    generated_cache_usage: tuple[RunnerHostHygieneGeneratedCacheUsage, ...] = ()
     docker_toolchain: RunnerHostDockerToolchainObservation | None = None
     warm_builders: tuple[str, ...] = ()
     image_inventory: tuple[RunnerHostHygieneImageInventoryItem, ...] = ()
@@ -299,6 +415,9 @@ class RunnerHostHygieneReport(BaseModel):
         self.warm_builders = _normalized_tokens(self.warm_builders)
         self.runner_workdir_usage = tuple(
             sorted(self.runner_workdir_usage, key=lambda item: item.root_key)
+        )
+        self.generated_cache_usage = tuple(
+            sorted(self.generated_cache_usage, key=lambda item: item.cache_key)
         )
         self.image_inventory = _sorted_image_inventory(self.image_inventory)
         self.volume_inventory = _sorted_volume_inventory(self.volume_inventory)
@@ -322,6 +441,8 @@ class RunnerHostHygieneApplyPolicy(BaseModel):
     require_audit_record: bool = True
     allow_docker_cache_prune: bool = False
     allow_dangling_image_prune: bool = False
+    allow_generated_run_cache_prune: bool = False
+    allowed_generated_cache_keys: tuple[str, ...] = ()
     allowed_buildkit_builders: tuple[str, ...] = ()
     allow_buildkit_state_volume_remove: bool = False
     allowed_buildkit_state_volumes: tuple[str, ...] = ()
@@ -336,6 +457,17 @@ class RunnerHostHygieneApplyPolicy(BaseModel):
         )
         self.allowed_buildkit_builders = _normalized_buildkit_builder_names(
             self.allowed_buildkit_builders
+        )
+        self.allowed_generated_cache_keys = tuple(
+            sorted(
+                {
+                    _required_public_token(
+                        value,
+                        "runner host hygiene allowed generated cache key must be public-safe",
+                    )
+                    for value in self.allowed_generated_cache_keys
+                }
+            )
         )
         self.allowed_buildkit_state_volumes = _normalized_volume_names(
             self.allowed_buildkit_state_volumes
@@ -354,6 +486,12 @@ class RunnerHostHygieneApplyRequest(BaseModel):
     target_buildkit_builder: str = ""
     max_used_space_bytes: int = Field(default=0, ge=0)
     target_buildkit_state_volumes: tuple[str, ...] = ()
+    target_generated_cache_key: str = ""
+    target_generated_cache_run_ids: tuple[int, ...] = ()
+    generated_cache_minimum_age_hours: int = Field(default=0, ge=0)
+    generated_cache_high_water_bytes: int = Field(default=0, ge=0)
+    generated_cache_low_water_bytes: int = Field(default=0, ge=0)
+    generated_cache_cooldown_hours: int = Field(default=0, ge=0)
     audit_record_key: str = ""
 
     @model_validator(mode="after")
@@ -368,6 +506,12 @@ class RunnerHostHygieneApplyRequest(BaseModel):
         self.target_buildkit_state_volumes = _normalized_volume_name_entries(
             self.target_buildkit_state_volumes
         )
+        self.target_generated_cache_key = _normalized_public_token(self.target_generated_cache_key)
+        self.target_generated_cache_run_ids = tuple(
+            sorted(set(self.target_generated_cache_run_ids))
+        )
+        if any(run_id <= 0 for run_id in self.target_generated_cache_run_ids):
+            raise ValueError("generated cache run ids must be positive")
         self.audit_record_key = self.audit_record_key.strip()
         return self
 
@@ -744,6 +888,49 @@ def evaluate_runner_host_hygiene(
                 ),
             )
         )
+    generated_cache_budgets = {
+        item.cache_key: item.high_water_bytes for item in policy.generated_cache_budgets
+    }
+    over_budget_generated_caches = tuple(
+        item.cache_key
+        for item in observation.generated_cache_usage
+        if item.cache_key in generated_cache_budgets
+        and item.allocated_bytes > generated_cache_budgets[item.cache_key]
+    )
+    if over_budget_generated_caches:
+        findings.append(
+            _finding(
+                "generated_cache_above_limit",
+                "runner host generated caches exceed configured high-water limits: "
+                + ", ".join(over_budget_generated_caches),
+            )
+        )
+    partial_generated_caches = tuple(
+        item.cache_key
+        for item in observation.generated_cache_usage
+        if item.measurement_status == "partial"
+    )
+    if partial_generated_caches:
+        findings.append(
+            _finding(
+                "generated_cache_measurement_partial",
+                "runner host generated cache measurement was partial for keys: "
+                + ", ".join(partial_generated_caches),
+            )
+        )
+    unsafe_generated_caches = tuple(
+        item.cache_key
+        for item in observation.generated_cache_usage
+        if not item.owner_valid or not item.mode_valid or not item.symlink_safe
+    )
+    if unsafe_generated_caches:
+        findings.append(
+            _finding(
+                "generated_cache_safety_failed",
+                "runner host generated cache safety checks failed for keys: "
+                + ", ".join(unsafe_generated_caches),
+            )
+        )
     missing_builders = tuple(
         builder
         for builder in policy.required_warm_builders
@@ -780,6 +967,9 @@ def evaluate_runner_host_hygiene(
         runner_workdir_bytes=observation.runner_workdir_bytes,
         runner_workdir_allocated_bytes=observation.runner_workdir_allocated_bytes,
         runner_workdir_usage=observation.runner_workdir_usage,
+        generated_cache_apparent_bytes=observation.generated_cache_apparent_bytes,
+        generated_cache_allocated_bytes=observation.generated_cache_allocated_bytes,
+        generated_cache_usage=observation.generated_cache_usage,
         docker_toolchain=observation.docker_toolchain,
         warm_builders=observation.warm_builders,
         image_inventory=observation.image_inventory,
@@ -878,6 +1068,7 @@ def plan_runner_host_hygiene_apply(
         )
     blockers.extend(_target_volume_blockers(policy=policy, request=request, report=report))
     blockers.extend(_target_builder_blockers(policy=policy, request=request))
+    blockers.extend(_target_generated_cache_blockers(policy=policy, request=request, report=report))
 
     status: RunnerHostHygieneApplyPlanStatus = "blocked" if blockers else "ready"
     return RunnerHostHygieneApplyPlan(
@@ -1083,11 +1274,154 @@ def _apply_action_allowed(
         return policy.allow_docker_cache_prune
     if action == "prune_dangling_images":
         return policy.allow_dangling_image_prune
+    if action == "prune_generated_run_cache":
+        return policy.allow_generated_run_cache_prune
     if action == "remove_buildkit_state_volumes":
         return policy.allow_buildkit_state_volume_remove
     if action == "prune_runner_workdir":
         return policy.allow_runner_workdir_prune
     return policy.allow_runner_service_restart
+
+
+def _target_generated_cache_blockers(
+    *,
+    policy: RunnerHostHygieneApplyPolicy,
+    request: RunnerHostHygieneApplyRequest,
+    report: RunnerHostHygieneReport,
+) -> tuple[RunnerHostHygieneApplyBlocker, ...]:
+    if request.action != "prune_generated_run_cache":
+        return ()
+    blockers: list[RunnerHostHygieneApplyBlocker] = []
+    cache_key = request.target_generated_cache_key
+    if not cache_key:
+        blockers.append(
+            _apply_blocker(
+                "target_generated_cache_key_missing",
+                "runner host generated cache cleanup requires a target cache key",
+            )
+        )
+        return tuple(blockers)
+    if cache_key not in policy.allowed_generated_cache_keys:
+        blockers.append(
+            _apply_blocker(
+                "target_generated_cache_not_allowlisted",
+                f"runner host generated cache key is not allowlisted: {cache_key}",
+            )
+        )
+    cache_by_key = {item.cache_key: item for item in report.generated_cache_usage}
+    cache = cache_by_key.get(cache_key)
+    if cache is None:
+        blockers.append(
+            _apply_blocker(
+                "target_generated_cache_missing_from_report",
+                f"runner host generated cache is missing from report: {cache_key}",
+            )
+        )
+        return tuple(blockers)
+    if (
+        request.generated_cache_high_water_bytes <= 0
+        or request.generated_cache_low_water_bytes >= request.generated_cache_high_water_bytes
+        or request.generated_cache_minimum_age_hours <= 0
+        or request.generated_cache_cooldown_hours <= 0
+    ):
+        blockers.append(
+            _apply_blocker(
+                "target_generated_cache_budget_invalid",
+                "runner host generated cache cleanup requires positive age/high-water inputs "
+                "and a lower low-water target",
+            )
+        )
+    if cache.allocated_bytes <= request.generated_cache_high_water_bytes:
+        blockers.append(
+            _apply_blocker(
+                "target_generated_cache_below_high_water",
+                (
+                    "runner host generated cache is not above its high-water limit: "
+                    f"{cache.allocated_bytes} <= {request.generated_cache_high_water_bytes}"
+                ),
+            )
+        )
+    if cache.cooldown_remaining_seconds > 0:
+        blockers.append(
+            _apply_blocker(
+                "target_generated_cache_cooldown_active",
+                (
+                    "runner host generated cache cleanup cooldown remains active for "
+                    f"{cache.cooldown_remaining_seconds} seconds"
+                ),
+            )
+        )
+    if cache.measurement_status != "complete" or not (
+        cache.owner_valid and cache.mode_valid and cache.symlink_safe
+    ):
+        blockers.append(
+            _apply_blocker(
+                "target_generated_cache_safety_failed",
+                f"runner host generated cache safety evidence is incomplete: {cache_key}",
+            )
+        )
+    if len(cache.owner_worker_observations) < 2 or any(
+        value > 0 for value in cache.owner_worker_observations
+    ):
+        blockers.append(
+            _apply_blocker(
+                "target_generated_cache_owner_busy",
+                (
+                    "runner host generated cache owner lacks two idle worker observations: "
+                    f"{cache_key}"
+                ),
+            )
+        )
+    if not request.target_generated_cache_run_ids:
+        blockers.append(
+            _apply_blocker(
+                "target_generated_cache_runs_missing",
+                "runner host generated cache cleanup requires completed run targets",
+            )
+        )
+        return tuple(blockers)
+    entries_by_run_id = {item.run_id: item for item in cache.entries}
+    minimum_age_seconds = request.generated_cache_minimum_age_hours * 3600
+    for run_id in request.target_generated_cache_run_ids:
+        entry = entries_by_run_id.get(run_id)
+        if entry is None:
+            blockers.append(
+                _apply_blocker(
+                    "target_generated_cache_run_missing",
+                    f"runner host generated cache run is missing from report: {run_id}",
+                )
+            )
+            continue
+        if entry.github_run_state != "completed":
+            blockers.append(
+                _apply_blocker(
+                    "target_generated_cache_run_active",
+                    (
+                        "runner host generated cache run is not proven completed: "
+                        f"{run_id} state={entry.github_run_state}"
+                    ),
+                )
+            )
+        if entry.age_seconds < minimum_age_seconds:
+            blockers.append(
+                _apply_blocker(
+                    "target_generated_cache_run_too_recent",
+                    (
+                        "runner host generated cache run is newer than the configured age: "
+                        f"{run_id} age_seconds={entry.age_seconds}"
+                    ),
+                )
+            )
+        if len(entry.open_handle_observations) < 2 or any(
+            value > 0 for value in entry.open_handle_observations
+        ):
+            blockers.append(
+                _apply_blocker(
+                    "target_generated_cache_run_not_idle",
+                    f"runner host generated cache run lacks two zero-handle observations: {run_id}",
+                )
+            )
+    return tuple(blockers)
 
 
 def _target_builder_blockers(
@@ -1208,6 +1542,12 @@ def _apply_next_steps(
             "prune only dangling Docker images older than the approved age",
             "capture post-apply host hygiene evidence and write the audit record",
         )
+    if action == "prune_generated_run_cache":
+        return (
+            "capture completed-run, ownership, symlink, and open-handle evidence",
+            "remove only exact allowlisted completed-run cache directories above high water",
+            "capture post-apply generated cache evidence and write the audit record",
+        )
     return (
         "capture pre-apply host hygiene evidence",
         "prune Docker cache without removing retained warm builders",
@@ -1247,6 +1587,8 @@ def _required_privileged_scope(
         return "docker_cache"
     if action == "remove_buildkit_state_volumes":
         return "docker_volume"
+    if action == "prune_generated_run_cache":
+        return "generated_cache"
     if action == "prune_runner_workdir":
         return "runner_workdir"
     return "runner_service"
@@ -1315,6 +1657,17 @@ def _normalized_values(values: tuple[str, ...], normalize: Callable[[str], str])
 
 def _normalized_token(value: str) -> str:
     return value.strip().lower()
+
+
+def _normalized_public_token(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized and not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", normalized):
+        raise ValueError("value must be a public-safe token")
+    return normalized
+
+
+def _required_public_token(value: str, message: str) -> str:
+    return _required_text(_normalized_public_token(value), message)
 
 
 def _normalized_volume_name(value: str) -> str:

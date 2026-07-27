@@ -1250,7 +1250,10 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         )
     },
     ".github/workflows/runner-host-hygiene.yml": {
-        "RUNNER_REPOSITORY_SCOPE": frozenset(("${{ github.repository }}",))
+        "GH_TOKEN": frozenset(
+            ("${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_READ_TOKEN }}",)
+        ),
+        "RUNNER_REPOSITORY_SCOPE": frozenset(("${{ github.repository }}",)),
     },
     ".github/workflows/runner-lane-registration.yml": {
         "GH_TOKEN": frozenset(("${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}",))

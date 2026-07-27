@@ -21,6 +21,9 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRe
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterPolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterProposal
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneImageInventoryItem
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheBudget
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheEntry
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheUsage
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneReport
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneRunnerWorkdirUsage
@@ -88,6 +91,44 @@ class RunnerHostHygieneTests(unittest.TestCase):
         self.assertEqual(
             [finding.code for finding in report.findings],
             ["runner_workdir_measurement_partial"],
+        )
+
+    def test_report_marks_generated_cache_budget_and_safety_findings(self) -> None:
+        report = evaluate_runner_host_hygiene(
+            policy=RunnerHostHygienePolicy(
+                generated_cache_budgets=(
+                    RunnerHostHygieneGeneratedCacheBudget(
+                        cache_key="codex-lab-runs",
+                        high_water_bytes=100,
+                    ),
+                )
+            ),
+            observation=RunnerHostHygieneObservation(
+                host_name="chris-testing",
+                observed_at="2026-07-27T00:00:00Z",
+                free_disk_bytes=200,
+                generated_cache_apparent_bytes=120,
+                generated_cache_allocated_bytes=120,
+                generated_cache_usage=(
+                    RunnerHostHygieneGeneratedCacheUsage(
+                        cache_key="codex-lab-runs",
+                        apparent_bytes=120,
+                        allocated_bytes=120,
+                        entry_count=1,
+                        measurement_status="partial",
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(report.status, "attention")
+        self.assertEqual(
+            [finding.code for finding in report.findings],
+            [
+                "generated_cache_above_limit",
+                "generated_cache_measurement_partial",
+                "generated_cache_safety_failed",
+            ],
         )
 
     def test_report_preserves_sorted_resource_inventory(self) -> None:
@@ -706,6 +747,101 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
 
         self.assertEqual(plan.status, "ready")
         self.assertEqual(plan.blockers, ())
+
+    def test_apply_plan_can_prune_completed_idle_generated_run_cache(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_generated_run_cache_prune=True,
+                allowed_generated_cache_keys=("codex-lab-runs",),
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_generated_run_cache",
+                host_name="chris-testing",
+                mutate=True,
+                target_generated_cache_key="codex-lab-runs",
+                target_generated_cache_run_ids=(101,),
+                generated_cache_minimum_age_hours=1,
+                generated_cache_high_water_bytes=100,
+                generated_cache_low_water_bytes=10,
+                generated_cache_cooldown_hours=1,
+                audit_record_key="runner-host-hygiene/2026-07-27/generated-cache",
+            ),
+            report=_healthy_report_with_generated_cache(
+                RunnerHostHygieneGeneratedCacheUsage(
+                    cache_key="codex-lab-runs",
+                    apparent_bytes=120,
+                    allocated_bytes=120,
+                    entry_count=1,
+                    owner_valid=True,
+                    mode_valid=True,
+                    symlink_safe=True,
+                    owner_worker_observations=(0, 0),
+                    entries=(
+                        RunnerHostHygieneGeneratedCacheEntry(
+                            run_id=101,
+                            apparent_bytes=120,
+                            allocated_bytes=120,
+                            age_seconds=7_200,
+                            open_handle_observations=(0, 0),
+                            github_run_state="completed",
+                        ),
+                    ),
+                )
+            ),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.blockers, ())
+
+    def test_apply_plan_blocks_generated_cache_when_owner_is_busy(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_generated_run_cache_prune=True,
+                allowed_generated_cache_keys=("codex-lab-runs",),
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_generated_run_cache",
+                host_name="chris-testing",
+                mutate=True,
+                target_generated_cache_key="codex-lab-runs",
+                target_generated_cache_run_ids=(101,),
+                generated_cache_minimum_age_hours=1,
+                generated_cache_high_water_bytes=100,
+                generated_cache_low_water_bytes=10,
+                generated_cache_cooldown_hours=1,
+                audit_record_key="runner-host-hygiene/2026-07-27/generated-cache",
+            ),
+            report=_healthy_report_with_generated_cache(
+                RunnerHostHygieneGeneratedCacheUsage(
+                    cache_key="codex-lab-runs",
+                    apparent_bytes=120,
+                    allocated_bytes=120,
+                    entry_count=1,
+                    owner_valid=True,
+                    mode_valid=True,
+                    symlink_safe=True,
+                    owner_worker_observations=(1, 1),
+                    entries=(
+                        RunnerHostHygieneGeneratedCacheEntry(
+                            run_id=101,
+                            apparent_bytes=120,
+                            allocated_bytes=120,
+                            age_seconds=7_200,
+                            open_handle_observations=(0, 0),
+                            github_run_state="completed",
+                        ),
+                    ),
+                )
+            ),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers],
+            ["target_generated_cache_owner_busy"],
+        )
 
     def test_apply_plan_blocks_unallowlisted_builder_without_budget(self) -> None:
         plan = plan_runner_host_hygiene_apply(
@@ -1431,6 +1567,79 @@ class RunnerHostHygieneApplyPlanCliTests(unittest.TestCase):
         )
         self.assertEqual(payload["request"]["max_used_space_bytes"], 64_424_509_440)
 
+    def test_cli_builds_generated_run_cache_apply_plan(self) -> None:
+        generated_usage = RunnerHostHygieneGeneratedCacheUsage(
+            cache_key="codex-lab-runs",
+            apparent_bytes=120,
+            allocated_bytes=120,
+            entry_count=1,
+            owner_valid=True,
+            mode_valid=True,
+            symlink_safe=True,
+            owner_worker_observations=(0, 0),
+            entries=(
+                RunnerHostHygieneGeneratedCacheEntry(
+                    run_id=101,
+                    apparent_bytes=120,
+                    allocated_bytes=120,
+                    age_seconds=7_200,
+                    open_handle_observations=(0, 0),
+                    github_run_state="completed",
+                ),
+            ),
+        )
+        with TemporaryDirectory() as temp_dir:
+            report_file = Path(temp_dir) / "report.json"
+            report_file.write_text(
+                json.dumps(
+                    {
+                        "report": _healthy_report_with_generated_cache(generated_usage).model_dump(
+                            mode="json"
+                        )
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-host-hygiene-apply-plan",
+                    "--action",
+                    "prune_generated_run_cache",
+                    "--host-name",
+                    "chris-testing",
+                    "--mutate",
+                    "--audit-record-key",
+                    "runner-host-hygiene/2026-07-27/generated-cache",
+                    "--approved-host",
+                    "chris-testing",
+                    "--allow-generated-run-cache-prune",
+                    "--allowed-generated-cache-key",
+                    "codex-lab-runs",
+                    "--target-generated-cache-key",
+                    "codex-lab-runs",
+                    "--target-generated-cache-run-id",
+                    "101",
+                    "--generated-cache-minimum-age-hours",
+                    "1",
+                    "--generated-cache-high-water-bytes",
+                    "100",
+                    "--generated-cache-low-water-bytes",
+                    "10",
+                    "--generated-cache-cooldown-hours",
+                    "1",
+                    "--report-file",
+                    report_file.as_posix(),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["plan"]["status"], "ready")
+        self.assertEqual(payload["request"]["target_generated_cache_run_ids"], [101])
+
     def test_cli_builds_dangling_image_apply_plan(self) -> None:
         with TemporaryDirectory() as temp_dir:
             report_file = Path(temp_dir) / "report.json"
@@ -1559,6 +1768,22 @@ def _healthy_report_with_volumes(
             free_disk_bytes=500,
             warm_builders=("odoo-docker-chris-testing",),
             volume_inventory=volumes,
+        ),
+    )
+
+
+def _healthy_report_with_generated_cache(
+    usage: RunnerHostHygieneGeneratedCacheUsage,
+) -> RunnerHostHygieneReport:
+    return evaluate_runner_host_hygiene(
+        policy=RunnerHostHygienePolicy(),
+        observation=RunnerHostHygieneObservation(
+            host_name="chris-testing",
+            observed_at="2026-07-27T00:00:00Z",
+            free_disk_bytes=500,
+            generated_cache_apparent_bytes=usage.apparent_bytes,
+            generated_cache_allocated_bytes=usage.allocated_bytes,
+            generated_cache_usage=(usage,),
         ),
     )
 

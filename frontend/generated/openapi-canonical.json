@@ -17031,6 +17031,19 @@
               "target_volume_not_requested",
               "target_builder_budget_missing",
               "target_builder_not_allowlisted",
+              "target_generated_cache_below_high_water",
+              "target_generated_cache_budget_invalid",
+              "target_generated_cache_cooldown_active",
+              "target_generated_cache_key_missing",
+              "target_generated_cache_missing_from_report",
+              "target_generated_cache_not_allowlisted",
+              "target_generated_cache_owner_busy",
+              "target_generated_cache_run_active",
+              "target_generated_cache_run_missing",
+              "target_generated_cache_run_not_idle",
+              "target_generated_cache_run_too_recent",
+              "target_generated_cache_runs_missing",
+              "target_generated_cache_safety_failed",
               "retained_warm_builder_missing_from_report",
               "warm_builder_not_retained"
             ],
@@ -17056,6 +17069,7 @@
             "enum": [
               "prune_docker_cache",
               "prune_dangling_images",
+              "prune_generated_run_cache",
               "remove_buildkit_state_volumes",
               "prune_runner_workdir",
               "restart_runner_service"
@@ -17128,6 +17142,7 @@
             "enum": [
               "prune_docker_cache",
               "prune_dangling_images",
+              "prune_generated_run_cache",
               "remove_buildkit_state_volumes",
               "prune_runner_workdir",
               "restart_runner_service"
@@ -17139,6 +17154,30 @@
             "default": "",
             "title": "Audit Record Key",
             "type": "string"
+          },
+          "generated_cache_cooldown_hours": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generated Cache Cooldown Hours",
+            "type": "integer"
+          },
+          "generated_cache_high_water_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generated Cache High Water Bytes",
+            "type": "integer"
+          },
+          "generated_cache_low_water_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generated Cache Low Water Bytes",
+            "type": "integer"
+          },
+          "generated_cache_minimum_age_hours": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generated Cache Minimum Age Hours",
+            "type": "integer"
           },
           "host_name": {
             "title": "Host Name",
@@ -17180,6 +17219,19 @@
               "type": "string"
             },
             "title": "Target Buildkit State Volumes",
+            "type": "array"
+          },
+          "target_generated_cache_key": {
+            "default": "",
+            "title": "Target Generated Cache Key",
+            "type": "string"
+          },
+          "target_generated_cache_run_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Target Generated Cache Run Ids",
             "type": "array"
           }
         },
@@ -17252,6 +17304,9 @@
             "enum": [
               "docker_reclaimable_above_limit",
               "free_disk_below_minimum",
+              "generated_cache_above_limit",
+              "generated_cache_measurement_partial",
+              "generated_cache_safety_failed",
               "orphan_buildkit_present",
               "required_warm_builder_missing",
               "runner_workdir_above_limit",
@@ -17270,6 +17325,219 @@
           "message"
         ],
         "title": "RunnerHostHygieneFinding",
+        "type": "object"
+      },
+      "RunnerHostHygieneGeneratedCacheAgeBucket": {
+        "additionalProperties": false,
+        "properties": {
+          "allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Allocated Bytes",
+            "type": "integer"
+          },
+          "apparent_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Apparent Bytes",
+            "type": "integer"
+          },
+          "bucket": {
+            "enum": [
+              "under_1h",
+              "1h_to_24h",
+              "1d_to_7d",
+              "7d_to_30d",
+              "30d_or_more"
+            ],
+            "title": "Bucket",
+            "type": "string"
+          },
+          "entry_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Entry Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bucket"
+        ],
+        "title": "RunnerHostHygieneGeneratedCacheAgeBucket",
+        "type": "object"
+      },
+      "RunnerHostHygieneGeneratedCacheEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "age_seconds": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Age Seconds",
+            "type": "integer"
+          },
+          "allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Allocated Bytes",
+            "type": "integer"
+          },
+          "apparent_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Apparent Bytes",
+            "type": "integer"
+          },
+          "github_run_state": {
+            "default": "unknown",
+            "enum": [
+              "completed",
+              "active",
+              "unknown"
+            ],
+            "title": "Github Run State",
+            "type": "string"
+          },
+          "open_handle_observations": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Open Handle Observations",
+            "type": "array"
+          },
+          "run_id": {
+            "minimum": 1.0,
+            "title": "Run Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "title": "RunnerHostHygieneGeneratedCacheEntry",
+        "type": "object"
+      },
+      "RunnerHostHygieneGeneratedCacheUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "age_buckets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneGeneratedCacheAgeBucket"
+            },
+            "title": "Age Buckets",
+            "type": "array"
+          },
+          "allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Allocated Bytes",
+            "type": "integer"
+          },
+          "apparent_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Apparent Bytes",
+            "type": "integer"
+          },
+          "cache_key": {
+            "title": "Cache Key",
+            "type": "string"
+          },
+          "cooldown_remaining_seconds": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Cooldown Remaining Seconds",
+            "type": "integer"
+          },
+          "entries": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneGeneratedCacheEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "entries_truncated": {
+            "default": false,
+            "title": "Entries Truncated",
+            "type": "boolean"
+          },
+          "entry_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Entry Count",
+            "type": "integer"
+          },
+          "estimated_daily_growth_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Estimated Daily Growth Bytes",
+            "type": "integer"
+          },
+          "last_cleanup_epoch_seconds": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Last Cleanup Epoch Seconds",
+            "type": "integer"
+          },
+          "last_post_cleanup_allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Last Post Cleanup Allocated Bytes",
+            "type": "integer"
+          },
+          "last_reclaimed_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Last Reclaimed Bytes",
+            "type": "integer"
+          },
+          "last_removed_run_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Last Removed Run Ids",
+            "type": "array"
+          },
+          "measurement_status": {
+            "default": "complete",
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "title": "Measurement Status",
+            "type": "string"
+          },
+          "mode_valid": {
+            "default": false,
+            "title": "Mode Valid",
+            "type": "boolean"
+          },
+          "owner_valid": {
+            "default": false,
+            "title": "Owner Valid",
+            "type": "boolean"
+          },
+          "owner_worker_observations": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Owner Worker Observations",
+            "type": "array"
+          },
+          "symlink_safe": {
+            "default": false,
+            "title": "Symlink Safe",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cache_key"
+        ],
+        "title": "RunnerHostHygieneGeneratedCacheUsage",
         "type": "object"
       },
       "RunnerHostHygieneImageInventoryItem": {
@@ -17357,6 +17625,26 @@
             "minimum": 0.0,
             "title": "Free Disk Bytes",
             "type": "integer"
+          },
+          "generated_cache_allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generated Cache Allocated Bytes",
+            "type": "integer"
+          },
+          "generated_cache_apparent_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generated Cache Apparent Bytes",
+            "type": "integer"
+          },
+          "generated_cache_usage": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneGeneratedCacheUsage"
+            },
+            "title": "Generated Cache Usage",
+            "type": "array"
           },
           "host_name": {
             "title": "Host Name",
