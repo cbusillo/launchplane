@@ -1871,33 +1871,45 @@ def extract_odoo_backup_restore_result(
         normalized_line = line.strip()
         if normalized_line.startswith(marker_prefix):
             encoded_results.append(normalized_line.removeprefix(marker_prefix).strip())
+    if not encoded_results:
+        raise click.ClickException(
+            f"Dokploy Odoo backup restore {phase} failed (provider_result_missing)."
+        )
     if len(encoded_results) != 1:
-        raise click.ClickException("Dokploy Odoo backup restore returned no unique bounded result.")
+        raise click.ClickException(
+            f"Dokploy Odoo backup restore {phase} failed (provider_result_duplicate)."
+        )
     try:
         decoded_payload = base64.b64decode(encoded_results[0], validate=True)
         parsed_payload = json.loads(decoded_payload.decode("utf-8"))
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise click.ClickException(
-            "Dokploy Odoo backup restore returned an invalid bounded result."
+            f"Dokploy Odoo backup restore {phase} failed (provider_result_invalid)."
         ) from error
     result = api.as_json_object(parsed_payload)
     if result is None or set(result) != ODOO_BACKUP_RESTORE_RESULT_FIELDS:
         raise click.ClickException(
-            "Dokploy Odoo backup restore returned an unexpected bounded result shape."
+            f"Dokploy Odoo backup restore {phase} failed (provider_result_shape_invalid)."
         )
     if result.get("schema_version") != 1:
-        raise click.ClickException("Dokploy Odoo backup restore returned an unsupported result.")
+        raise click.ClickException(
+            f"Dokploy Odoo backup restore {phase} failed (provider_result_schema_unsupported)."
+        )
     if result.get("operation_id") != operation_id or result.get("phase") != phase:
         raise click.ClickException(
-            "Dokploy Odoo backup restore result did not match the exact operation phase."
+            f"Dokploy Odoo backup restore {phase} failed (provider_result_identity_mismatch)."
         )
     evidence = api.as_json_object(result.get("evidence"))
     if evidence is None or len(evidence) > 32:
-        raise click.ClickException("Dokploy Odoo backup restore evidence was not bounded.")
+        raise click.ClickException(
+            f"Dokploy Odoo backup restore {phase} failed (provider_evidence_unbounded)."
+        )
     normalized_evidence: dict[str, str] = {}
     for key, value in evidence.items():
         if not isinstance(value, str) or len(key) > 100 or len(value) > 4096:
-            raise click.ClickException("Dokploy Odoo backup restore evidence was not bounded.")
+            raise click.ClickException(
+                f"Dokploy Odoo backup restore {phase} failed (provider_evidence_unbounded)."
+            )
         normalized_evidence[key] = value
     return normalized_evidence
 
@@ -4030,7 +4042,7 @@ with tarfile.open(archive_path, mode="r:gz") as archive:
         raise
 PY
 
-python3 - "${result_marker}" "${operation_id}" "${filestore_staging_path}" "${filestore_archive_sha256}" "${filestore_member_count}" "${filestore_unpacked_size}" <<'PY'
+python3 - "${result_marker}" "${operation_id}" "${filestore_staging_path}" "${expected_filestore_archive_sha256}" "${expected_filestore_member_count}" "${expected_filestore_unpacked_size}" <<'PY'
 import base64
 import json
 import sys
