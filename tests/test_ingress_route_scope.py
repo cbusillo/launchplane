@@ -30,12 +30,13 @@ def _profile(*, shared_prod_domain: bool = False) -> LaunchplaneProductProfileRe
                 base_url=f"https://{testing_domain}",
                 health_url=f"https://health-{testing_domain}/launchplane/health",
                 health_monitoring=ProductLaneHealthMonitoringPolicy(
+                    monitoring_intent="public",
                     checks=(
                         ProductLaneHealthCheck(
                             name="public-ingress",
                             url=f"https://{testing_domain}/launchplane/health",
                         ),
-                    )
+                    ),
                 ),
             ),
             ProductLaneProfile(

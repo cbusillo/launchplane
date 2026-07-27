@@ -11,6 +11,7 @@ from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
 from control_plane.contracts.product_health_monitoring_migration import health_check_record_token
+from control_plane.contracts.product_profile_record import ProductLaneMonitoringIntent
 from control_plane.contracts.route_binding_record import RouteBindingStatus
 from control_plane.contracts.route_binding_record import RouteBindingTerminationKind
 from control_plane.contracts.route_binding_record import RouteBindingTlsOwner
@@ -18,7 +19,9 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIde
 
 
 PublicIngressObservationStatus = Literal["pass", "fail", "skipped"]
+PublicIngressObservationPurpose = Literal["probe", "reconciliation"]
 PublicIngressIncidentStatus = Literal["open", "resolved"]
+PublicIngressIncidentResolutionReason = Literal["recovered", "monitoring_intent_changed"]
 PublicIngressIncidentEvent = Literal["opened", "updated", "resolved"]
 PublicIngressNotificationDestinationKind = Literal["github_issue", "email", "discord"]
 PublicIngressNotificationStatus = Literal["enabled", "disabled"]
@@ -30,6 +33,7 @@ PublicIngressTargetKind = Literal[
     "base_url",
     "health_url",
     "private_health_url",
+    "monitoring_intent",
     "provider",
     "tls_domain",
 ]
@@ -43,6 +47,7 @@ PublicIngressFailureCode = Literal[
     "private_endpoint_mismatch",
     "private_endpoint_not_found",
     "private_url",
+    "monitoring_intent_changed",
     "provider_check_unavailable",
     "redirect_loop",
     "self_redirect",
@@ -242,12 +247,11 @@ class PublicIngressTargetObservation(BaseModel):
             raise ValueError("failing public ingress target requires failure_code")
         if self.status == "skipped" and self.failure_code not in {
             None,
+            "monitoring_intent_changed",
             "private_url",
             "tls_unsupported",
         }:
-            raise ValueError(
-                "skipped public ingress target can only use private_url or tls_unsupported failure_code"
-            )
+            raise ValueError("skipped public ingress target has an unsupported failure_code")
         if self.target == "tls_domain":
             if self.tls is None:
                 raise ValueError("TLS public ingress target requires TLS evidence")
@@ -268,6 +272,8 @@ class PublicIngressObservationRecord(BaseModel):
     instance: str
     check_name: str = "public-ingress"
     check_kind: PublicIngressCheckKind = "public_http"
+    purpose: PublicIngressObservationPurpose = "probe"
+    monitoring_intent: ProductLaneMonitoringIntent | Literal["legacy"] = "legacy"
     observed_at: str
     status: PublicIngressObservationStatus
     failure_code: PublicIngressFailureCode | None = None
@@ -307,18 +313,30 @@ class PublicIngressObservationRecord(BaseModel):
             raise ValueError("failing public ingress observation requires failure_code")
         if self.status == "skipped" and self.failure_code not in {
             None,
+            "monitoring_intent_changed",
             "private_url",
             "tls_unsupported",
         }:
-            raise ValueError(
-                "skipped public ingress observation can only use private_url or tls_unsupported failure_code"
-            )
+            raise ValueError("skipped public ingress observation has an unsupported failure_code")
         if not self.targets:
             raise ValueError("public ingress observation requires at least one target")
         if self.status == "pass" and any(target.status != "pass" for target in self.targets):
             raise ValueError("passing public ingress observation requires all targets to pass")
         if self.status == "fail" and not any(target.status == "fail" for target in self.targets):
             raise ValueError("failing public ingress observation requires a failing target")
+        if self.purpose == "reconciliation":
+            if self.status != "skipped" or self.failure_code != "monitoring_intent_changed":
+                raise ValueError(
+                    "public ingress reconciliation observation requires skipped monitoring_intent_changed status"
+                )
+            if any(target.target != "monitoring_intent" for target in self.targets):
+                raise ValueError(
+                    "public ingress reconciliation observation requires monitoring_intent targets"
+                )
+        elif any(target.target == "monitoring_intent" for target in self.targets):
+            raise ValueError(
+                "public ingress probe observations cannot use monitoring_intent targets"
+            )
         return self
 
 
@@ -342,6 +360,7 @@ class PublicIngressIncidentRecord(BaseModel):
     failure_code: PublicIngressFailureCode
     resolved_at: str = ""
     resolved_observation_id: str = ""
+    resolution_reason: PublicIngressIncidentResolutionReason | Literal[""] = ""
     summary: str
 
     @model_validator(mode="after")
@@ -382,7 +401,11 @@ class PublicIngressIncidentRecord(BaseModel):
                 raise ValueError(
                     "resolved public ingress incident requires resolved_observation_id"
                 )
-        if self.status == "open" and (self.resolved_at or self.resolved_observation_id):
+            if not self.resolution_reason:
+                self.resolution_reason = "recovered"
+        if self.status == "open" and (
+            self.resolved_at or self.resolved_observation_id or self.resolution_reason
+        ):
             raise ValueError("open public ingress incident cannot include resolution fields")
         return self
 
@@ -575,6 +598,24 @@ def build_public_ingress_observation_id(
     return "-".join(
         _record_token(value)
         for value in ("public-ingress", product, context, instance, check_token, observed_at)
+        if _record_token(value)
+    )
+
+
+def build_public_ingress_reconciliation_observation_id(
+    *, product: str, context: str, instance: str, observed_at: str, check_name: str = ""
+) -> str:
+    check_token = _check_record_token(check_name)
+    return "-".join(
+        _record_token(value)
+        for value in (
+            "public-ingress-reconciliation",
+            product,
+            context,
+            instance,
+            check_token,
+            observed_at,
+        )
         if _record_token(value)
     )
 

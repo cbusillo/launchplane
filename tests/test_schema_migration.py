@@ -29,6 +29,109 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_monitoring_intent_migration_backfills_and_downgrades_profile_payloads(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = _alembic_config(database_url)
+            command.upgrade(config, "b3d5f7a9c1e4")
+            engine = create_engine(database_url)
+            profile_payload = {
+                "product": "example-site",
+                "display_name": "Example Site",
+                "repository": "example/example-site",
+                "driver_id": "generic-web",
+                "image": {"repository": "ghcr.io/example/example-site"},
+                "runtime_port": 3000,
+                "health_path": "/healthz",
+                "updated_at": "2026-07-27T16:50:00Z",
+                "source": "test:migration",
+                "lanes": [
+                    {
+                        "instance": "public",
+                        "context": "example-site",
+                        "health_monitoring": {
+                            "checks": [{"name": "public-ingress", "kind": "public_http"}]
+                        },
+                    },
+                    {
+                        "instance": "private",
+                        "context": "example-site",
+                        "health_monitoring": {
+                            "checks": [
+                                {
+                                    "name": "private-runtime",
+                                    "kind": "private_http",
+                                    "private_endpoint_key": "example-private",
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "instance": "prelaunch",
+                        "context": "example-site",
+                        "health_monitoring": {"checks": []},
+                    },
+                ],
+            }
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "insert into launchplane_product_profiles "
+                            "(product, display_name, repository, driver_id, updated_at, payload) "
+                            "values (:product, :display_name, :repository, :driver_id, "
+                            ":updated_at, :payload)"
+                        ),
+                        {
+                            "product": "example-site",
+                            "display_name": "Example Site",
+                            "repository": "example/example-site",
+                            "driver_id": "generic-web",
+                            "updated_at": "2026-07-27T16:50:00Z",
+                            "payload": json.dumps(profile_payload),
+                        },
+                    )
+                command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+                with engine.connect() as connection:
+                    migrated_payload = connection.execute(
+                        text(
+                            "select payload from launchplane_product_profiles "
+                            "where product = 'example-site'"
+                        )
+                    ).scalar_one()
+                migrated = (
+                    json.loads(migrated_payload)
+                    if isinstance(migrated_payload, str)
+                    else migrated_payload
+                )
+                self.assertEqual(
+                    [lane["health_monitoring"]["monitoring_intent"] for lane in migrated["lanes"]],
+                    ["public", "private", "prelaunch"],
+                )
+
+                command.downgrade(config, "b3d5f7a9c1e4")
+                with engine.connect() as connection:
+                    downgraded_payload = connection.execute(
+                        text(
+                            "select payload from launchplane_product_profiles "
+                            "where product = 'example-site'"
+                        )
+                    ).scalar_one()
+                downgraded = (
+                    json.loads(downgraded_payload)
+                    if isinstance(downgraded_payload, str)
+                    else downgraded_payload
+                )
+                self.assertTrue(
+                    all(
+                        "monitoring_intent" not in lane["health_monitoring"]
+                        for lane in downgraded["lanes"]
+                    )
+                )
+            finally:
+                engine.dispose()
+
     def test_compatibility_floor_upgrades_by_default(self) -> None:
         self.assertEqual(
             schema_migration_action(current_revision=AUTHZ_COMPATIBILITY_FLOOR_REVISION),

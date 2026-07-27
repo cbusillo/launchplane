@@ -12,9 +12,13 @@ from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
     health_check_record_token,
 )
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneHealthCheck,
+    ProductLaneHealthCheckKind,
+    ProductLaneHealthMonitoringPolicy,
+    ProductLaneMonitoringIntent,
     ProductLaneProfile,
 )
 
@@ -42,8 +46,11 @@ class ProductHealthMonitoringApplyRequest(BaseModel):
     context: str
     instance: str
     check_name: str
+    check_kind: Literal["public_http", "private_http"] = "public_http"
+    monitoring_intent: ProductLaneMonitoringIntent
     enabled: bool = True
     require_runtime_identity: bool = False
+    private_endpoint_key: str = ""
     mode: ProductHealthMonitoringMode = "dry-run"
     reason: str
     reviewed_plan_sha256: str = ""
@@ -54,6 +61,7 @@ class ProductHealthMonitoringApplyRequest(BaseModel):
         self.context = self.context.strip()
         self.instance = self.instance.strip()
         self.check_name = self.check_name.strip()
+        self.private_endpoint_key = self.private_endpoint_key.strip()
         self.reason = self.reason.strip()
         self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
         if not self.product:
@@ -66,6 +74,10 @@ class ProductHealthMonitoringApplyRequest(BaseModel):
             raise ValueError("Product health monitoring request requires a valid check_name.")
         if not self.reason:
             raise ValueError("Product health monitoring request requires reason.")
+        if self.check_kind == "public_http" and self.private_endpoint_key:
+            raise ValueError(
+                "Public HTTP health monitoring requests cannot set private_endpoint_key."
+            )
         if not self.enabled and self.require_runtime_identity:
             raise ValueError(
                 "Disabled product health monitoring checks cannot require runtime identity."
@@ -88,11 +100,16 @@ class ProductHealthMonitoringPlan(BaseModel):
     context: str
     instance: str
     check_name: str
+    current_check_kind: ProductLaneHealthCheckKind | None = None
+    requested_check_kind: Literal["public_http", "private_http"]
+    current_monitoring_intent: ProductLaneMonitoringIntent
+    requested_monitoring_intent: ProductLaneMonitoringIntent
     operation: ProductHealthMonitoringOperation
     current_enabled: bool | None = None
     requested_enabled: bool
     current_require_runtime_identity: bool | None = None
     requested_require_runtime_identity: bool
+    private_endpoint_key: str = ""
     resolved_url: str
     changed: bool
     applied: bool = False
@@ -104,6 +121,36 @@ class ProductHealthMonitoringPlan(BaseModel):
     plan_sha256: str
 
 
+def product_health_monitoring_authority(
+    profile: LaunchplaneProductProfileRecord,
+) -> dict[tuple[str, str], dict[str, object]]:
+    return {
+        (lane.context, lane.instance): lane.health_monitoring.model_dump(mode="json")
+        for lane in profile.lanes
+    }
+
+
+def validate_product_health_monitoring_private_endpoint(
+    *,
+    request: ProductHealthMonitoringApplyRequest,
+    endpoint: PrivateHealthEndpointRecord,
+) -> None:
+    if request.check_kind != "private_http" or not request.enabled:
+        return
+    if endpoint.endpoint_key != request.private_endpoint_key:
+        raise ProductHealthMonitoringTargetError(
+            "Private health endpoint does not match the requested endpoint key."
+        )
+    if endpoint.status != "active":
+        raise ProductHealthMonitoringTargetError("Private health endpoint is not active.")
+    if endpoint.product != request.product:
+        raise ProductHealthMonitoringTargetError(
+            "Private health endpoint belongs to another product."
+        )
+    if endpoint.context != request.context or endpoint.instance != request.instance:
+        raise ProductHealthMonitoringTargetError("Private health endpoint belongs to another lane.")
+
+
 def build_product_health_monitoring_plan(
     *,
     profile: LaunchplaneProductProfileRecord,
@@ -111,20 +158,30 @@ def build_product_health_monitoring_plan(
 ) -> ProductHealthMonitoringPlan:
     lane = _target_lane(profile=profile, request=request)
     existing_check = _matching_check(lane=lane, check_name=request.check_name)
-    if existing_check is not None and existing_check.kind != "public_http":
+    if existing_check is not None and existing_check.kind != request.check_kind:
         raise ProductHealthMonitoringCheckKindError(
-            "Product health monitoring can mutate only public HTTP checks."
+            "Product health monitoring cannot change the kind of an existing check name."
         )
     candidate_check = _candidate_check(existing_check=existing_check, request=request)
-    resolved_url = candidate_check.url or lane.health_url or lane.base_url
-    _validate_resolved_url(
+    candidate_policy = _candidate_policy(
+        lane=lane,
+        candidate_check=candidate_check,
+        monitoring_intent=request.monitoring_intent,
+    )
+    resolved_url = (
+        candidate_check.url or lane.health_url or lane.base_url
+        if candidate_check.kind == "public_http"
+        else ""
+    )
+    _validate_resolved_target(
         lane=lane,
         check=candidate_check,
         resolved_url=resolved_url,
     )
-    changed = existing_check is None or (
-        existing_check.enabled != request.enabled
-        or existing_check.require_runtime_identity != request.require_runtime_identity
+    changed = (
+        existing_check is None
+        or existing_check.model_dump(mode="json") != candidate_check.model_dump(mode="json")
+        or lane.health_monitoring.monitoring_intent != candidate_policy.monitoring_intent
     )
     operation: ProductHealthMonitoringOperation
     if existing_check is None:
@@ -141,11 +198,12 @@ def build_product_health_monitoring_plan(
         "instance": lane.instance,
         "check_name": existing_check.name if existing_check is not None else request.check_name,
         "operation": operation,
+        "current_monitoring_intent": lane.health_monitoring.monitoring_intent,
+        "requested_monitoring_intent": candidate_policy.monitoring_intent,
         "current_check": (
             existing_check.model_dump(mode="json") if existing_check is not None else None
         ),
-        "requested_enabled": request.enabled,
-        "requested_require_runtime_identity": request.require_runtime_identity,
+        "requested_check": candidate_check.model_dump(mode="json"),
         "resolved_url": resolved_url,
         "profile_sha256": profile_sha256,
         "source_label": PRODUCT_HEALTH_MONITORING_SOURCE,
@@ -157,6 +215,10 @@ def build_product_health_monitoring_plan(
         context=lane.context,
         instance=lane.instance,
         check_name=existing_check.name if existing_check is not None else request.check_name,
+        current_check_kind=existing_check.kind if existing_check is not None else None,
+        requested_check_kind=request.check_kind,
+        current_monitoring_intent=lane.health_monitoring.monitoring_intent,
+        requested_monitoring_intent=candidate_policy.monitoring_intent,
         operation=operation,
         current_enabled=existing_check.enabled if existing_check is not None else None,
         requested_enabled=request.enabled,
@@ -164,6 +226,7 @@ def build_product_health_monitoring_plan(
             existing_check.require_runtime_identity if existing_check is not None else None
         ),
         requested_require_runtime_identity=request.require_runtime_identity,
+        private_endpoint_key=candidate_check.private_endpoint_key,
         resolved_url=resolved_url,
         changed=changed,
         reason=request.reason,
@@ -181,34 +244,27 @@ def updated_product_health_monitoring_profile(
 ) -> LaunchplaneProductProfileRecord:
     lane = _target_lane(profile=profile, request=request)
     existing_check = _matching_check(lane=lane, check_name=request.check_name)
-    if existing_check is not None and existing_check.kind != "public_http":
+    if existing_check is not None and existing_check.kind != request.check_kind:
         raise ProductHealthMonitoringCheckKindError(
-            "Product health monitoring can mutate only public HTTP checks."
+            "Product health monitoring cannot change the kind of an existing check name."
         )
     candidate_check = _candidate_check(existing_check=existing_check, request=request)
-    _validate_resolved_url(
+    candidate_policy = _candidate_policy(
+        lane=lane,
+        candidate_check=candidate_check,
+        monitoring_intent=request.monitoring_intent,
+    )
+    resolved_url = (
+        candidate_check.url or lane.health_url or lane.base_url
+        if candidate_check.kind == "public_http"
+        else ""
+    )
+    _validate_resolved_target(
         lane=lane,
         check=candidate_check,
-        resolved_url=candidate_check.url or lane.health_url or lane.base_url,
+        resolved_url=resolved_url,
     )
-    target_token = canonical_health_check_record_token(request.check_name)
-    updated_checks: list[ProductLaneHealthCheck] = []
-    replaced = False
-    for check in lane.health_monitoring.checks:
-        if canonical_health_check_record_token(check.name) == target_token:
-            updated_checks.append(candidate_check)
-            replaced = True
-        else:
-            updated_checks.append(check)
-    if not replaced:
-        updated_checks.append(candidate_check)
-    updated_lane = lane.model_copy(
-        update={
-            "health_monitoring": lane.health_monitoring.model_copy(
-                update={"checks": tuple(updated_checks)}
-            )
-        }
-    )
+    updated_lane = lane.model_copy(update={"health_monitoring": candidate_policy})
     updated_lanes = tuple(
         updated_lane
         if candidate.context.strip() == request.context
@@ -277,27 +333,72 @@ def _candidate_check(
     request: ProductHealthMonitoringApplyRequest,
 ) -> ProductLaneHealthCheck:
     if existing_check is None:
-        return ProductLaneHealthCheck(
+        candidate = ProductLaneHealthCheck(
             name=request.check_name,
-            kind="public_http",
+            kind=request.check_kind,
             enabled=request.enabled,
+            private_endpoint_key=request.private_endpoint_key,
             require_runtime_identity=request.require_runtime_identity,
         )
-    return existing_check.model_copy(
-        update={
-            "enabled": request.enabled,
-            "require_runtime_identity": request.require_runtime_identity,
-        }
+    else:
+        candidate = existing_check.model_copy(
+            update={
+                "enabled": request.enabled,
+                "private_endpoint_key": (
+                    request.private_endpoint_key or existing_check.private_endpoint_key
+                    if request.check_kind == "private_http"
+                    else ""
+                ),
+                "require_runtime_identity": request.require_runtime_identity,
+            }
+        )
+    if (
+        candidate.enabled
+        and candidate.kind == "private_http"
+        and not candidate.private_endpoint_key
+    ):
+        raise ProductHealthMonitoringTargetError(
+            "Enabled private HTTP health monitoring requires private_endpoint_key."
+        )
+    return ProductLaneHealthCheck.model_validate(candidate.model_dump(mode="json"))
+
+
+def _candidate_policy(
+    *,
+    lane: ProductLaneProfile,
+    candidate_check: ProductLaneHealthCheck,
+    monitoring_intent: ProductLaneMonitoringIntent,
+) -> ProductLaneHealthMonitoringPolicy:
+    target_token = canonical_health_check_record_token(candidate_check.name)
+    updated_checks: list[ProductLaneHealthCheck] = []
+    replaced = False
+    for check in lane.health_monitoring.checks:
+        if canonical_health_check_record_token(check.name) == target_token:
+            updated_checks.append(candidate_check)
+            replaced = True
+        else:
+            updated_checks.append(check)
+    if not replaced:
+        updated_checks.append(candidate_check)
+    return ProductLaneHealthMonitoringPolicy(
+        monitoring_intent=monitoring_intent,
+        checks=tuple(updated_checks),
     )
 
 
-def _validate_resolved_url(
+def _validate_resolved_target(
     *,
     lane: ProductLaneProfile,
     check: ProductLaneHealthCheck,
     resolved_url: str,
 ) -> None:
     if not check.enabled:
+        return
+    if check.kind == "private_http":
+        if not check.private_endpoint_key:
+            raise ProductHealthMonitoringTargetError(
+                "Enabled private HTTP health monitoring requires private_endpoint_key."
+            )
         return
     parsed_url = urlsplit(resolved_url)
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:

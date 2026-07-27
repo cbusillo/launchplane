@@ -110,6 +110,9 @@ from control_plane.contracts.product_health_monitoring_migration import (
 from control_plane.contracts.product_health_monitoring_migration import (
     migrate_product_profile_health_monitoring_payload,
 )
+from control_plane.contracts.product_monitoring_intent_migration import (
+    migrate_product_profile_monitoring_intent_payload,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationAttemptRecord,
@@ -2262,7 +2265,9 @@ class FilesystemRecordStore:
         self, record_path: Path
     ) -> LaunchplaneProductProfileRecord:
         payload = json.loads(record_path.read_text(encoding="utf-8"))
-        migrated_payload = migrate_product_profile_health_monitoring_payload(payload)
+        migrated_payload = migrate_product_profile_monitoring_intent_payload(
+            migrate_product_profile_health_monitoring_payload(payload)
+        )
         record = LaunchplaneProductProfileRecord.model_validate(migrated_payload)
         if migrated_payload != payload:
             record_path.write_text(

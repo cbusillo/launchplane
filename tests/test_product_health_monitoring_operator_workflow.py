@@ -45,6 +45,13 @@ class ProductHealthMonitoringOperatorWorkflowTests(unittest.TestCase):
         self.assertIn("reviewed dry-run plan SHA-256", validation_step.run)
         self.assertIn("idempotency_key is required for apply", validation_step.run)
         self.assertIn("A disabled check cannot require runtime identity", validation_step.run)
+        self.assertIn(
+            "enabled private_http checks require private_endpoint_key", validation_step.run
+        )
+        self.assertIn(
+            "monitoring_intent must be public, private, or prelaunch",
+            validation_step.run,
+        )
 
     def test_worker_accepts_no_topology_or_full_profile_inputs(self) -> None:
         trigger = self.worker.data["on"]
@@ -61,8 +68,11 @@ class ProductHealthMonitoringOperatorWorkflowTests(unittest.TestCase):
                 "context",
                 "instance",
                 "check_name",
+                "check_kind",
+                "monitoring_intent",
                 "enabled",
                 "require_runtime_identity",
+                "private_endpoint_key",
                 "reviewed_plan_sha256",
                 "reason",
                 "idempotency_key",
@@ -104,8 +114,11 @@ class ProductHealthMonitoringOperatorWorkflowTests(unittest.TestCase):
                 "context",
                 "instance",
                 "check_name",
+                "check_kind",
+                "monitoring_intent",
                 "enabled",
                 "require_runtime_identity",
+                "private_endpoint_key",
                 "reviewed_plan_sha256",
                 "reason",
                 "idempotency_key",

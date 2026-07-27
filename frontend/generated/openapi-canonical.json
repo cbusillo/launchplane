@@ -11988,6 +11988,9 @@
             "title": "Environment",
             "type": "string"
           },
+          "health_monitoring": {
+            "$ref": "#/components/schemas/ProductHealthMonitoringSummary"
+          },
           "health_url": {
             "default": "",
             "title": "Health Url",
@@ -12063,6 +12066,7 @@
           "environment",
           "context",
           "target",
+          "health_monitoring",
           "trust_state",
           "provenance"
         ],
@@ -12165,6 +12169,9 @@
             "title": "Environment",
             "type": "string"
           },
+          "health_monitoring": {
+            "$ref": "#/components/schemas/ProductHealthMonitoringSummary"
+          },
           "health_url": {
             "default": "",
             "title": "Health Url",
@@ -12202,6 +12209,7 @@
         "required": [
           "environment",
           "context",
+          "health_monitoring",
           "trust_state",
           "provenance"
         ],
@@ -12336,6 +12344,157 @@
         "title": "ProductExpectedConfigProfile",
         "type": "object"
       },
+      "ProductHealthMonitoringCheckSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "failure_code": {
+            "default": "",
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "incident_eligible": {
+            "title": "Incident Eligible",
+            "type": "boolean"
+          },
+          "incident_id": {
+            "default": "",
+            "title": "Incident Id",
+            "type": "string"
+          },
+          "incident_status": {
+            "default": "",
+            "title": "Incident Status",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "public_http",
+              "private_http",
+              "provider"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "observed_at": {
+            "default": "",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "private_endpoint_configured": {
+            "default": false,
+            "title": "Private Endpoint Configured",
+            "type": "boolean"
+          },
+          "probe_effective": {
+            "title": "Probe Effective",
+            "type": "boolean"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance",
+            "default": {
+              "detail": "Launchplane has not recorded a probe observation for this health check.",
+              "freshness_status": "missing",
+              "recorded_at": "",
+              "refreshed_at": "",
+              "source_kind": "record",
+              "source_record_id": "",
+              "stale_after": ""
+            }
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "status": {
+            "default": "missing",
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "title": "Summary",
+            "type": "string"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "enabled",
+          "probe_effective",
+          "incident_eligible"
+        ],
+        "title": "ProductHealthMonitoringCheckSummary",
+        "type": "object"
+      },
+      "ProductHealthMonitoringSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "checks": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductHealthMonitoringCheckSummary"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "monitoring_intent": {
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Monitoring Intent",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "public_incident_eligible": {
+            "title": "Public Incident Eligible",
+            "type": "boolean"
+          },
+          "trust_state": {
+            "default": "recorded",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "monitoring_intent",
+          "public_incident_eligible",
+          "provenance"
+        ],
+        "title": "ProductHealthMonitoringSummary",
+        "type": "object"
+      },
       "ProductImageProfile": {
         "additionalProperties": false,
         "properties": {
@@ -12412,6 +12571,16 @@
             },
             "title": "Checks",
             "type": "array"
+          },
+          "monitoring_intent": {
+            "default": "prelaunch",
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Monitoring Intent",
+            "type": "string"
           }
         },
         "title": "ProductLaneHealthMonitoringPolicy",
@@ -12547,6 +12716,11 @@
             "title": "Failure Code",
             "type": "string"
           },
+          "incident_eligible": {
+            "default": false,
+            "title": "Incident Eligible",
+            "type": "boolean"
+          },
           "incident_id": {
             "default": "",
             "title": "Incident Id",
@@ -12555,6 +12729,16 @@
           "incident_status": {
             "default": "",
             "title": "Incident Status",
+            "type": "string"
+          },
+          "monitoring_intent": {
+            "default": "prelaunch",
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Monitoring Intent",
             "type": "string"
           },
           "observed_at": {
@@ -14779,6 +14963,11 @@
             "title": "Failure Code",
             "type": "string"
           },
+          "incident_eligible": {
+            "default": false,
+            "title": "Incident Eligible",
+            "type": "boolean"
+          },
           "incident_id": {
             "default": "",
             "title": "Incident Id",
@@ -14792,6 +14981,16 @@
           "incident_status": {
             "default": "",
             "title": "Incident Status",
+            "type": "string"
+          },
+          "monitoring_intent": {
+            "default": "prelaunch",
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Monitoring Intent",
             "type": "string"
           },
           "notification_sent": {
@@ -42037,6 +42236,16 @@
                         },
                         "title": "Checks",
                         "type": "array"
+                      },
+                      "monitoring_intent": {
+                        "default": "prelaunch",
+                        "enum": [
+                          "public",
+                          "private",
+                          "prelaunch"
+                        ],
+                        "title": "Monitoring Intent",
+                        "type": "string"
                       }
                     },
                     "title": "ProductLaneHealthMonitoringPolicy",
@@ -43513,6 +43722,15 @@
               "schema": {
                 "additionalProperties": false,
                 "properties": {
+                  "check_kind": {
+                    "default": "public_http",
+                    "enum": [
+                      "public_http",
+                      "private_http"
+                    ],
+                    "title": "Check Kind",
+                    "type": "string"
+                  },
                   "check_name": {
                     "title": "Check Name",
                     "type": "string"
@@ -43537,6 +43755,20 @@
                       "apply"
                     ],
                     "title": "Mode",
+                    "type": "string"
+                  },
+                  "monitoring_intent": {
+                    "enum": [
+                      "public",
+                      "private",
+                      "prelaunch"
+                    ],
+                    "title": "Monitoring Intent",
+                    "type": "string"
+                  },
+                  "private_endpoint_key": {
+                    "default": "",
+                    "title": "Private Endpoint Key",
                     "type": "string"
                   },
                   "product": {
@@ -43569,6 +43801,7 @@
                   "context",
                   "instance",
                   "check_name",
+                  "monitoring_intent",
                   "reason"
                 ],
                 "title": "ProductHealthMonitoringApplyRequest",

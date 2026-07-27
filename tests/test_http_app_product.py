@@ -8,6 +8,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
@@ -160,8 +161,11 @@ def _product_health_monitoring_payload() -> dict[str, object]:
         "context": "cm",
         "instance": "testing",
         "check_name": "public-ingress",
+        "check_kind": "public_http",
+        "monitoring_intent": "public",
         "enabled": True,
         "require_runtime_identity": True,
+        "private_endpoint_key": "",
         "mode": "dry-run",
         "reason": "Require strict public runtime identity.",
         "reviewed_plan_sha256": "",
@@ -178,6 +182,7 @@ def _product_health_monitoring_profile() -> LaunchplaneProductProfileRecord:
     lanes[0]["base_url"] = "https://cm-testing.example.com"
     lanes[0]["health_url"] = "https://cm-testing.example.com/launchplane/health"
     lanes[0]["health_monitoring"] = {
+        "monitoring_intent": "public",
         "checks": [
             {
                 "name": "public-ingress",
@@ -186,7 +191,7 @@ def _product_health_monitoring_profile() -> LaunchplaneProductProfileRecord:
                 "url": "",
                 "require_runtime_identity": False,
             }
-        ]
+        ],
     }
     return LaunchplaneProductProfileRecord.model_validate(payload)
 
@@ -1971,6 +1976,39 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored_profile.preview.slug_template, "pr-{number}")
         self.assertEqual(stored_profile.preview.domain_certificate_type, "letsencrypt")
 
+    async def test_write_product_profile_requires_bounded_apply_for_monitoring_changes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            existing_payload = _product_profile_payload()
+            existing_lanes = cast(list[dict[str, object]], existing_payload["lanes"])
+            existing_lanes[0]["health_monitoring"] = {
+                "monitoring_intent": "public",
+                "checks": [{"name": "public-ingress", "kind": "public_http"}],
+            }
+            existing_profile = LaunchplaneProductProfileRecord.model_validate(existing_payload)
+            record_store.write_product_profile_record(existing_profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: record_store,
+            )
+            replacement_payload = existing_profile.model_dump(mode="json")
+            replacement_payload["lanes"][0]["health_monitoring"]["monitoring_intent"] = "prelaunch"
+
+            response = await _post_product_profile(
+                app,
+                replacement_payload,
+                idempotency_key="profile-monitoring-change",
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "health_monitoring_bounded_apply_required",
+        )
+
     async def test_write_product_profile_replays_idempotent_request(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -2103,7 +2141,8 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                     "instance": "testing",
                     "context": "sellyouroutboard-testing",
                     "health_monitoring": {
-                        "checks": [{"name": "public-ingress", "kind": "public_http"}]
+                        "monitoring_intent": "public",
+                        "checks": [{"name": "public-ingress", "kind": "public_http"}],
                     },
                 },
             )
@@ -2437,6 +2476,87 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             stored_profile.lanes[0].health_monitoring.checks[0].require_runtime_identity
         )
 
+    async def test_apply_product_health_monitoring_plans_private_intent_from_registered_endpoint(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_health_monitoring_profile())
+            store.write_private_health_endpoint_record(
+                PrivateHealthEndpointRecord(
+                    endpoint_key="cm-testing-runtime",
+                    product="odoo-product",
+                    context="cm",
+                    instance="testing",
+                    url="http://10.0.0.5:8069/launchplane/health",
+                    status="active",
+                    updated_at="2026-07-27T16:55:00Z",
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_health_monitoring_identity()),
+                authz_policy=_product_health_monitoring_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_product_health_monitoring(
+                app,
+                {
+                    **_product_health_monitoring_payload(),
+                    "check_name": "private-runtime",
+                    "check_kind": "private_http",
+                    "monitoring_intent": "private",
+                    "private_endpoint_key": "cm-testing-runtime",
+                },
+            )
+            stored_profile = store.read_product_profile_record("odoo-product")
+            store.close()
+
+        self.assertEqual(response.status_code, 202)
+        result = response.json()["result"]
+        self.assertEqual(result["requested_check_kind"], "private_http")
+        self.assertEqual(result["requested_monitoring_intent"], "private")
+        self.assertEqual(result["private_endpoint_key"], "cm-testing-runtime")
+        self.assertEqual(result["resolved_url"], "")
+        self.assertEqual(stored_profile.lanes[0].health_monitoring.monitoring_intent, "public")
+
+    async def test_apply_product_health_monitoring_rejects_missing_private_endpoint(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_health_monitoring_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_health_monitoring_identity()),
+                authz_policy=_product_health_monitoring_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_product_health_monitoring(
+                app,
+                {
+                    **_product_health_monitoring_payload(),
+                    "check_name": "private-runtime",
+                    "check_kind": "private_http",
+                    "monitoring_intent": "private",
+                    "private_endpoint_key": "missing-runtime",
+                },
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_health_monitoring_target")
+
     async def test_apply_product_health_monitoring_persists_and_replays_reviewed_plan(
         self,
     ) -> None:
@@ -2620,6 +2740,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             )
             store.ensure_schema()
             profile_payload = _product_health_monitoring_profile().model_dump(mode="json")
+            profile_payload["lanes"][0]["health_monitoring"]["monitoring_intent"] = "prelaunch"
             profile_payload["lanes"][0]["health_monitoring"]["checks"] = [
                 {
                     "name": "provider-health",

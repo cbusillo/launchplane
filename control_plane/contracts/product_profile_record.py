@@ -1,3 +1,5 @@
+import hashlib
+import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -152,6 +154,7 @@ class ProductOdooLaneDataPolicy(BaseModel):
 
 
 ProductLaneHealthCheckKind = Literal["public_http", "private_http", "provider"]
+ProductLaneMonitoringIntent = Literal["public", "private", "prelaunch"]
 
 
 class ProductLaneHealthCheck(BaseModel):
@@ -203,17 +206,52 @@ class ProductLaneHealthCheck(BaseModel):
 class ProductLaneHealthMonitoringPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    monitoring_intent: ProductLaneMonitoringIntent = "prelaunch"
     checks: tuple[ProductLaneHealthCheck, ...] = ()
 
     @model_validator(mode="after")
     def _validate_policy(self) -> "ProductLaneHealthMonitoringPolicy":
+        if self.checks and "monitoring_intent" not in self.model_fields_set:
+            raise ValueError(
+                "product lane health monitoring checks require explicit monitoring_intent"
+            )
         tokens: list[str] = []
         for check in self.checks:
             token = canonical_health_check_record_token(check.name)
             if token in tokens:
                 raise ValueError("product lane health check names must be unique")
             tokens.append(token)
+        enabled_kinds = {check.kind for check in self.checks if check.enabled}
+        if self.monitoring_intent == "public" and "public_http" not in enabled_kinds:
+            raise ValueError(
+                "public monitoring intent requires an enabled public HTTP health check"
+            )
+        if self.monitoring_intent == "private" and "private_http" not in enabled_kinds:
+            raise ValueError(
+                "private monitoring intent requires an enabled private HTTP health check"
+            )
         return self
+
+
+def product_lane_monitoring_probe_effective(
+    *,
+    monitoring_intent: ProductLaneMonitoringIntent,
+    check_kind: str,
+) -> bool:
+    return check_kind not in {"public_http", "tls"} or monitoring_intent != "private"
+
+
+def product_lane_monitoring_incident_eligible(
+    *,
+    monitoring_intent: ProductLaneMonitoringIntent,
+    check_kind: str,
+) -> bool:
+    if not product_lane_monitoring_probe_effective(
+        monitoring_intent=monitoring_intent,
+        check_kind=check_kind,
+    ):
+        return False
+    return check_kind not in {"public_http", "tls"} or monitoring_intent == "public"
 
 
 class ProductLaneProfile(BaseModel):
@@ -231,7 +269,7 @@ class ProductLaneProfile(BaseModel):
     )
     odoo_data_policy: ProductOdooLaneDataPolicy = Field(default_factory=ProductOdooLaneDataPolicy)
     health_monitoring: ProductLaneHealthMonitoringPolicy = Field(
-        default_factory=ProductLaneHealthMonitoringPolicy
+        default_factory=lambda: ProductLaneHealthMonitoringPolicy(monitoring_intent="prelaunch")
     )
 
     @model_validator(mode="after")
@@ -530,3 +568,13 @@ class LaunchplaneProductProfileRecord(BaseModel):
                 if not self.health_path:
                     raise ValueError("public HTTP health check with base_url requires health_path")
         return self
+
+
+def product_profile_record_sha256(record: LaunchplaneProductProfileRecord) -> str:
+    canonical_payload = json.dumps(
+        record.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()

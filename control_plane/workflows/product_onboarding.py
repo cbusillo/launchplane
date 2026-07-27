@@ -15,6 +15,7 @@ from control_plane.contracts.product_onboarding_manifest import (
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
+    ProductLaneHealthMonitoringPolicy,
     ProductLaneProfile,
     ProductPreviewProfile,
 )
@@ -103,7 +104,10 @@ def build_product_profile_record(
                 odoo_stable_bootstrap=lane.odoo_stable_bootstrap,
                 odoo_prelaunch_rebuild=lane.odoo_prelaunch_rebuild,
                 odoo_data_policy=lane.odoo_data_policy,
-                health_monitoring=lane.health_monitoring,
+                health_monitoring=_lane_health_monitoring(
+                    lane=lane,
+                    existing_profile=existing_profile,
+                ),
             )
             for lane in manifest.lanes
         ),
@@ -114,6 +118,20 @@ def build_product_profile_record(
         updated_at=updated_at,
         source=manifest.source_label,
     )
+
+
+def _lane_health_monitoring(
+    *,
+    lane: ProductOnboardingLaneManifest,
+    existing_profile: LaunchplaneProductProfileRecord | None,
+) -> ProductLaneHealthMonitoringPolicy:
+    if existing_profile is None:
+        return lane.health_monitoring
+    existing_lane = next(
+        (candidate for candidate in existing_profile.lanes if candidate.instance == lane.instance),
+        None,
+    )
+    return existing_lane.health_monitoring if existing_lane is not None else lane.health_monitoring
 
 
 def _lane_health_url(

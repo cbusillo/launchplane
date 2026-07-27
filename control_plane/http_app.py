@@ -10039,6 +10039,30 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message=str(error),
             ) from error
+        read_existing_profile = getattr(profile_store, "read_product_profile_record", None)
+        if callable(read_existing_profile):
+            try:
+                existing_profile = read_existing_profile(profile.product)
+            except (FileNotFoundError, KeyError):
+                existing_profile = None
+            if (
+                existing_profile is not None
+                and control_plane_product_health_monitoring.product_health_monitoring_authority(
+                    existing_profile
+                )
+                != control_plane_product_health_monitoring.product_health_monitoring_authority(
+                    profile
+                )
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="health_monitoring_bounded_apply_required",
+                    message=(
+                        "Existing product health monitoring authority must be changed through "
+                        "the reviewed health-monitoring apply endpoint."
+                    ),
+                )
         profile_store.write_product_profile_record(profile)
         response = accepted_evidence_response(
             trace_id=trace_id,
@@ -10309,6 +10333,22 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         try:
+            if (
+                health_monitoring_request.check_kind == "private_http"
+                and health_monitoring_request.enabled
+            ):
+                try:
+                    private_endpoint = database_store.read_private_health_endpoint_record(
+                        health_monitoring_request.private_endpoint_key
+                    )
+                except FileNotFoundError as error:
+                    raise control_plane_product_health_monitoring.ProductHealthMonitoringTargetError(
+                        "Private health endpoint was not found."
+                    ) from error
+                control_plane_product_health_monitoring.validate_product_health_monitoring_private_endpoint(
+                    request=health_monitoring_request,
+                    endpoint=private_endpoint,
+                )
             plan = control_plane_product_health_monitoring.build_product_health_monitoring_plan(
                 profile=profile,
                 request=health_monitoring_request,
