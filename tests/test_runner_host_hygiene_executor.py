@@ -1080,7 +1080,11 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertIn("entry_version_by_name", helper_text)
         self.assertIn("last_attempt_epoch_seconds", helper_text)
         self.assertNotIn('findmnt -rn -R -o TARGET --target "$entry_path" || true', helper_text)
+        self.assertNotIn('find "$entry_path" -xdev -type l', helper_text)
         self.assertIn(".launchplane-generated-run-cache-prune.", helper_text)
+        self.assertIn("validate_quarantine_directory", helper_text)
+        self.assertIn("quarantine_open_handle_count", helper_text)
+        self.assertIn("restore_quarantined_entries", helper_text)
         self.assertIn("last_removed_run_ids", helper_text)
         self.assertIn('/usr/bin/sync -f "$state_file"', helper_text)
         subprocess.run(

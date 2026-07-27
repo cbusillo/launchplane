@@ -281,8 +281,7 @@ collect_inventory() {
     if (( (8#$entry_mode & 0022) != 0 )); then
       mode_valid=false
     fi
-    symlink_path="$(/usr/bin/find "$entry_path" -xdev -type l -print -quit)"
-    if [[ -n "$symlink_path" ]] || entry_has_mount_escape "$entry_path"; then
+    if entry_has_mount_escape "$entry_path"; then
       symlink_safe=false
     fi
     measure_directory "$entry_path" apparent
@@ -488,6 +487,52 @@ quarantine_directory="$(
 )"
 /usr/bin/chown root:root "$quarantine_directory"
 /usr/bin/chmod 0700 "$quarantine_directory"
+quarantine_identity="$(/usr/bin/stat -c '%d:%i' "$quarantine_directory")"
+[[ "$quarantine_identity" =~ ^[0-9]+:[0-9]+$ ]]
+quarantined_entry_names=()
+
+validate_quarantine_directory() {
+  [[ -d "$quarantine_directory" && ! -L "$quarantine_directory" ]]
+  [[ "$(/usr/bin/realpath -e -- "$quarantine_directory")" == "$quarantine_directory" ]]
+  [[ "$(/usr/bin/stat -c '%d:%i' "$quarantine_directory")" == "$quarantine_identity" ]]
+  read -r quarantine_owner quarantine_group quarantine_mode < <(
+    /usr/bin/stat -c '%U %G %a' "$quarantine_directory"
+  )
+  [[ "$quarantine_owner" == "root" ]]
+  [[ "$quarantine_group" == "root" ]]
+  [[ "$quarantine_mode" == "700" ]]
+}
+
+quarantine_open_handle_count() {
+  local fd target
+  quarantined_open_handles=0
+  for fd in /proc/[0-9]*/fd/*; do
+    target="$(/usr/bin/readlink -- "$fd" 2>/dev/null || true)"
+    target="${target% (deleted)}"
+    if [[ "$target" == "$quarantine_directory" || "$target" == "$quarantine_directory/"* ]]; then
+      quarantined_open_handles=$((quarantined_open_handles + 1))
+    fi
+  done
+}
+
+restore_quarantined_entries() {
+  local entry_name quarantined_path original_path restore_failed=false
+  for entry_name in "${quarantined_entry_names[@]}"; do
+    quarantined_path="$quarantine_directory/$entry_name"
+    original_path="$root_path/$entry_name"
+    [[ -e "$quarantined_path" ]] || continue
+    if [[ -e "$original_path" || -L "$original_path" ]]; then
+      restore_failed=true
+      continue
+    fi
+    /usr/bin/mv -T -- "$quarantined_path" "$original_path" || restore_failed=true
+  done
+  if [[ "$restore_failed" == "false" ]]; then
+    /usr/bin/rmdir -- "$quarantine_directory"
+  fi
+}
+
+validate_quarantine_directory
 removed_entries=0
 for run_id in "${requested_run_ids[@]}"; do
   matched_entries=0
@@ -504,21 +549,33 @@ for run_id in "${requested_run_ids[@]}"; do
     [[ "$entry_owner" == "$expected_owner" ]]
     [[ "$entry_group" == "$expected_group" ]]
     (( (8#$entry_mode & 0022) == 0 ))
-    symlink_path="$(/usr/bin/find "$entry_path" -xdev -type l -print -quit)"
-    [[ -z "$symlink_path" ]]
     if entry_has_mount_escape "$entry_path"; then
       exit 1
     fi
     current_age_seconds=$(( $(/usr/bin/date +%s) - $(/usr/bin/stat -c '%Y' "$entry_path") ))
     ((current_age_seconds >= minimum_age_hours * 3600))
     quarantined_path="$quarantine_directory/$entry_name"
+    validate_quarantine_directory
     /usr/bin/mv -T -- "$entry_path" "$quarantined_path"
     [[ "$(/usr/bin/stat -c '%d:%i' "$quarantined_path")" == "${entry_identity_by_name["$entry_name"]}" ]]
+    quarantined_entry_names+=("$entry_name")
     matched_entries=$((matched_entries + 1))
     removed_entries=$((removed_entries + 1))
   done
   ((matched_entries > 0))
 done
+validate_quarantine_directory
+worker_count="$(
+  /usr/bin/ps -u "$expected_uid" -o args= \
+    | /usr/bin/grep -c '[R]unner.Worker' || true
+)"
+[[ "$worker_count" =~ ^[0-9]+$ ]]
+quarantine_open_handle_count
+if ((worker_count != 0 || quarantined_open_handles != 0)); then
+  restore_quarantined_entries
+  exit 1
+fi
+validate_quarantine_directory
 /usr/bin/rm -rf --one-file-system -- "$quarantine_directory"
 [[ ! -e "$quarantine_directory" ]]
 
