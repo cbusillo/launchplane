@@ -384,14 +384,21 @@ Cmnd_Alias LAUNCHPLANE_GENERATED_CACHE_PRUNE = /usr/local/sbin/launchplane-gener
 Validate the candidate and complete sudoers policy with `visudo -cf`. The
 helper independently revalidates the root-owned config and fixed retention
 policy, canonical root,
-owner/group/mode, top-level name shape, same-filesystem traversal, absence of
-symlinks, age floor, owner idle samples, and exact target open handles. It emits
+owner/group/mode, top-level name shape, same-filesystem traversal,
+non-dereferencing handling of internal symlinks, fail-closed nested-mount
+detection, age floor, owner idle samples, and exact target open handles. It emits
 only public keys, numeric run ids, counts, sizes, ages, and booleans. Deleting
 completed run-scoped generated data has no byte-for-byte rollback; recovery is
 regeneration in a later run, while the durable `action_started` envelope
 prevents an uncertain action from being repeated automatically.
 
-The helper fails closed when mount discovery is unavailable or incomplete. A
+The helper never follows internal symlinks during measurement, quarantine, or
+removal; only an exact canonical top-level directory can become a target. It
+fails closed when mount discovery is unavailable or incomplete. A
+post-quarantine owner-worker and open-handle check restores the exact entries
+before aborting when work starts during the final race window; an ambiguous
+restore leaves the root-owned quarantine visible as partial evidence instead of
+deleting it. A
 cleanup attempt that removes data but cannot reach the configured low-water
 target persists its reclaimed-byte and target receipt without advancing the
 successful-cleanup cooldown, so a corrected follow-up can run immediately.
