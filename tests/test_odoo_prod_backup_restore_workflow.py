@@ -136,14 +136,13 @@ class OdooProdBackupRestoreWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(required_field, verify_script)
 
-    def test_apply_worker_replans_then_creates_and_polls_operation(self) -> None:
+    def test_apply_worker_creates_and_polls_service_validated_operation(self) -> None:
         request_steps = launchplane_request_steps(self.apply_worker)
 
-        self.assertEqual(len(request_steps), 3)
+        self.assertEqual(len(request_steps), 2)
         self.assertEqual(
             [step.with_values["route-path"] for step in request_steps],
             [
-                "/v1/drivers/odoo/prod-backup-restore-plan",
                 "/v1/drivers/odoo/prod-backup-restore-apply",
                 "${{ steps.restore_metadata.outputs.poll_url }}",
             ],
@@ -155,16 +154,16 @@ class OdooProdBackupRestoreWorkflowTests(unittest.TestCase):
                 "false",
             )
         self.assertEqual(
-            request_steps[1].with_values["idempotency-key"],
+            request_steps[0].with_values["idempotency-key"],
             "${{ inputs.idempotency_key }}",
         )
-        self.assertEqual(request_steps[2].with_values["method"], "GET")
+        self.assertEqual(request_steps[1].with_values["method"], "GET")
         self.assertEqual(
-            request_steps[2].with_values["poll-result-statuses"],
+            request_steps[1].with_values["poll-result-statuses"],
             "pending,running",
         )
         self.assertEqual(
-            request_steps[1].with_values["output-paths"],
+            request_steps[0].with_values["output-paths"],
             "operation_id=result.operation_id",
         )
 
@@ -185,11 +184,12 @@ class OdooProdBackupRestoreWorkflowTests(unittest.TestCase):
             validate_step.run,
         )
 
-        fingerprint_step = self.apply_worker.step_named(
-            "apply", "Enforce reviewed plan fingerprint"
-        )
-        assert fingerprint_step is not None
-        self.assertIn("PLAN_FINGERPRINT", fingerprint_step.run)
+        build_step = self.apply_worker.step_named("apply", "Build restore apply request")
+        assert build_step is not None
+        self.assertIn("plan_fingerprint", build_step.run)
+        self.assertIn("restore-apply-payload.json", build_step.run)
+        self.assertNotIn("restore-plan-payload.json", build_step.run)
+        self.assertIsNone(self.apply_worker.step_named("apply", "Recompute reviewed restore plan"))
 
         result_step = self.apply_worker.step_named("apply", "Verify destructive restore result")
         assert result_step is not None
