@@ -1809,7 +1809,10 @@ Deployment, inventory, release-tuple, phase checkpoint, authorization, provider
 result, and final verification evidence remain durable in Launchplane. A failed
 or interrupted operation must be inspected from its operation record before any
 new restore is planned; do not rerun a provider schedule or use target
-replacement as a recovery shortcut.
+replacement as a recovery shortcut. Missing, duplicate, malformed, mismatched,
+or unbounded provider phase results fail closed with the exact restore phase and
+an allowlisted `provider_result_*` or `provider_evidence_unbounded` code; raw
+provider log text is not persisted in the operation error.
 
 Legacy backup-gate manifests created before manifest schema and hash fields were
 introduced remain verifiable: Launchplane validates their recorded identity,
