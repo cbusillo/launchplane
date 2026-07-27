@@ -375,6 +375,7 @@ from control_plane.odoo_prod_backup_restore_http import (
     OdooProdBackupRestorePlanChangedError,
     OdooProdBackupRestorePlanEnvelope,
     OdooProdBackupRestoreProductMismatchError,
+    OdooProdBackupRestoreReplayNotEligibleError,
     OdooProdBackupRestoreRouteDependencyError,
     enqueue_odoo_prod_backup_restore_operation,
     odoo_prod_backup_restore_operation_payload,
@@ -6620,6 +6621,13 @@ def create_launchplane_fastapi_app(
                     "operation": odoo_prod_backup_restore_operation_payload(error.operation),
                 },
             )
+        except OdooProdBackupRestoreReplayNotEligibleError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="odoo_prod_backup_restore_replay_not_eligible",
+                message=str(error),
+            ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
                 status_code=400,

@@ -418,6 +418,219 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
                 "database_restore_schedule_trigger",
             )
 
+    def test_worker_replays_restore_verification_without_full_apply(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            base_operation = _restore_operation()
+            failed_result = OdooProdBackupRestoreResult(
+                product=base_operation.product,
+                context=base_operation.context,
+                instance=base_operation.instance,
+                backup_record_id=base_operation.plan.backup_record_id,
+                verification_record_id=base_operation.plan.verification_record_id,
+                plan_fingerprint=base_operation.plan.plan_fingerprint,
+                deployment_record_id="deployment-cm-prod-restore",
+                restore_status="fail",
+                database_restore_status="pass",
+                filestore_stage_status="pass",
+                web_quiesce_status="pass",
+                filestore_activation_status="pass",
+                deployment_status="pass",
+                post_deploy_status="pass",
+                health_status="pass",
+                canonical_status="fail",
+                logo_status="pass",
+                runtime_identity_status="skipped",
+                old_db_volume=base_operation.plan.old_db_volume,
+                new_db_volume=base_operation.plan.new_db_volume,
+                data_volume=base_operation.plan.data_volume,
+                log_volume=base_operation.plan.log_volume,
+                filestore_quarantine_path=base_operation.plan.filestore_quarantine_path,
+                database_dump_sha256=base_operation.plan.database_dump_sha256,
+                filestore_archive_sha256=base_operation.plan.filestore_archive_sha256,
+                phase_evidence={
+                    "database_restore": {"status": "pass"},
+                    "filestore_stage": {"status": "pass"},
+                    "web_quiesce": {"status": "pass"},
+                    "filestore_activate": {"status": "pass"},
+                    "target_env_update": {
+                        "old_db_volume": base_operation.plan.old_db_volume,
+                        "new_db_volume": base_operation.plan.new_db_volume,
+                        "data_volume": base_operation.plan.data_volume,
+                        "log_volume": base_operation.plan.log_volume,
+                    },
+                    "deployment": {"provider_deployment": "provider-deployment-1"},
+                    "post_deploy": {"status": "pass"},
+                },
+                error_message="Odoo canonical verification failed.",
+            )
+            terminal_operation = base_operation.model_copy(
+                update={
+                    "status": "fail",
+                    "phase": "failed",
+                    "checkpoints": tuple(
+                        OdooProdBackupRestoreCheckpoint.model_validate(
+                            {
+                                "phase": phase,
+                                "recorded_at": f"2026-07-25T00:{index:02d}:00Z",
+                                "evidence": {"status": "pass"},
+                            }
+                        )
+                        for index, phase in enumerate(
+                            (
+                                "validated",
+                                "database_restored",
+                                "filestore_staged",
+                                "web_quiesced",
+                                "filestore_activated",
+                                "target_env_updated",
+                                "deployed",
+                                "post_deploy_completed",
+                                "verification_started",
+                            ),
+                            start=1,
+                        )
+                    ),
+                    "deployment_record_id": failed_result.deployment_record_id,
+                    "started_at": "2026-07-25T00:01:00Z",
+                    "finished_at": "2026-07-25T00:30:00Z",
+                    "updated_at": "2026-07-25T00:30:00Z",
+                    "attempt": 1,
+                    "result": failed_result,
+                    "error_message": failed_result.error_message,
+                }
+            )
+            store.write_odoo_prod_backup_restore_operation_record(terminal_operation)
+            requeued = store.requeue_terminal_failed_odoo_prod_backup_restore_operation_record(
+                operation_id=terminal_operation.operation_id,
+                queued_at="2026-07-25T00:31:00Z",
+                authorization=base_operation.authorization,
+            )
+            assert requeued is not None
+
+            def replay_restore(
+                *,
+                operation: OdooProdBackupRestoreOperationRecord,
+                phase_checkpoint: Callable[[str, dict[str, str]], None],
+                provider_effect_checkpoint: Callable[[str, str], None],
+                **_: object,
+            ) -> OdooProdBackupRestoreResult:
+                self.assertEqual(operation.attempt, 2)
+                phase_checkpoint("post_deploy_started", {"replay": "verification_only"})
+                provider_effect_checkpoint("post_deploy_started", "post_deploy_schedule_trigger")
+                phase_checkpoint("post_deploy_completed", {"status": "pass"})
+                phase_checkpoint("verification_started", {"replay": "verification_only"})
+                return failed_result.model_copy(
+                    update={
+                        "restore_status": "pass",
+                        "canonical_status": "pass",
+                        "runtime_identity_status": "match",
+                        "error_message": "",
+                    }
+                )
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_backup_restore_apply",
+                    side_effect=AssertionError("verification replay must not run full apply"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_backup_restore_verification_replay",
+                    side_effect=replay_restore,
+                ),
+            ):
+                worker_result = run_odoo_stable_operation_worker_once(
+                    record_store=store,
+                    control_plane_root_path=Path(temporary_directory_name),
+                    lease_owner="worker-a",
+                    lease_seconds=60,
+                    heartbeat_seconds=30,
+                )
+
+            stored = store.read_odoo_prod_backup_restore_operation_record(
+                terminal_operation.operation_id
+            )
+            self.assertEqual(worker_result.operation_kind, "odoo_prod_backup_restore")
+            self.assertEqual(stored.status, "pass")
+            self.assertEqual(stored.phase, "completed")
+            self.assertEqual(stored.attempt, 2)
+            self.assertEqual(stored.deployment_record_id, failed_result.deployment_record_id)
+            self.assertEqual(
+                [checkpoint.phase for checkpoint in stored.checkpoints[-3:]],
+                ["post_deploy_started", "post_deploy_completed", "verification_started"],
+            )
+
+    def test_worker_never_runs_full_restore_when_prior_result_exists(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            base_operation = _restore_operation()
+            failed_result = OdooProdBackupRestoreResult(
+                product=base_operation.product,
+                context=base_operation.context,
+                instance=base_operation.instance,
+                backup_record_id=base_operation.plan.backup_record_id,
+                verification_record_id=base_operation.plan.verification_record_id,
+                plan_fingerprint=base_operation.plan.plan_fingerprint,
+                deployment_record_id="deployment-cm-prod-restore",
+                restore_status="fail",
+                old_db_volume=base_operation.plan.old_db_volume,
+                new_db_volume=base_operation.plan.new_db_volume,
+                data_volume=base_operation.plan.data_volume,
+                log_volume=base_operation.plan.log_volume,
+                database_dump_sha256=base_operation.plan.database_dump_sha256,
+                filestore_archive_sha256=base_operation.plan.filestore_archive_sha256,
+                error_message="Prior restore result exists.",
+            )
+            pending_operation = base_operation.model_copy(
+                update={
+                    "status": "pending",
+                    "phase": "verification_started",
+                    "checkpoints": (
+                        OdooProdBackupRestoreCheckpoint(
+                            phase="verification_started",
+                            recorded_at="2026-07-25T00:26:00Z",
+                            evidence={"replay": "verification_only"},
+                        ),
+                    ),
+                    "deployment_record_id": failed_result.deployment_record_id,
+                    "started_at": "2026-07-25T00:01:00Z",
+                    "updated_at": "2026-07-25T00:31:00Z",
+                    "attempt": 2,
+                    "result": failed_result,
+                }
+            )
+            store.write_odoo_prod_backup_restore_operation_record(pending_operation)
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_backup_restore_apply",
+                    side_effect=AssertionError("prior result must never run full restore"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_backup_restore_verification_replay",
+                    side_effect=AssertionError("ineligible prior result must not replay"),
+                ),
+            ):
+                worker_result = run_odoo_stable_operation_worker_once(
+                    record_store=store,
+                    control_plane_root_path=Path(temporary_directory_name),
+                    lease_owner="worker-a",
+                    lease_seconds=60,
+                    heartbeat_seconds=30,
+                )
+
+            stored = store.read_odoo_prod_backup_restore_operation_record(
+                pending_operation.operation_id
+            )
+            self.assertEqual(worker_result.operation_kind, "odoo_prod_backup_restore")
+            self.assertEqual(stored.status, "fail")
+            self.assertEqual(stored.attempt, 3)
+            self.assertEqual(
+                stored.error_message,
+                "Odoo production backup restore with prior result evidence requires operator "
+                "reconciliation.",
+            )
+
     def test_restore_lease_expiry_after_provider_effect_is_never_retried(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

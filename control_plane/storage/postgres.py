@@ -39,6 +39,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
@@ -93,6 +94,8 @@ from control_plane.contracts.odoo_prod_backup_restore_operation import (
     OdooProdBackupRestoreCheckpoint,
     OdooProdBackupRestoreOperationPhase,
     OdooProdBackupRestoreOperationRecord,
+    odoo_prod_backup_restore_operation_is_verification_replay_claim,
+    requeue_odoo_prod_backup_restore_verification_replay,
 )
 from control_plane.contracts.odoo_prod_retained_volume_backup_import_operation import (
     ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_PHASE_SEQUENCE,
@@ -5050,6 +5053,55 @@ class PostgresRecordStore(HumanSessionStore):
                 )
         return record, True
 
+    def requeue_terminal_failed_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        operation_id: str,
+        queued_at: str,
+        authorization: DurableOperationAuthorization,
+    ) -> OdooProdBackupRestoreOperationRecord | None:
+        existing_record = self.read_odoo_prod_backup_restore_operation_record(operation_id.strip())
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session,
+                product=existing_record.product,
+                context=existing_record.context,
+                instance=existing_record.instance,
+            )
+            statement = (
+                select(LaunchplaneOdooProdBackupRestoreOperationRow)
+                .where(
+                    LaunchplaneOdooProdBackupRestoreOperationRow.operation_id
+                    == existing_record.operation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(operation_id)
+            record = self._read_payload(
+                model_type=OdooProdBackupRestoreOperationRecord,
+                payload=row.payload,
+            )
+            active_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_owner is not None or record.status != "fail":
+                return None
+            requeued_record = requeue_odoo_prod_backup_restore_verification_replay(
+                operation=record,
+                queued_at=queued_at,
+                authorization=authorization,
+            )
+            self._sync_odoo_prod_backup_restore_operation_row(row, requeued_record)
+            session.commit()
+            return requeued_record
+
     def read_odoo_prod_backup_restore_operation_record(
         self, operation_id: str
     ) -> OdooProdBackupRestoreOperationRecord:
@@ -5185,7 +5237,7 @@ class PostgresRecordStore(HumanSessionStore):
                 claimed_record = record.model_copy(
                     update={
                         "status": "running",
-                        "phase": "running",
+                        "phase": record.phase if record.checkpoints else "running",
                         "started_at": record.started_at or claimed_at,
                         "updated_at": claimed_at,
                         "lease_owner": normalized_lease_owner,
@@ -5279,7 +5331,11 @@ class PostgresRecordStore(HumanSessionStore):
                     ODOO_PROD_BACKUP_RESTORE_OPERATION_PHASE_SEQUENCE
                 )
             }
-            if phase_indexes[phase] < phase_indexes[record.phase]:
+            replay_restart = (
+                phase == "post_deploy_started"
+                and odoo_prod_backup_restore_operation_is_verification_replay_claim(record)
+            )
+            if not replay_restart and phase_indexes[phase] < phase_indexes[record.phase]:
                 return None
             checkpoint = OdooProdBackupRestoreCheckpoint(
                 phase=phase,
@@ -5398,6 +5454,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "lease_owner": "",
                             "lease_expires_at": "",
                             "heartbeat_at": "",
+                            "result": None,
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 "Odoo production backup restore lease expired in "

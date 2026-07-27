@@ -17,6 +17,46 @@ from control_plane.contracts.odoo_prod_backup_restore import (
 )
 
 
+ODOO_PROD_BACKUP_RESTORE_REPLAY_REQUIRED_RESULT_STATUSES = {
+    "database_restore_status": "pass",
+    "filestore_stage_status": "pass",
+    "web_quiesce_status": "pass",
+    "filestore_activation_status": "pass",
+    "deployment_status": "pass",
+    "post_deploy_status": "pass",
+}
+ODOO_PROD_BACKUP_RESTORE_REPLAY_READINESS_FAILURE_STATUSES = (
+    "health_status",
+    "canonical_status",
+    "logo_status",
+)
+ODOO_PROD_BACKUP_RESTORE_REPLAY_RUNTIME_IDENTITY_FAILURE_STATUSES = frozenset(
+    {"mismatch", "missing", "malformed", "unverifiable"}
+)
+ODOO_PROD_BACKUP_RESTORE_REPLAY_REQUIRED_CHECKPOINT_PHASES = (
+    "validated",
+    "database_restored",
+    "filestore_staged",
+    "web_quiesced",
+    "filestore_activated",
+    "target_env_updated",
+    "deployed",
+    "post_deploy_completed",
+    "verification_started",
+)
+ODOO_PROD_BACKUP_RESTORE_REPLAY_REQUIRED_PHASE_EVIDENCE = frozenset(
+    {
+        "database_restore",
+        "filestore_stage",
+        "web_quiesce",
+        "filestore_activate",
+        "target_env_update",
+        "deployment",
+        "post_deploy",
+    }
+)
+
+
 OdooProdBackupRestoreOperationStatus = Literal[
     "pending",
     "running",
@@ -214,6 +254,127 @@ class OdooProdBackupRestoreOperationRecord(BaseModel):
                 "Only cancelled Odoo backup restore operations can include cancellation."
             )
         return self
+
+
+def odoo_prod_backup_restore_failure_is_replay_eligible(
+    operation: OdooProdBackupRestoreOperationRecord,
+) -> bool:
+    """Return whether a failed restore can replay final verification only."""
+    result = operation.result
+    if (
+        operation.status != "fail"
+        or operation.phase != "failed"
+        or operation.attempt != 1
+        or result is None
+        or result.restore_status != "fail"
+        or not result.deployment_record_id.strip()
+        or operation.deployment_record_id != result.deployment_record_id
+        or result.plan_fingerprint != operation.plan.plan_fingerprint
+        or result.backup_record_id != operation.plan.backup_record_id
+        or result.verification_record_id != operation.plan.verification_record_id
+        or result.old_db_volume != operation.plan.old_db_volume
+        or result.new_db_volume != operation.plan.new_db_volume
+        or result.data_volume != operation.plan.data_volume
+        or result.log_volume != operation.plan.log_volume
+        or result.database_dump_sha256 != operation.plan.database_dump_sha256
+        or result.filestore_archive_sha256 != operation.plan.filestore_archive_sha256
+        or not _odoo_prod_backup_restore_replay_evidence_is_complete(operation)
+    ):
+        return False
+    for (
+        status_field,
+        expected_status,
+    ) in ODOO_PROD_BACKUP_RESTORE_REPLAY_REQUIRED_RESULT_STATUSES.items():
+        if getattr(result, status_field) != expected_status:
+            return False
+    if any(
+        getattr(result, status_field) == "fail"
+        for status_field in ODOO_PROD_BACKUP_RESTORE_REPLAY_READINESS_FAILURE_STATUSES
+    ):
+        return True
+    if (
+        result.runtime_identity_status
+        in ODOO_PROD_BACKUP_RESTORE_REPLAY_RUNTIME_IDENTITY_FAILURE_STATUSES
+    ):
+        return True
+    return False
+
+
+def _odoo_prod_backup_restore_replay_evidence_is_complete(
+    operation: OdooProdBackupRestoreOperationRecord,
+) -> bool:
+    result = operation.result
+    if result is None or not operation.checkpoints:
+        return False
+    checkpoint_phases = tuple(checkpoint.phase for checkpoint in operation.checkpoints)
+    if checkpoint_phases[-1] != "verification_started":
+        return False
+    required_index = 0
+    for checkpoint_phase in checkpoint_phases:
+        if (
+            required_index < len(ODOO_PROD_BACKUP_RESTORE_REPLAY_REQUIRED_CHECKPOINT_PHASES)
+            and checkpoint_phase
+            == ODOO_PROD_BACKUP_RESTORE_REPLAY_REQUIRED_CHECKPOINT_PHASES[required_index]
+        ):
+            required_index += 1
+    if required_index != len(ODOO_PROD_BACKUP_RESTORE_REPLAY_REQUIRED_CHECKPOINT_PHASES):
+        return False
+    if not ODOO_PROD_BACKUP_RESTORE_REPLAY_REQUIRED_PHASE_EVIDENCE.issubset(result.phase_evidence):
+        return False
+    if any(
+        not result.phase_evidence[evidence_name]
+        for evidence_name in ODOO_PROD_BACKUP_RESTORE_REPLAY_REQUIRED_PHASE_EVIDENCE
+    ):
+        return False
+    target_env_evidence = result.phase_evidence["target_env_update"]
+    if target_env_evidence != {
+        "old_db_volume": operation.plan.old_db_volume,
+        "new_db_volume": operation.plan.new_db_volume,
+        "data_volume": operation.plan.data_volume,
+        "log_volume": operation.plan.log_volume,
+    }:
+        return False
+    if result.phase_evidence["post_deploy"].get("status") != "pass":
+        return False
+    return bool(result.phase_evidence["deployment"].get("provider_deployment", "").strip())
+
+
+def odoo_prod_backup_restore_operation_is_verification_replay_claim(
+    operation: OdooProdBackupRestoreOperationRecord,
+) -> bool:
+    if operation.status != "running" or operation.attempt != 2:
+        return False
+    terminal_shape = operation.model_copy(
+        update={"status": "fail", "phase": "failed", "attempt": 1}
+    )
+    return odoo_prod_backup_restore_failure_is_replay_eligible(terminal_shape)
+
+
+def requeue_odoo_prod_backup_restore_verification_replay(
+    *,
+    operation: OdooProdBackupRestoreOperationRecord,
+    queued_at: str,
+    authorization: DurableOperationAuthorization,
+) -> OdooProdBackupRestoreOperationRecord:
+    normalized_queued_at = queued_at.strip()
+    if not normalized_queued_at:
+        raise ValueError("Odoo backup restore verification replay requires queued_at.")
+    if not odoo_prod_backup_restore_failure_is_replay_eligible(operation):
+        raise ValueError("Odoo backup restore failure is not eligible for verification replay.")
+    return operation.model_copy(
+        update={
+            "status": "pending",
+            "phase": "verification_started",
+            "updated_at": normalized_queued_at,
+            "finished_at": "",
+            "lease_owner": "",
+            "lease_expires_at": "",
+            "heartbeat_at": "",
+            "authorization": authorization,
+            "error_code": "",
+            "error_message": "",
+        }
+    )
 
 
 def build_odoo_prod_backup_restore_operation_id(

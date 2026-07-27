@@ -19,6 +19,7 @@ from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
@@ -62,6 +63,8 @@ from control_plane.contracts.odoo_prod_backup_restore_operation import (
     OdooProdBackupRestoreCheckpoint,
     OdooProdBackupRestoreOperationPhase,
     OdooProdBackupRestoreOperationRecord,
+    odoo_prod_backup_restore_operation_is_verification_replay_claim,
+    requeue_odoo_prod_backup_restore_verification_replay,
 )
 from control_plane.contracts.odoo_prod_retained_volume_backup_import_operation import (
     ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_PHASE_SEQUENCE,
@@ -3051,6 +3054,44 @@ class FilesystemRecordStore:
             self.write_odoo_prod_backup_restore_operation_record(record)
             return record, True
 
+    def requeue_terminal_failed_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        operation_id: str,
+        queued_at: str,
+        authorization: DurableOperationAuthorization,
+    ) -> OdooProdBackupRestoreOperationRecord | None:
+        reservation_id = ""
+        current_record = self.read_odoo_prod_backup_restore_operation_record(operation_id.strip())
+        reservation_id = _odoo_stable_lane_reservation_id(
+            product=current_record.product,
+            context=current_record.context,
+            instance=current_record.instance,
+        )
+        with self._exclusive_record_lock("odoo_stable_lane_operation_reservations", reservation_id):
+            active_operation = self._active_odoo_stable_lane_operation(
+                product=current_record.product,
+                context=current_record.context,
+                instance=current_record.instance,
+            )
+            if active_operation is not None:
+                return None
+            with self._exclusive_record_lock(
+                "odoo_prod_backup_restore_operations", current_record.operation_id
+            ):
+                locked_record = self.read_odoo_prod_backup_restore_operation_record(
+                    current_record.operation_id
+                )
+                if locked_record.status != "fail":
+                    return None
+                requeued_record = requeue_odoo_prod_backup_restore_verification_replay(
+                    operation=locked_record,
+                    queued_at=queued_at,
+                    authorization=authorization,
+                )
+                self.write_odoo_prod_backup_restore_operation_record(requeued_record)
+                return requeued_record
+
     def claim_next_odoo_prod_backup_restore_operation_record(
         self,
         *,
@@ -3100,7 +3141,9 @@ class FilesystemRecordStore:
                     claimed_record = current_record.model_copy(
                         update={
                             "status": "running",
-                            "phase": "running",
+                            "phase": current_record.phase
+                            if current_record.checkpoints
+                            else "running",
                             "started_at": current_record.started_at or claimed_at,
                             "updated_at": claimed_at,
                             "lease_owner": normalized_lease_owner,
@@ -3164,7 +3207,11 @@ class FilesystemRecordStore:
                     ODOO_PROD_BACKUP_RESTORE_OPERATION_PHASE_SEQUENCE
                 )
             }
-            if phase_indexes[phase] < phase_indexes[record.phase]:
+            replay_restart = (
+                phase == "post_deploy_started"
+                and odoo_prod_backup_restore_operation_is_verification_replay_claim(record)
+            )
+            if not replay_restart and phase_indexes[phase] < phase_indexes[record.phase]:
                 return None
             checkpoint = OdooProdBackupRestoreCheckpoint(
                 phase=phase,
@@ -3261,6 +3308,7 @@ class FilesystemRecordStore:
                             "lease_owner": "",
                             "lease_expires_at": "",
                             "heartbeat_at": "",
+                            "result": None,
                             "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 "Odoo production backup restore lease expired in "

@@ -32,6 +32,8 @@ from control_plane.contracts.odoo_prod_backup_restore import (
 )
 from control_plane.contracts.odoo_prod_backup_restore_operation import (
     OdooProdBackupRestoreOperationPhase,
+    OdooProdBackupRestoreOperationRecord,
+    odoo_prod_backup_restore_operation_is_verification_replay_claim,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -40,7 +42,11 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.contracts.runtime_identity import (
+    RuntimeIdentity,
+    parse_runtime_identity_payload,
+    runtime_identity_env,
+)
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
@@ -93,6 +99,8 @@ class OdooProdBackupRestoreStore(RuntimeKeySafetyPolicyReadStore, Protocol):
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
     ) -> EnvironmentInventory: ...
+
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
 
@@ -505,7 +513,7 @@ def execute_odoo_prod_backup_restore_apply(
     )
 
     phase_evidence: dict[str, dict[str, str]] = {}
-    statuses = {
+    statuses: dict[str, str] = {
         "database_restore_status": "skipped",
         "filestore_stage_status": "skipped",
         "web_quiesce_status": "skipped",
@@ -767,7 +775,7 @@ def execute_odoo_prod_backup_restore_apply(
             request=OdooPostDeployRequest(
                 context=plan.context,
                 instance=plan.instance,
-                phase="restore",
+                phase="deploy",
             ),
             run_destructive_restore=False,
             provider_effect_checkpoint=provider_checkpoint("post_deploy_started"),
@@ -891,6 +899,335 @@ def execute_odoo_prod_backup_restore_apply(
         deployment_id="control-plane-dokploy",
         deployment_status="pass",
         started_at=started_at,
+        finished_at=finished_at,
+        resolved_target=resolved_target,
+        runtime_source=runtime_source,
+        runtime_identity=final_runtime_identity,
+        post_deploy_update=post_deploy_evidence,
+        destination_health=destination_health,
+    )
+    record_store.write_deployment_record(deployment_record)
+    record_store.write_environment_inventory(
+        build_environment_inventory(deployment_record=deployment_record, updated_at=finished_at)
+    )
+    release_tuple_id = _write_release_tuple(
+        record_store=record_store,
+        deployment_record=deployment_record,
+        artifact_manifest=artifact_manifest,
+        minted_at=finished_at,
+    )
+    return result(
+        restore_status="pass",
+        verification_evidence=verification.evidence,
+        release_tuple_id=release_tuple_id,
+    )
+
+
+def execute_odoo_prod_backup_restore_verification_replay(
+    *,
+    control_plane_root: Path,
+    record_store: OdooProdBackupRestoreStore,
+    operation: OdooProdBackupRestoreOperationRecord,
+    phase_checkpoint: RestorePhaseCheckpoint,
+    provider_effect_checkpoint: RestoreProviderEffectCheckpoint,
+) -> OdooProdBackupRestoreResult:
+    if not odoo_prod_backup_restore_operation_is_verification_replay_claim(operation):
+        raise click.ClickException(
+            "Odoo production restore replay requires an eligible attempt-2 claim."
+        )
+    stored_result = operation.result
+    if stored_result is None:
+        raise click.ClickException(
+            "Odoo production restore replay requires stored result evidence."
+        )
+    plan = operation.plan
+    deployment_record_id = stored_result.deployment_record_id.strip()
+    if not deployment_record_id:
+        raise click.ClickException("Odoo production restore replay requires deployment evidence.")
+
+    try:
+        profile = _read_product_profile(record_store=record_store, product=operation.product)
+        lane = _read_prod_lane(profile=profile, context=operation.context)
+        target_record = _read_target_record(
+            record_store=record_store,
+            context=operation.context,
+            instance=operation.instance,
+        )
+        target_id_record = _read_target_id_record(
+            record_store=record_store,
+            context=operation.context,
+            instance=operation.instance,
+        )
+        artifact_manifest = record_store.read_artifact_manifest(plan.expected_current_artifact_id)
+        deployment_record = record_store.read_deployment_record(deployment_record_id)
+        _require_restore_replay_record_authority(
+            profile=profile,
+            lane=lane,
+            target_record=target_record,
+            target_id_record=target_id_record,
+            artifact_manifest=artifact_manifest,
+            plan=plan,
+        )
+        runtime_identity = _existing_restore_runtime_identity(
+            deployment_record=deployment_record,
+            plan=plan,
+            deployment_record_id=deployment_record_id,
+        )
+    except (click.ClickException, OSError, ValueError) as error:
+        raise click.ClickException(
+            "Odoo production restore replay record authority is unavailable."
+        ) from error
+    ship_request = _ship_request_from_restore_plan(
+        plan=plan,
+        target_record=target_record,
+        timeout_seconds=operation.request.timeout_seconds,
+        health_timeout_seconds=operation.request.health_timeout_seconds,
+        no_cache=operation.request.no_cache,
+    )
+    resolved_target = ResolvedTargetEvidence(
+        target_type="compose",
+        target_id=plan.target_id,
+        target_name=plan.target_name,
+    )
+    runtime_source = {
+        **{
+            key: value
+            for key, value in deployment_record.runtime_source.items()
+            if key != "restore_error"
+        },
+        "restore_replay": "verification_only",
+        "restore_replay_attempt": str(operation.attempt),
+    }
+    phase_evidence = dict(stored_result.phase_evidence)
+    statuses: dict[str, str] = {
+        "database_restore_status": stored_result.database_restore_status,
+        "filestore_stage_status": stored_result.filestore_stage_status,
+        "web_quiesce_status": stored_result.web_quiesce_status,
+        "filestore_activation_status": stored_result.filestore_activation_status,
+        "deployment_status": stored_result.deployment_status,
+        "post_deploy_status": "skipped",
+        "health_status": "skipped",
+        "canonical_status": "skipped",
+        "logo_status": "skipped",
+        "runtime_identity_status": "skipped",
+    }
+    health_timeout_seconds = ship_request.health_timeout_seconds or (
+        target_record.healthcheck_timeout_seconds
+        or dokploy_source.DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS
+    )
+
+    def result(
+        *,
+        restore_status: str,
+        error_message: str = "",
+        verification_evidence: OdooVerificationEvidence | None = None,
+        release_tuple_id: str = "",
+    ) -> OdooProdBackupRestoreResult:
+        return OdooProdBackupRestoreResult.model_validate(
+            {
+                "product": plan.product,
+                "context": plan.context,
+                "instance": plan.instance,
+                "backup_record_id": plan.backup_record_id,
+                "verification_record_id": plan.verification_record_id,
+                "plan_fingerprint": plan.plan_fingerprint,
+                "deployment_record_id": deployment_record_id,
+                "release_tuple_id": release_tuple_id,
+                "restore_status": restore_status,
+                "old_db_volume": plan.old_db_volume,
+                "new_db_volume": plan.new_db_volume,
+                "data_volume": plan.data_volume,
+                "log_volume": plan.log_volume,
+                "filestore_quarantine_path": plan.filestore_quarantine_path,
+                "database_dump_sha256": plan.database_dump_sha256,
+                "filestore_archive_sha256": plan.filestore_archive_sha256,
+                "verification_evidence": verification_evidence or OdooVerificationEvidence(),
+                "phase_evidence": phase_evidence,
+                "error_message": error_message,
+                **statuses,
+            }
+        )
+
+    def replay_failure(
+        *,
+        code: str,
+        post_deploy_update: PostDeployUpdateEvidence | None = None,
+        verification_evidence: OdooVerificationEvidence | None = None,
+    ) -> OdooProdBackupRestoreResult:
+        error_message = f"Odoo production restore replay failed: {code}."
+        phase_evidence["verification_replay"] = {
+            "status": "fail",
+            "code": code,
+            "attempt": str(operation.attempt),
+        }
+        _write_failed_deployment(
+            record_store=record_store,
+            ship_request=ship_request,
+            deployment_record_id=deployment_record_id,
+            deployment_id=deployment_record.deploy.deployment_id or "control-plane-dokploy",
+            started_at=deployment_record.deploy.started_at,
+            resolved_target=resolved_target,
+            runtime_source=runtime_source,
+            runtime_identity=runtime_identity,
+            post_deploy_update=(
+                post_deploy_update
+                if post_deploy_update is not None
+                else deployment_record.post_deploy_update
+            ),
+            error_message=error_message,
+        )
+        return result(
+            restore_status="fail",
+            verification_evidence=verification_evidence,
+            error_message=error_message,
+        )
+
+    try:
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+        target_payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=target_id_record.target_id,
+        )
+    except (click.ClickException, OSError, ValueError):
+        return replay_failure(code="live_target_read_failed")
+
+    try:
+        live_env = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+        if str(target_payload.get("name") or "").strip() != plan.target_name:
+            raise click.ClickException(
+                "Odoo production restore replay live target identity changed."
+            )
+        _require_exact_live_volumes(
+            env=live_env,
+            db_volume=plan.new_db_volume,
+            data_volume=plan.data_volume,
+            log_volume=plan.log_volume,
+        )
+        _require_live_runtime_identity(
+            env=live_env,
+            expected_runtime_identity=runtime_identity,
+        )
+    except (click.ClickException, ValueError):
+        return replay_failure(code="live_target_authority_changed")
+
+    phase_checkpoint(
+        "post_deploy_started",
+        {
+            "replay": "verification_only",
+            "deployment_record_id": deployment_record_id,
+        },
+    )
+    try:
+        post_deploy_result = execute_odoo_post_deploy(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=OdooPostDeployRequest(
+                context=plan.context,
+                instance=plan.instance,
+                phase="deploy",
+            ),
+            run_destructive_restore=False,
+            provider_effect_checkpoint=lambda effect: provider_effect_checkpoint(
+                "post_deploy_started", effect
+            ),
+        )
+    except DurableOperationAuthorizationDeniedError:
+        raise
+    except (click.ClickException, OSError, ValueError):
+        return replay_failure(code="post_deploy_execution_failed")
+
+    post_deploy_evidence = PostDeployUpdateEvidence(
+        attempted=True,
+        status=post_deploy_result.post_deploy_status,
+        detail=(
+            "Odoo post-deploy completed during restore verification replay."
+            if post_deploy_result.post_deploy_status == "pass"
+            else "Odoo post-deploy failed during restore verification replay."
+        ),
+        evidence=post_deploy_result.override_evidence,
+    )
+    phase_evidence["post_deploy"] = {
+        "status": post_deploy_result.post_deploy_status,
+        "replay": "verification_only",
+        **post_deploy_result.override_evidence,
+    }
+    statuses["post_deploy_status"] = post_deploy_result.post_deploy_status
+    if post_deploy_result.post_deploy_status != "pass":
+        return replay_failure(
+            code="post_deploy_failed",
+            post_deploy_update=post_deploy_evidence,
+        )
+    phase_checkpoint(
+        "post_deploy_completed",
+        {"status": post_deploy_result.post_deploy_status, "replay": "verification_only"},
+    )
+    phase_checkpoint(
+        "verification_started",
+        {
+            "base_url": plan.base_url,
+            "health_url": plan.health_url,
+            "replay": "verification_only",
+        },
+    )
+    try:
+        verification = verify_odoo_stable_readiness(
+            base_url=plan.base_url,
+            health_url=plan.health_url,
+            verify_health=True,
+            verify_canonical=True,
+            verify_logo=True,
+            timeout_seconds=health_timeout_seconds,
+            retry_interval_seconds=ODOO_PROD_BACKUP_RESTORE_VERIFY_RETRY_INTERVAL_SECONDS,
+        )
+    except (click.ClickException, OSError, ValueError):
+        return replay_failure(
+            code="readiness_execution_failed",
+            post_deploy_update=post_deploy_evidence,
+        )
+    statuses["health_status"] = verification.health_status
+    statuses["canonical_status"] = verification.canonical_status
+    statuses["logo_status"] = verification.logo_status
+    if verification.error_message:
+        return replay_failure(
+            code="readiness_failed",
+            post_deploy_update=post_deploy_evidence,
+            verification_evidence=verification.evidence,
+        )
+    try:
+        destination_health = _verify_runtime_identity(
+            health_url=plan.health_url,
+            timeout_seconds=health_timeout_seconds,
+            expected_runtime_identity=runtime_identity,
+        )
+    except (click.ClickException, OSError, ValueError):
+        return replay_failure(
+            code="runtime_identity_execution_failed",
+            post_deploy_update=post_deploy_evidence,
+            verification_evidence=verification.evidence,
+        )
+    statuses["runtime_identity_status"] = destination_health.runtime_identity_status
+    if destination_health.runtime_identity_status != "match":
+        return replay_failure(
+            code="runtime_identity_failed",
+            post_deploy_update=post_deploy_evidence,
+            verification_evidence=verification.evidence,
+        )
+
+    phase_evidence["verification_replay"] = {
+        "status": "pass",
+        "attempt": str(operation.attempt),
+    }
+
+    finished_at = utc_now_timestamp()
+    final_runtime_identity = runtime_identity.model_copy(update={"deployed_at": finished_at})
+    deployment_record = build_deployment_record(
+        request=ship_request,
+        record_id=deployment_record_id,
+        deployment_id=deployment_record.deploy.deployment_id or "control-plane-dokploy",
+        deployment_status="pass",
+        started_at=deployment_record.deploy.started_at,
         finished_at=finished_at,
         resolved_target=resolved_target,
         runtime_source=runtime_source,
@@ -1249,6 +1586,140 @@ def _target_definition(
     return dokploy_source.DokployTargetDefinition.model_validate(payload)
 
 
+def _ship_request_from_restore_plan(
+    *,
+    plan: OdooProdBackupRestorePlan,
+    target_record: DokployTargetRecord,
+    timeout_seconds: int | None,
+    health_timeout_seconds: int | None,
+    no_cache: bool,
+) -> ShipRequest:
+    return ShipRequest(
+        artifact_id=plan.expected_current_artifact_id,
+        context=plan.context,
+        instance=plan.instance,
+        source_git_ref=plan.expected_source_git_ref,
+        target_name=plan.target_name,
+        target_type="compose",
+        provider_id="dokploy",
+        target_category="compose",
+        provider_target_type="compose",
+        deploy_mode="dokploy-compose-api",
+        wait=True,
+        timeout_seconds=(
+            timeout_seconds
+            or target_record.deploy_timeout_seconds
+            or dokploy_source.DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+        ),
+        verify_health=True,
+        health_timeout_seconds=(
+            health_timeout_seconds
+            or target_record.healthcheck_timeout_seconds
+            or dokploy_source.DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS
+        ),
+        no_cache=no_cache,
+        destination_health=HealthcheckEvidence(status="pending"),
+    )
+
+
+def _require_restore_replay_record_authority(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    target_record: DokployTargetRecord,
+    target_id_record: DokployTargetIdRecord,
+    artifact_manifest: ArtifactIdentityManifest,
+    plan: OdooProdBackupRestorePlan,
+) -> None:
+    lane_base_url = lane.base_url.strip().rstrip("/")
+    lane_health_url = lane.health_url.strip()
+    resolved_health_url = (
+        lane_health_url
+        if lane_health_url
+        and not is_legacy_derived_odoo_health_url(
+            health_url=lane_health_url,
+            base_url=lane_base_url,
+            profile_health_path=profile.health_path,
+        )
+        else default_odoo_health_url(base_url=lane_base_url)
+    )
+    expected_domain_hosts = tuple(
+        sorted({domain.strip().lower() for domain in target_record.domains if domain.strip()})
+    )
+    if (
+        lane_base_url != plan.base_url
+        or resolved_health_url != plan.health_url
+        or target_record.target_type != "compose"
+        or target_id_record.target_id != plan.target_id
+        or (
+            target_record.target_name.strip()
+            and target_record.target_name.strip() != plan.target_name
+        )
+        or expected_domain_hosts != plan.expected_domain_hosts
+        or artifact_manifest.artifact_id != plan.expected_current_artifact_id
+        or artifact_manifest.source_commit != plan.expected_source_git_ref
+        or _artifact_image_reference(artifact_manifest) != plan.image_reference
+        or not artifact_manifest_matches_image_repository(
+            artifact_manifest,
+            expected_repository=profile.image.repository,
+        )
+    ):
+        raise click.ClickException("Odoo production restore replay record authority changed.")
+
+
+def _existing_restore_runtime_identity(
+    *,
+    deployment_record: DeploymentRecord,
+    plan: OdooProdBackupRestorePlan,
+    deployment_record_id: str,
+) -> RuntimeIdentity:
+    runtime_identity = deployment_record.runtime_identity
+    resolved_target = deployment_record.resolved_target
+    artifact_identity = deployment_record.artifact_identity
+    if (
+        deployment_record.record_id != deployment_record_id
+        or deployment_record.context != plan.context
+        or deployment_record.instance != plan.instance
+        or deployment_record.source_git_ref != plan.expected_source_git_ref
+        or artifact_identity is None
+        or artifact_identity.artifact_id != plan.expected_current_artifact_id
+        or runtime_identity is None
+        or runtime_identity.product != plan.product
+        or runtime_identity.context != plan.context
+        or runtime_identity.instance != plan.instance
+        or runtime_identity.deployment_record_id != deployment_record_id
+        or runtime_identity.artifact_id != plan.expected_current_artifact_id
+        or runtime_identity.source_git_ref != plan.expected_source_git_ref
+        or runtime_identity.image_reference != plan.image_reference
+        or runtime_identity.deployed_at.strip()
+        or deployment_record.deploy.status != "fail"
+        or resolved_target is None
+        or resolved_target.target_type != "compose"
+        or resolved_target.target_id != plan.target_id
+        or resolved_target.target_name != plan.target_name
+    ):
+        raise click.ClickException(
+            "Odoo production restore replay requires exact failed deployment runtime identity."
+        )
+    return runtime_identity
+
+
+def _require_live_runtime_identity(
+    *,
+    env: Mapping[str, str],
+    expected_runtime_identity: RuntimeIdentity,
+) -> None:
+    live_runtime_identity = parse_runtime_identity_payload(
+        env.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", "")
+    )
+    if live_runtime_identity is None:
+        raise click.ClickException(
+            "Odoo production restore replay live runtime identity is missing or malformed."
+        )
+    if live_runtime_identity != expected_runtime_identity:
+        raise click.ClickException("Odoo production restore replay live runtime identity changed.")
+
+
 def _require_exact_live_volumes(
     *,
     env: Mapping[str, str],
@@ -1325,12 +1796,13 @@ def _write_failed_deployment(
     runtime_identity: RuntimeIdentity,
     error_message: str,
     post_deploy_update: PostDeployUpdateEvidence | None = None,
+    deployment_id: str = "control-plane-dokploy",
 ) -> None:
     record_store.write_deployment_record(
         build_deployment_record(
             request=ship_request,
             record_id=deployment_record_id,
-            deployment_id="control-plane-dokploy",
+            deployment_id=deployment_id,
             deployment_status="fail",
             started_at=started_at,
             finished_at=utc_now_timestamp(),

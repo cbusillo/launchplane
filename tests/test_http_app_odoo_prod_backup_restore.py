@@ -6,13 +6,17 @@ from unittest.mock import patch
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.odoo_prod_backup_restore_http import (
+    OdooProdBackupRestoreApplyEnvelope,
     OdooProdBackupRestoreOperationActiveError,
+    OdooProdBackupRestoreReplayNotEligibleError,
+    enqueue_odoo_prod_backup_restore_operation,
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _asgi_request
 from tests.support.auth import _identity, _StubVerifier
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
+from tests.test_odoo_prod_backup_restore_storage import _verification_failed_restore_operation
 from tests.test_odoo_stable_operation_worker import _restore_operation
 
 
@@ -158,6 +162,90 @@ class OdooProdBackupRestoreHttpTests(unittest.IsolatedAsyncioTestCase):
             authorization.action,
             "odoo_prod_backup_restore_apply.execute",
         )
+
+    async def test_apply_route_reports_replay_ineligible_conflict(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_prod_backup_restore_apply.execute"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            with patch(
+                "control_plane.http_app.enqueue_odoo_prod_backup_restore_operation",
+                side_effect=OdooProdBackupRestoreReplayNotEligibleError(
+                    "Odoo production backup restore failure is not eligible for replay."
+                ),
+            ):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/drivers/odoo/prod-backup-restore-apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "restore-request-ineligible",
+                    },
+                    payload=self._payload(apply=True),
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "odoo_prod_backup_restore_replay_not_eligible",
+        )
+
+    def test_enqueue_requeues_exact_terminal_failed_restore_replay(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store(root / "state")
+            operation = _verification_failed_restore_operation()
+            store.write_odoo_prod_backup_restore_operation_record(operation)
+
+            records, payload = enqueue_odoo_prod_backup_restore_operation(
+                control_plane_root=root,
+                record_store=store,
+                request=OdooProdBackupRestoreApplyEnvelope.model_validate(
+                    self._payload(apply=True)
+                ),
+                idempotency_key=operation.idempotency_key,
+                idempotency_scope=operation.idempotency_scope,
+                request_fingerprint=operation.request_fingerprint,
+                created_at="2026-07-25T00:31:00Z",
+                authorization=operation.authorization,
+            )
+            stored = store.read_odoo_prod_backup_restore_operation_record(operation.operation_id)
+
+        self.assertEqual(
+            records["odoo_prod_backup_restore_operation_id"],
+            operation.operation_id,
+        )
+        self.assertEqual(payload["status"], "pending")
+        self.assertEqual(stored.status, "pending")
+        self.assertEqual(stored.phase, "verification_started")
+        self.assertEqual(stored.attempt, 1)
+
+    def test_enqueue_maps_ineligible_failed_replay_to_typed_conflict(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store(root / "state")
+            operation = _verification_failed_restore_operation().model_copy(update={"attempt": 2})
+            store.write_odoo_prod_backup_restore_operation_record(operation)
+
+            with self.assertRaises(OdooProdBackupRestoreReplayNotEligibleError):
+                enqueue_odoo_prod_backup_restore_operation(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=OdooProdBackupRestoreApplyEnvelope.model_validate(
+                        self._payload(apply=True)
+                    ),
+                    idempotency_key=operation.idempotency_key,
+                    idempotency_scope=operation.idempotency_scope,
+                    request_fingerprint=operation.request_fingerprint,
+                    created_at="2026-07-25T00:31:00Z",
+                    authorization=operation.authorization,
+                )
 
     async def test_apply_route_does_not_expose_operation_exception_text(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
