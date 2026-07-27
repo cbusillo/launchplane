@@ -3,6 +3,8 @@ from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
+import click
+
 from control_plane.contracts.artifact_identity import (
     ArtifactImageReference,
     ArtifactIdentityManifest,
@@ -630,10 +632,31 @@ class OdooProdBackupRestoreScriptTests(unittest.TestCase):
         self.assertIn("volume_label", database_script)
         self.assertIn("not member.isfile() and not member.isdir()", filestore_script)
         self.assertIn("member_path.parts[0] != database_name", filestore_script)
+        self.assertIn(
+            '"${expected_filestore_archive_sha256}" '
+            '"${expected_filestore_member_count}" '
+            '"${expected_filestore_unpacked_size}"',
+            filestore_script,
+        )
+        self.assertNotIn('"${filestore_archive_sha256}"', filestore_script)
+        self.assertNotIn('"${filestore_member_count}"', filestore_script)
+        self.assertNotIn('"${filestore_unpacked_size}"', filestore_script)
         self.assertIn("filestore_quarantine_path", activation_script)
         self.assertIn("docker exec -u root -i", activation_script)
         self.assertIn("live_path.rename(quarantine_path)", activation_script)
         self.assertNotIn('mv "${current_filestore_path}"', activation_script)
+
+    def test_restore_result_failure_identifies_exact_phase_with_bounded_code(self) -> None:
+        with self.assertRaises(click.ClickException) as raised:
+            dokploy_post_deploy.extract_odoo_backup_restore_result(
+                {"logs": ["untrusted provider error text"]},
+                operation_id="restore-operation-1",
+                phase="filestore_stage",
+            )
+        self.assertEqual(
+            str(raised.exception),
+            "Dokploy Odoo backup restore filestore_stage failed (provider_result_missing).",
+        )
 
 
 if __name__ == "__main__":
