@@ -389,6 +389,51 @@ class _TopologyStore:
 
 
 class ProductTopologyReadModelTests(unittest.TestCase):
+    def test_private_monitoring_intent_suppresses_public_and_tls_observation_warnings(
+        self,
+    ) -> None:
+        profile_payload = _profile().model_dump(mode="json")
+        profile_payload["lanes"][0]["health_monitoring"] = {
+            "monitoring_intent": "private",
+            "checks": [
+                {"name": "public-ingress", "kind": "public_http"},
+                {
+                    "name": "private-runtime",
+                    "kind": "private_http",
+                    "private_endpoint_key": "example-site-prod-runtime",
+                },
+            ],
+        }
+        profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        failed_public_observation = _http_observation(runtime_identity_status="unverifiable")
+
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=_route_binding(
+                    ingress_provider="external",
+                    tls_owner="external",
+                    source_kind="operator",
+                ),
+                observations=(failed_public_observation,),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=LaunchplaneLaneSummary(
+                context="example-context",
+                instance="prod",
+                provider_target=_provider_target(),
+            ),
+            now=_NOW,
+        )
+
+        warning_codes = {warning.code for warning in topology.warnings}
+        self.assertEqual(topology.observed.ingress.monitoring_intent, "private")
+        self.assertFalse(topology.observed.ingress.incident_eligible)
+        self.assertEqual(topology.observed.ingress.status, "not_expected")
+        self.assertNotIn("public_ingress_failure", warning_codes)
+        self.assertNotIn("public_runtime_identity_unverified", warning_codes)
+        self.assertNotIn("tls_observation_missing", warning_codes)
+
     def test_external_ingress_projects_fresh_public_runtime_proof(self) -> None:
         profile = _profile()
         route_binding = _route_binding(

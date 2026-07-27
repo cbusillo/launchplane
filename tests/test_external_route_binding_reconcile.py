@@ -53,12 +53,13 @@ def _profile(
                 instance="web",
                 base_url=f"https://{domain}",
                 health_monitoring=ProductLaneHealthMonitoringPolicy(
+                    monitoring_intent="public",
                     checks=(
                         ProductLaneHealthCheck(
                             name="public-ingress",
                             require_runtime_identity=require_runtime_identity,
                         ),
-                    )
+                    ),
                 ),
             ),
         ),

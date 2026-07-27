@@ -713,15 +713,26 @@ The `Public Ingress Monitor` workflow owns both the recurring schedule and
 manual operator reruns, so its GitHub OIDC identity stays scoped only to
 `public_ingress_monitor.run_once`. Both paths call
 `POST /v1/products/public-ingress-monitor/run-once` through GitHub OIDC and are
-authorized in the Launchplane service context. Lanes opt in by declaring
-`health_monitoring.checks[]`: `public_http` checks validate public reachability,
-`private_http` checks resolve a Launchplane-owned private endpoint record by
+authorized in the Launchplane service context. Each lane declares a DB-backed
+`health_monitoring.monitoring_intent` of `public`, `private`, or `prelaunch` plus
+`checks[]`: `public_http` checks validate public reachability, `private_http`
+checks resolve a Launchplane-owned private endpoint record by
 `private_endpoint_key`, and `provider` checks fail closed until a
-provider-specific monitor is wired. The public-ingress route and record
+provider-specific monitor is wired. `public` requires an enabled public check;
+`private` requires an enabled private check; contradictory or missing intent
+fails validation. The public-ingress route and record
 names are compatibility names for the existing health-monitor observation
 family. Observations are sensor evidence; incident records are keyed by product,
 lane, and health-check name so public, private, and provider failures do not
 overwrite each other.
+
+Probe effectiveness and incident eligibility are separate. Public and TLS
+checks run for `public` and `prelaunch`; their failures open or update incidents
+only for `public`. Private intent suppresses public and TLS probes, while private
+and provider checks remain active and incident-eligible in every intent mode.
+Prelaunch failures therefore stay visible as readiness evidence without being
+reported as public outages. Moving to `public` deterministically activates
+incident eligibility on the next monitor cycle.
 
 `public_http` uses the centralized public outbound HTTP policy. Every initial
 destination and redirect hop is resolved independently; all IPv4 and IPv6
@@ -735,6 +746,27 @@ connect, request, response read, and redirect hops; the operating-system
 resolver still owns its own DNS lookup timeout. `private_http` is intentionally
 separate: only a scoped active private-health endpoint record can select the
 explicit private client, and public checks never fall back to that path.
+
+Use the `Product Health Monitoring` workflow for shared or production intent
+changes. Run `dry-run` first with the exact product/context/instance, check name,
+check kind, requested intent, and any registered private endpoint key; review the
+returned plan SHA-256, then run `apply` with that digest, a unique idempotency
+key, and the exact confirmation phrase. The service validates private endpoint
+scope without returning its URL, rejects check-kind changes under an existing
+name, and compare-and-writes only the selected check and lane intent. Whole
+profile writes cannot change existing health-monitoring authority, and
+onboarding updates preserve it.
+
+When intent makes an open public or TLS incident ineligible, the monitor keeps
+the real probe observation and writes a separate skipped reconciliation
+observation. The incident resolves with `monitoring_intent_changed`, not a false
+recovery. Observation, incident, and GitHub outbox rows are fenced by canonical
+fingerprints of the product profile and any private endpoint or route binding
+used by the target. The checks happen in one transaction, so an in-flight run
+discovered under old authority cannot reopen or resolve operator state after a
+record changes, even when its human timestamp is unchanged. Email and Discord
+delivery behavior and DB-backed notification policies are unchanged; do not
+disable destinations to perform an intent transition.
 
 TLS observations reuse the same monitor run, record family, and incident
 lifecycle. For each active environment route binding, Launchplane probes one

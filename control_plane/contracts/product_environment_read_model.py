@@ -22,9 +22,13 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    ProductLaneHealthCheckKind,
+    ProductLaneMonitoringIntent,
     ProductLaneProfile,
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
+    product_lane_monitoring_incident_eligible,
+    product_lane_monitoring_probe_effective,
     product_config_requirement_applies_to_lane,
 )
 from control_plane.contracts.product_topology_read_model import (
@@ -265,6 +269,8 @@ class ProductTargetSummary(BaseModel):
 class ProductPublicIngressSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    monitoring_intent: ProductLaneMonitoringIntent = "prelaunch"
+    incident_eligible: bool = False
     status: str = "missing"
     failure_code: str = ""
     observed_at: str = ""
@@ -280,6 +286,40 @@ class ProductPublicIngressSummary(BaseModel):
         freshness_status="missing",
         detail="Launchplane has not recorded public ingress observations for this lane.",
     )
+
+
+class ProductHealthMonitoringCheckSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    kind: ProductLaneHealthCheckKind
+    enabled: bool
+    probe_effective: bool
+    incident_eligible: bool
+    private_endpoint_configured: bool = False
+    status: str = "missing"
+    failure_code: str = ""
+    observed_at: str = ""
+    record_id: str = ""
+    summary: str = ""
+    incident_status: str = ""
+    incident_id: str = ""
+    trust_state: FreshnessStatus = "missing"
+    provenance: DataProvenance = DataProvenance(
+        source_kind="record",
+        freshness_status="missing",
+        detail="Launchplane has not recorded a probe observation for this health check.",
+    )
+
+
+class ProductHealthMonitoringSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    monitoring_intent: ProductLaneMonitoringIntent
+    public_incident_eligible: bool
+    checks: tuple[ProductHealthMonitoringCheckSummary, ...] = ()
+    trust_state: FreshnessStatus = "recorded"
+    provenance: DataProvenance
 
 
 class ProductOdooEnvironmentExtension(BaseModel):
@@ -313,6 +353,7 @@ class ProductEnvironmentSummary(BaseModel):
         default_factory=ProductEnvironmentDriverExtensions
     )
     topology: ProductEnvironmentTopology = Field(default_factory=ProductEnvironmentTopology)
+    health_monitoring: ProductHealthMonitoringSummary
     public_ingress: ProductPublicIngressSummary = Field(default_factory=ProductPublicIngressSummary)
     trust_state: FreshnessStatus
     provenance: DataProvenance
@@ -371,6 +412,7 @@ class ProductEnvironmentDetail(BaseModel):
     )
     target: ProductTargetSummary
     topology: ProductEnvironmentTopology = Field(default_factory=ProductEnvironmentTopology)
+    health_monitoring: ProductHealthMonitoringSummary
     public_ingress: ProductPublicIngressSummary = Field(default_factory=ProductPublicIngressSummary)
     runtime_settings: tuple[ProductRuntimeSettingSummary, ...] = ()
     managed_secrets: tuple[ProductSecretBindingSummary, ...] = ()
@@ -599,6 +641,11 @@ def build_product_environment_detail(
         ),
         target=_target_summary(lane_summary, topology=topology),
         topology=topology,
+        health_monitoring=_health_monitoring_summary(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+        ),
         public_ingress=_public_ingress_summary(
             record_store=record_store,
             profile=profile,
@@ -1723,6 +1770,11 @@ def _build_environment_summary(
             lane=lane,
         ),
         topology=topology,
+        health_monitoring=_health_monitoring_summary(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+        ),
         public_ingress=_public_ingress_summary(
             record_store=record_store,
             profile=profile,
@@ -1843,12 +1895,157 @@ def _build_preview_summary(
     )
 
 
+def _health_monitoring_summary(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+) -> ProductHealthMonitoringSummary:
+    check_summaries: list[ProductHealthMonitoringCheckSummary] = []
+    for check in lane.health_monitoring.checks:
+        probe_effective = check.enabled and product_lane_monitoring_probe_effective(
+            monitoring_intent=lane.health_monitoring.monitoring_intent,
+            check_kind=check.kind,
+        )
+        incident_eligible = check.enabled and product_lane_monitoring_incident_eligible(
+            monitoring_intent=lane.health_monitoring.monitoring_intent,
+            check_kind=check.kind,
+        )
+        latest: PublicIngressObservationRecord | None = None
+        if probe_effective:
+            records = _optional_records(
+                record_store,
+                "list_public_ingress_observation_records",
+                product=profile.product,
+                context_name=lane.context,
+                instance_name=lane.instance,
+                check_name=check.name,
+                check_kind=check.kind,
+                limit=50,
+            )
+            latest = next(
+                (
+                    record
+                    for record in records
+                    if isinstance(record, PublicIngressObservationRecord)
+                    and record.purpose == "probe"
+                ),
+                None,
+            )
+        incidents = _required_records(
+            record_store,
+            "list_public_ingress_incident_records",
+            product=profile.product,
+            context_name=lane.context,
+            instance_name=lane.instance,
+            check_name=check.name,
+            check_kind=check.kind,
+            status="open",
+            limit=1,
+        )
+        open_incident = next(
+            (
+                incident
+                for incident in incidents
+                if isinstance(incident, PublicIngressIncidentRecord)
+            ),
+            None,
+        )
+        status: str
+        if latest is not None:
+            trust_state = _public_ingress_freshness(latest.status)
+            provenance = DataProvenance(
+                source_kind="record",
+                source_record_id=latest.record_id,
+                recorded_at=latest.observed_at,
+                refreshed_at=latest.observed_at,
+                freshness_status=trust_state,
+                detail="Launchplane health monitoring probe observation.",
+            )
+            status = latest.status
+            summary = latest.summary
+        elif not check.enabled:
+            trust_state = "recorded"
+            provenance = _monitoring_intent_provenance(profile=profile, lane=lane)
+            status = "disabled"
+            summary = "This health check is disabled in the product profile."
+        elif not probe_effective:
+            trust_state = "recorded"
+            provenance = _monitoring_intent_provenance(profile=profile, lane=lane)
+            status = "not_expected"
+            summary = "This public check is suppressed by private monitoring intent."
+        else:
+            trust_state = "missing"
+            provenance = DataProvenance(
+                source_kind="record",
+                source_record_id=profile.product,
+                recorded_at=profile.updated_at,
+                refreshed_at=profile.updated_at,
+                freshness_status="missing",
+                detail="Launchplane has not recorded a probe observation for this health check.",
+            )
+            status = "missing"
+            summary = "Launchplane has not recorded a probe observation for this health check."
+        check_summaries.append(
+            ProductHealthMonitoringCheckSummary(
+                name=check.name,
+                kind=check.kind,
+                enabled=check.enabled,
+                probe_effective=probe_effective,
+                incident_eligible=incident_eligible,
+                private_endpoint_configured=bool(check.private_endpoint_key),
+                status=status,
+                failure_code=latest.failure_code or "" if latest is not None else "",
+                observed_at=latest.observed_at if latest is not None else "",
+                record_id=latest.record_id if latest is not None else "",
+                summary=summary,
+                incident_status=open_incident.status if open_incident is not None else "",
+                incident_id=open_incident.incident_id if open_incident is not None else "",
+                trust_state=trust_state,
+                provenance=provenance,
+            )
+        )
+    return ProductHealthMonitoringSummary(
+        monitoring_intent=lane.health_monitoring.monitoring_intent,
+        public_incident_eligible=lane.health_monitoring.monitoring_intent == "public",
+        checks=tuple(check_summaries),
+        provenance=_monitoring_intent_provenance(profile=profile, lane=lane),
+    )
+
+
+def _monitoring_intent_provenance(
+    *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+) -> DataProvenance:
+    return DataProvenance(
+        source_kind="record",
+        source_record_id=profile.product,
+        recorded_at=profile.updated_at,
+        refreshed_at=profile.updated_at,
+        freshness_status="recorded",
+        detail=(
+            f"Launchplane product-profile monitoring intent for {lane.context}/{lane.instance}."
+        ),
+    )
+
+
 def _public_ingress_summary(
     *,
     record_store: object,
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
 ) -> ProductPublicIngressSummary:
+    monitoring_intent = lane.health_monitoring.monitoring_intent
+    incident_eligible = monitoring_intent == "public"
+    if monitoring_intent == "private":
+        provenance = _monitoring_intent_provenance(profile=profile, lane=lane)
+        return ProductPublicIngressSummary(
+            monitoring_intent=monitoring_intent,
+            incident_eligible=False,
+            status="not_expected",
+            summary="Public ingress is not expected; private health monitoring is authoritative.",
+            trust_state="recorded",
+            provenance=provenance,
+        )
     records = _optional_records(
         record_store,
         "list_public_ingress_observation_records",
@@ -1856,11 +2053,21 @@ def _public_ingress_summary(
         context_name=lane.context,
         instance_name=lane.instance,
         check_kind="public_http",
-        limit=1,
+        limit=50,
     )
-    latest = next(iter(records), None)
+    latest = next(
+        (
+            record
+            for record in records
+            if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
+        ),
+        None,
+    )
     if latest is None or not isinstance(latest, PublicIngressObservationRecord):
-        return ProductPublicIngressSummary()
+        return ProductPublicIngressSummary(
+            monitoring_intent=monitoring_intent,
+            incident_eligible=incident_eligible,
+        )
     incidents = _required_records(
         record_store,
         "list_public_ingress_incident_records",
@@ -1884,6 +2091,8 @@ def _public_ingress_summary(
         detail="Launchplane public ingress synthetic observation.",
     )
     return ProductPublicIngressSummary(
+        monitoring_intent=monitoring_intent,
+        incident_eligible=incident_eligible,
         status=latest.status,
         failure_code=latest.failure_code or "",
         observed_at=latest.observed_at,

@@ -1,3 +1,5 @@
+import hashlib
+import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -52,3 +54,13 @@ class PrivateHealthEndpointRecord(BaseModel):
         if not public_error:
             raise ValueError("private health endpoint url must not be public")
         return self
+
+
+def private_health_endpoint_record_sha256(record: PrivateHealthEndpointRecord) -> str:
+    canonical_payload = json.dumps(
+        record.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()

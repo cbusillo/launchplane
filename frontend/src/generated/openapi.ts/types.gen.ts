@@ -1175,6 +1175,7 @@ export type ProductEnvironmentDetail = {
     driver_extensions: ProductEnvironmentDriverExtensions;
     driver_id: string;
     environment: string;
+    health_monitoring: ProductHealthMonitoringSummary;
     health_url: string;
     managed_secrets: Array<ProductSecretBindingSummary>;
     product: string;
@@ -1217,6 +1218,7 @@ export type ProductEnvironmentSummary = {
     context: string;
     driver_extensions: ProductEnvironmentDriverExtensions;
     environment: string;
+    health_monitoring: ProductHealthMonitoringSummary;
     health_url: string;
     provenance: DataProvenance;
     public_ingress: ProductPublicIngressSummary;
@@ -1251,6 +1253,32 @@ export type ProductExpectedConfigProfile = {
     runtime_environment_keys: Array<ProductRuntimeConfigRequirement>;
 };
 
+export type ProductHealthMonitoringCheckSummary = {
+    enabled: boolean;
+    failure_code: string;
+    incident_eligible: boolean;
+    incident_id: string;
+    incident_status: string;
+    kind: 'public_http' | 'private_http' | 'provider';
+    name: string;
+    observed_at: string;
+    private_endpoint_configured: boolean;
+    probe_effective: boolean;
+    provenance: DataProvenance;
+    record_id: string;
+    status: string;
+    summary: string;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductHealthMonitoringSummary = {
+    checks: Array<ProductHealthMonitoringCheckSummary>;
+    monitoring_intent: 'public' | 'private' | 'prelaunch';
+    provenance: DataProvenance;
+    public_incident_eligible: boolean;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
 export type ProductImageProfile = {
     repository: string;
 };
@@ -1268,6 +1296,7 @@ export type ProductLaneHealthCheck = {
 
 export type ProductLaneHealthMonitoringPolicy = {
     checks: Array<ProductLaneHealthCheck>;
+    monitoring_intent: 'public' | 'private' | 'prelaunch';
 };
 
 export type ProductLaneProfile = {
@@ -1294,8 +1323,10 @@ export type ProductManagedSecretConfigStatusItem = {
 export type ProductObservedIngress = {
     expected_runtime_identity: RuntimeIdentity | null;
     failure_code: string;
+    incident_eligible: boolean;
     incident_id: string;
     incident_status: string;
+    monitoring_intent: 'public' | 'private' | 'prelaunch';
     observed_at: string;
     observed_runtime_identity: RuntimeIdentity | null;
     provenance: DataProvenance;
@@ -1697,9 +1728,11 @@ export type ProductProviderRecordedTopology = {
 
 export type ProductPublicIngressSummary = {
     failure_code: string;
+    incident_eligible: boolean;
     incident_id: string;
     incident_opened_at: string;
     incident_status: string;
+    monitoring_intent: 'public' | 'private' | 'prelaunch';
     notification_sent: boolean;
     observed_at: string;
     provenance: DataProvenance;

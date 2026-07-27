@@ -17,7 +17,10 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
+from control_plane.workflows.product_onboarding import (
+    apply_product_onboarding_manifest,
+    build_product_profile_record,
+)
 
 
 CLI_MAIN = cast(Command, main)
@@ -118,12 +121,13 @@ def _manifest_payload() -> dict[str, object]:
                 "context": "example-site-testing",
                 "base_url": "https://testing.example.invalid",
                 "health_monitoring": {
+                    "monitoring_intent": "public",
                     "checks": [
                         {
                             "name": "public-ingress",
                             "kind": "public_http",
                         }
-                    ]
+                    ],
                 },
                 "odoo_stable_bootstrap": {
                     "enabled": True,
@@ -291,6 +295,31 @@ def _assert_odoo_stable_lane_runtime_contract(
 
 
 class ProductOnboardingTests(unittest.TestCase):
+    def test_existing_onboarding_preserves_health_monitoring_authority(self) -> None:
+        existing_manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+        existing_profile = build_product_profile_record(
+            manifest=existing_manifest,
+            updated_at="2026-07-27T16:56:00Z",
+        )
+        replacement_payload = _manifest_payload()
+        replacement_lanes = cast(list[dict[str, object]], replacement_payload["lanes"])
+        replacement_lanes[0]["health_monitoring"] = {
+            "monitoring_intent": "prelaunch",
+            "checks": [{"name": "public-ingress", "kind": "public_http"}],
+        }
+        replacement_manifest = ProductOnboardingManifest.model_validate(replacement_payload)
+
+        replacement_profile = build_product_profile_record(
+            manifest=replacement_manifest,
+            updated_at="2026-07-27T16:57:00Z",
+            existing_profile=existing_profile,
+        )
+
+        self.assertEqual(
+            replacement_profile.lanes[0].health_monitoring.monitoring_intent,
+            "public",
+        )
+
     def test_reusable_odoo_artifact_publish_standardizes_request_shape(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-artifact-publish.yml").read_text(
             encoding="utf-8"
@@ -2905,7 +2934,8 @@ class ProductOnboardingTests(unittest.TestCase):
                     "instance": "prod",
                     "context": "repairshopr-sync",
                     "health_monitoring": {
-                        "checks": [{"name": "public-ingress", "kind": "public_http"}]
+                        "monitoring_intent": "public",
+                        "checks": [{"name": "public-ingress", "kind": "public_http"}],
                     },
                 }
             ],
@@ -2980,6 +3010,7 @@ class ProductOnboardingTests(unittest.TestCase):
                     "context": "example-site",
                     "base_url": "https://example.test",
                     "health_monitoring": {
+                        "monitoring_intent": "public",
                         "checks": [
                             {
                                 "name": "private-runtime",
@@ -2994,7 +3025,7 @@ class ProductOnboardingTests(unittest.TestCase):
                                 "require_runtime_identity": True,
                                 "alert_issue_url": "https://github.example.test/org/repo/issues/1",
                             },
-                        ]
+                        ],
                     },
                 },
                 {
@@ -3038,6 +3069,7 @@ class ProductOnboardingTests(unittest.TestCase):
                     "context": "example-site",
                     "base_url": "https://example.test",
                     "health_monitoring": {
+                        "monitoring_intent": "public",
                         "checks": [
                             {"name": "api check", "kind": "public_http"},
                             {
@@ -3045,7 +3077,7 @@ class ProductOnboardingTests(unittest.TestCase):
                                 "kind": "private_http",
                                 "private_endpoint_key": "example-site-prod-runtime",
                             },
-                        ]
+                        ],
                     },
                 }
             ],
@@ -3071,6 +3103,7 @@ class ProductOnboardingTests(unittest.TestCase):
                     "context": "example-site",
                     "base_url": "https://example.test",
                     "health_monitoring": {
+                        "monitoring_intent": "private",
                         "checks": [
                             {"name": "public-ingress", "kind": "public_http"},
                             {
@@ -3078,7 +3111,7 @@ class ProductOnboardingTests(unittest.TestCase):
                                 "kind": "private_http",
                                 "private_endpoint_key": "example-site-prod-runtime",
                             },
-                        ]
+                        ],
                     },
                 }
             ],
@@ -3129,7 +3162,10 @@ class ProductOnboardingTests(unittest.TestCase):
                     "instance": "prod",
                     "context": "example-site",
                     "base_url": "https://example.test",
-                    "health_monitoring": {"checks": [{"name": "---", "kind": "public_http"}]},
+                    "health_monitoring": {
+                        "monitoring_intent": "public",
+                        "checks": [{"name": "---", "kind": "public_http"}],
+                    },
                 }
             ],
         }
@@ -3152,7 +3188,8 @@ class ProductOnboardingTests(unittest.TestCase):
                     "context": "repairshopr-sync",
                     "base_url": "https://repairshopr-sync.example.test",
                     "health_monitoring": {
-                        "checks": [{"name": "public-ingress", "kind": "public_http"}]
+                        "monitoring_intent": "public",
+                        "checks": [{"name": "public-ingress", "kind": "public_http"}],
                     },
                 }
             ],

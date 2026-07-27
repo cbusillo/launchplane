@@ -131,13 +131,25 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
-from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
-from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.contracts.private_health_endpoint_record import (
+    PrivateHealthEndpointRecord,
+    private_health_endpoint_record_sha256,
+)
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    route_binding_record_sha256,
+)
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
     migrate_product_profile_health_monitoring_payload,
 )
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_monitoring_intent_migration import (
+    migrate_product_profile_monitoring_intent_payload,
+)
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    product_profile_record_sha256,
+)
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationAttemptRecord,
 )
@@ -190,6 +202,7 @@ ProductProfileCompareWriteStatus = Literal[
     "reservation_in_progress",
     "reconciliation_required",
 ]
+PublicIngressTransitionWriteStatus = Literal["written", "authority_changed"]
 ProviderTargetCreateStatus = Literal["created", "exists"]
 MutationReservationDecision = Literal[
     "acquired",
@@ -267,6 +280,10 @@ MutationReconciliationRetryStatus = Literal[
 class ProductProfileCompareWriteResult(NamedTuple):
     status: ProductProfileCompareWriteStatus
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
+
+
+class PublicIngressTransitionWriteResult(NamedTuple):
+    status: PublicIngressTransitionWriteStatus
 
 
 class MutationReservationResult(NamedTuple):
@@ -8747,7 +8764,9 @@ class PostgresRecordStore(HumanSessionStore):
         self, payload: PayloadDict
     ) -> LaunchplaneProductProfileRecord:
         return LaunchplaneProductProfileRecord.model_validate(
-            migrate_product_profile_health_monitoring_payload(payload)
+            migrate_product_profile_monitoring_intent_payload(
+                migrate_product_profile_health_monitoring_payload(payload)
+            )
         )
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
@@ -9369,9 +9388,85 @@ class PostgresRecordStore(HumanSessionStore):
         observation: PublicIngressObservationRecord,
         incidents: tuple[PublicIngressIncidentRecord, ...],
         outbox_deliveries: tuple[OutboxDeliveryRecord, ...] = (),
-    ) -> None:
+        expected_profile_sha256: str = "",
+        expected_private_endpoint_key: str = "",
+        expected_private_endpoint_sha256: str = "",
+        expected_route_binding_sha256: str = "",
+    ) -> PublicIngressTransitionWriteResult:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            authority_changed = False
+            if expected_profile_sha256:
+                profile_statement = (
+                    select(LaunchplaneProductProfileRow)
+                    .where(LaunchplaneProductProfileRow.product == observation.product)
+                    .limit(1)
+                )
+                if not self.database_url.startswith("sqlite"):
+                    profile_statement = profile_statement.with_for_update()
+                profile_row = session.scalar(profile_statement)
+                authority_changed = (
+                    profile_row is None
+                    or product_profile_record_sha256(
+                        self._read_product_profile_payload(profile_row.payload)
+                    )
+                    != expected_profile_sha256
+                )
+            if not authority_changed and expected_private_endpoint_sha256:
+                private_endpoint_statement = (
+                    select(LaunchplanePrivateHealthEndpointRow)
+                    .where(
+                        LaunchplanePrivateHealthEndpointRow.endpoint_key
+                        == expected_private_endpoint_key
+                    )
+                    .limit(1)
+                )
+                if not self.database_url.startswith("sqlite"):
+                    private_endpoint_statement = private_endpoint_statement.with_for_update()
+                private_endpoint_row = session.scalar(private_endpoint_statement)
+                private_endpoint_sha256 = (
+                    "missing"
+                    if private_endpoint_row is None
+                    else private_health_endpoint_record_sha256(
+                        PrivateHealthEndpointRecord.model_validate(private_endpoint_row.payload)
+                    )
+                )
+                authority_changed = private_endpoint_sha256 != expected_private_endpoint_sha256
+            if not authority_changed and expected_route_binding_sha256:
+                route_binding_statement = (
+                    select(LaunchplaneRouteBindingRow)
+                    .where(
+                        LaunchplaneRouteBindingRow.product == observation.product,
+                        LaunchplaneRouteBindingRow.context == observation.context,
+                        LaunchplaneRouteBindingRow.instance == observation.instance,
+                    )
+                    .limit(1)
+                )
+                if not self.database_url.startswith("sqlite"):
+                    route_binding_statement = route_binding_statement.with_for_update()
+                route_binding_row = session.scalar(route_binding_statement)
+                route_binding_sha256 = (
+                    "missing"
+                    if route_binding_row is None
+                    else route_binding_record_sha256(
+                        EnvironmentRouteBindingRecord.model_validate(route_binding_row.payload)
+                    )
+                )
+                authority_changed = route_binding_sha256 != expected_route_binding_sha256
+            if authority_changed:
+                session.merge(
+                    LaunchplanePublicIngressObservationRow(
+                        record_id=observation.record_id,
+                        product=observation.product,
+                        context=observation.context,
+                        instance=observation.instance,
+                        status=observation.status,
+                        observed_at=observation.observed_at,
+                        payload=self._payload_dict(observation),
+                    )
+                )
+                session.commit()
+                return PublicIngressTransitionWriteResult(status="authority_changed")
             self._lock_outbox_dedupe_keys(
                 session,
                 dedupe_keys=tuple(delivery.dedupe_key for delivery in outbox_deliveries),
@@ -9409,6 +9504,7 @@ class PostgresRecordStore(HumanSessionStore):
                 if existing_delivery is None:
                     session.add(self._outbox_delivery_row(delivery))
             session.commit()
+            return PublicIngressTransitionWriteResult(status="written")
 
     def list_public_ingress_incident_records(
         self,

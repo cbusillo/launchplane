@@ -1560,18 +1560,24 @@ runtime values, or checked-in product catalogs, and workflow authority for real
 products must be granted through operator-supplied authz input.
 
 Health-monitoring apply is an exact-instance mutation for one stable-lane
-`public_http` check. Dry-run requires
+`public_http` or `private_http` check plus the lane's typed `public`, `private`,
+or `prelaunch` monitoring intent. Dry-run requires
 `product_profile.health_monitoring.plan`; apply requires the separate
 `product_profile.health_monitoring.apply` action, the reviewed plan SHA-256, and
 an idempotency key. Both actions authorize against the request product, context,
 and exact instance. The request excludes URL, domain, provider, proxy,
-certificate, and full-profile fields. Launchplane preserves the existing check
-URL or derives it from the current lane profile, rejects non-public check kinds,
-and requires strict runtime-identity checks to resolve to a lane-owned HTTPS
-host. The plan binds the complete current profile digest. Apply rebuilds the
-candidate from fresh DB-backed state and commits the profile compare-and-write
-with completed replay evidence atomically, so reviewed-plan drift and concurrent
-profile changes fail stale.
+certificate, and full-profile fields. Launchplane preserves an existing public
+check URL or derives it from the current lane profile. Private checks carry only
+a registered endpoint key; the service requires an active private endpoint
+record owned by the exact lane and never returns or logs its internal URL.
+Strict public runtime-identity checks must resolve to a lane-owned HTTPS host.
+The requested intent must retain its required enabled public or private check.
+The plan binds the complete current profile digest. Apply rebuilds the candidate
+from fresh DB-backed state and commits the profile compare-and-write with
+completed replay evidence atomically, so reviewed-plan drift and concurrent
+profile changes fail stale. Existing monitoring authority cannot be changed by
+the broad product-profile write route or overwritten by onboarding; callers use
+this reviewed bounded endpoint instead.
 
 Before authentication or JSON parsing, the ASGI boundary requires
 `application/json`, exactly one bounded `Content-Length`, no transfer encoding,

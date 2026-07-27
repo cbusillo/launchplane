@@ -2616,7 +2616,7 @@ def _product_health_monitoring_policy(
                     "job_workflow_refs": [
                         "cbusillo/launchplane/.github/workflows/"
                         "reusable-product-health-monitoring.yml@"
-                        "e61dc9a6161f9b97d2182ca69c4cadaa1df81fca"
+                        "88584ae2800bceabc9d448eba7defddc5da75ec1"
                     ],
                     "event_names": ["workflow_dispatch"],
                     "products": [product],

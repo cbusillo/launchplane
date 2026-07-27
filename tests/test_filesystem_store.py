@@ -970,6 +970,10 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self.assertEqual(check.name, "public-ingress")
         self.assertEqual(check.kind, "public_http")
         self.assertTrue(check.require_runtime_identity)
+        self.assertEqual(
+            loaded_record.lanes[0].health_monitoring.monitoring_intent,
+            "public",
+        )
         self.assertEqual([record.product for record in listed_records], ["example-site"])
         self.assertNotIn("public_ingress_monitoring", persisted_payload["lanes"][0])
         self.assertNotIn(
@@ -979,6 +983,10 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self.assertEqual(
             persisted_payload["lanes"][0]["health_monitoring"]["checks"][0]["name"],
             "public-ingress",
+        )
+        self.assertEqual(
+            persisted_payload["lanes"][0]["health_monitoring"]["monitoring_intent"],
+            "public",
         )
 
     def test_write_and_list_public_ingress_observation_records(self) -> None:

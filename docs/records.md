@@ -644,7 +644,15 @@ derived from runtime-environment records, managed secret binding records, driver
 support, and trust metadata; expected config requirements do not store runtime
 values, managed secret IDs, secret plaintext, or ciphertext.
 
-Stable lanes declare synthetic monitoring through `health_monitoring.checks[]`.
+Stable lanes declare synthetic monitoring through `health_monitoring`, which
+contains an explicit `monitoring_intent` of `public`, `private`, or `prelaunch`
+plus `checks[]`. The intent is DB-backed product-profile authority, not a
+checked-in product catalog. `public` requires an enabled `public_http` check;
+`private` requires an enabled `private_http` check; `prelaunch` may retain
+public checks so Launchplane can show readiness evidence before public
+availability is expected. Missing intent on a policy with checks, unknown
+values, and public/private intent without its required check fail validation.
+
 Each check has a stable name and kind. `public_http` checks use an explicit URL
 or the lane `health_url`, or derive one from lane `base_url` plus product
 `health_path`. `private_http` checks monitor internal service endpoints without
@@ -656,15 +664,20 @@ a product/context/instance lane. Private endpoint records reject public URLs,
 and endpoint-key-backed checks fail closed when the record is missing, disabled,
 or scoped to another lane. `provider` checks record provider-health intent and
 fail closed until a provider-specific monitor implementation is wired. The
-monitor records HTTP reachability, redirect failures, private/internal URL skips
-for public checks, and runtime identity comparison when current lane inventory
-or deployment evidence provides an expected identity. Check policy may carry an
-enabled flag and provider-specific routing details, but alert destinations are
-not lane text fields. Public ingress incident notifications are routed through
-DB-backed notification policy records. Legacy product-profile payloads that
-still contain `alert_issue_url` are tolerated during record reads and stripped
-from the migrated health-monitoring shape instead of being treated as runtime
-authority.
+monitor records HTTP reachability, redirect failures, private/internal URL
+rejection for public checks, and runtime identity comparison when current lane
+inventory or deployment evidence provides an expected identity. Public and TLS
+probes are effective for `public` and `prelaunch`, but only `public` makes their
+failures incident-eligible. `private` suppresses public/TLS probes while keeping
+private and provider checks active; private/provider failures remain
+incident-eligible in every intent mode. Public checks never fall back to the
+private client. Check policy may carry an enabled flag and provider-specific
+routing details, but alert destinations are not lane text fields. Public ingress
+incident notifications are routed through DB-backed notification policy
+records. Legacy product-profile payloads receive a versioned generic migration:
+an enabled public check maps to `public`, otherwise an enabled private check maps
+to `private`, and lanes without either map to `prelaunch`. Real product identity
+does not participate in that migration.
 
 The product key is the durable workspace identity. For example,
 `sellyouroutboard` is the SellYourOutboard product workspace; `testing`, `prod`,
@@ -770,18 +783,24 @@ surface for both modes and supplies the target product and requested `none` or
 from service-backed or operator-supplied authz input rather than a checked-in
 product catalog.
 
-Stable-lane public health policy changes use
+Stable-lane health policy and monitoring-intent changes use
 `POST /v1/product-profiles/health-monitoring/apply`. The request identifies one
-exact product/context/instance lane and one health-check name, then supplies only
-the desired enabled and runtime-identity requirements. It cannot carry a URL,
-domain, provider target, proxy record, certificate reference, or replacement
-product profile. Launchplane reads the DB-backed profile, preserves any existing
-public-check URL or derives the check from lane-owned `health_url`/`base_url`,
-and rejects non-public checks. Enabling strict runtime identity requires an HTTPS
-host already owned by that lane. Dry-run returns a canonical plan bound to the
-complete current profile; apply requires the reviewed digest and an idempotency
-key, then compare-and-writes only the selected check plus server-owned profile
-audit fields. Concurrent profile edits fail stale instead of being overwritten.
+exact product/context/instance lane and one health-check name, then supplies the
+desired `monitoring_intent`, `public_http` or `private_http` kind, enabled state,
+and runtime-identity requirement. Public checks cannot carry endpoint URLs;
+Launchplane preserves any existing public-check URL or derives it from lane-owned
+`health_url`/`base_url`. Private checks carry only a registered
+`private_endpoint_key`; apply validates that the record is active and belongs to
+the exact product/context/instance without returning or logging its internal URL.
+The request cannot carry a domain, provider target, proxy record, certificate
+reference, or replacement product profile. Enabling strict public runtime
+identity requires an HTTPS host already owned by that lane. Dry-run returns a
+canonical plan bound to the complete current profile; apply requires the reviewed
+digest and an idempotency key, then compare-and-writes only the selected check,
+lane intent, and server-owned profile audit fields. Whole-profile service writes
+cannot change existing health-monitoring authority, and onboarding updates
+preserve it; operators use this bounded apply path instead. Concurrent profile
+edits fail stale instead of being overwritten.
 
 For initial seed or repair work, operators can write the same DB-backed record
 directly with
@@ -797,15 +816,29 @@ Public ingress observations are append-only Launchplane records under
 context, instance, and observation time. It stores the checked base and health
 URLs, pass/fail/skipped status, failure code, redirect and HTTP evidence,
 runtime identity match detail when available, and whether Launchplane delivered
-a configured transition notification.
+a configured transition notification. Records also carry the lane's typed
+`monitoring_intent` and a `purpose` of `probe` or `reconciliation`.
 
 These records are the source for the product environment read model's
-`public_ingress` summary. Passing and failing observations are both verified
-evidence of the latest probe; failure marks the lane unhealthy without
-mislabeling current evidence as stale. A public check whose literal or resolved
-destination is non-public records a failing `private_url` observation. The
-`skipped` status remains readable for historical records, but current public
+`public_ingress` and `health_monitoring` summaries. Readiness projections select
+the latest `probe` record so an intent transition cannot replace measured
+reachability with administrative evidence. Passing and failing observations are
+both verified evidence of the latest probe; failure marks the lane unhealthy
+without mislabeling current evidence as stale. A public check whose literal or
+resolved destination is non-public records a failing `private_url` observation.
+The `skipped` status remains readable for historical records, but current public
 checks do not treat a private destination as unsupported or silently healthy.
+
+When a check leaves the incident-eligible set, Launchplane writes a distinct
+`reconciliation` observation with skipped `monitoring_intent_changed` evidence
+and a separate record id. This preserves the last real probe while giving the
+incident transition an explicit durable cause. Canonical fingerprints for the
+product profile and any private-endpoint or route-binding authority used by the
+target are checked in the same database transaction as observation, incident,
+and GitHub outbox writes. If monitoring authority changed after target
+discovery, the stale probe is retained as evidence but cannot open, update, or
+resolve an incident; the next monitor cycle reconciles against current
+authority.
 
 ## Product Environment Topology Projection
 
@@ -905,8 +938,13 @@ Public ingress incidents are Launchplane-owned lifecycle records under
 `launchplane_public_ingress_incidents`. They are derived from public-ingress
 observations and keyed by product, context, instance, and incident open time. An
 open incident records the first failing observation and the latest failing
-observation for that lane. A recovery observation resolves the incident by
-recording the resolving observation and resolved timestamp.
+observation for that lane. A recovery observation resolves the incident with
+`resolution_reason = recovered`. If a public or TLS check becomes ineligible
+because monitoring authority changes, a typed reconciliation observation
+resolves it with `resolution_reason = monitoring_intent_changed`; this is not
+presented as endpoint recovery. Existing notification policies remain in force
+for opened, updated, and resolved events, so actionable failures remain red and
+intent-driven resolution remains auditable.
 
 TLS certificate observations do not introduce a parallel storage family. They
 reuse `launchplane_public_ingress_observations` with `check_kind = "tls"` and a

@@ -28,6 +28,7 @@ def _profile() -> LaunchplaneProductProfileRecord:
     lanes[0]["base_url"] = "https://cm-testing.example.com"
     lanes[0]["health_url"] = "https://cm-testing.example.com/launchplane/health"
     lanes[0]["health_monitoring"] = {
+        "monitoring_intent": "public",
         "checks": [
             {
                 "name": "public-ingress",
@@ -43,7 +44,7 @@ def _profile() -> LaunchplaneProductProfileRecord:
                 "provider": "example",
                 "provider_check": "ready",
             },
-        ]
+        ],
     }
     return LaunchplaneProductProfileRecord.model_validate(payload)
 
@@ -52,8 +53,11 @@ def _request(
     *,
     mode: str = "dry-run",
     check_name: str = "public-ingress",
+    check_kind: str = "public_http",
+    monitoring_intent: str = "public",
     enabled: bool = True,
     require_runtime_identity: bool = True,
+    private_endpoint_key: str = "",
     reviewed_plan_sha256: str = "",
 ) -> ProductHealthMonitoringApplyRequest:
     return ProductHealthMonitoringApplyRequest.model_validate(
@@ -62,8 +66,11 @@ def _request(
             "context": "cm",
             "instance": "testing",
             "check_name": check_name,
+            "check_kind": check_kind,
+            "monitoring_intent": monitoring_intent,
             "enabled": enabled,
             "require_runtime_identity": require_runtime_identity,
+            "private_endpoint_key": private_endpoint_key,
             "mode": mode,
             "reason": "Require strict public runtime identity.",
             "reviewed_plan_sha256": reviewed_plan_sha256,
@@ -78,6 +85,8 @@ class ProductHealthMonitoringTests(unittest.TestCase):
 
         self.assertEqual(plan.operation, "update")
         self.assertEqual(plan.current_enabled, True)
+        self.assertEqual(plan.current_monitoring_intent, "public")
+        self.assertEqual(plan.requested_monitoring_intent, "public")
         self.assertEqual(plan.current_require_runtime_identity, False)
         self.assertEqual(plan.requested_require_runtime_identity, True)
         self.assertEqual(
@@ -129,6 +138,32 @@ class ProductHealthMonitoringTests(unittest.TestCase):
         self.assertTrue(created.enabled)
         self.assertTrue(created.require_runtime_identity)
 
+    def test_private_intent_adds_registered_private_check_without_exposing_url(self) -> None:
+        profile = _profile()
+        request = _request(
+            check_name="private-health",
+            check_kind="private_http",
+            monitoring_intent="private",
+            require_runtime_identity=True,
+            private_endpoint_key="private-health-prod",
+        )
+
+        plan = build_product_health_monitoring_plan(profile=profile, request=request)
+        updated = updated_product_health_monitoring_profile(
+            profile=profile,
+            request=request,
+            updated_at="2026-07-22T01:00:00Z",
+        )
+
+        self.assertEqual(plan.requested_check_kind, "private_http")
+        self.assertEqual(plan.requested_monitoring_intent, "private")
+        self.assertEqual(plan.resolved_url, "")
+        self.assertEqual(plan.private_endpoint_key, "private-health-prod")
+        self.assertEqual(updated.lanes[0].health_monitoring.monitoring_intent, "private")
+        private_check = updated.lanes[0].health_monitoring.checks[-1]
+        self.assertEqual(private_check.kind, "private_http")
+        self.assertEqual(private_check.private_endpoint_key, "private-health-prod")
+
     def test_plan_rejects_matching_non_public_check(self) -> None:
         with self.assertRaises(ProductHealthMonitoringCheckKindError):
             build_product_health_monitoring_plan(
@@ -172,6 +207,15 @@ class ProductHealthMonitoringTests(unittest.TestCase):
             _request(reviewed_plan_sha256="a" * 64)
         with self.assertRaises(ValidationError):
             _request(enabled=False, require_runtime_identity=True)
+        with self.assertRaises(ValidationError):
+            _request(private_endpoint_key="private-health-prod")
+
+    def test_private_intent_requires_enabled_private_check(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires an enabled private HTTP"):
+            build_product_health_monitoring_plan(
+                profile=_profile(),
+                request=_request(monitoring_intent="private"),
+            )
 
     def test_request_rejects_caller_authority_fields(self) -> None:
         payload = _request().model_dump(mode="json")

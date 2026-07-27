@@ -47,10 +47,13 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
     PublicIngressNotificationDriverSet,
+    _deliver_github_issue_notification,
     _gh_issue_client,
     _incident_event,
+    check_public_ingress_target,
     deliver_public_ingress_notification_outbox_delivery,
     discover_public_ingress_monitor_targets,
+    reconcile_public_ingress_incident,
     run_public_ingress_monitor_once,
 )
 from control_plane.outbound_http import PublicHttpDestinationError
@@ -65,12 +68,13 @@ def _public_health_monitoring(
     *, require_runtime_identity: bool = False
 ) -> ProductLaneHealthMonitoringPolicy:
     return ProductLaneHealthMonitoringPolicy(
+        monitoring_intent="public",
         checks=(
             ProductLaneHealthCheck(
                 name="public-ingress",
                 require_runtime_identity=require_runtime_identity,
             ),
-        )
+        ),
     )
 
 
@@ -555,7 +559,10 @@ class PublicIngressMonitorTests(unittest.TestCase):
             instance="prod",
             context="example-site",
             base_url="https://example.test",
-            health_monitoring=ProductLaneHealthMonitoringPolicy(checks=()),
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="prelaunch",
+                checks=(),
+            ),
         )
         store = _Store((_profile(lane=lane),))
 
@@ -581,6 +588,88 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(requested_urls, [])
         self.assertEqual(store.records[0].status, "fail")
         self.assertEqual(store.records[0].failure_code, "private_url")
+        self.assertEqual(result.open_incident_count, 1)
+
+    def test_prelaunch_public_failure_stays_visible_without_opening_incident(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            base_url="https://example.test",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="prelaunch",
+                checks=(ProductLaneHealthCheck(name="public-ingress"),),
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-07-27T16:40:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=404,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(result.open_incident_count, 0)
+        self.assertEqual(store.incidents, [])
+        self.assertEqual(store.records[0].purpose, "probe")
+        self.assertEqual(store.records[0].monitoring_intent, "prelaunch")
+
+    def test_public_to_prelaunch_resolves_incident_without_false_recovery(self) -> None:
+        store = _Store((_profile(),))
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-07-27T16:41:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=404,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        prelaunch_lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            base_url="https://example.test",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="prelaunch",
+                checks=(ProductLaneHealthCheck(name="public-ingress"),),
+            ),
+        )
+        store._profiles = (
+            _profile(lane=prelaunch_lane).model_copy(update={"updated_at": "2026-07-27T16:41:30Z"}),
+        )
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-07-27T16:42:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=404,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+
+        self.assertEqual(result.resolved_incident_count, 1)
+        self.assertEqual(result.reconciliation_count, 1)
+        self.assertEqual(store.incidents[0].status, "resolved")
+        self.assertEqual(
+            store.incidents[0].resolution_reason,
+            "monitoring_intent_changed",
+        )
+        probe = next(record for record in result.records if record.purpose == "probe")
+        reconciliation = next(
+            record for record in result.records if record.purpose == "reconciliation"
+        )
+        self.assertEqual(probe.status, "fail")
+        self.assertEqual(reconciliation.status, "skipped")
+        self.assertNotEqual(probe.record_id, reconciliation.record_id)
+        self.assertEqual(
+            store.incidents[0].resolved_observation_id,
+            reconciliation.record_id,
+        )
 
     def test_public_http_timeout_records_connection_timeout(self) -> None:
         store = _Store((_profile(),))
@@ -912,13 +1001,14 @@ class PublicIngressMonitorTests(unittest.TestCase):
             instance="prod",
             context="example-site",
             health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="private",
                 checks=(
                     ProductLaneHealthCheck(
                         name="private-runtime",
                         kind="private_http",
                         private_endpoint_key="example-site-prod-runtime",
                     ),
-                )
+                ),
             ),
         )
         store = _Store((_profile(lane=lane),))
@@ -941,18 +1031,75 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(store.records[0].check_kind, "private_http")
         self.assertEqual(store.records[0].targets[0].target, "private_health_url")
 
+    def test_public_to_private_reconciles_public_incident_and_keeps_private_probe(self) -> None:
+        store = _Store((_profile(),))
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-07-27T16:43:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=500,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        private_lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            base_url="https://example.test",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="private",
+                checks=(
+                    ProductLaneHealthCheck(name="public-ingress"),
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        private_endpoint_key="example-site-prod-runtime",
+                    ),
+                ),
+            ),
+        )
+        store._profiles = (
+            _profile(lane=private_lane).model_copy(update={"updated_at": "2026-07-27T16:43:30Z"}),
+        )
+        _add_private_endpoint(store)
+        private_urls: list[str] = []
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-07-27T16:44:00Z",
+            http_get=lambda _url, _timeout: (_ for _ in ()).throw(
+                AssertionError("private intent must suppress public probes")
+            ),
+            private_http_get=lambda url, _timeout: _capture_request(private_urls, url),
+        )
+
+        self.assertEqual(result.pass_count, 1)
+        self.assertEqual(result.reconciliation_count, 1)
+        self.assertEqual(result.resolved_incident_count, 1)
+        self.assertEqual(private_urls, ["http://10.0.0.5:8080/health"])
+        private_probe = next(record for record in result.records if record.purpose == "probe")
+        reconciliation = next(
+            record for record in result.records if record.purpose == "reconciliation"
+        )
+        self.assertEqual(private_probe.check_kind, "private_http")
+        self.assertEqual(private_probe.status, "pass")
+        self.assertEqual(reconciliation.check_kind, "public_http")
+        self.assertEqual(reconciliation.status, "skipped")
+        self.assertEqual(store.incidents[0].resolution_reason, "monitoring_intent_changed")
+
     def test_private_http_check_resolves_private_endpoint_record(self) -> None:
         lane = ProductLaneProfile(
             instance="prod",
             context="example-site",
             health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="private",
                 checks=(
                     ProductLaneHealthCheck(
                         name="private-runtime",
                         kind="private_http",
                         private_endpoint_key="example-site-prod-runtime",
                     ),
-                )
+                ),
             ),
         )
         store = _Store((_profile(lane=lane),))
@@ -970,18 +1117,51 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(store.records[0].health_url, "http://10.0.0.5:8080/health")
         self.assertEqual(store.records[0].targets[0].target, "private_health_url")
 
+    def test_prelaunch_private_failure_remains_incident_eligible(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="prelaunch",
+                checks=(
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        private_endpoint_key="example-site-prod-runtime",
+                    ),
+                ),
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+        _add_private_endpoint(store)
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-07-27T17:40:00Z",
+            private_http_get=lambda url, _timeout: HttpObservation(
+                status_code=503,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(result.open_incident_count, 1)
+        self.assertEqual(store.incidents[0].check_kind, "private_http")
+
     def test_private_http_endpoint_reference_fails_closed_when_missing(self) -> None:
         lane = ProductLaneProfile(
             instance="prod",
             context="example-site",
             health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="private",
                 checks=(
                     ProductLaneHealthCheck(
                         name="private-runtime",
                         kind="private_http",
                         private_endpoint_key="missing-runtime",
                     ),
-                )
+                ),
             ),
         )
         store = _Store((_profile(lane=lane),))
@@ -1004,13 +1184,14 @@ class PublicIngressMonitorTests(unittest.TestCase):
             instance="prod",
             context="example-site",
             health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="private",
                 checks=(
                     ProductLaneHealthCheck(
                         name="private-runtime",
                         kind="private_http",
                         private_endpoint_key="disabled-runtime",
                     ),
-                )
+                ),
             ),
         )
         store = _Store((_profile(lane=lane),))
@@ -1030,13 +1211,14 @@ class PublicIngressMonitorTests(unittest.TestCase):
             instance="prod",
             context="example-site",
             health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="private",
                 checks=(
                     ProductLaneHealthCheck(
                         name="private-runtime",
                         kind="private_http",
                         private_endpoint_key="wrong-lane-runtime",
                     ),
-                )
+                ),
             ),
         )
         store = _Store((_profile(lane=lane),))
@@ -1058,13 +1240,14 @@ class PublicIngressMonitorTests(unittest.TestCase):
             instance="prod",
             context="example-site",
             health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="private",
                 checks=(
                     ProductLaneHealthCheck(
                         name="private-runtime",
                         kind="private_http",
                         private_endpoint_key="wrong-product-runtime",
                     ),
-                )
+                ),
             ),
         )
         store = _Store((_profile(lane=lane),))
@@ -1085,6 +1268,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
             context="example-site",
             base_url="https://example.test",
             health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="public",
                 checks=(
                     ProductLaneHealthCheck(name="public-ingress"),
                     ProductLaneHealthCheck(
@@ -1092,7 +1276,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                         kind="private_http",
                         private_endpoint_key="example-site-prod-runtime",
                     ),
-                )
+                ),
             ),
         )
         store = _Store((_profile(driver_id="custom-worker", lane=lane),))
@@ -1109,6 +1293,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
             instance="prod",
             context="example-site",
             health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="prelaunch",
                 checks=(
                     ProductLaneHealthCheck(
                         name="provider-target",
@@ -1116,7 +1301,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                         provider="dokploy",
                         provider_check="target-health",
                     ),
-                )
+                ),
             ),
         )
         store = _Store((_profile(lane=lane),))
@@ -1141,6 +1326,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
             context="example-site",
             base_url="https://example.test",
             health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="public",
                 checks=(
                     ProductLaneHealthCheck(name="public-ingress"),
                     ProductLaneHealthCheck(
@@ -1148,7 +1334,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                         kind="private_http",
                         private_endpoint_key="example-site-prod-runtime",
                     ),
-                )
+                ),
             ),
         )
         store = _Store((_profile(lane=lane),))
@@ -1669,6 +1855,178 @@ class PublicIngressMonitorTests(unittest.TestCase):
             },
         )
 
+    def test_postgres_transition_fences_same_timestamp_monitoring_authority(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(_profile())
+            target = discover_public_ingress_monitor_targets(store)[0]
+            prelaunch_lane = ProductLaneProfile(
+                instance="prod",
+                context="example-site",
+                base_url="https://example.test",
+                health_monitoring=ProductLaneHealthMonitoringPolicy(
+                    monitoring_intent="prelaunch",
+                    checks=(ProductLaneHealthCheck(name="public-ingress"),),
+                ),
+            )
+            store.write_product_profile_record(_profile(lane=prelaunch_lane))
+            observation = check_public_ingress_target(
+                target=target,
+                checked_at="2026-07-27T16:45:30Z",
+                timeout_seconds=10,
+                http_get=lambda url, _timeout: HttpObservation(
+                    status_code=503,
+                    final_url=url,
+                    redirect_count=0,
+                ),
+                tls_get=lambda _domain, _timeout: (_ for _ in ()).throw(
+                    AssertionError("HTTP target must not use TLS probe")
+                ),
+            )
+            incidents = reconcile_public_ingress_incident(
+                record_store=store,
+                record=observation,
+                write_records=False,
+            )
+
+            write_result = store.write_public_ingress_transition_with_outbox(
+                observation=observation,
+                incidents=incidents,
+                expected_profile_sha256=target.profile_sha256,
+            )
+            stored_observations = store.list_public_ingress_observation_records()
+            stored_incidents = store.list_public_ingress_incident_records()
+            store.close()
+
+        self.assertEqual(write_result.status, "authority_changed")
+        self.assertEqual(len(stored_observations), 1)
+        self.assertEqual(stored_incidents, ())
+
+    def test_postgres_transition_fences_private_endpoint_authority_change(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="private",
+                checks=(
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        private_endpoint_key="example-site-prod-runtime",
+                    ),
+                ),
+            ),
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(_profile(lane=lane))
+            store.write_private_health_endpoint_record(
+                PrivateHealthEndpointRecord(
+                    endpoint_key="example-site-prod-runtime",
+                    product="example-site",
+                    context="example-site",
+                    instance="prod",
+                    url="http://10.0.0.5:8080/health",
+                    updated_at="2026-07-27T17:48:00Z",
+                )
+            )
+            target = discover_public_ingress_monitor_targets(store)[0]
+            store.write_private_health_endpoint_record(
+                PrivateHealthEndpointRecord(
+                    endpoint_key="example-site-prod-runtime",
+                    product="example-site",
+                    context="example-site",
+                    instance="prod",
+                    url="http://10.0.0.6:8080/health",
+                    updated_at="2026-07-27T17:48:00Z",
+                )
+            )
+            observation = check_public_ingress_target(
+                target=target,
+                checked_at="2026-07-27T17:48:30Z",
+                timeout_seconds=10,
+                http_get=lambda url, _timeout: HttpObservation(
+                    status_code=503,
+                    final_url=url,
+                    redirect_count=0,
+                ),
+                tls_get=lambda _domain, _timeout: self.fail(
+                    "private target must not use TLS probe"
+                ),
+            )
+            incidents = reconcile_public_ingress_incident(
+                record_store=store,
+                record=observation,
+                write_records=False,
+            )
+
+            write_result = store.write_public_ingress_transition_with_outbox(
+                observation=observation,
+                incidents=incidents,
+                expected_profile_sha256=target.profile_sha256,
+                expected_private_endpoint_key=target.private_endpoint_key,
+                expected_private_endpoint_sha256=target.private_endpoint_sha256,
+            )
+            stored_incidents = store.list_public_ingress_incident_records()
+            store.close()
+
+        self.assertEqual(write_result.status, "authority_changed")
+        self.assertEqual(stored_incidents, ())
+
+    def test_postgres_transition_fences_route_binding_authority_change(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(_profile())
+            store.write_route_binding_record(_route_binding())
+            target = next(
+                target
+                for target in discover_public_ingress_monitor_targets(store)
+                if target.check_kind == "tls"
+            )
+            store.write_route_binding_record(
+                _route_binding(domains=(("replacement.example.test", "primary"),))
+            )
+            observation = check_public_ingress_target(
+                target=target,
+                checked_at="2026-07-27T17:49:30Z",
+                timeout_seconds=10,
+                http_get=lambda _url, _timeout: self.fail("TLS target must not use HTTP probe"),
+                tls_get=lambda _domain, _timeout: PublicTlsProbeResult(
+                    status="unreachable",
+                    failure_code="tls_failure",
+                    summary="TLS probe failed.",
+                ),
+            )
+            incidents = reconcile_public_ingress_incident(
+                record_store=store,
+                record=observation,
+                write_records=False,
+            )
+
+            write_result = store.write_public_ingress_transition_with_outbox(
+                observation=observation,
+                incidents=incidents,
+                expected_profile_sha256=target.profile_sha256,
+                expected_route_binding_sha256=target.route_binding_sha256,
+            )
+            stored_incidents = store.list_public_ingress_incident_records()
+            store.close()
+
+        self.assertEqual(write_result.status, "authority_changed")
+        self.assertEqual(stored_incidents, ())
+
     def test_postgres_mixed_notification_policy_keeps_direct_email_and_discord(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
@@ -1816,6 +2174,64 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(result.action, "closed_issue")
         self.assertEqual(result.external_id, "issue-123")
 
+    def test_resolved_outbox_without_prior_issue_is_terminally_skipped(self) -> None:
+        marker = "public-ingress-resolved-no-prior-issue"
+        record = OutboxDeliveryRecord(
+            delivery_id="outbox-public-ingress-resolved-no-prior-issue",
+            kind="public_ingress_notification",
+            state="running",
+            aggregate_type="public_ingress_incident",
+            aggregate_id="incident-example-site-prod",
+            dedupe_key=f"public_ingress_notification:{marker}",
+            created_at="2026-07-27T17:47:00Z",
+            updated_at="2026-07-27T17:47:00Z",
+            next_attempt_at="2026-07-27T17:47:00Z",
+            lease_owner="worker-a",
+            lease_expires_at="2026-07-27T17:52:00Z",
+            payload={
+                "attempt": {
+                    "attempt_id": marker,
+                    "incident_id": "incident-example-site-prod",
+                    "event": "resolved",
+                    "policy_id": "public-ingress-notifications-example-site",
+                    "destination_id": "github-main",
+                    "destination_kind": "github_issue",
+                    "attempted_at": "2026-07-27T17:47:00Z",
+                    "observation_id": "observation-example-site-prod",
+                },
+                "destination": {
+                    "destination_id": "github-main",
+                    "kind": "github_issue",
+                    "status": "enabled",
+                    "github_repository": "cbusillo/launchplane",
+                    "github_issue_number": None,
+                    "github_label": "public-ingress",
+                },
+                "body": f"Resolved\n<!-- launchplane-public-ingress-notification:{marker} -->",
+                "existing_issue_url": "",
+                "marker": marker,
+            },
+        )
+
+        result = deliver_public_ingress_notification_outbox_delivery(
+            record=record,
+            drivers=PublicIngressNotificationDriverSet(
+                github_client=lambda _action, _payload: self.fail(
+                    "resolution without a prior issue must not call GitHub"
+                )
+            ),
+            mark_provider_started=lambda _key, _provider: self.fail(
+                "skipped resolution must not start a provider operation"
+            ),
+        )
+
+        self.assertEqual(result.state, "delivered")
+        self.assertEqual(result.action, "skipped_no_prior_issue")
+        attempt_result = result.payload["attempt_result"]
+        self.assertIsInstance(attempt_result, dict)
+        assert isinstance(attempt_result, dict)
+        self.assertEqual(attempt_result["delivery_status"], "skipped")
+
     def test_github_ensure_closed_patches_open_issue_without_duplicate_comment(self) -> None:
         with patch(
             "control_plane.workflows.public_ingress_monitor._github_api_request",
@@ -1918,6 +2334,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
             context="example-site",
             base_url="https://example.test",
             health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="public",
                 checks=(
                     ProductLaneHealthCheck(name="public-ingress"),
                     ProductLaneHealthCheck(
@@ -1925,7 +2342,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                         kind="private_http",
                         private_endpoint_key="example-site-prod-runtime",
                     ),
-                )
+                ),
             ),
         )
         store = _Store((_profile(lane=lane),))
@@ -2110,6 +2527,47 @@ class PublicIngressMonitorTests(unittest.TestCase):
             github_calls[1][1]["issue_url"],
             "https://github.com/cbusillo/launchplane/issues/123",
         )
+
+    def test_github_resolution_without_prior_issue_is_skipped(self) -> None:
+        store = _Store((_profile(),))
+        failure = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-07-27T17:45:00Z",
+            notify=False,
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=503,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        incident = failure.incidents[0].model_copy(
+            update={
+                "status": "resolved",
+                "resolved_at": "2026-07-27T17:46:00Z",
+                "resolved_observation_id": failure.records[0].record_id,
+                "resolution_reason": "monitoring_intent_changed",
+            }
+        )
+        destination = PublicIngressNotificationDestination(
+            destination_id="github-main",
+            kind="github_issue",
+            github_repository="cbusillo/launchplane",
+            github_label="public-ingress",
+        )
+
+        delivery = _deliver_github_issue_notification(
+            destination=destination,
+            event="resolved",
+            incident=incident,
+            observation=failure.records[0],
+            previous_attempts=(),
+            github_client=lambda _action, _payload: self.fail(
+                "resolution without a prior issue must not call GitHub"
+            ),
+        )
+
+        self.assertEqual(delivery.delivery_status, "skipped")
+        self.assertEqual(delivery.action, "no_prior_issue")
 
     def test_default_github_incident_driver_uses_managed_token_api(self) -> None:
         requests: list[Request] = []

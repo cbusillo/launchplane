@@ -558,7 +558,8 @@ class GenericWebDeployTests(unittest.TestCase):
                     instance="prod",
                     context="repairshopr-sync",
                     health_monitoring=ProductLaneHealthMonitoringPolicy(
-                        checks=(ProductLaneHealthCheck(name="public-ingress"),)
+                        monitoring_intent="public",
+                        checks=(ProductLaneHealthCheck(name="public-ingress"),),
                     ),
                 ),
             ),
@@ -584,7 +585,8 @@ class GenericWebDeployTests(unittest.TestCase):
                     context="repairshopr-sync",
                     base_url="https://repairshopr-sync.example.test",
                     health_monitoring=ProductLaneHealthMonitoringPolicy(
-                        checks=(ProductLaneHealthCheck(name="public-ingress"),)
+                        monitoring_intent="public",
+                        checks=(ProductLaneHealthCheck(name="public-ingress"),),
                     ),
                 ),
             ),
@@ -609,13 +611,14 @@ class GenericWebDeployTests(unittest.TestCase):
                     instance="prod",
                     context="repairshopr-sync",
                     health_monitoring=ProductLaneHealthMonitoringPolicy(
+                        monitoring_intent="private",
                         checks=(
                             ProductLaneHealthCheck(
                                 name="private-runtime",
                                 kind="private_http",
                                 private_endpoint_key="repairshopr-sync-prod-runtime",
                             ),
-                        )
+                        ),
                     ),
                 ),
             ),

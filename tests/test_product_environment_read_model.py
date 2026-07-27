@@ -1129,9 +1129,13 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertTrue(detail_odoo.requires_runtime_identity)
 
     def test_product_read_model_exposes_public_ingress_observation(self) -> None:
-        profile = LaunchplaneProductProfileRecord.model_validate(
-            _site_profile_payload(preview_enabled=False)
-        )
+        profile_payload = _site_profile_payload(preview_enabled=False)
+        lanes = cast(tuple[dict[str, object], ...], profile_payload["lanes"])
+        lanes[1]["health_monitoring"] = {
+            "monitoring_intent": "public",
+            "checks": [{"name": "public-ingress", "kind": "public_http"}],
+        }
+        profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
         observation = PublicIngressObservationRecord(
             record_id="public-ingress-example-site-prod-20260529t120000z",
             product="example-site",
@@ -1183,12 +1187,95 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
 
         prod_summary = {summary.environment: summary for summary in overview.environments}["prod"]
+        self.assertEqual(prod_summary.health_monitoring.monitoring_intent, "public")
+        self.assertTrue(prod_summary.health_monitoring.public_incident_eligible)
         self.assertEqual(prod_summary.public_ingress.status, "fail")
+        self.assertTrue(prod_summary.public_ingress.incident_eligible)
         self.assertEqual(prod_summary.public_ingress.trust_state, "verified")
         self.assertEqual(prod_summary.public_ingress.record_id, observation.record_id)
         self.assertEqual(prod_summary.public_ingress.incident_status, "open")
         self.assertEqual(prod_summary.public_ingress.incident_id, incident.incident_id)
         self.assertTrue(detail.public_ingress.notification_sent)
+
+    def test_private_monitoring_read_model_ignores_reconciliation_as_probe_evidence(
+        self,
+    ) -> None:
+        profile_payload = _site_profile_payload(preview_enabled=False)
+        lanes = cast(tuple[dict[str, object], ...], profile_payload["lanes"])
+        lanes[1]["health_monitoring"] = {
+            "monitoring_intent": "private",
+            "checks": [
+                {"name": "public-ingress", "kind": "public_http"},
+                {
+                    "name": "private-runtime",
+                    "kind": "private_http",
+                    "private_endpoint_key": "example-site-prod-runtime",
+                },
+            ],
+        }
+        profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        private_probe = PublicIngressObservationRecord(
+            record_id="private-runtime-example-site-prod-20260727t164600z",
+            product="example-site",
+            context="example-site-prod",
+            instance="prod",
+            check_name="private-runtime",
+            check_kind="private_http",
+            purpose="probe",
+            monitoring_intent="private",
+            observed_at="2026-07-27T16:46:00Z",
+            status="pass",
+            targets=(
+                PublicIngressTargetObservation(
+                    target="private_health_url",
+                    url="private-endpoint://example-site-prod-runtime",
+                    status="pass",
+                    http_status=200,
+                    summary="Private health endpoint passed.",
+                ),
+            ),
+            summary="Private health monitoring passed.",
+        )
+        reconciliation = PublicIngressObservationRecord(
+            record_id="public-ingress-example-site-prod-20260727t164700z",
+            product="example-site",
+            context="example-site-prod",
+            instance="prod",
+            check_name="public-ingress",
+            check_kind="public_http",
+            purpose="reconciliation",
+            monitoring_intent="private",
+            observed_at="2026-07-27T16:47:00Z",
+            status="skipped",
+            failure_code="monitoring_intent_changed",
+            targets=(
+                PublicIngressTargetObservation(
+                    target="monitoring_intent",
+                    url="monitoring-intent://private",
+                    status="skipped",
+                    failure_code="monitoring_intent_changed",
+                    summary="Public monitoring is no longer expected.",
+                ),
+            ),
+            summary="Public monitoring is no longer expected.",
+        )
+        store = _PublicIngressReadModelStore(profile, (reconciliation, private_probe))
+
+        detail = build_product_environment_detail(
+            record_store=store,
+            product="example-site",
+            environment="prod",
+            action_allowed=lambda *_: False,
+        )
+
+        self.assertEqual(detail.health_monitoring.monitoring_intent, "private")
+        checks = {check.name: check for check in detail.health_monitoring.checks}
+        self.assertEqual(checks["public-ingress"].status, "not_expected")
+        self.assertFalse(checks["public-ingress"].probe_effective)
+        self.assertEqual(checks["private-runtime"].status, "pass")
+        self.assertTrue(checks["private-runtime"].incident_eligible)
+        self.assertEqual(detail.public_ingress.status, "not_expected")
+        self.assertEqual(detail.public_ingress.record_id, "")
 
     def test_product_environment_detail_fails_without_public_ingress_incident_support(
         self,
