@@ -391,6 +391,8 @@ Operators mutate shared or production authz through the deployed service, not
 through direct DB commands or a local CLI from an arbitrary checkout. Store the
 complete desired rules for one `managed_set_id` in a protected repository
 secret. `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` owns the primary operator set;
+`LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON` owns the generic
+Product Health Monitoring wrapper's exact immutable worker grant;
 `LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
 Odoo stable managed route-binding set; and
 `LAUNCHPLANE_AUTHZ_ODOO_EXTERNAL_ROUTE_BINDING_MANAGED_SET_JSON` owns the
@@ -841,7 +843,10 @@ reviewed digest, a unique idempotency key, and confirmation
 `APPLY PRODUCT HEALTH MONITORING`. The service re-reads the complete profile and
 atomically rejects stale or concurrent edits. Authority uses separate exact-
 instance `product_profile.health_monitoring.plan` and `.apply` actions supplied
-through managed authz reconciliation.
+through the dedicated `product-health-monitoring` managed authz set. That set
+owns only the generic wrapper's exact immutable reusable-worker grant; real
+product, context, instance, check, and endpoint values remain explicit operator
+input and DB-backed Launchplane records.
 
 The manual Product Context Cutover workflow plans or applies the same
 current-authority record move through the Launchplane service. The workflow
