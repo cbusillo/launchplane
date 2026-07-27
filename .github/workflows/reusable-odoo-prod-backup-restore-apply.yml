@@ -129,7 +129,7 @@ jobs:
           done
           mkdir -p .launchplane
 
-      - name: Build restore request payloads
+      - name: Build restore apply request
         shell: bash
         run: |
           set -euo pipefail
@@ -143,6 +143,9 @@ jobs:
             --arg new_db "$EXPECTED_NEW_DB_VOLUME" \
             --arg data_volume "$EXPECTED_DATA_VOLUME" \
             --arg log_volume "$EXPECTED_LOG_VOLUME" \
+            --arg plan_fingerprint "$PLAN_FINGERPRINT" \
+            --arg confirmation "$CONFIRMATION" \
+            --argjson no_cache "$NO_CACHE" \
             '{
               schema_version: 1,
               product: $product,
@@ -157,19 +160,12 @@ jobs:
                 expected_old_db_volume: $old_db,
                 expected_new_db_volume: $new_db,
                 expected_data_volume: $data_volume,
-                expected_log_volume: $log_volume
+                expected_log_volume: $log_volume,
+                plan_fingerprint: $plan_fingerprint,
+                confirmation: $confirmation,
+                no_cache: $no_cache
               }
-            }' > .launchplane/restore-plan-payload.json
-          jq \
-            --arg plan_fingerprint "$PLAN_FINGERPRINT" \
-            --arg confirmation "$CONFIRMATION" \
-            --argjson no_cache "$NO_CACHE" \
-            '.restore += {
-              plan_fingerprint: $plan_fingerprint,
-              confirmation: $confirmation,
-              no_cache: $no_cache
-          }' .launchplane/restore-plan-payload.json \
-            > .launchplane/restore-apply-payload.json
+            }' > .launchplane/restore-apply-payload.json
           if [ -n "$TIMEOUT_SECONDS" ]; then
             jq \
               --argjson value "$TIMEOUT_SECONDS" \
@@ -182,53 +178,6 @@ jobs:
               '.restore.health_timeout_seconds = $value' \
               .launchplane/restore-apply-payload.json > .launchplane/payload.tmp
             mv .launchplane/payload.tmp .launchplane/restore-apply-payload.json
-          fi
-
-      - name: Recompute reviewed restore plan
-        id: plan
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
-        with:
-          launchplane-url: >-
-            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
-          audience: >-
-            ${{
-              inputs.launchplane_audience ||
-              vars.LAUNCHPLANE_SERVICE_AUDIENCE
-            }}
-          route-path: /v1/drivers/odoo/prod-backup-restore-plan
-          payload-file: .launchplane/restore-plan-payload.json
-          fail-result-paths: ""
-          log-response-body: "false"
-          response-output-file: odoo-prod-backup-restore-plan.json
-
-      - name: Enforce reviewed plan fingerprint
-        env:
-          PLAN_STATUS_CODE: ${{ steps.plan.outputs.status-code }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          replanned_status="$(
-            jq -r '.result.plan_status // ""' \
-              odoo-prod-backup-restore-plan.json
-          )"
-          replanned_fingerprint="$(
-            jq -r '.result.plan_fingerprint // ""' \
-              odoo-prod-backup-restore-plan.json
-          )"
-          if [ "$PLAN_STATUS_CODE" != "202" ] || \
-            [ "$replanned_status" != "ready" ] || \
-            [ "$replanned_fingerprint" != "$PLAN_FINGERPRINT" ]; then
-            echo 'Restore plan changed; refusing destructive apply.' >&2
-            jq -c '{
-              status,
-              result: {
-                plan_status: .result.plan_status,
-                plan_fingerprint: .result.plan_fingerprint,
-                blockers: .result.blockers
-              }
-            }' \
-              odoo-prod-backup-restore-plan.json >&2
-            exit 1
           fi
 
       - name: Create destructive restore operation
@@ -359,7 +308,6 @@ jobs:
         with:
           name: odoo-prod-backup-restore
           path: |
-            odoo-prod-backup-restore-plan.json
             odoo-prod-backup-restore-create.json
             odoo-prod-backup-restore-result.json
           if-no-files-found: ignore
