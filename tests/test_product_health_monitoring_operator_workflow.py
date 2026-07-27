@@ -101,7 +101,7 @@ class ProductHealthMonitoringOperatorWorkflowTests(unittest.TestCase):
             self.workflow.job_uses("apply"),
             "cbusillo/launchplane/.github/workflows/"
             "reusable-product-health-monitoring.yml@"
-            "e61dc9a6161f9b97d2182ca69c4cadaa1df81fca",
+            "88584ae2800bceabc9d448eba7defddc5da75ec1",
         )
         job = self.workflow.job("apply")
         forwarded_inputs = job["with"]
