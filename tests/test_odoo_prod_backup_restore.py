@@ -19,6 +19,9 @@ from control_plane.contracts.odoo_prod_backup_restore import (
     OdooProdBackupRestoreApplyRequest,
     OdooProdBackupRestoreRequest,
 )
+from control_plane.contracts.odoo_prod_backup_restore_operation import (
+    OdooProdBackupRestoreOperationRecord,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -45,11 +48,13 @@ from control_plane.workflows.odoo_prod_backup_gate import (
 from control_plane.workflows.odoo_prod_backup_restore import (
     build_odoo_prod_backup_restore_plan,
     execute_odoo_prod_backup_restore_apply,
+    execute_odoo_prod_backup_restore_verification_replay,
 )
 from control_plane.workflows.odoo_verification import (
     OdooVerificationEvidence,
     OdooVerificationResult,
 )
+from tests.support.durable_operations import durable_operation_authorization_payload
 
 
 PRODUCT = "example-odoo-product"
@@ -279,6 +284,12 @@ class _Store:
     def write_deployment_record(self, record: DeploymentRecord) -> None:
         self.deployment_records.append(record)
 
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord:
+        for record in reversed(self.deployment_records):
+            if record.record_id == record_id:
+                return record
+        raise FileNotFoundError(record_id)
+
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
         self.environment_inventories.append(record)
 
@@ -455,13 +466,14 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
             confirmation=ODOO_PROD_BACKUP_RESTORE_CONFIRMATION,
         )
 
-        def post_deploy(*, provider_effect_checkpoint, **_: object):  # type: ignore[no-untyped-def]
+        def post_deploy(*, request, provider_effect_checkpoint, **_: object):  # type: ignore[no-untyped-def]
+            self.assertEqual(request.phase, "deploy")
             provider_effect_checkpoint("post_deploy_schedule_upsert")
             provider_effect_checkpoint("post_deploy_schedule_trigger")
             return OdooPostDeployResult(
                 context=CONTEXT,
                 instance="prod",
-                phase="restore",
+                phase="deploy",
                 post_deploy_status="pass",
             )
 
@@ -578,6 +590,391 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
         self.assertIn("filestore_activated", [phase for phase, _ in phase_checkpoints])
         self.assertIn("verification_started", [phase for phase, _ in phase_checkpoints])
         self.assertTrue(store.environment_inventories)
+
+    def test_verification_replay_reruns_only_post_deploy_and_checks(self) -> None:
+        store = _Store()
+        live_env = _live_env()
+
+        def fetch_target_payload(**_: object) -> dict[str, str]:
+            return {
+                "name": "example-prod",
+                "env": dokploy_api.serialize_dokploy_env_text(live_env),
+            }
+
+        def update_target_env(*, env_text: str, **_: object) -> None:
+            live_env.clear()
+            live_env.update(dokploy_api.parse_dokploy_env_text(env_text))
+
+        def provider_phase(
+            phase: str,
+            evidence: dict[str, str],
+        ) -> Callable[..., dict[str, str]]:
+            def run(
+                *,
+                before_provider_mutation: Callable[[str], None],
+                **_: object,
+            ) -> dict[str, str]:
+                before_provider_mutation(f"{phase}_schedule_upsert")
+                before_provider_mutation(f"{phase}_schedule_trigger")
+                return evidence
+
+            return run
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.fetch_dokploy_target_payload",
+                side_effect=fetch_target_payload,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.update_dokploy_target_env",
+                side_effect=update_target_env,
+            ),
+        ):
+            plan = build_odoo_prod_backup_restore_plan(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(),
+            )
+        apply_request = OdooProdBackupRestoreApplyRequest(
+            **_request().model_dump(),
+            plan_fingerprint=plan.plan_fingerprint,
+            confirmation=ODOO_PROD_BACKUP_RESTORE_CONFIRMATION,
+        )
+        first_phase_checkpoints: list[tuple[str, dict[str, str]]] = []
+
+        def post_deploy(*, request, provider_effect_checkpoint, **_: object):  # type: ignore[no-untyped-def]
+            self.assertEqual(request.phase, "deploy")
+            provider_effect_checkpoint("post_deploy_schedule_upsert")
+            provider_effect_checkpoint("post_deploy_schedule_trigger")
+            return OdooPostDeployResult(
+                context=CONTEXT,
+                instance="prod",
+                phase="deploy",
+                post_deploy_status="pass",
+                override_evidence={"website_bootstrap_included": "true"},
+            )
+
+        canonical_failure = OdooVerificationResult(
+            health_status="pass",
+            canonical_status="fail",
+            logo_status="pass",
+            evidence=OdooVerificationEvidence(
+                base_url=BASE_URL,
+                health_url=HEALTH_URL,
+                canonical_url="https://wrong.example.test",
+                logo_urls=(f"{BASE_URL}/web/image/website/1/logo",),
+            ),
+            error_message="Odoo canonical verification failed.",
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.fetch_dokploy_target_payload",
+                side_effect=fetch_target_payload,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.update_dokploy_target_env",
+                side_effect=update_target_env,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.latest_deployment_for_target",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.trigger_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.wait_for_target_deployment",
+                return_value="provider-deployment-1",
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_post_deploy.run_compose_odoo_backup_restore_database",
+                side_effect=provider_phase("database_restore", {"new_db_volume": NEW_DB_VOLUME}),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_post_deploy.run_compose_odoo_backup_restore_filestore_stage",
+                side_effect=provider_phase(
+                    "filestore_stage",
+                    {"filestore_staging_path": plan.filestore_staging_path},
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_post_deploy.run_compose_odoo_backup_restore_web_quiesce",
+                side_effect=provider_phase("web_quiesce", {"web_was_running": "true"}),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_post_deploy.run_compose_odoo_backup_restore_filestore_activate",
+                side_effect=provider_phase(
+                    "filestore_activate",
+                    {"filestore_quarantine_path": plan.filestore_quarantine_path},
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.control_plane_live_target_runtime.require_product_profile_runtime_secret_keys",
+                return_value=frozenset(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.control_plane_live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync",
+                return_value={"required": False, "status": "not_required"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.execute_odoo_post_deploy",
+                side_effect=post_deploy,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.verify_odoo_stable_readiness",
+                return_value=canonical_failure,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore._verify_runtime_identity",
+                side_effect=AssertionError("runtime identity check should wait for readiness pass"),
+            ),
+        ):
+            failed_result = execute_odoo_prod_backup_restore_apply(
+                control_plane_root=Path("."),
+                record_store=store,
+                operation_id="restore-operation-1",
+                request=apply_request,
+                phase_checkpoint=lambda phase, evidence: first_phase_checkpoints.append(
+                    (phase, evidence)
+                ),
+                provider_effect_checkpoint=lambda _phase, _effect: None,
+            )
+
+        failed_deployment = store.read_deployment_record(failed_result.deployment_record_id)
+        self.assertEqual(failed_result.restore_status, "fail")
+        self.assertEqual(failed_result.canonical_status, "fail")
+        self.assertEqual(failed_deployment.deploy.status, "fail")
+        replay_operation = OdooProdBackupRestoreOperationRecord.model_validate(
+            {
+                "operation_id": "restore-operation-1",
+                "product": PRODUCT,
+                "context": CONTEXT,
+                "instance": "prod",
+                "idempotency_key": "restore-request-1",
+                "idempotency_scope": "github-actions|example|restore.yml|subject-a",
+                "request_fingerprint": "restore-fingerprint",
+                "request": apply_request.model_dump(mode="json"),
+                "plan": plan.model_dump(mode="json"),
+                "authorization": durable_operation_authorization_payload(
+                    action="odoo_prod_backup_restore_apply.execute",
+                    managed_rule_id="example-prod-backup-restore",
+                    product=PRODUCT,
+                    context=CONTEXT,
+                    instances=("prod",),
+                ),
+                "status": "fail",
+                "phase": "failed",
+                "checkpoints": tuple(
+                    {
+                        "phase": phase,
+                        "recorded_at": f"2026-07-25T00:{index:02d}:00Z",
+                        "evidence": evidence,
+                    }
+                    for index, (phase, evidence) in enumerate(first_phase_checkpoints, start=1)
+                ),
+                "deployment_record_id": failed_result.deployment_record_id,
+                "created_at": "2026-07-25T00:00:00Z",
+                "updated_at": "2026-07-25T00:30:00Z",
+                "started_at": "2026-07-25T00:01:00Z",
+                "finished_at": "2026-07-25T00:30:00Z",
+                "attempt": 1,
+                "result": failed_result.model_dump(mode="json"),
+                "error_message": failed_result.error_message,
+            }
+        ).model_copy(update={"status": "running", "phase": "running", "attempt": 2})
+        replay_phase_checkpoints: list[tuple[str, dict[str, str]]] = []
+        replay_provider_effects: list[tuple[str, str]] = []
+        replay_verification = OdooVerificationResult(
+            health_status="pass",
+            canonical_status="pass",
+            logo_status="pass",
+            evidence=OdooVerificationEvidence(
+                base_url=BASE_URL,
+                health_url=HEALTH_URL,
+                canonical_url=BASE_URL,
+                logo_urls=(f"{BASE_URL}/web/image/website/1/logo",),
+            ),
+        )
+
+        valid_live_env = dict(live_env)
+        sensitive_runtime_payload = "super-secret-runtime-identity-payload"
+        live_env["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"] = sensitive_runtime_payload
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.fetch_dokploy_target_payload",
+                side_effect=fetch_target_payload,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.execute_odoo_post_deploy",
+                side_effect=AssertionError("invalid live identity must block post-deploy"),
+            ),
+        ):
+            malformed_identity_result = execute_odoo_prod_backup_restore_verification_replay(
+                control_plane_root=Path("."),
+                record_store=store,
+                operation=replay_operation,
+                phase_checkpoint=lambda _phase, _evidence: None,
+                provider_effect_checkpoint=lambda _phase, _effect: None,
+            )
+        malformed_identity_deployment = store.read_deployment_record(
+            failed_result.deployment_record_id
+        )
+        self.assertEqual(malformed_identity_result.restore_status, "fail")
+        self.assertEqual(
+            malformed_identity_result.error_message,
+            "Odoo production restore replay failed: live_target_authority_changed.",
+        )
+        self.assertNotIn(sensitive_runtime_payload, malformed_identity_result.model_dump_json())
+        self.assertNotIn(sensitive_runtime_payload, malformed_identity_deployment.model_dump_json())
+        live_env.clear()
+        live_env.update(valid_live_env)
+
+        sensitive_provider_error = "private provider response body"
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.fetch_dokploy_target_payload",
+                side_effect=click.ClickException(sensitive_provider_error),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.execute_odoo_post_deploy",
+                side_effect=AssertionError("provider read failure must block post-deploy"),
+            ),
+        ):
+            provider_error_result = execute_odoo_prod_backup_restore_verification_replay(
+                control_plane_root=Path("."),
+                record_store=store,
+                operation=replay_operation,
+                phase_checkpoint=lambda _phase, _evidence: None,
+                provider_effect_checkpoint=lambda _phase, _effect: None,
+            )
+        provider_error_deployment = store.read_deployment_record(failed_result.deployment_record_id)
+        self.assertEqual(
+            provider_error_result.error_message,
+            "Odoo production restore replay failed: live_target_read_failed.",
+        )
+        self.assertNotIn(sensitive_provider_error, provider_error_result.model_dump_json())
+        self.assertNotIn(sensitive_provider_error, provider_error_deployment.model_dump_json())
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.fetch_dokploy_target_payload",
+                side_effect=fetch_target_payload,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.update_dokploy_target_env",
+                side_effect=AssertionError("replay must not update target env"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.latest_deployment_for_target",
+                side_effect=AssertionError("replay must not inspect deploy baseline"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.trigger_deployment",
+                side_effect=AssertionError("replay must not trigger deploy"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.wait_for_target_deployment",
+                side_effect=AssertionError("replay must not wait for deploy"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_post_deploy.run_compose_odoo_backup_restore_database",
+                side_effect=AssertionError("replay must not restore database"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_post_deploy.run_compose_odoo_backup_restore_filestore_stage",
+                side_effect=AssertionError("replay must not stage filestore"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_post_deploy.run_compose_odoo_backup_restore_web_quiesce",
+                side_effect=AssertionError("replay must not quiesce web"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.dokploy_post_deploy.run_compose_odoo_backup_restore_filestore_activate",
+                side_effect=AssertionError("replay must not activate filestore"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.execute_odoo_post_deploy",
+                side_effect=post_deploy,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore.verify_odoo_stable_readiness",
+                return_value=replay_verification,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_restore._verify_runtime_identity",
+                return_value=HealthcheckEvidence(
+                    verified=True,
+                    urls=(HEALTH_URL,),
+                    timeout_seconds=60,
+                    status="pass",
+                    runtime_identity_status="match",
+                ),
+            ),
+        ):
+            replay_result = execute_odoo_prod_backup_restore_verification_replay(
+                control_plane_root=Path("."),
+                record_store=store,
+                operation=replay_operation,
+                phase_checkpoint=lambda phase, evidence: replay_phase_checkpoints.append(
+                    (phase, evidence)
+                ),
+                provider_effect_checkpoint=lambda phase, effect: replay_provider_effects.append(
+                    (phase, effect)
+                ),
+            )
+
+        self.assertEqual(replay_result.restore_status, "pass")
+        self.assertEqual(replay_result.deployment_record_id, failed_result.deployment_record_id)
+        self.assertEqual(replay_result.database_restore_status, "pass")
+        self.assertEqual(replay_result.filestore_stage_status, "pass")
+        self.assertEqual(replay_result.web_quiesce_status, "pass")
+        self.assertEqual(replay_result.filestore_activation_status, "pass")
+        self.assertEqual(replay_result.deployment_status, "pass")
+        self.assertEqual(replay_result.canonical_status, "pass")
+        self.assertEqual(replay_result.runtime_identity_status, "match")
+        self.assertEqual(
+            replay_provider_effects,
+            [
+                ("post_deploy_started", "post_deploy_schedule_upsert"),
+                ("post_deploy_started", "post_deploy_schedule_trigger"),
+            ],
+        )
+        self.assertEqual(
+            [phase for phase, _ in replay_phase_checkpoints],
+            ["post_deploy_started", "post_deploy_completed", "verification_started"],
+        )
+        passed_deployment = store.read_deployment_record(failed_result.deployment_record_id)
+        self.assertEqual(passed_deployment.deploy.status, "pass")
+        self.assertNotIn("restore_error", passed_deployment.runtime_source)
+        self.assertIsNotNone(passed_deployment.runtime_identity)
+        assert passed_deployment.runtime_identity is not None
+        assert failed_deployment.runtime_identity is not None
+        self.assertEqual(
+            passed_deployment.runtime_identity.deployment_record_id,
+            failed_deployment.runtime_identity.deployment_record_id,
+        )
+        self.assertTrue(store.environment_inventories)
+        self.assertTrue(store.release_tuples)
 
 
 class OdooProdBackupRestoreScriptTests(unittest.TestCase):

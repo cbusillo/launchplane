@@ -8,10 +8,12 @@ from threading import Event, Thread
 from typing import Callable, Protocol, cast
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
+from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.odoo_prod_backup_restore import OdooProdBackupRestoreResult
 from control_plane.contracts.odoo_prod_backup_restore_operation import (
     OdooProdBackupRestoreOperationPhase,
     OdooProdBackupRestoreOperationRecord,
+    odoo_prod_backup_restore_operation_is_verification_replay_claim,
 )
 from control_plane.contracts.odoo_prod_retained_volume_backup_import import (
     OdooProdRetainedVolumeBackupImportApplyRequest,
@@ -43,6 +45,7 @@ from control_plane.workflows.odoo_stable_bootstrap import (
 from control_plane.workflows.odoo_prod_backup_restore import (
     OdooProdBackupRestoreStore,
     execute_odoo_prod_backup_restore_apply,
+    execute_odoo_prod_backup_restore_verification_replay,
 )
 from control_plane.workflows.odoo_prod_retained_volume_backup_import import (
     OdooProdRetainedVolumeBackupImportStore,
@@ -211,6 +214,14 @@ class OdooStableOperationWorkerStore(Protocol):
         safe_phases: tuple[str, ...],
         max_attempts: int,
     ) -> tuple[str, ...]: ...
+
+    def requeue_terminal_failed_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        operation_id: str,
+        queued_at: str,
+        authorization: DurableOperationAuthorization,
+    ) -> OdooProdBackupRestoreOperationRecord | None: ...
 
     def list_odoo_prod_retained_volume_backup_import_operation_records(
         self,
@@ -895,14 +906,28 @@ def _execute_prod_backup_restore_operation(
 
     try:
         authorization_guard.authorize_execution()
-        result = execute_odoo_prod_backup_restore_apply(
-            control_plane_root=control_plane_root_path,
-            record_store=cast(OdooProdBackupRestoreStore, record_store),
-            operation_id=operation.operation_id,
-            request=operation.request,
-            phase_checkpoint=checkpoint_phase,
-            provider_effect_checkpoint=checkpoint_provider_effect,
-        )
+        if operation.result is not None:
+            if not _is_prod_backup_restore_verification_replay(operation):
+                raise RuntimeError(
+                    "Odoo production backup restore with prior result evidence requires "
+                    "operator reconciliation."
+                )
+            result = execute_odoo_prod_backup_restore_verification_replay(
+                control_plane_root=control_plane_root_path,
+                record_store=cast(OdooProdBackupRestoreStore, record_store),
+                operation=operation,
+                phase_checkpoint=checkpoint_phase,
+                provider_effect_checkpoint=checkpoint_provider_effect,
+            )
+        else:
+            result = execute_odoo_prod_backup_restore_apply(
+                control_plane_root=control_plane_root_path,
+                record_store=cast(OdooProdBackupRestoreStore, record_store),
+                operation_id=operation.operation_id,
+                request=operation.request,
+                phase_checkpoint=checkpoint_phase,
+                provider_effect_checkpoint=checkpoint_provider_effect,
+            )
         if authorization_guard.denial_error is not None:
             raise authorization_guard.denial_error
     except DurableOperationAuthorizationDeniedError as error:
@@ -1273,6 +1298,12 @@ def _prod_backup_restore_terminal_operation(
             else (result.error_message or "Odoo production backup restore failed."),
         }
     )
+
+
+def _is_prod_backup_restore_verification_replay(
+    operation: OdooProdBackupRestoreOperationRecord,
+) -> bool:
+    return odoo_prod_backup_restore_operation_is_verification_replay_claim(operation)
 
 
 def _retained_volume_backup_import_terminal_operation(

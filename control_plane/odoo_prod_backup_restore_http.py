@@ -63,6 +63,10 @@ class OdooProdBackupRestorePlanChangedError(ValueError):
     pass
 
 
+class OdooProdBackupRestoreReplayNotEligibleError(ValueError):
+    pass
+
+
 class OdooProdBackupRestoreOperationActiveError(ValueError):
     def __init__(self, operation: OdooProdBackupRestoreOperationRecord) -> None:
         super().__init__(
@@ -83,6 +87,14 @@ class OdooProdBackupRestoreOperationStore(OdooProdBackupRestoreStore, Protocol):
     def read_odoo_prod_backup_restore_operation_record(
         self, operation_id: str
     ) -> OdooProdBackupRestoreOperationRecord: ...
+
+    def requeue_terminal_failed_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        operation_id: str,
+        queued_at: str,
+        authorization: DurableOperationAuthorization,
+    ) -> OdooProdBackupRestoreOperationRecord | None: ...
 
     def list_odoo_prod_backup_restore_operation_records(
         self,
@@ -193,6 +205,24 @@ def enqueue_odoo_prod_backup_restore_operation(
     if existing is not None:
         if existing.request_fingerprint != request_fingerprint:
             raise OdooProdBackupRestoreIdempotencyKeyReusedError
+        if existing.status == "fail":
+            try:
+                requeued = operation_store.requeue_terminal_failed_odoo_prod_backup_restore_operation_record(
+                    operation_id=existing.operation_id,
+                    queued_at=created_at,
+                    authorization=authorization,
+                )
+            except ValueError as error:
+                raise OdooProdBackupRestoreReplayNotEligibleError(
+                    "Odoo production backup restore failure is not eligible for replay."
+                ) from error
+            if requeued is None:
+                raise OdooProdBackupRestoreReplayNotEligibleError(
+                    "Odoo production backup restore failure is not eligible for replay."
+                )
+            return _operation_records(requeued), odoo_prod_backup_restore_operation_payload(
+                requeued
+            )
         return _operation_records(existing), odoo_prod_backup_restore_operation_payload(existing)
 
     restore_request = request.restore
@@ -274,6 +304,7 @@ def odoo_prod_backup_restore_operation_store(
         "list_runtime_environment_records",
         "create_odoo_prod_backup_restore_operation_record_if_no_active_lane",
         "read_odoo_prod_backup_restore_operation_record",
+        "requeue_terminal_failed_odoo_prod_backup_restore_operation_record",
         "list_odoo_prod_backup_restore_operation_records",
         "list_odoo_stable_bootstrap_operation_records",
         "list_odoo_stable_target_replacement_operation_records",

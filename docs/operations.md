@@ -1803,16 +1803,49 @@ old filestore is moved to the reviewed quarantine path and the staged tree is
 activated. The data and log volume names cannot change. The old database volume
 and quarantined filestore remain available for explicit later cleanup.
 
-Apply passes only after deploy and post-deploy complete and Launchplane verifies
-the health endpoint, canonical page, logo route, and exact runtime identity.
-Deployment, inventory, release-tuple, phase checkpoint, authorization, provider
-result, and final verification evidence remain durable in Launchplane. A failed
-or interrupted operation must be inspected from its operation record before any
-new restore is planned; do not rerun a provider schedule or use target
-replacement as a recovery shortcut. Missing, duplicate, malformed, mismatched,
-or unbounded provider phase results fail closed with the exact restore phase and
-an allowlisted `provider_result_*` or `provider_evidence_unbounded` code; raw
+Apply runs the Odoo post-deploy driver with deploy-phase semantics so
+DB-backed website bootstrap and ordinary production post-deploy settings are
+applied before canonical verification. It passes only after deploy and
+post-deploy complete and Launchplane verifies the health endpoint, canonical
+page, logo route, and exact runtime identity. Deployment, inventory,
+release-tuple, phase checkpoint, authorization, provider result, and final
+verification evidence remain durable in Launchplane. A failed or interrupted
+operation must be inspected from its operation record before any new restore is
+planned; do not rerun a provider schedule or use target replacement as a
+recovery shortcut. Missing, duplicate, malformed, mismatched, or unbounded
+provider phase results fail closed with the exact restore phase and an
+allowlisted `provider_result_*` or `provider_evidence_unbounded` code; raw
 provider log text is not persisted in the operation error.
+
+An exact idempotent replay of the same restore apply request may requeue one
+terminal failed operation only when the stored result proves database restore,
+filestore staging, web quiesce, filestore activation, deployment, and
+post-deploy all passed, the ordered durable checkpoints and phase evidence prove
+those same effects plus target-env cutover, and the failure was limited to final
+health, canonical, logo, or runtime identity verification. The requeued
+operation keeps prior checkpoints and evidence, preserves the same operation id,
+and is claimed as attempt 2. Attempt 2 verifies current lane, target, artifact,
+and deployment-record authority; verifies the live target still points at the reviewed new
+database volume plus unchanged data and log volumes, verifies the live runtime
+identity matches the existing failed deployment record, reauthorizes before any
+post-deploy provider effect, reruns only non-destructive deploy-phase
+post-deploy, reruns final health/canonical/logo/runtime-identity checks, then
+reconciles that same deployment record to pass and writes inventory and release
+tuple evidence. It never reruns database restore, filestore staging,
+filestore activation, target volume/env update, or main deploy. Any missing or
+mismatched stored proof, active stable-lane operation, changed live volume
+authority, missing failed deployment identity, or second failed replay remains
+fail-closed and requires operator reconciliation rather than another automatic
+provider mutation. Any operation carrying prior result evidence is barred from
+the full restore path, even if a later stale-lease or malformed-record condition
+changes its attempt number. Replay target-read, parser, post-deploy, readiness,
+and runtime-identity failures persist only an allowlisted
+`live_target_*`, `post_deploy_*`, `readiness_*`, or `runtime_identity_*` replay
+code; raw provider response bodies and live env values are not persisted.
+If an attempt-2 replay lease expires, recovery moves the operation to
+`reconciliation_required`, clears the stale prior result envelope required by
+the reconciliation-state contract, and retains the reviewed plan, deployment
+record id, and ordered checkpoints for operator diagnosis.
 
 Legacy backup-gate manifests created before manifest schema and hash fields were
 introduced remain verifiable: Launchplane validates their recorded identity,
@@ -1855,10 +1888,11 @@ surfaces as a failed, operator-actionable workflow result instead of waiting for
 the poll timeout. `Idempotency-Key` is required: a repeated request with the same
 key from the same caller identity returns the existing operation, while a
 different key for the same product/context/instance is rejected while a
-`pending`, `running`, or `reconciliation_required` operation is active. Storage owns that active-lane
-reservation so the worker starts only after the lane is claimed; abandoned
-filesystem reservations recover after a bounded settle window if the owner or
-owner record never appears. The first apply surface is testing-only and keeps
+`pending`, `running`, or `reconciliation_required` operation is active. Storage
+owns that active-lane reservation so the worker starts only after the lane is
+claimed; abandoned filesystem reservations recover after a bounded settle
+window if the owner or owner record never appears. The first apply surface is
+testing-only and keeps
 the existing compose
 target, explicit Odoo volume env keys, and expected hostnames; the operation
 worker re-syncs the Launchplane-rendered compose source, reconciles each expected
