@@ -15,7 +15,7 @@ PLAN_WORKER_PATH = Path(".github/workflows/reusable-odoo-prod-backup-restore-pla
 APPLY_WRAPPER_PATH = Path(".github/workflows/odoo-prod-backup-restore-apply.yml")
 APPLY_WORKER_PATH = Path(".github/workflows/reusable-odoo-prod-backup-restore-apply.yml")
 PLAN_PINNED_WORKFLOW_SHA = "75c632d645f29775c5f2b1ab91f5318e1468000b"
-APPLY_PINNED_WORKFLOW_SHA = "2e3168626bd90cc0839eed455b9b206a9a19231e"
+APPLY_PINNED_WORKFLOW_SHA = "fc3746b61bc9dbf054d491a2352f8bd3c8e4ce1b"
 
 RESTORE_IDENTITY_INPUTS = {
     "product",
