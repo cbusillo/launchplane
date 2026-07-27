@@ -35,7 +35,13 @@ from control_plane.contracts.product_topology_read_model import (
     ProductEnvironmentTopology,
     build_product_environment_topology,
 )
-from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentEventKind,
+    PublicIngressIncidentNotificationState,
+    PublicIngressIncidentRecord,
+    PublicIngressIncidentReminderStateRecord,
+    PublicIngressIncidentSeverity,
+)
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.promotion_record import PromotionRecord
@@ -169,6 +175,15 @@ class ProductEnvironmentReadModelStore(ProductReadModelStore, Protocol):
         limit: int | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]: ...
 
+    def list_public_ingress_incident_reminder_state_records(
+        self,
+        *,
+        incident_id: str = "",
+        policy_id: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentReminderStateRecord, ...]: ...
+
 
 class ProductEnvironmentReadModelCapabilityError(RuntimeError):
     pass
@@ -280,6 +295,13 @@ class ProductPublicIngressSummary(BaseModel):
     incident_status: str = ""
     incident_id: str = ""
     incident_opened_at: str = ""
+    incident_severity: PublicIngressIncidentSeverity | Literal[""] = ""
+    incident_notification_state: PublicIngressIncidentNotificationState | Literal[""] = ""
+    incident_material_fingerprint_sha256: str = ""
+    incident_latest_event: PublicIngressIncidentEventKind | Literal[""] = ""
+    incident_latest_event_at: str = ""
+    incident_next_reminder_at: str = ""
+    incident_last_reminded_at: str = ""
     trust_state: FreshnessStatus = "missing"
     provenance: DataProvenance = DataProvenance(
         source_kind="record",
@@ -304,6 +326,13 @@ class ProductHealthMonitoringCheckSummary(BaseModel):
     summary: str = ""
     incident_status: str = ""
     incident_id: str = ""
+    incident_severity: PublicIngressIncidentSeverity | Literal[""] = ""
+    incident_notification_state: PublicIngressIncidentNotificationState | Literal[""] = ""
+    incident_material_fingerprint_sha256: str = ""
+    incident_latest_event: PublicIngressIncidentEventKind | Literal[""] = ""
+    incident_latest_event_at: str = ""
+    incident_next_reminder_at: str = ""
+    incident_last_reminded_at: str = ""
     trust_state: FreshnessStatus = "missing"
     provenance: DataProvenance = DataProvenance(
         source_kind="record",
@@ -1951,6 +1980,10 @@ def _health_monitoring_summary(
             ),
             None,
         )
+        next_reminder_at, last_reminded_at = _incident_reminder_times(
+            record_store=record_store,
+            incident_id=open_incident.incident_id if open_incident is not None else "",
+        )
         status: str
         if latest is not None:
             trust_state = _public_ingress_freshness(latest.status)
@@ -2001,6 +2034,21 @@ def _health_monitoring_summary(
                 summary=summary,
                 incident_status=open_incident.status if open_incident is not None else "",
                 incident_id=open_incident.incident_id if open_incident is not None else "",
+                incident_severity=open_incident.severity if open_incident is not None else "",
+                incident_notification_state=(
+                    open_incident.notification_state if open_incident is not None else ""
+                ),
+                incident_material_fingerprint_sha256=(
+                    open_incident.material_fingerprint_sha256 if open_incident is not None else ""
+                ),
+                incident_latest_event=(
+                    open_incident.latest_material_event if open_incident is not None else ""
+                ),
+                incident_latest_event_at=(
+                    open_incident.latest_material_event_at if open_incident is not None else ""
+                ),
+                incident_next_reminder_at=next_reminder_at,
+                incident_last_reminded_at=last_reminded_at,
                 trust_state=trust_state,
                 provenance=provenance,
             )
@@ -2082,6 +2130,10 @@ def _public_ingress_summary(
         (incident for incident in incidents if isinstance(incident, PublicIngressIncidentRecord)),
         None,
     )
+    next_reminder_at, last_reminded_at = _incident_reminder_times(
+        record_store=record_store,
+        incident_id=open_incident.incident_id if open_incident is not None else "",
+    )
     provenance = DataProvenance(
         source_kind="record",
         source_record_id=latest.record_id,
@@ -2102,6 +2154,21 @@ def _public_ingress_summary(
         incident_status=open_incident.status if open_incident is not None else "",
         incident_id=open_incident.incident_id if open_incident is not None else "",
         incident_opened_at=open_incident.opened_at if open_incident is not None else "",
+        incident_severity=open_incident.severity if open_incident is not None else "",
+        incident_notification_state=(
+            open_incident.notification_state if open_incident is not None else ""
+        ),
+        incident_material_fingerprint_sha256=(
+            open_incident.material_fingerprint_sha256 if open_incident is not None else ""
+        ),
+        incident_latest_event=(
+            open_incident.latest_material_event if open_incident is not None else ""
+        ),
+        incident_latest_event_at=(
+            open_incident.latest_material_event_at if open_incident is not None else ""
+        ),
+        incident_next_reminder_at=next_reminder_at,
+        incident_last_reminded_at=last_reminded_at,
         trust_state=provenance.freshness_status,
         provenance=provenance,
     )
@@ -2115,6 +2182,36 @@ def _public_ingress_freshness(status: str) -> FreshnessStatus:
     if status == "skipped":
         return "unsupported"
     return "missing"
+
+
+def _incident_reminder_times(
+    *,
+    record_store: object,
+    incident_id: str,
+) -> tuple[str, str]:
+    if not incident_id:
+        return "", ""
+    records = _required_records(
+        record_store,
+        "list_public_ingress_incident_reminder_state_records",
+        incident_id=incident_id,
+    )
+    reminder_states = tuple(
+        record for record in records if isinstance(record, PublicIngressIncidentReminderStateRecord)
+    )
+    next_reminder_at = min(
+        (
+            state.next_reminder_at
+            for state in reminder_states
+            if state.status == "active" and state.next_reminder_at
+        ),
+        default="",
+    )
+    last_reminded_at = max(
+        (state.last_reminded_at for state in reminder_states if state.last_reminded_at),
+        default="",
+    )
+    return next_reminder_at, last_reminded_at
 
 
 def _action_availability(

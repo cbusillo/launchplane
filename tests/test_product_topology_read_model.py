@@ -13,6 +13,7 @@ from control_plane.contracts.product_topology_read_model import (
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressFailureCode,
     PublicIngressIncidentRecord,
+    PublicIngressIncidentReminderStateRecord,
     PublicIngressObservationRecord,
     PublicIngressObservationStatus,
     PublicIngressRouteBindingSourceKind,
@@ -21,7 +22,10 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressTlsProbeEvidence,
     PublicIngressTlsRecordedEvidence,
     PublicIngressTlsStatus,
+    build_public_ingress_incident_event_id,
+    build_public_ingress_material_fingerprint,
     build_public_ingress_tls_check_name,
+    public_ingress_material_fingerprint_sha256,
 )
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
@@ -297,8 +301,17 @@ def _tls_incident(
     *, product: str = "example-site", domain_name: str = "example.test"
 ) -> PublicIngressIncidentRecord:
     observation = _tls_observation(product=product, domain_name=domain_name)
+    fingerprint = build_public_ingress_material_fingerprint(observation)
+    fingerprint_sha256 = public_ingress_material_fingerprint_sha256(fingerprint)
+    incident_id = f"tls-incident-{product}"
+    event_id = build_public_ingress_incident_event_id(
+        incident_id=incident_id,
+        event="opened",
+        material_fingerprint_sha256=fingerprint_sha256,
+    )
     return PublicIngressIncidentRecord(
-        incident_id=f"tls-incident-{product}",
+        schema_version=2,
+        incident_id=incident_id,
         product=product,
         repository=f"example/{product}",
         driver_id="generic-web",
@@ -312,6 +325,17 @@ def _tls_incident(
         latest_observation_id=observation.record_id,
         latest_observed_at=observation.observed_at,
         failure_code="tls_hostname_mismatch",
+        state_version=1,
+        severity="critical",
+        material_fingerprint=fingerprint,
+        material_fingerprint_sha256=fingerprint_sha256,
+        material_fingerprint_complete=True,
+        latest_material_event_id=event_id,
+        latest_material_event="opened",
+        latest_material_event_at=observation.observed_at,
+        notification_state="acknowledged",
+        notification_state_changed_at="2026-07-14T11:01:00Z",
+        notification_state_reason="operator_acknowledged",
         summary="TLS hostname mismatch is active.",
     )
 
@@ -323,10 +347,12 @@ class _TopologyStore:
         route_binding: EnvironmentRouteBindingRecord | None,
         observations: tuple[PublicIngressObservationRecord, ...] = (),
         incidents: tuple[PublicIngressIncidentRecord, ...] = (),
+        reminders: tuple[PublicIngressIncidentReminderStateRecord, ...] = (),
     ) -> None:
         self.route_binding = route_binding
         self.observations = observations
         self.incidents = incidents
+        self.reminders = reminders
 
     def read_route_binding_record(
         self, *, product: str, context_name: str, instance_name: str
@@ -385,6 +411,24 @@ class _TopologyStore:
             and (not status or record.status == status)
         ]
         records.sort(key=lambda record: (record.opened_at, record.incident_id), reverse=True)
+        return tuple(records if limit is None else records[:limit])
+
+    def list_public_ingress_incident_reminder_state_records(
+        self,
+        *,
+        incident_id: str = "",
+        policy_id: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentReminderStateRecord, ...]:
+        records = [
+            record
+            for record in self.reminders
+            if (not incident_id or record.incident_id == incident_id)
+            and (not policy_id or record.policy_id == policy_id)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.reminder_state_id), reverse=True)
         return tuple(records if limit is None else records[:limit])
 
 
@@ -566,16 +610,27 @@ class ProductTopologyReadModelTests(unittest.TestCase):
             product=profile.product,
             domain_name="cm-website.example.test",
         )
+        incident = _tls_incident(
+            product=profile.product,
+            domain_name="cm-website.example.test",
+        )
+        reminder = PublicIngressIncidentReminderStateRecord(
+            reminder_state_id="tls-reminder-cm-website",
+            incident_id=incident.incident_id,
+            policy_id="example-policy",
+            status="suppressed",
+            material_event_id=incident.latest_material_event_id,
+            interval_seconds=21600,
+            window_anchor_at=incident.latest_material_event_at,
+            next_reminder_at="2026-07-14T18:00:00Z",
+            updated_at="2026-07-14T12:00:00Z",
+        )
         topology = build_product_environment_topology(
             record_store=_TopologyStore(
                 route_binding=route_binding,
                 observations=(observation,),
-                incidents=(
-                    _tls_incident(
-                        product=profile.product,
-                        domain_name="cm-website.example.test",
-                    ),
-                ),
+                incidents=(incident,),
+                reminders=(reminder,),
             ),
             profile=profile,
             lane=profile.lanes[0],
@@ -598,6 +653,10 @@ class ProductTopologyReadModelTests(unittest.TestCase):
         self.assertEqual(observed_tls.failure_code, "tls_hostname_mismatch")
         self.assertEqual(observed_tls.presented_name_evidence, ("wrong.example.test",))
         self.assertEqual(observed_tls.incident_status, "open")
+        self.assertEqual(observed_tls.incident_severity, "critical")
+        self.assertEqual(observed_tls.incident_notification_state, "acknowledged")
+        self.assertEqual(observed_tls.incident_latest_event, "opened")
+        self.assertEqual(observed_tls.incident_next_reminder_at, "")
         self.assertIn("certificate binding", observed_tls.likely_failure_cause)
         self.assertIn("tls_mismatch", {warning.code for warning in topology.warnings})
         serialized = topology.model_dump_json()

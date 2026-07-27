@@ -29,6 +29,14 @@ from control_plane.contracts.product_environment_read_model import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentReminderStateRecord,
+)
+from control_plane.contracts.public_ingress_monitoring import (
+    build_public_ingress_incident_event_id,
+    build_public_ingress_material_fingerprint,
+    public_ingress_material_fingerprint_sha256,
+)
 from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
@@ -221,10 +229,12 @@ class _PublicIngressReadModelStore(_PreviewRecordStore):
         profile: LaunchplaneProductProfileRecord,
         observations: tuple[PublicIngressObservationRecord, ...],
         incidents: tuple[PublicIngressIncidentRecord, ...] = (),
+        reminders: tuple[PublicIngressIncidentReminderStateRecord, ...] = (),
     ) -> None:
         super().__init__(profile, ())
         self._observations = observations
         self._incidents = incidents
+        self._reminders = reminders
 
     def list_public_ingress_observation_records(
         self,
@@ -285,6 +295,26 @@ class _PublicIngressReadModelStore(_PreviewRecordStore):
         if limit is not None:
             incidents = incidents[:limit]
         return tuple(incidents)
+
+    def list_public_ingress_incident_reminder_state_records(
+        self,
+        *,
+        incident_id: str = "",
+        policy_id: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentReminderStateRecord, ...]:
+        records = [
+            record
+            for record in self._reminders
+            if (not incident_id or record.incident_id == incident_id)
+            and (not policy_id or record.policy_id == policy_id)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.reminder_state_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
 
 class _PublicIngressObservationsOnlyStore(_PreviewRecordStore):
@@ -1159,7 +1189,22 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             notification_sent=True,
             summary="Public ingress failed for example-site/prod: HTTP 503",
         )
+        fingerprint = build_public_ingress_material_fingerprint(observation)
+        fingerprint_sha256 = public_ingress_material_fingerprint_sha256(fingerprint)
+        observation = observation.model_copy(
+            update={
+                "schema_version": 2,
+                "material_fingerprint": fingerprint,
+                "material_fingerprint_sha256": fingerprint_sha256,
+            }
+        )
+        event_id = build_public_ingress_incident_event_id(
+            incident_id="public-ingress-incident-example-site-prod-20260529t120000z",
+            event="opened",
+            material_fingerprint_sha256=fingerprint_sha256,
+        )
         incident = PublicIngressIncidentRecord(
+            schema_version=2,
             incident_id="public-ingress-incident-example-site-prod-20260529t120000z",
             product="example-site",
             context="example-site-prod",
@@ -1170,9 +1215,34 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             latest_observation_id=observation.record_id,
             latest_observed_at=observation.observed_at,
             failure_code="http_error",
+            state_version=1,
+            severity="critical",
+            material_fingerprint=fingerprint,
+            material_fingerprint_sha256=fingerprint_sha256,
+            material_fingerprint_complete=True,
+            latest_material_event_id=event_id,
+            latest_material_event="opened",
+            latest_material_event_at=observation.observed_at,
+            notification_state="acknowledged",
+            notification_state_changed_at="2026-05-29T12:01:00Z",
+            notification_state_reason="operator_acknowledged",
             summary="Public ingress failed for example-site/prod: HTTP 503",
         )
-        store = _PublicIngressReadModelStore(profile, (observation,), (incident,))
+        reminder = PublicIngressIncidentReminderStateRecord(
+            reminder_state_id="public-ingress-reminder-example-policy",
+            incident_id=incident.incident_id,
+            policy_id="example-policy",
+            status="suppressed",
+            material_event_id=event_id,
+            interval_seconds=21600,
+            window_anchor_at=observation.observed_at,
+            last_window_index=1,
+            last_reminder_event_id="public-ingress-event-example-reminder-1",
+            last_reminded_at="2026-05-29T18:00:00Z",
+            next_reminder_at="2026-05-30T00:00:00Z",
+            updated_at="2026-05-29T18:00:00Z",
+        )
+        store = _PublicIngressReadModelStore(profile, (observation,), (incident,), (reminder,))
 
         overview = build_product_site_overview(
             record_store=store,
@@ -1195,6 +1265,21 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertEqual(prod_summary.public_ingress.record_id, observation.record_id)
         self.assertEqual(prod_summary.public_ingress.incident_status, "open")
         self.assertEqual(prod_summary.public_ingress.incident_id, incident.incident_id)
+        self.assertEqual(prod_summary.public_ingress.incident_severity, "critical")
+        self.assertEqual(prod_summary.public_ingress.incident_notification_state, "acknowledged")
+        self.assertEqual(
+            prod_summary.public_ingress.incident_material_fingerprint_sha256,
+            fingerprint_sha256,
+        )
+        self.assertEqual(prod_summary.public_ingress.incident_latest_event, "opened")
+        self.assertEqual(
+            prod_summary.public_ingress.incident_next_reminder_at,
+            "",
+        )
+        self.assertEqual(
+            prod_summary.public_ingress.incident_last_reminded_at,
+            "2026-05-29T18:00:00Z",
+        )
         self.assertTrue(detail.public_ingress.notification_sent)
 
     def test_private_monitoring_read_model_ignores_reconciliation_as_probe_evidence(

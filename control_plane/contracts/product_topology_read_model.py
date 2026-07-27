@@ -17,7 +17,11 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.public_ingress_monitoring import (
     PUBLIC_HTTP_STALE_AFTER_SECONDS,
+    PublicIngressIncidentEventKind,
+    PublicIngressIncidentNotificationState,
     PublicIngressIncidentRecord,
+    PublicIngressIncidentReminderStateRecord,
+    PublicIngressIncidentSeverity,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
     PublicIngressTlsObservation,
@@ -199,6 +203,13 @@ class ProductObservedIngress(BaseModel):
     summary: str = ""
     incident_status: str = ""
     incident_id: str = ""
+    incident_severity: PublicIngressIncidentSeverity | Literal[""] = ""
+    incident_notification_state: PublicIngressIncidentNotificationState | Literal[""] = ""
+    incident_material_fingerprint_sha256: str = ""
+    incident_latest_event: PublicIngressIncidentEventKind | Literal[""] = ""
+    incident_latest_event_at: str = ""
+    incident_next_reminder_at: str = ""
+    incident_last_reminded_at: str = ""
     expected_runtime_identity: RuntimeIdentity | None = None
     observed_runtime_identity: RuntimeIdentity | None = None
     runtime_identity_status: RuntimeIdentityStatus = "unchecked"
@@ -236,6 +247,13 @@ class ProductObservedTlsDomain(BaseModel):
     record_id: str = ""
     incident_status: str = ""
     incident_id: str = ""
+    incident_severity: PublicIngressIncidentSeverity | Literal[""] = ""
+    incident_notification_state: PublicIngressIncidentNotificationState | Literal[""] = ""
+    incident_material_fingerprint_sha256: str = ""
+    incident_latest_event: PublicIngressIncidentEventKind | Literal[""] = ""
+    incident_latest_event_at: str = ""
+    incident_next_reminder_at: str = ""
+    incident_last_reminded_at: str = ""
     trust_state: FreshnessStatus = "missing"
     provenance: DataProvenance = Field(
         default_factory=lambda: _missing_provenance(
@@ -716,6 +734,10 @@ def _observed_ingress(
         stale_after=stale_after_value,
         detail="Launchplane public ingress active observation.",
     )
+    next_reminder_at, last_reminded_at = _incident_reminder_times(
+        record_store=record_store,
+        incident_id=incident.incident_id if incident is not None else "",
+    )
     return ProductObservedIngress(
         monitoring_intent=monitoring_intent,
         incident_eligible=incident_eligible,
@@ -726,6 +748,17 @@ def _observed_ingress(
         summary=latest.summary,
         incident_status=incident.status if incident is not None else "",
         incident_id=incident.incident_id if incident is not None else "",
+        incident_severity=incident.severity if incident is not None else "",
+        incident_notification_state=(incident.notification_state if incident is not None else ""),
+        incident_material_fingerprint_sha256=(
+            incident.material_fingerprint_sha256 if incident is not None else ""
+        ),
+        incident_latest_event=(incident.latest_material_event if incident is not None else ""),
+        incident_latest_event_at=(
+            incident.latest_material_event_at if incident is not None else ""
+        ),
+        incident_next_reminder_at=next_reminder_at,
+        incident_last_reminded_at=last_reminded_at,
         expected_runtime_identity=latest.expected_runtime_identity,
         observed_runtime_identity=(
             runtime_target.observed_runtime_identity if runtime_target is not None else None
@@ -818,6 +851,10 @@ def _observed_tls_evidence(
         stale_after=tls.probe.stale_after,
         detail="Launchplane active TLS certificate observation.",
     )
+    next_reminder_at, last_reminded_at = _incident_reminder_times(
+        record_store=record_store,
+        incident_id=incident.incident_id if incident is not None else "",
+    )
     projection = ProductObservedTlsDomain(
         domain_name=tls.public_name,
         role=tls.recorded.domain_role or role,
@@ -843,6 +880,17 @@ def _observed_tls_evidence(
         record_id=latest.record_id,
         incident_status=incident.status if incident is not None else "",
         incident_id=(incident.incident_id if incident is not None else tls.incident_id),
+        incident_severity=incident.severity if incident is not None else "",
+        incident_notification_state=(incident.notification_state if incident is not None else ""),
+        incident_material_fingerprint_sha256=(
+            incident.material_fingerprint_sha256 if incident is not None else ""
+        ),
+        incident_latest_event=(incident.latest_material_event if incident is not None else ""),
+        incident_latest_event_at=(
+            incident.latest_material_event_at if incident is not None else ""
+        ),
+        incident_next_reminder_at=next_reminder_at,
+        incident_last_reminded_at=last_reminded_at,
         trust_state=trust_state,
         provenance=provenance,
     )
@@ -872,6 +920,37 @@ def _latest_open_incident(
     return next(
         (record for record in records if isinstance(record, PublicIngressIncidentRecord)),
         None,
+    )
+
+
+def _incident_reminder_times(
+    *,
+    record_store: object,
+    incident_id: str,
+) -> tuple[str, str]:
+    if not incident_id:
+        return "", ""
+    records = _optional_records(
+        record_store,
+        "list_public_ingress_incident_reminder_state_records",
+        incident_id=incident_id,
+    )
+    reminder_states = tuple(
+        record for record in records if isinstance(record, PublicIngressIncidentReminderStateRecord)
+    )
+    return (
+        min(
+            (
+                state.next_reminder_at
+                for state in reminder_states
+                if state.status == "active" and state.next_reminder_at
+            ),
+            default="",
+        ),
+        max(
+            (state.last_reminded_at for state in reminder_states if state.last_reminded_at),
+            default="",
+        ),
     )
 
 

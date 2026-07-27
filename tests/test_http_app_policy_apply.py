@@ -132,6 +132,10 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(payload["result"]["mode"], "apply")
         self.assertTrue(payload["result"]["changed"])
+        self.assertEqual(
+            payload["result"]["policy"]["reminder_interval_seconds"],
+            policy_record.reminder_interval_seconds,
+        )
         self.assertEqual(records, (policy_record,))
 
     async def test_public_ingress_notification_policy_dry_run_does_not_write(self) -> None:

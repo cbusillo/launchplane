@@ -166,6 +166,7 @@ class ProductLaneHealthCheck(BaseModel):
     url: str = ""
     private_endpoint_key: str = ""
     require_runtime_identity: bool = False
+    recovery_observation_threshold: int = Field(default=1, ge=1, le=10)
     provider: str = ""
     provider_check: str = ""
 

@@ -151,6 +151,8 @@ from control_plane.contracts.product_profile_record import (
     product_profile_record_sha256,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentEventRecord,
+    PublicIngressIncidentReminderStateRecord,
     PublicIngressNotificationAttemptRecord,
 )
 from control_plane.contracts.public_ingress_monitoring import (
@@ -158,6 +160,9 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    public_ingress_incident_record_sha256,
+)
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import (
@@ -202,7 +207,11 @@ ProductProfileCompareWriteStatus = Literal[
     "reservation_in_progress",
     "reconciliation_required",
 ]
-PublicIngressTransitionWriteStatus = Literal["written", "authority_changed"]
+PublicIngressTransitionWriteStatus = Literal[
+    "written",
+    "authority_changed",
+    "incident_changed",
+]
 ProviderTargetCreateStatus = Literal["created", "exists"]
 MutationReservationDecision = Literal[
     "acquired",
@@ -847,6 +856,20 @@ class LaunchplanePublicIngressObservationRow(Base):
             "status",
             desc("observed_at"),
         ),
+        Index(
+            "launchplane_public_ingress_observations_incident_idx",
+            "incident_id",
+            desc("observed_at"),
+        ),
+        Index(
+            "launchplane_public_ingress_observations_check_idx",
+            "product",
+            "context",
+            "instance",
+            "check_token",
+            "check_kind",
+            desc("observed_at"),
+        ),
     )
 
     record_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -855,6 +878,9 @@ class LaunchplanePublicIngressObservationRow(Base):
     instance: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     observed_at: Mapped[str] = mapped_column(String, nullable=False)
+    incident_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    check_token: Mapped[str] = mapped_column(String, nullable=False, default="")
+    check_kind: Mapped[str] = mapped_column(String, nullable=False, default="public_http")
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -997,6 +1023,17 @@ class LaunchplanePublicIngressIncidentRow(Base):
             "status",
             desc("opened_at"),
         ),
+        Index(
+            "launchplane_public_ingress_incidents_open_uidx",
+            "product",
+            "context",
+            "instance",
+            "check_token",
+            "check_kind",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+            sqlite_where=text("status = 'open'"),
+        ),
     )
 
     incident_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -1004,8 +1041,57 @@ class LaunchplanePublicIngressIncidentRow(Base):
     context: Mapped[str] = mapped_column(String, nullable=False)
     instance: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
+    check_token: Mapped[str] = mapped_column(String, nullable=False)
+    check_kind: Mapped[str] = mapped_column(String, nullable=False)
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False)
     opened_at: Mapped[str] = mapped_column(String, nullable=False)
     latest_observed_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePublicIngressIncidentEventRow(Base):
+    __tablename__ = "launchplane_public_ingress_incident_events"
+    __table_args__ = (
+        Index(
+            "launchplane_pi_incident_events_incident_idx",
+            "incident_id",
+            desc("occurred_at"),
+        ),
+        Index(
+            "launchplane_pi_incident_events_kind_idx",
+            "event",
+            desc("occurred_at"),
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String, nullable=False)
+    event: Mapped[str] = mapped_column(String, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePublicIngressIncidentReminderRow(Base):
+    __tablename__ = "launchplane_public_ingress_incident_reminders"
+    __table_args__ = (
+        Index(
+            "launchplane_pi_incident_reminders_due_idx",
+            "status",
+            "next_reminder_at",
+        ),
+        Index(
+            "launchplane_pi_incident_reminders_incident_idx",
+            "incident_id",
+            "policy_id",
+        ),
+    )
+
+    reminder_state_id: Mapped[str] = mapped_column(String, primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String, nullable=False)
+    policy_id: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    next_reminder_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -2784,6 +2870,35 @@ class PostgresRecordStore(HumanSessionStore):
         session.execute(
             text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
             {"lock_name": f"launchplane:route-binding:{binding_key}"},
+        )
+
+    def _lock_public_ingress_incident_write(
+        self,
+        session: Any,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+        check_token: str,
+        check_kind: str,
+    ) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {
+                "lock_name": ":".join(
+                    (
+                        "launchplane",
+                        "public-ingress-incident",
+                        product,
+                        context_name,
+                        instance_name,
+                        check_token,
+                        check_kind,
+                    )
+                )
+            },
         )
 
     @contextmanager
@@ -8811,6 +8926,9 @@ class PostgresRecordStore(HumanSessionStore):
                 instance=record.instance,
                 status=record.status,
                 observed_at=record.observed_at,
+                incident_id=record.incident_id,
+                check_token=canonical_health_check_record_token(record.check_name),
+                check_kind=record.check_kind,
                 payload=self._payload_dict(record),
             )
         )
@@ -9330,6 +9448,7 @@ class PostgresRecordStore(HumanSessionStore):
         instance_name: str = "",
         check_name: str = "",
         check_kind: str = "",
+        incident_id: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]:
         filters: list[object] = []
@@ -9339,14 +9458,15 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplanePublicIngressObservationRow.context == context_name)
         if instance_name:
             filters.append(LaunchplanePublicIngressObservationRow.instance == instance_name)
-        if check_kind:
+        if check_name:
             filters.append(
-                func.coalesce(
-                    LaunchplanePublicIngressObservationRow.payload["check_kind"].as_string(),
-                    "public_http",
-                )
-                == check_kind
+                LaunchplanePublicIngressObservationRow.check_token
+                == canonical_health_check_record_token(check_name)
             )
+        if check_kind:
+            filters.append(LaunchplanePublicIngressObservationRow.check_kind == check_kind)
+        if incident_id:
+            filters.append(LaunchplanePublicIngressObservationRow.incident_id == incident_id)
         records = self._list_models(
             model_type=PublicIngressObservationRecord,
             orm_model=LaunchplanePublicIngressObservationRow,
@@ -9355,17 +9475,8 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplanePublicIngressObservationRow.observed_at.desc(),
                 LaunchplanePublicIngressObservationRow.record_id.desc(),
             ),
-            limit=None if check_name else limit,
+            limit=limit,
         )
-        if check_name:
-            check_token = canonical_health_check_record_token(check_name)
-            records = tuple(
-                record
-                for record in records
-                if canonical_health_check_record_token(record.check_name) == check_token
-            )
-            if limit is not None:
-                records = records[:limit]
         return records
 
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> None:
@@ -9376,10 +9487,90 @@ class PostgresRecordStore(HumanSessionStore):
                 context=record.context,
                 instance=record.instance,
                 status=record.status,
+                check_token=canonical_health_check_record_token(record.check_name),
+                check_kind=record.check_kind,
+                state_version=record.state_version,
                 opened_at=record.opened_at,
                 latest_observed_at=record.latest_observed_at,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def write_public_ingress_incident_event_record(
+        self, record: PublicIngressIncidentEventRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePublicIngressIncidentEventRow(
+                event_id=record.event_id,
+                incident_id=record.incident_id,
+                event=record.event,
+                occurred_at=record.occurred_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_public_ingress_incident_event_records(
+        self,
+        *,
+        incident_id: str = "",
+        event: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentEventRecord, ...]:
+        filters: list[object] = []
+        if incident_id:
+            filters.append(LaunchplanePublicIngressIncidentEventRow.incident_id == incident_id)
+        if event:
+            filters.append(LaunchplanePublicIngressIncidentEventRow.event == event)
+        return self._list_models(
+            model_type=PublicIngressIncidentEventRecord,
+            orm_model=LaunchplanePublicIngressIncidentEventRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePublicIngressIncidentEventRow.occurred_at.desc(),
+                LaunchplanePublicIngressIncidentEventRow.event_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_public_ingress_incident_reminder_state_record(
+        self, record: PublicIngressIncidentReminderStateRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePublicIngressIncidentReminderRow(
+                reminder_state_id=record.reminder_state_id,
+                incident_id=record.incident_id,
+                policy_id=record.policy_id,
+                status=record.status,
+                next_reminder_at=record.next_reminder_at,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_public_ingress_incident_reminder_state_records(
+        self,
+        *,
+        incident_id: str = "",
+        policy_id: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentReminderStateRecord, ...]:
+        filters: list[object] = []
+        if incident_id:
+            filters.append(LaunchplanePublicIngressIncidentReminderRow.incident_id == incident_id)
+        if policy_id:
+            filters.append(LaunchplanePublicIngressIncidentReminderRow.policy_id == policy_id)
+        if status:
+            filters.append(LaunchplanePublicIngressIncidentReminderRow.status == status)
+        return self._list_models(
+            model_type=PublicIngressIncidentReminderStateRecord,
+            orm_model=LaunchplanePublicIngressIncidentReminderRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePublicIngressIncidentReminderRow.updated_at.desc(),
+                LaunchplanePublicIngressIncidentReminderRow.reminder_state_id.desc(),
+            ),
+            limit=limit,
         )
 
     def write_public_ingress_transition_with_outbox(
@@ -9387,12 +9578,18 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         observation: PublicIngressObservationRecord,
         incidents: tuple[PublicIngressIncidentRecord, ...],
+        incident_events: tuple[PublicIngressIncidentEventRecord, ...] = (),
+        reminder_states: tuple[PublicIngressIncidentReminderStateRecord, ...] = (),
         outbox_deliveries: tuple[OutboxDeliveryRecord, ...] = (),
+        expected_open_incident_id: str = "",
+        expected_open_incident_state_version: int = 0,
+        expected_open_incident_sha256: str = "",
         expected_profile_sha256: str = "",
         expected_private_endpoint_key: str = "",
         expected_private_endpoint_sha256: str = "",
         expected_route_binding_sha256: str = "",
     ) -> PublicIngressTransitionWriteResult:
+        check_token = canonical_health_check_record_token(observation.check_name)
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             authority_changed = False
@@ -9462,11 +9659,86 @@ class PostgresRecordStore(HumanSessionStore):
                         instance=observation.instance,
                         status=observation.status,
                         observed_at=observation.observed_at,
-                        payload=self._payload_dict(observation),
+                        incident_id="",
+                        check_token=check_token,
+                        check_kind=observation.check_kind,
+                        payload=self._payload_dict(
+                            observation.model_copy(
+                                update={
+                                    "incident_id": "",
+                                    "incident_event_id": "",
+                                }
+                            )
+                        ),
                     )
                 )
                 session.commit()
                 return PublicIngressTransitionWriteResult(status="authority_changed")
+            self._lock_public_ingress_incident_write(
+                session,
+                product=observation.product,
+                context_name=observation.context,
+                instance_name=observation.instance,
+                check_token=check_token,
+                check_kind=observation.check_kind,
+            )
+            current_incident_statement = (
+                select(LaunchplanePublicIngressIncidentRow)
+                .where(
+                    LaunchplanePublicIngressIncidentRow.product == observation.product,
+                    LaunchplanePublicIngressIncidentRow.context == observation.context,
+                    LaunchplanePublicIngressIncidentRow.instance == observation.instance,
+                    LaunchplanePublicIngressIncidentRow.check_token == check_token,
+                    LaunchplanePublicIngressIncidentRow.check_kind == observation.check_kind,
+                    LaunchplanePublicIngressIncidentRow.status == "open",
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                current_incident_statement = current_incident_statement.with_for_update()
+            current_incident_row = session.scalar(current_incident_statement)
+            current_incident_sha256 = ""
+            if current_incident_row is not None:
+                try:
+                    current_incident_sha256 = public_ingress_incident_record_sha256(
+                        PublicIngressIncidentRecord.model_validate(current_incident_row.payload)
+                    )
+                except ValueError:
+                    current_incident_sha256 = "invalid"
+            incident_changed = (
+                current_incident_row is None and bool(expected_open_incident_id)
+            ) or (
+                current_incident_row is not None
+                and (
+                    not expected_open_incident_id
+                    or current_incident_row.incident_id != expected_open_incident_id
+                    or current_incident_row.state_version != expected_open_incident_state_version
+                    or (
+                        bool(expected_open_incident_sha256)
+                        and current_incident_sha256 != expected_open_incident_sha256
+                    )
+                )
+            )
+            if incident_changed:
+                unlinked_observation = observation.model_copy(
+                    update={"incident_id": "", "incident_event_id": ""}
+                )
+                session.merge(
+                    LaunchplanePublicIngressObservationRow(
+                        record_id=observation.record_id,
+                        product=observation.product,
+                        context=observation.context,
+                        instance=observation.instance,
+                        status=observation.status,
+                        observed_at=observation.observed_at,
+                        incident_id="",
+                        check_token=check_token,
+                        check_kind=observation.check_kind,
+                        payload=self._payload_dict(unlinked_observation),
+                    )
+                )
+                session.commit()
+                return PublicIngressTransitionWriteResult(status="incident_changed")
             self._lock_outbox_dedupe_keys(
                 session,
                 dedupe_keys=tuple(delivery.dedupe_key for delivery in outbox_deliveries),
@@ -9479,6 +9751,9 @@ class PostgresRecordStore(HumanSessionStore):
                     instance=observation.instance,
                     status=observation.status,
                     observed_at=observation.observed_at,
+                    incident_id=observation.incident_id,
+                    check_token=check_token,
+                    check_kind=observation.check_kind,
                     payload=self._payload_dict(observation),
                 )
             )
@@ -9490,9 +9765,42 @@ class PostgresRecordStore(HumanSessionStore):
                         context=incident.context,
                         instance=incident.instance,
                         status=incident.status,
+                        check_token=canonical_health_check_record_token(incident.check_name),
+                        check_kind=incident.check_kind,
+                        state_version=incident.state_version,
                         opened_at=incident.opened_at,
                         latest_observed_at=incident.latest_observed_at,
                         payload=self._payload_dict(incident),
+                    )
+                )
+            for event_record in incident_events:
+                existing_event = session.get(
+                    LaunchplanePublicIngressIncidentEventRow, event_record.event_id
+                )
+                if existing_event is None:
+                    session.add(
+                        LaunchplanePublicIngressIncidentEventRow(
+                            event_id=event_record.event_id,
+                            incident_id=event_record.incident_id,
+                            event=event_record.event,
+                            occurred_at=event_record.occurred_at,
+                            payload=self._payload_dict(event_record),
+                        )
+                    )
+                elif existing_event.payload != self._payload_dict(event_record):
+                    raise ValueError(
+                        "public ingress incident event identity reused with different payload"
+                    )
+            for reminder_state in reminder_states:
+                session.merge(
+                    LaunchplanePublicIngressIncidentReminderRow(
+                        reminder_state_id=reminder_state.reminder_state_id,
+                        incident_id=reminder_state.incident_id,
+                        policy_id=reminder_state.policy_id,
+                        status=reminder_state.status,
+                        next_reminder_at=reminder_state.next_reminder_at,
+                        updated_at=reminder_state.updated_at,
+                        payload=self._payload_dict(reminder_state),
                     )
                 )
             for delivery in outbox_deliveries:
@@ -9525,12 +9833,11 @@ class PostgresRecordStore(HumanSessionStore):
         if instance_name:
             filters.append(LaunchplanePublicIngressIncidentRow.instance == instance_name)
         if check_kind:
+            filters.append(LaunchplanePublicIngressIncidentRow.check_kind == check_kind)
+        if check_name:
             filters.append(
-                func.coalesce(
-                    LaunchplanePublicIngressIncidentRow.payload["check_kind"].as_string(),
-                    "public_http",
-                )
-                == check_kind
+                LaunchplanePublicIngressIncidentRow.check_token
+                == canonical_health_check_record_token(check_name)
             )
         if status:
             filters.append(LaunchplanePublicIngressIncidentRow.status == status)
@@ -9542,17 +9849,8 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplanePublicIngressIncidentRow.opened_at.desc(),
                 LaunchplanePublicIngressIncidentRow.incident_id.desc(),
             ),
-            limit=None if check_name else limit,
+            limit=limit,
         )
-        if check_name:
-            check_token = canonical_health_check_record_token(check_name)
-            records = tuple(
-                record
-                for record in records
-                if canonical_health_check_record_token(record.check_name) == check_token
-            )
-            if limit is not None:
-                records = records[:limit]
         return records
 
     def write_public_ingress_notification_policy_record(

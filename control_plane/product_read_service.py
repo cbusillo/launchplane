@@ -46,6 +46,7 @@ _PRODUCT_ENVIRONMENT_READ_MODEL_STORE_METHODS = (
     "list_preview_pr_feedback_records",
     "list_public_ingress_observation_records",
     "list_public_ingress_incident_records",
+    "list_public_ingress_incident_reminder_state_records",
     "list_authz_policy_records",
 )
 

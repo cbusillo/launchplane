@@ -1807,6 +1807,18 @@ const missingEvidenceProduct: ProductSiteOverview = {
   available_actions: [],
 };
 
+function incidentFixtureState(open: boolean) {
+  return {
+    incident_last_reminded_at: "",
+    incident_latest_event: open ? ("opened" as const) : ("" as const),
+    incident_latest_event_at: open ? OBSERVED_AT : "",
+    incident_material_fingerprint_sha256: open ? "fixture-material-fingerprint" : "",
+    incident_next_reminder_at: "",
+    incident_notification_state: open ? ("active" as const) : ("" as const),
+    incident_severity: open ? ("critical" as const) : ("" as const),
+  };
+}
+
 function environmentFixture({
   environment,
   host,
@@ -1869,6 +1881,7 @@ function environmentFixture({
           summary: ingressSummary,
           incident_status: warning ? "open" : "",
           incident_id: warning ? "incident-example" : "",
+          ...incidentFixtureState(Boolean(warning)),
           trust_state: "verified",
           provenance: provenance("verified", ingressSummary),
         },
@@ -1884,6 +1897,7 @@ function environmentFixture({
       failure_code: warning ? "tls_hostname_mismatch" : "",
       incident_id: warning ? "incident-example" : "",
       incident_status: warning ? "open" : "",
+      ...incidentFixtureState(Boolean(warning)),
       incident_opened_at: warning ? OBSERVED_AT : "",
       notification_sent: warning,
       observed_at: OBSERVED_AT,
@@ -1955,6 +1969,7 @@ function environmentFixture({
           failure_code: warning ? "tls_hostname_mismatch" : "",
           incident_id: warning ? "incident-example" : "",
           incident_status: warning ? "open" : "",
+          ...incidentFixtureState(Boolean(warning)),
           observed_at: OBSERVED_AT,
           record_id: `ingress-${environment}-example`,
           status: ingressStatus,
@@ -1987,6 +2002,7 @@ function environmentFixture({
             failure_code: warning ? "hostname_mismatch" : "",
             incident_id: warning ? "incident-example" : "",
             incident_status: warning ? "open" : "",
+            ...incidentFixtureState(Boolean(warning)),
             issuer: "Example Trust Services",
             subject: host,
             not_before: "2026-06-01T00:00:00Z",
@@ -2131,6 +2147,7 @@ function missingEnvironmentFixture(
           summary: "No prelaunch public probe observation is recorded.",
           incident_status: "",
           incident_id: "",
+          ...incidentFixtureState(false),
           trust_state: "missing",
           provenance: missing,
         },
@@ -2146,6 +2163,7 @@ function missingEnvironmentFixture(
       failure_code: "",
       incident_id: "",
       incident_status: "",
+      ...incidentFixtureState(false),
       incident_opened_at: "",
       notification_sent: false,
       observed_at: "",
@@ -2208,6 +2226,7 @@ function missingEnvironmentFixture(
           failure_code: "",
           incident_id: "",
           incident_status: "",
+          ...incidentFixtureState(false),
           observed_at: "",
           record_id: "",
           status: "",
