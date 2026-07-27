@@ -12,7 +12,7 @@ import re
 import socket
 import subprocess
 import time
-from typing import Literal
+from typing import Literal, cast
 from urllib.error import HTTPError
 from urllib.error import URLError
 from urllib.parse import quote
@@ -35,6 +35,10 @@ from control_plane.contracts.runner_host_hygiene import (
     RunnerHostHygieneDockerReclaimableBreakdown,
 )
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneImageInventoryItem
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheAgeBucket
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheBudget
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheEntry
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheUsage
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneReport
@@ -55,6 +59,7 @@ MINIMUM_DEFAULT_CACHE_KEEP_STORAGE_BYTES = 8 * 1024**3
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
 _BUILDCTL_STORAGE_MB_BYTES = 1_000_000
 _RUNNER_WORKDIR_USAGE_HELPER = "/usr/local/sbin/launchplane-runner-workdir-usage"
+_GENERATED_RUN_CACHE_HELPER = "/usr/local/sbin/launchplane-generated-run-cache"
 _DOCKER_DISK_USAGE_COMMAND = (
     "curl",
     "--silent",
@@ -121,12 +126,24 @@ RemoteCommandRunner = Callable[[Sequence[str], int], RemoteCommandResult]
 AuditPoster = Callable[[RunnerHostHygieneApplyAuditRecord, str], dict[str, object]]
 BearerTokenProvider = Callable[[], str]
 AuditDeliverySleeper = Callable[[float], None]
+GitHubRunStateReader = Callable[[str, tuple[int, ...]], Mapping[int, str]]
 
 
 @dataclass(frozen=True)
 class RunnerWorkdirRoot:
     key: str
     path: str
+
+
+@dataclass(frozen=True)
+class GeneratedRunCacheRoot:
+    key: str
+    path: str
+    source_repository: str
+    high_water_bytes: int
+    low_water_bytes: int
+    minimum_age_hours: int
+    cooldown_hours: int
 
 
 class AuditDeliveryError(click.ClickException):
@@ -151,6 +168,9 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
     timeout_seconds: int = Field(default=120, ge=1)
     prune_until: str = DEFAULT_PRUNE_UNTIL
     runner_workdir_roots: tuple[RunnerWorkdirRoot, ...] = ()
+    generated_run_cache_roots: tuple[GeneratedRunCacheRoot, ...] = ()
+    target_generated_cache_key: str = ""
+    target_generated_cache_run_ids: tuple[int, ...] = ()
     idle_observation_count: int = Field(default=2, ge=2, le=10)
     idle_observation_interval_seconds: int = Field(default=5, ge=0, le=60)
     resolve_action_started: bool = False
@@ -165,11 +185,13 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
         if self.action not in {
             "prune_docker_cache",
             "prune_dangling_images",
+            "prune_generated_run_cache",
             "remove_buildkit_state_volumes",
         }:
             raise ValueError(
                 "runner host hygiene executor only supports prune_docker_cache "
-                "prune_dangling_images, and remove_buildkit_state_volumes"
+                "prune_dangling_images, prune_generated_run_cache, and "
+                "remove_buildkit_state_volumes"
             )
         (
             self.host_name,
@@ -211,6 +233,62 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
             seen_root_paths.add(path)
             normalized_roots.append(RunnerWorkdirRoot(key=key, path=path))
         self.runner_workdir_roots = tuple(sorted(normalized_roots, key=lambda item: item.key))
+        normalized_generated_roots: list[GeneratedRunCacheRoot] = []
+        seen_generated_keys: set[str] = set()
+        seen_generated_paths: set[str] = set()
+        for generated_root in self.generated_run_cache_roots:
+            key = generated_root.key.strip().lower()
+            path = generated_root.path.strip().rstrip("/")
+            source_repository = generated_root.source_repository.strip().lower()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", key):
+                raise ValueError("generated run cache key must be a public-safe token")
+            if (
+                not path
+                or not path.startswith("/")
+                or "/../" in f"{path}/"
+                or re.search(r"\s", path)
+                or posixpath.normpath(path) != path
+            ):
+                raise ValueError("generated run cache path must be a scoped absolute path")
+            if not re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", source_repository):
+                raise ValueError("generated run cache repository must use owner/name")
+            if (
+                generated_root.high_water_bytes <= 0
+                or generated_root.low_water_bytes >= generated_root.high_water_bytes
+            ):
+                raise ValueError("generated run cache requires positive high water above low water")
+            if generated_root.minimum_age_hours <= 0:
+                raise ValueError("generated run cache minimum age must be positive hours")
+            if generated_root.cooldown_hours <= 0:
+                raise ValueError("generated run cache cooldown must be positive hours")
+            if key in seen_generated_keys or path in seen_generated_paths:
+                raise ValueError("generated run cache roots must be unique")
+            seen_generated_keys.add(key)
+            seen_generated_paths.add(path)
+            normalized_generated_roots.append(
+                GeneratedRunCacheRoot(
+                    key=key,
+                    path=path,
+                    source_repository=source_repository,
+                    high_water_bytes=generated_root.high_water_bytes,
+                    low_water_bytes=generated_root.low_water_bytes,
+                    minimum_age_hours=generated_root.minimum_age_hours,
+                    cooldown_hours=generated_root.cooldown_hours,
+                )
+            )
+        self.generated_run_cache_roots = tuple(
+            sorted(normalized_generated_roots, key=lambda item: item.key)
+        )
+        self.target_generated_cache_key = self.target_generated_cache_key.strip().lower()
+        if self.target_generated_cache_key and not re.fullmatch(
+            r"[a-z0-9][a-z0-9._-]{0,63}", self.target_generated_cache_key
+        ):
+            raise ValueError("target generated cache key must be a public-safe token")
+        self.target_generated_cache_run_ids = tuple(
+            sorted(set(self.target_generated_cache_run_ids))
+        )
+        if any(run_id <= 0 for run_id in self.target_generated_cache_run_ids):
+            raise ValueError("target generated cache run ids must be positive")
         self.target_buildkit_builder = self.target_buildkit_builder.strip().lower()
         if self.target_buildkit_builder and not re.fullmatch(
             r"[a-z0-9][a-z0-9._-]{0,127}", self.target_buildkit_builder
@@ -252,6 +330,10 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
             raise ValueError("Docker cache and image prune requests cannot include target volumes")
         if self.action != "remove_buildkit_state_volumes" and self.allowed_buildkit_state_volumes:
             raise ValueError("Docker cache and image prune requests cannot include allowed volumes")
+        if self.action != "prune_generated_run_cache" and self.target_generated_cache_key:
+            raise ValueError("non-generated-cache requests cannot include a generated cache key")
+        if self.action != "prune_generated_run_cache" and self.target_generated_cache_run_ids:
+            raise ValueError("non-generated-cache requests cannot include generated cache run ids")
         if self.action == "prune_dangling_images" and (
             self.target_buildkit_builder
             or self.allowed_buildkit_builders
@@ -264,6 +346,21 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
             or self.max_used_space_bytes
         ):
             raise ValueError("BuildKit volume removal requests cannot include builder cache inputs")
+        if self.action == "prune_generated_run_cache" and (
+            self.target_buildkit_builder
+            or self.allowed_buildkit_builders
+            or self.max_used_space_bytes
+            or self.target_buildkit_state_volumes
+            or self.allowed_buildkit_state_volumes
+        ):
+            raise ValueError("generated cache requests cannot include Docker mutation targets")
+        if self.action == "prune_generated_run_cache":
+            if not self.target_generated_cache_key:
+                raise ValueError("generated cache requests require a target cache key")
+            if self.target_generated_cache_key not in {
+                root.key for root in self.generated_run_cache_roots
+            }:
+                raise ValueError("target generated cache key is not configured")
         if (
             not self.target_buildkit_builder
             and self.max_used_space_bytes
@@ -323,7 +420,12 @@ def execute_runner_host_hygiene_executor(
     audit_poster: AuditPoster,
     audit_spool: RunnerHostHygieneAuditSpool | None = None,
     audit_delivery_sleeper: AuditDeliverySleeper = time.sleep,
+    github_run_state_reader: GitHubRunStateReader | None = None,
 ) -> RunnerHostHygieneExecutorResult:
+    if request.action == "prune_generated_run_cache" and request.mutate and audit_spool is None:
+        raise click.ClickException(
+            "generated run cache mutation requires durable host-local audit delivery state"
+        )
     if audit_spool is not None:
         reconciliation_result = _reconcile_audit_spool(
             request=request,
@@ -331,6 +433,7 @@ def execute_runner_host_hygiene_executor(
             audit_spool=audit_spool,
             audit_poster=audit_poster,
             audit_delivery_sleeper=audit_delivery_sleeper,
+            github_run_state_reader=github_run_state_reader,
         )
         if reconciliation_result is not None:
             return reconciliation_result
@@ -338,27 +441,56 @@ def execute_runner_host_hygiene_executor(
     pre_report = collect_runner_host_hygiene_report(
         request=request,
         remote_runner=remote_runner,
+        github_run_state_reader=github_run_state_reader,
     )
+    selected_generated_run_ids = _select_generated_cache_run_ids(
+        request=request,
+        report=pre_report,
+    )
+    action_request = request.model_copy(
+        update={"target_generated_cache_run_ids": selected_generated_run_ids}
+    )
+    target_generated_cache = _target_generated_run_cache_root(action_request)
     apply_request = RunnerHostHygieneApplyRequest(
-        action=request.action,
-        host_name=request.host_name,
-        mutate=request.mutate,
-        retained_warm_builders=request.retained_warm_builders,
-        target_buildkit_builder=request.target_buildkit_builder,
-        max_used_space_bytes=request.max_used_space_bytes,
-        target_buildkit_state_volumes=request.target_buildkit_state_volumes,
-        audit_record_key=request.audit_record_key,
+        action=action_request.action,
+        host_name=action_request.host_name,
+        mutate=action_request.mutate,
+        retained_warm_builders=action_request.retained_warm_builders,
+        target_buildkit_builder=action_request.target_buildkit_builder,
+        max_used_space_bytes=action_request.max_used_space_bytes,
+        target_buildkit_state_volumes=action_request.target_buildkit_state_volumes,
+        target_generated_cache_key=action_request.target_generated_cache_key,
+        target_generated_cache_run_ids=action_request.target_generated_cache_run_ids,
+        generated_cache_minimum_age_hours=(
+            target_generated_cache.minimum_age_hours if target_generated_cache else 0
+        ),
+        generated_cache_high_water_bytes=(
+            target_generated_cache.high_water_bytes if target_generated_cache else 0
+        ),
+        generated_cache_low_water_bytes=(
+            target_generated_cache.low_water_bytes if target_generated_cache else 0
+        ),
+        generated_cache_cooldown_hours=(
+            target_generated_cache.cooldown_hours if target_generated_cache else 0
+        ),
+        audit_record_key=action_request.audit_record_key,
     )
     apply_plan = plan_runner_host_hygiene_apply(
         policy=RunnerHostHygieneApplyPolicy(
-            approved_hosts=(request.host_name,),
-            required_retained_warm_builders=request.retained_warm_builders,
+            approved_hosts=(action_request.host_name,),
+            required_retained_warm_builders=action_request.retained_warm_builders,
             require_healthy_report=False,
-            allow_docker_cache_prune=request.action == "prune_docker_cache",
-            allow_dangling_image_prune=request.action == "prune_dangling_images",
-            allowed_buildkit_builders=request.allowed_buildkit_builders,
-            allow_buildkit_state_volume_remove=(request.action == "remove_buildkit_state_volumes"),
-            allowed_buildkit_state_volumes=request.allowed_buildkit_state_volumes,
+            allow_docker_cache_prune=action_request.action == "prune_docker_cache",
+            allow_dangling_image_prune=action_request.action == "prune_dangling_images",
+            allow_generated_run_cache_prune=(action_request.action == "prune_generated_run_cache"),
+            allowed_generated_cache_keys=tuple(
+                root.key for root in action_request.generated_run_cache_roots
+            ),
+            allowed_buildkit_builders=action_request.allowed_buildkit_builders,
+            allow_buildkit_state_volume_remove=(
+                action_request.action == "remove_buildkit_state_volumes"
+            ),
+            allowed_buildkit_state_volumes=action_request.allowed_buildkit_state_volumes,
         ),
         request=apply_request,
         report=pre_report,
@@ -371,6 +503,7 @@ def execute_runner_host_hygiene_executor(
         pre_apply_report=pre_report,
         message="planned runner host hygiene apply; no host mutation was executed yet",
     )
+    _assert_generated_cache_audit_redacted(audit=planned_audit, request=action_request)
     planned_idempotency_key = f"runner-host-hygiene:{request.audit_record_key}:planned"
     audit_envelope: RunnerHostHygieneAuditDeliveryEnvelope | None = None
     if audit_spool is None:
@@ -387,6 +520,24 @@ def execute_runner_host_hygiene_executor(
             audit_delivery_sleeper=audit_delivery_sleeper,
         )
         planned_response = delivery_responses.get("planned", {})
+        if (
+            action_request.action == "prune_generated_run_cache"
+            and apply_plan.status == "ready"
+            and audit_envelope.planned_delivery_state != "delivered"
+        ):
+            audit_envelope = audit_spool.write(
+                audit_envelope.model_copy(update={"execution_state": "blocked"})
+            )
+            return RunnerHostHygieneExecutorResult(
+                status="blocked",
+                audit_record_key=request.audit_record_key,
+                planned_response=planned_response,
+                audit_delivery_pending=True,
+                message=(
+                    "generated run cache mutation requires accepted planned audit delivery; "
+                    "host mutation was not executed"
+                ),
+            )
         if (
             apply_plan.status == "ready"
             and audit_envelope.planned_delivery_state == "pending"
@@ -406,6 +557,7 @@ def execute_runner_host_hygiene_executor(
                 ),
             )
     if apply_plan.status != "ready":
+        generated_cache_not_needed = _generated_cache_apply_not_needed(apply_plan)
         audit_delivery_pending = (
             audit_envelope is not None and audit_envelope.planned_delivery_state != "delivered"
         )
@@ -414,26 +566,33 @@ def execute_runner_host_hygiene_executor(
                 audit_envelope.model_copy(update={"execution_state": "blocked"})
             )
         return RunnerHostHygieneExecutorResult(
-            status="blocked",
+            status="not_needed" if generated_cache_not_needed else "blocked",
             audit_record_key=request.audit_record_key,
             planned_response=planned_response,
             audit_delivery_pending=audit_delivery_pending,
             message=(
                 f"{apply_plan.summary}; planned audit delivery remains pending"
                 if audit_delivery_pending
-                else apply_plan.summary
+                else (
+                    "runner host generated cache cleanup is not needed under current policy"
+                    if generated_cache_not_needed
+                    else apply_plan.summary
+                )
             ),
         )
 
-    idle_result = _check_host_idle(
-        request=request,
-        remote_runner=remote_runner,
-        sleeper=audit_delivery_sleeper,
-    )
+    idle_result = None
+    if action_request.action != "prune_generated_run_cache":
+        idle_result = _check_host_idle(
+            request=action_request,
+            remote_runner=remote_runner,
+            sleeper=audit_delivery_sleeper,
+        )
     if idle_result is not None:
         post_report = _collect_terminal_report(
-            request=request,
+            request=action_request,
             remote_runner=remote_runner,
+            github_run_state_reader=github_run_state_reader,
         )
         terminal_message = (
             f"runner host hygiene apply blocked by active runner or build processes: {idle_result}"
@@ -448,6 +607,7 @@ def execute_runner_host_hygiene_executor(
             status="failed",
             message=terminal_message,
         )
+        _assert_generated_cache_audit_redacted(audit=terminal_audit, request=action_request)
         terminal_response, audit_delivery_pending = _deliver_terminal_audit(
             terminal_audit=terminal_audit,
             audit_envelope=audit_envelope,
@@ -468,28 +628,29 @@ def execute_runner_host_hygiene_executor(
         audit_envelope = audit_spool.write(
             audit_envelope.model_copy(update={"execution_state": "action_started"})
         )
-    action_result = _execute_apply_action(request=request, remote_runner=remote_runner)
+    action_result = _execute_apply_action(request=action_request, remote_runner=remote_runner)
     post_report = _collect_terminal_report(
-        request=request,
+        request=action_request,
         remote_runner=remote_runner,
+        github_run_state_reader=github_run_state_reader,
     )
     if post_report is None:
         terminal_status: RunnerHostHygieneApplyAuditStatus = "failed"
         action_outcome = "succeeded" if action_result.returncode == 0 else "failed"
         terminal_message = (
-            f"runner host hygiene {request.action} {action_outcome}; "
+            f"runner host hygiene {action_request.action} {action_outcome}; "
             "terminal evidence collection failed"
         )
     else:
         post_evidence_failure = _post_apply_evidence_failure(
-            request=request,
+            request=action_request,
             post_report=post_report,
         )
         terminal_status = (
             "completed" if action_result.returncode == 0 and not post_evidence_failure else "failed"
         )
         terminal_message = _terminal_message(
-            action=request.action,
+            action=action_request.action,
             action_result=action_result,
             post_report=post_report,
             post_evidence_failure=post_evidence_failure,
@@ -502,6 +663,7 @@ def execute_runner_host_hygiene_executor(
         status=terminal_status,
         message=terminal_message,
     )
+    _assert_generated_cache_audit_redacted(audit=terminal_audit, request=action_request)
     terminal_response, audit_delivery_pending = _deliver_terminal_audit(
         terminal_audit=terminal_audit,
         audit_envelope=audit_envelope,
@@ -526,6 +688,7 @@ def _reconcile_audit_spool(
     audit_spool: RunnerHostHygieneAuditSpool,
     audit_poster: AuditPoster,
     audit_delivery_sleeper: AuditDeliverySleeper,
+    github_run_state_reader: GitHubRunStateReader | None,
 ) -> RunnerHostHygieneExecutorResult | None:
     for original_envelope in audit_spool.list_for(
         host_name=request.host_name,
@@ -563,6 +726,7 @@ def _reconcile_audit_spool(
             post_report = _collect_terminal_report(
                 request=request,
                 remote_runner=remote_runner,
+                github_run_state_reader=github_run_state_reader,
             )
             if post_report is None:
                 terminal_message = (
@@ -582,6 +746,7 @@ def _reconcile_audit_spool(
                 status="failed",
                 message=terminal_message,
             )
+            _assert_generated_cache_audit_redacted(audit=terminal_audit, request=request)
             terminal_response, delivery_pending = _deliver_terminal_audit(
                 terminal_audit=terminal_audit,
                 audit_envelope=envelope,
@@ -618,6 +783,20 @@ def _reconcile_audit_spool(
                 message="runner host hygiene request was already recorded as blocked",
             )
     return None
+
+
+def _generated_cache_apply_not_needed(apply_plan: RunnerHostHygieneApplyPlan) -> bool:
+    if apply_plan.action != "prune_generated_run_cache" or not apply_plan.mutate:
+        return False
+    blocker_codes = {blocker.code for blocker in apply_plan.blockers}
+    benign_codes = {
+        "target_generated_cache_below_high_water",
+        "target_generated_cache_cooldown_active",
+        "target_generated_cache_runs_missing",
+    }
+    return "target_generated_cache_below_high_water" in blocker_codes and blocker_codes.issubset(
+        benign_codes
+    )
 
 
 def _deliver_terminal_audit(
@@ -717,6 +896,29 @@ def _post_audit_with_retry(
 def _execute_apply_action(
     *, request: RunnerHostHygieneExecutorRequest, remote_runner: RemoteCommandRunner
 ) -> RemoteCommandResult:
+    if request.action == "prune_generated_run_cache":
+        root = _target_generated_run_cache_root(request)
+        if root is None or not request.target_generated_cache_run_ids:
+            return RemoteCommandResult(
+                returncode=1,
+                stderr="generated cache action lacks an exact configured target",
+            )
+        return remote_runner(
+            (
+                "flock",
+                "-n",
+                HOST_LOCK_PATH,
+                "/usr/bin/sudo",
+                "-n",
+                _GENERATED_RUN_CACHE_HELPER,
+                "prune",
+                f"{root.key}={root.path}",
+                str(request.idle_observation_count),
+                str(request.idle_observation_interval_seconds),
+                ",".join(str(run_id) for run_id in request.target_generated_cache_run_ids),
+            ),
+            request.timeout_seconds,
+        )
     if request.action == "remove_buildkit_state_volumes":
         target_volume = request.target_buildkit_state_volumes[0]
         return remote_runner(
@@ -801,10 +1003,7 @@ def _execute_apply_action(
             json.dumps({"until": [request.prune_until]}, separators=(",", ":")),
             safe="",
         )
-        prune_url = (
-            "http://localhost/v1.45/build/prune?all=true&filters="
-            f"{prune_filters}"
-        )
+        prune_url = f"http://localhost/v1.45/build/prune?all=true&filters={prune_filters}"
     return remote_runner(
         (
             "flock",
@@ -828,6 +1027,7 @@ def collect_runner_host_hygiene_report(
     *,
     request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
+    github_run_state_reader: GitHubRunStateReader | None = None,
 ) -> RunnerHostHygieneReport:
     df_result = _require_remote_success(
         remote_runner(("df", "-B1", "-P", "/"), request.timeout_seconds),
@@ -859,6 +1059,11 @@ def collect_runner_host_hygiene_report(
         request=request,
         remote_runner=remote_runner,
     )
+    generated_cache_usage = _collect_generated_run_cache_usage(
+        request=request,
+        remote_runner=remote_runner,
+        github_run_state_reader=github_run_state_reader,
+    )
     observation = RunnerHostHygieneObservation(
         host_name=request.host_name,
         observed_at=utc_now_timestamp(),
@@ -868,6 +1073,9 @@ def collect_runner_host_hygiene_report(
         runner_workdir_bytes=sum(item.apparent_bytes for item in runner_workdir_usage),
         runner_workdir_allocated_bytes=sum(item.allocated_bytes for item in runner_workdir_usage),
         runner_workdir_usage=runner_workdir_usage,
+        generated_cache_apparent_bytes=sum(item.apparent_bytes for item in generated_cache_usage),
+        generated_cache_allocated_bytes=sum(item.allocated_bytes for item in generated_cache_usage),
+        generated_cache_usage=generated_cache_usage,
         docker_toolchain=_collect_docker_toolchain(
             request=request,
             remote_runner=remote_runner,
@@ -887,6 +1095,13 @@ def collect_runner_host_hygiene_report(
     return evaluate_runner_host_hygiene(
         policy=RunnerHostHygienePolicy(
             minimum_free_disk_bytes=request.minimum_free_disk_bytes,
+            generated_cache_budgets=tuple(
+                RunnerHostHygieneGeneratedCacheBudget(
+                    cache_key=root.key,
+                    high_water_bytes=root.high_water_bytes,
+                )
+                for root in request.generated_run_cache_roots
+            ),
             required_warm_builders=request.retained_warm_builders,
         ),
         observation=observation,
@@ -951,6 +1166,10 @@ def validate_local_executor_environment(
             "Runner host hygiene executor host must match the approved host."
         )
     github_repository = resolved_env.get("GITHUB_REPOSITORY", "").strip()
+    if request.action == "prune_generated_run_cache" and request.mutate and not github_repository:
+        raise click.ClickException(
+            "Generated run cache mutation requires GITHUB_REPOSITORY scope evidence."
+        )
     if github_repository and github_repository != request.repository_scope:
         raise click.ClickException(
             "Runner host hygiene repository scope must match GITHUB_REPOSITORY."
@@ -965,6 +1184,50 @@ def build_service_audit_poster(*, service_url: str, bearer_token: str) -> AuditP
         service_url=service_url,
         bearer_token_provider=lambda: normalized_bearer_token,
     )
+
+
+def build_github_run_state_reader(
+    *,
+    bearer_token: str,
+    api_base_url: str = "https://api.github.com",
+) -> GitHubRunStateReader:
+    normalized_token = bearer_token.strip()
+    normalized_api_base_url = api_base_url.strip().rstrip("/")
+    if not normalized_api_base_url:
+        raise click.ClickException("generated cache GitHub run evidence requires API base URL")
+
+    def read(repository: str, run_ids: tuple[int, ...]) -> Mapping[int, str]:
+        owner, name = repository.split("/", maxsplit=1)
+        states: dict[int, str] = {}
+        for run_id in run_ids:
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "launchplane-runner-host-hygiene",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            if normalized_token:
+                headers["Authorization"] = f"Bearer {normalized_token}"
+            request = Request(
+                (
+                    f"{normalized_api_base_url}/repos/{quote(owner, safe='')}"
+                    f"/{quote(name, safe='')}/actions/runs/{run_id}"
+                ),
+                headers=headers,
+                method="GET",
+            )
+            try:
+                with urlopen(request, timeout=30) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            except (HTTPError, URLError, TimeoutError, socket.timeout, json.JSONDecodeError):
+                states[run_id] = "unknown"
+                continue
+            if not isinstance(payload, dict):
+                states[run_id] = "unknown"
+                continue
+            states[run_id] = "completed" if payload.get("status") == "completed" else "active"
+        return states
+
+    return read
 
 
 def build_refreshing_service_audit_poster(
@@ -1329,6 +1592,350 @@ def _collect_runner_workdir_usage(
     return tuple(usage)
 
 
+def _collect_generated_run_cache_usage(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+    github_run_state_reader: GitHubRunStateReader | None,
+) -> tuple[RunnerHostHygieneGeneratedCacheUsage, ...]:
+    usage: list[RunnerHostHygieneGeneratedCacheUsage] = []
+    effective_github_run_state_reader = (
+        github_run_state_reader
+        if request.action == "prune_generated_run_cache" or not request.mutate
+        else None
+    )
+    for root in request.generated_run_cache_roots:
+        result = remote_runner(
+            (
+                "/usr/bin/sudo",
+                "-n",
+                _GENERATED_RUN_CACHE_HELPER,
+                "observe",
+                f"{root.key}={root.path}",
+                str(request.idle_observation_count),
+                str(request.idle_observation_interval_seconds),
+            ),
+            request.timeout_seconds,
+        )
+        if result.returncode != 0:
+            usage.append(
+                RunnerHostHygieneGeneratedCacheUsage(
+                    cache_key=root.key,
+                    measurement_status="partial",
+                )
+            )
+            continue
+        try:
+            usage.append(
+                _parse_generated_run_cache_usage(
+                    output=result.stdout,
+                    root=root,
+                    github_run_state_reader=effective_github_run_state_reader,
+                )
+            )
+        except (click.ClickException, ValueError):
+            usage.append(
+                RunnerHostHygieneGeneratedCacheUsage(
+                    cache_key=root.key,
+                    measurement_status="partial",
+                )
+            )
+    return tuple(usage)
+
+
+def _parse_generated_run_cache_usage(
+    *,
+    output: str,
+    root: GeneratedRunCacheRoot,
+    github_run_state_reader: GitHubRunStateReader | None,
+) -> RunnerHostHygieneGeneratedCacheUsage:
+    rows = _parse_json_lines(output, evidence_name=f"generated_cache:{root.key}")
+    summary_rows = tuple(row for row in rows if row.get("record_type") == "summary")
+    entry_rows = tuple(row for row in rows if row.get("record_type") == "entry")
+    if len(summary_rows) != 1:
+        raise click.ClickException("runner host generated cache evidence requires one summary")
+    summary = summary_rows[0]
+    if _docker_json_text(summary, "cache_key") != root.key:
+        raise click.ClickException("runner host generated cache evidence key mismatch")
+    configured_policy = (
+        ("minimum_age_hours", root.minimum_age_hours),
+        ("high_water_bytes", root.high_water_bytes),
+        ("low_water_bytes", root.low_water_bytes),
+        ("cooldown_hours", root.cooldown_hours),
+    )
+    for field_name, expected_value in configured_policy:
+        if (
+            _strict_non_negative_int(
+                summary.get(field_name),
+                evidence_name=f"generated cache {field_name}",
+            )
+            != expected_value
+        ):
+            raise click.ClickException(
+                f"runner host generated cache {field_name} does not match root-owned policy"
+            )
+    run_ids = tuple(
+        sorted(
+            {
+                _strict_positive_int(row.get("run_id"), evidence_name="generated cache run id")
+                for row in entry_rows
+            }
+        )
+    )
+    github_states = (
+        github_run_state_reader(root.source_repository, run_ids)
+        if github_run_state_reader is not None and run_ids
+        else {}
+    )
+    entries = tuple(
+        RunnerHostHygieneGeneratedCacheEntry(
+            run_id=_strict_positive_int(row.get("run_id"), evidence_name="generated cache run id"),
+            apparent_bytes=_strict_non_negative_int(
+                row.get("apparent_bytes"), evidence_name="generated cache apparent bytes"
+            ),
+            allocated_bytes=_strict_non_negative_int(
+                row.get("allocated_bytes"), evidence_name="generated cache allocated bytes"
+            ),
+            age_seconds=_strict_non_negative_int(
+                row.get("age_seconds"), evidence_name="generated cache age seconds"
+            ),
+            open_handle_observations=_strict_non_negative_int_tuple(
+                row.get("open_handle_observations"),
+                evidence_name="generated cache open-handle observations",
+            ),
+            github_run_state=_github_run_state(github_states.get(run_id)),
+        )
+        for row in entry_rows
+        for run_id in (
+            _strict_positive_int(row.get("run_id"), evidence_name="generated cache run id"),
+        )
+    )
+    observed_epoch_seconds = _strict_non_negative_int(
+        summary.get("observed_epoch_seconds"),
+        evidence_name="generated cache observed epoch",
+    )
+    last_cleanup_epoch_seconds = _strict_non_negative_int(
+        summary.get("last_cleanup_epoch_seconds", 0),
+        evidence_name="generated cache last cleanup epoch",
+    )
+    last_post_cleanup_allocated_bytes = _strict_non_negative_int(
+        summary.get("last_post_cleanup_allocated_bytes", 0),
+        evidence_name="generated cache last post-cleanup bytes",
+    )
+    allocated_bytes = _strict_non_negative_int(
+        summary.get("allocated_bytes"),
+        evidence_name="generated cache allocated bytes",
+    )
+    cooldown_remaining_seconds = max(
+        last_cleanup_epoch_seconds + root.cooldown_hours * 3600 - observed_epoch_seconds,
+        0,
+    )
+    elapsed_since_cleanup = max(observed_epoch_seconds - last_cleanup_epoch_seconds, 0)
+    estimated_daily_growth_bytes = 0
+    if (
+        last_cleanup_epoch_seconds > 0
+        and elapsed_since_cleanup > 0
+        and allocated_bytes > last_post_cleanup_allocated_bytes
+    ):
+        estimated_daily_growth_bytes = (
+            (allocated_bytes - last_post_cleanup_allocated_bytes) * 86_400 // elapsed_since_cleanup
+        )
+    return RunnerHostHygieneGeneratedCacheUsage(
+        cache_key=root.key,
+        apparent_bytes=_strict_non_negative_int(
+            summary.get("apparent_bytes"),
+            evidence_name="generated cache apparent bytes",
+        ),
+        allocated_bytes=allocated_bytes,
+        entry_count=_strict_non_negative_int(
+            summary.get("entry_count"), evidence_name="generated cache entry count"
+        ),
+        measurement_status=_generated_cache_measurement_status(summary.get("measurement_status")),
+        owner_valid=_strict_bool(summary.get("owner_valid"), evidence_name="owner_valid"),
+        mode_valid=_strict_bool(summary.get("mode_valid"), evidence_name="mode_valid"),
+        symlink_safe=_strict_bool(summary.get("symlink_safe"), evidence_name="symlink_safe"),
+        owner_worker_observations=_strict_non_negative_int_tuple(
+            summary.get("owner_worker_observations"),
+            evidence_name="generated cache owner-worker observations",
+        ),
+        age_buckets=_generated_cache_age_buckets(entries),
+        entries=entries,
+        entries_truncated=_strict_bool(
+            summary.get("entries_truncated"), evidence_name="entries_truncated"
+        ),
+        last_cleanup_epoch_seconds=last_cleanup_epoch_seconds,
+        last_reclaimed_bytes=_strict_non_negative_int(
+            summary.get("last_reclaimed_bytes", 0),
+            evidence_name="generated cache last reclaimed bytes",
+        ),
+        last_post_cleanup_allocated_bytes=last_post_cleanup_allocated_bytes,
+        last_removed_run_ids=_strict_non_negative_int_tuple(
+            summary.get("last_removed_run_ids"),
+            evidence_name="generated cache last removed run ids",
+        ),
+        estimated_daily_growth_bytes=estimated_daily_growth_bytes,
+        cooldown_remaining_seconds=cooldown_remaining_seconds,
+    )
+
+
+def _generated_cache_age_buckets(
+    entries: tuple[RunnerHostHygieneGeneratedCacheEntry, ...],
+) -> tuple[RunnerHostHygieneGeneratedCacheAgeBucket, ...]:
+    bucket_names = (
+        "under_1h",
+        "1h_to_24h",
+        "1d_to_7d",
+        "7d_to_30d",
+        "30d_or_more",
+    )
+    bucket_values: dict[str, list[int]] = {name: [0, 0, 0] for name in bucket_names}
+    for entry in entries:
+        if entry.age_seconds < 3600:
+            bucket = "under_1h"
+        elif entry.age_seconds < 86_400:
+            bucket = "1h_to_24h"
+        elif entry.age_seconds < 7 * 86_400:
+            bucket = "1d_to_7d"
+        elif entry.age_seconds < 30 * 86_400:
+            bucket = "7d_to_30d"
+        else:
+            bucket = "30d_or_more"
+        bucket_values[bucket][0] += 1
+        bucket_values[bucket][1] += entry.apparent_bytes
+        bucket_values[bucket][2] += entry.allocated_bytes
+    return tuple(
+        RunnerHostHygieneGeneratedCacheAgeBucket(
+            bucket=cast(
+                Literal[
+                    "under_1h",
+                    "1h_to_24h",
+                    "1d_to_7d",
+                    "7d_to_30d",
+                    "30d_or_more",
+                ],
+                bucket_name,
+            ),
+            entry_count=bucket_values[bucket_name][0],
+            apparent_bytes=bucket_values[bucket_name][1],
+            allocated_bytes=bucket_values[bucket_name][2],
+        )
+        for bucket_name in bucket_names
+    )
+
+
+def _select_generated_cache_run_ids(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    report: RunnerHostHygieneReport,
+) -> tuple[int, ...]:
+    if request.action != "prune_generated_run_cache":
+        return ()
+    root = _target_generated_run_cache_root(request)
+    if root is None:
+        return ()
+    usage = next(
+        (
+            item
+            for item in report.generated_cache_usage
+            if item.cache_key == request.target_generated_cache_key
+        ),
+        None,
+    )
+    if (
+        usage is None
+        or usage.allocated_bytes <= root.high_water_bytes
+        or usage.cooldown_remaining_seconds > 0
+        or usage.measurement_status != "complete"
+        or usage.entries_truncated
+        or not (usage.owner_valid and usage.mode_valid and usage.symlink_safe)
+        or len(usage.owner_worker_observations) < request.idle_observation_count
+        or any(value > 0 for value in usage.owner_worker_observations)
+    ):
+        return ()
+    projected_allocated_bytes = usage.allocated_bytes
+    selected: list[int] = []
+    for entry in sorted(usage.entries, key=lambda item: (-item.age_seconds, item.run_id)):
+        if projected_allocated_bytes <= root.low_water_bytes:
+            break
+        if (
+            entry.github_run_state != "completed"
+            or entry.age_seconds < root.minimum_age_hours * 3600
+            or len(entry.open_handle_observations) < request.idle_observation_count
+            or any(value > 0 for value in entry.open_handle_observations)
+        ):
+            continue
+        selected.append(entry.run_id)
+        projected_allocated_bytes = max(
+            projected_allocated_bytes - entry.allocated_bytes,
+            0,
+        )
+    if projected_allocated_bytes > root.low_water_bytes:
+        return ()
+    return tuple(sorted(selected))
+
+
+def _target_generated_run_cache_root(
+    request: RunnerHostHygieneExecutorRequest,
+) -> GeneratedRunCacheRoot | None:
+    if not request.target_generated_cache_key:
+        return None
+    return next(
+        (
+            root
+            for root in request.generated_run_cache_roots
+            if root.key == request.target_generated_cache_key
+        ),
+        None,
+    )
+
+
+def _generated_cache_measurement_status(value: object) -> Literal["complete", "partial"]:
+    if value == "complete":
+        return "complete"
+    if value == "partial":
+        return "partial"
+    raise click.ClickException("runner host generated cache measurement status was invalid")
+
+
+def _github_run_state(value: object) -> Literal["completed", "active", "unknown"]:
+    if value == "completed":
+        return "completed"
+    if value == "active":
+        return "active"
+    return "unknown"
+
+
+def _strict_bool(value: object, *, evidence_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise click.ClickException(f"runner host hygiene {evidence_name} evidence was not boolean")
+
+
+def _strict_positive_int(value: object, *, evidence_name: str) -> int:
+    parsed = _strict_non_negative_int(value, evidence_name=evidence_name)
+    if parsed <= 0:
+        raise click.ClickException(f"runner host hygiene {evidence_name} was not positive")
+    return parsed
+
+
+def _strict_non_negative_int(value: object, *, evidence_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise click.ClickException(
+            f"runner host hygiene {evidence_name} evidence was not a non-negative integer"
+        )
+    return value
+
+
+def _strict_non_negative_int_tuple(
+    value: object,
+    *,
+    evidence_name: str,
+) -> tuple[int, ...]:
+    if not isinstance(value, list):
+        raise click.ClickException(f"runner host hygiene {evidence_name} was not a list")
+    return tuple(_strict_non_negative_int(item, evidence_name=evidence_name) for item in value)
+
+
 def _is_buildkit_state_volume_name(value: str) -> bool:
     return value.startswith("buildx_buildkit_") and value.endswith("_state")
 
@@ -1619,11 +2226,13 @@ def _collect_terminal_report(
     *,
     request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
+    github_run_state_reader: GitHubRunStateReader | None,
 ) -> RunnerHostHygieneReport | None:
     try:
         return collect_runner_host_hygiene_report(
             request=request,
             remote_runner=remote_runner,
+            github_run_state_reader=github_run_state_reader,
         )
     except click.ClickException:
         return None
@@ -1645,6 +2254,25 @@ def _redact_sensitive_text(value: str) -> str:
     return redacted.strip()[:500]
 
 
+def _assert_generated_cache_audit_redacted(
+    *,
+    audit: RunnerHostHygieneApplyAuditRecord,
+    request: RunnerHostHygieneExecutorRequest,
+) -> None:
+    serialized_audit = json.dumps(audit.model_dump(mode="json"), sort_keys=True)
+    forbidden_values = {
+        value
+        for root in request.generated_run_cache_roots
+        for value in (root.path, root.source_repository)
+        if value
+    }
+    leaked_values = tuple(sorted(value for value in forbidden_values if value in serialized_audit))
+    if leaked_values:
+        raise click.ClickException(
+            "runner host generated cache audit contained forbidden runtime topology"
+        )
+
+
 def _terminal_message(
     *,
     action: RunnerHostHygieneApplyAction,
@@ -1655,6 +2283,7 @@ def _terminal_message(
     action_label = {
         "prune_docker_cache": "Docker cache prune",
         "prune_dangling_images": "dangling Docker image prune",
+        "prune_generated_run_cache": "generated completed-run cache prune",
         "remove_buildkit_state_volumes": "BuildKit state volume removal",
         "prune_runner_workdir": "runner workdir prune",
         "restart_runner_service": "runner service restart",
@@ -1693,4 +2322,34 @@ def _post_apply_evidence_failure(
         )
         if remaining_targets:
             return "target BuildKit state volumes remain present: " + ", ".join(remaining_targets)
+    if request.action == "prune_generated_run_cache":
+        root = _target_generated_run_cache_root(request)
+        if root is None:
+            return "target generated cache policy is missing from post evidence"
+        cache = next(
+            (
+                item
+                for item in post_report.generated_cache_usage
+                if item.cache_key == request.target_generated_cache_key
+            ),
+            None,
+        )
+        if cache is None:
+            return "target generated cache is missing from post evidence"
+        remaining_run_ids = {entry.run_id for entry in cache.entries}.intersection(
+            request.target_generated_cache_run_ids
+        )
+        if remaining_run_ids:
+            return "target generated cache runs remain present: " + ", ".join(
+                str(run_id) for run_id in sorted(remaining_run_ids)
+            )
+        if cache.allocated_bytes > root.low_water_bytes:
+            return (
+                "target generated cache remains above its low-water target: "
+                f"{cache.allocated_bytes} > {root.low_water_bytes}"
+            )
+        if cache.measurement_status != "complete" or not (
+            cache.owner_valid and cache.mode_valid and cache.symlink_safe
+        ):
+            return "target generated cache post evidence failed safety checks"
     return ""

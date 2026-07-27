@@ -75,10 +75,12 @@ from control_plane.workflows.runner_lane_retirement_executor import (
     validate_local_executor_environment as validate_runner_retirement_environment,
 )
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
+from control_plane.workflows.runner_host_hygiene_executor import GeneratedRunCacheRoot
 from control_plane.workflows.runner_host_hygiene_executor import RunnerWorkdirRoot
 from control_plane.workflows.runner_host_hygiene_executor import DOCKER_BUILDX_PLUGIN_PATH_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandRunner
 from control_plane.workflows.runner_host_hygiene_executor import build_local_command_runner
+from control_plane.workflows.runner_host_hygiene_executor import build_github_run_state_reader
 from control_plane.workflows.runner_host_hygiene_executor import (
     build_refreshing_service_audit_poster,
 )
@@ -1108,6 +1110,7 @@ def runner_host_hygiene_report(
         (
             "prune_docker_cache",
             "prune_dangling_images",
+            "prune_generated_run_cache",
             "remove_buildkit_state_volumes",
             "prune_runner_workdir",
             "restart_runner_service",
@@ -1176,6 +1179,48 @@ def runner_host_hygiene_report(
     help="Retained cache bytes for the default daemon cache or a target builder.",
 )
 @click.option(
+    "--target-generated-cache-key",
+    default="",
+    help="Public generated-cache key the request targets.",
+)
+@click.option(
+    "--target-generated-cache-run-id",
+    "target_generated_cache_run_ids",
+    multiple=True,
+    type=click.IntRange(min=1),
+    help="Completed generated-cache run id targeted for removal. Repeat as needed.",
+)
+@click.option(
+    "--allowed-generated-cache-key",
+    "allowed_generated_cache_keys",
+    multiple=True,
+    help="Generated-cache key allowed by local policy. Repeat as needed.",
+)
+@click.option(
+    "--generated-cache-minimum-age-hours",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+)
+@click.option(
+    "--generated-cache-high-water-bytes",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+)
+@click.option(
+    "--generated-cache-low-water-bytes",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+)
+@click.option(
+    "--generated-cache-cooldown-hours",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+)
+@click.option(
     "--allow-docker-cache-prune/--disallow-docker-cache-prune",
     default=False,
     show_default=True,
@@ -1186,6 +1231,12 @@ def runner_host_hygiene_report(
     default=False,
     show_default=True,
     help="Enable dangling-only Docker image prune planning in the local policy.",
+)
+@click.option(
+    "--allow-generated-run-cache-prune/--disallow-generated-run-cache-prune",
+    default=False,
+    show_default=True,
+    help="Enable completed-run generated cache prune planning in the local policy.",
 )
 @click.option(
     "--allow-buildkit-state-volume-remove/--disallow-buildkit-state-volume-remove",
@@ -1236,8 +1287,16 @@ def runner_host_hygiene_apply_plan(
     target_buildkit_builder: str,
     allowed_buildkit_builders: tuple[str, ...],
     max_used_space_bytes: int,
+    target_generated_cache_key: str,
+    target_generated_cache_run_ids: tuple[int, ...],
+    allowed_generated_cache_keys: tuple[str, ...],
+    generated_cache_minimum_age_hours: int,
+    generated_cache_high_water_bytes: int,
+    generated_cache_low_water_bytes: int,
+    generated_cache_cooldown_hours: int,
     allow_docker_cache_prune: bool,
     allow_dangling_image_prune: bool,
+    allow_generated_run_cache_prune: bool,
     allow_buildkit_state_volume_remove: bool,
     allow_runner_workdir_prune: bool,
     allow_runner_service_restart: bool,
@@ -1254,6 +1313,8 @@ def runner_host_hygiene_apply_plan(
             require_audit_record=require_audit_record,
             allow_docker_cache_prune=allow_docker_cache_prune,
             allow_dangling_image_prune=allow_dangling_image_prune,
+            allow_generated_run_cache_prune=allow_generated_run_cache_prune,
+            allowed_generated_cache_keys=allowed_generated_cache_keys,
             allowed_buildkit_builders=allowed_buildkit_builders,
             allow_buildkit_state_volume_remove=allow_buildkit_state_volume_remove,
             allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
@@ -1268,6 +1329,12 @@ def runner_host_hygiene_apply_plan(
             target_buildkit_builder=target_buildkit_builder,
             max_used_space_bytes=max_used_space_bytes,
             target_buildkit_state_volumes=target_buildkit_state_volumes,
+            target_generated_cache_key=target_generated_cache_key,
+            target_generated_cache_run_ids=target_generated_cache_run_ids,
+            generated_cache_minimum_age_hours=generated_cache_minimum_age_hours,
+            generated_cache_high_water_bytes=generated_cache_high_water_bytes,
+            generated_cache_low_water_bytes=generated_cache_low_water_bytes,
+            generated_cache_cooldown_hours=generated_cache_cooldown_hours,
             audit_record_key=audit_record_key,
         )
         plan = plan_runner_host_hygiene_apply(
@@ -1325,7 +1392,9 @@ def runner_host_hygiene_apply_plan(
     "--privileged-scope",
     "privileged_scopes",
     multiple=True,
-    type=click.Choice(("docker_cache", "docker_volume", "runner_service", "runner_workdir")),
+    type=click.Choice(
+        ("docker_cache", "docker_volume", "generated_cache", "runner_service", "runner_workdir")
+    ),
     help="Privileged host capability requested by the adapter. Repeat for each scope.",
 )
 @click.option(
@@ -1385,7 +1454,9 @@ def runner_host_hygiene_apply_plan(
     "--allowed-privileged-scope",
     "allowed_privileged_scopes",
     multiple=True,
-    type=click.Choice(("docker_cache", "docker_volume", "runner_service", "runner_workdir")),
+    type=click.Choice(
+        ("docker_cache", "docker_volume", "generated_cache", "runner_service", "runner_workdir")
+    ),
     help="Privileged host scope allowed by local policy. Repeat for each scope.",
 )
 @click.option(
@@ -1496,7 +1567,12 @@ def runner_host_hygiene_adapter_boundary_plan(
     default="prune_docker_cache",
     show_default=True,
     type=click.Choice(
-        ("prune_docker_cache", "prune_dangling_images", "remove_buildkit_state_volumes")
+        (
+            "prune_docker_cache",
+            "prune_dangling_images",
+            "prune_generated_run_cache",
+            "remove_buildkit_state_volumes",
+        )
     ),
     help="Approved runner host hygiene executor action.",
 )
@@ -1589,6 +1665,20 @@ def runner_host_hygiene_adapter_boundary_plan(
     help="Approved runner root formatted as public-key=/absolute/path. Repeat as needed.",
 )
 @click.option(
+    "--generated-run-cache-root",
+    "generated_run_cache_roots",
+    multiple=True,
+    help=(
+        "Approved generated run cache formatted as "
+        "public-key=/absolute/path|owner/repo|high|low|min-age-hours|cooldown-hours."
+    ),
+)
+@click.option(
+    "--target-generated-cache-key",
+    default="",
+    help="Exact public generated-cache key selected for bounded completed-run cleanup.",
+)
+@click.option(
     "--idle-observation-count",
     default=2,
     show_default=True,
@@ -1627,6 +1717,12 @@ def runner_host_hygiene_adapter_boundary_plan(
     help="Environment variable containing a GitHub OIDC bearer token.",
 )
 @click.option(
+    "--github-token-env",
+    default="GH_TOKEN",
+    show_default=True,
+    help="Environment variable containing the GitHub token used for run-state evidence.",
+)
+@click.option(
     "--audit-spool-root",
     required=True,
     type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
@@ -1656,12 +1752,15 @@ def runner_host_hygiene_executor(
     minimum_free_disk_bytes: int,
     prune_until: str,
     runner_workdir_roots: tuple[str, ...],
+    generated_run_cache_roots: tuple[str, ...],
+    target_generated_cache_key: str,
     idle_observation_count: int,
     idle_observation_interval_seconds: int,
     resolve_action_started: bool,
     timeout_seconds: int,
     service_url: str,
     bearer_token_env: str,
+    github_token_env: str,
     audit_spool_root: Path,
     audit_artifact_file: Path,
 ) -> None:
@@ -1669,6 +1768,19 @@ def runner_host_hygiene_executor(
         token_env = bearer_token_env.strip()
         if not token_env:
             raise click.ClickException("runner host hygiene executor requires --bearer-token-env.")
+        parsed_generated_run_cache_roots = _parse_generated_run_cache_roots(
+            generated_run_cache_roots
+        )
+        github_token_env_name = github_token_env.strip()
+        if parsed_generated_run_cache_roots and not github_token_env_name:
+            raise click.ClickException(
+                "runner host hygiene generated cache evidence requires --github-token-env."
+            )
+        github_token = (
+            os.environ.get(github_token_env_name, "").strip()
+            if parsed_generated_run_cache_roots
+            else ""
+        )
         request = RunnerHostHygieneExecutorRequest(
             action=apply_action,
             host_name=host_name,
@@ -1687,6 +1799,8 @@ def runner_host_hygiene_executor(
             timeout_seconds=timeout_seconds,
             prune_until=prune_until,
             runner_workdir_roots=_parse_runner_workdir_roots(runner_workdir_roots),
+            generated_run_cache_roots=parsed_generated_run_cache_roots,
+            target_generated_cache_key=target_generated_cache_key,
             idle_observation_count=idle_observation_count,
             idle_observation_interval_seconds=idle_observation_interval_seconds,
             resolve_action_started=resolve_action_started,
@@ -1706,13 +1820,18 @@ def runner_host_hygiene_executor(
                 root=audit_spool_root,
                 artifact_file=audit_artifact_file,
             ),
+            github_run_state_reader=(
+                build_github_run_state_reader(bearer_token=github_token)
+                if parsed_generated_run_cache_roots
+                else None
+            ),
         )
     except (OSError, ValidationError, ValueError) as error:
         raise click.ClickException(str(error)) from error
     click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
     if result.audit_delivery_pending:
         raise click.ClickException("runner host hygiene audit delivery remains pending")
-    if mutate and result.status != "completed":
+    if mutate and result.status not in {"completed", "not_needed"}:
         raise click.ClickException(
             f"runner host hygiene mutation did not complete: {result.status}"
         )
@@ -1725,6 +1844,42 @@ def _parse_runner_workdir_roots(values: tuple[str, ...]) -> tuple[RunnerWorkdirR
         if not separator:
             raise click.ClickException("runner workdir roots must use public-key=/absolute/path")
         roots.append(RunnerWorkdirRoot(key=key, path=path))
+    return tuple(roots)
+
+
+def _parse_generated_run_cache_roots(
+    values: tuple[str, ...],
+) -> tuple[GeneratedRunCacheRoot, ...]:
+    roots: list[GeneratedRunCacheRoot] = []
+    for value in values:
+        parts = value.split("|")
+        if len(parts) != 6:
+            raise click.ClickException(
+                "generated run cache roots must use "
+                "public-key=/absolute/path|owner/repo|high|low|min-age-hours|cooldown-hours"
+            )
+        binding, source_repository, high_water, low_water, minimum_age, cooldown = parts
+        key, separator, path = binding.partition("=")
+        if not separator:
+            raise click.ClickException(
+                "generated run cache roots must use public-key=/absolute/path"
+            )
+        try:
+            roots.append(
+                GeneratedRunCacheRoot(
+                    key=key,
+                    path=path,
+                    source_repository=source_repository,
+                    high_water_bytes=int(high_water),
+                    low_water_bytes=int(low_water),
+                    minimum_age_hours=int(minimum_age),
+                    cooldown_hours=int(cooldown),
+                )
+            )
+        except ValueError as error:
+            raise click.ClickException(
+                "generated run cache budget and age fields must be integers"
+            ) from error
     return tuple(roots)
 
 

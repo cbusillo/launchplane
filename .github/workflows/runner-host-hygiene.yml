@@ -19,6 +19,7 @@ name: Runner Host Hygiene
         options:
           - prune_docker_cache
           - prune_dangling_images
+          - prune_generated_run_cache
           - remove_buildkit_state_volumes
       mutate:
         description: Execute the approved hygiene action
@@ -33,6 +34,11 @@ name: Runner Host Hygiene
         type: string
       target_buildkit_builder:
         description: Exact allowlisted Buildx builder whose cache should be bounded
+        required: false
+        default: ""
+        type: string
+      target_generated_cache_key:
+        description: Exact public generated run-cache key for bounded cleanup
         required: false
         default: ""
         type: string
@@ -59,6 +65,7 @@ name: Runner Host Hygiene
         type: boolean
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -84,6 +91,8 @@ jobs:
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS }}
       RUNNER_WORKDIR_ROOTS: >-
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_RUNNER_WORKDIR_ROOTS }}
+      RUNNER_GENERATED_RUN_CACHE_ROOTS: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_GENERATED_RUN_CACHE_ROOTS }}
       RUNNER_ALLOWED_BUILDKIT_STATE_VOLUMES: >-
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_ALLOWED_BUILDKIT_STATE_VOLUMES
         }}
@@ -115,6 +124,7 @@ jobs:
           require_env RUNNER_SERVICE_USER
           require_env RUNNER_RETAINED_WARM_BUILDERS
           require_env RUNNER_WORKDIR_ROOTS
+          require_env RUNNER_GENERATED_RUN_CACHE_ROOTS
           require_env RUNNER_BUILDKIT_CACHE_BUDGETS
           require_env RUNNER_DEFAULT_CACHE_BUDGET_BYTES
           if [[ ! "$RUNNER_DEFAULT_CACHE_BUDGET_BYTES" =~ ^[1-9][0-9]*$ ]]; then
@@ -139,9 +149,13 @@ jobs:
           INPUT_PRUNE_UNTIL: ${{ inputs.prune_until }}
           INPUT_RESOLVE_ACTION_STARTED: ${{ inputs.resolve_action_started }}
           INPUT_TARGET_BUILDKIT_BUILDER: ${{ inputs.target_buildkit_builder }}
+          INPUT_TARGET_GENERATED_CACHE_KEY: >-
+            ${{ inputs.target_generated_cache_key }}
           INPUT_TARGET_BUILDKIT_STATE_VOLUMES: >-
             ${{ inputs.target_buildkit_state_volumes }}
           INPUT_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          GH_TOKEN: >-
+            ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_READ_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -193,6 +207,34 @@ jobs:
           done
           if [ "${#runner_root_args[@]}" -eq 0 ]; then
             echo "At least one runner workdir root is required." >&2
+            exit 1
+          fi
+
+          generated_cache_args=()
+          generated_cache_keys=()
+          declare -A seen_generated_cache_keys=()
+          IFS=',' read -r -a generated_cache_roots <<< "$RUNNER_GENERATED_RUN_CACHE_ROOTS"
+          for generated_cache_root in "${generated_cache_roots[@]}"; do
+            trimmed="${generated_cache_root#"${generated_cache_root%%[![:space:]]*}"}"
+            trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+            if [ -z "$trimmed" ]; then
+              continue
+            fi
+            cache_key="${trimmed%%=*}"
+            if [[ ! "$cache_key" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]; then
+              echo "Generated cache key must be public-safe." >&2
+              exit 1
+            fi
+            if [ -n "${seen_generated_cache_keys[$cache_key]:-}" ]; then
+              echo "Generated cache keys must be unique." >&2
+              exit 1
+            fi
+            seen_generated_cache_keys[$cache_key]=1
+            generated_cache_keys+=("$cache_key")
+            generated_cache_args+=(--generated-run-cache-root "$trimmed")
+          done
+          if [ "${#generated_cache_args[@]}" -eq 0 ]; then
+            echo "At least one generated run cache root is required." >&2
             exit 1
           fi
 
@@ -286,6 +328,7 @@ jobs:
               --audit-record-key "$audit_key" \
               "${builder_args[@]}" \
               "${runner_root_args[@]}" \
+              "${generated_cache_args[@]}" \
               "$@" \
               "$mutation_flag" \
               "$resolve_flag" \
@@ -335,6 +378,17 @@ jobs:
                   maintenance_failures=$((maintenance_failures + 1))
                 fi
               done
+              for generated_cache_key in "${generated_cache_keys[@]}"; do
+                if ! run_hygiene \
+                  prune_generated_run_cache \
+                  "${audit_prefix}-scheduled-generated-${generated_cache_key}-${GITHUB_RUN_ID}" \
+                  168h \
+                  --mutate \
+                  "generated-${generated_cache_key}" \
+                  --target-generated-cache-key "$generated_cache_key"; then
+                  maintenance_failures=$((maintenance_failures + 1))
+                fi
+              done
               if ((maintenance_failures > 0)); then
                 echo "${maintenance_failures} scheduled hygiene action(s) failed." >&2
                 exit 1
@@ -358,6 +412,24 @@ jobs:
           fi
 
           target_builder_args=()
+          target_generated_cache_args=()
+          target_generated_cache_key="$INPUT_TARGET_GENERATED_CACHE_KEY"
+          target_generated_cache_key="${target_generated_cache_key#"${target_generated_cache_key%%[![:space:]]*}"}"
+          target_generated_cache_key="${target_generated_cache_key%"${target_generated_cache_key##*[![:space:]]}"}"
+          target_generated_cache_key="${target_generated_cache_key,,}"
+          if [ "$apply_action" = "prune_generated_run_cache" ]; then
+            if [ -z "$target_generated_cache_key" ] ||
+              [ -z "${seen_generated_cache_keys[$target_generated_cache_key]:-}" ]; then
+              echo "Target generated cache key is not configured." >&2
+              exit 1
+            fi
+            target_generated_cache_args=(
+              --target-generated-cache-key "$target_generated_cache_key"
+            )
+          elif [ -n "$target_generated_cache_key" ]; then
+            echo "Target generated cache key requires prune_generated_run_cache." >&2
+            exit 1
+          fi
           target_builder="$INPUT_TARGET_BUILDKIT_BUILDER"
           target_builder="${target_builder#"${target_builder%%[![:space:]]*}"}"
           target_builder="${target_builder%"${target_builder##*[![:space:]]}"}"
@@ -392,7 +464,8 @@ jobs:
             "$mutate_flag" \
             manual \
             "${volume_args[@]}" \
-            "${target_builder_args[@]}"
+            "${target_builder_args[@]}" \
+            "${target_generated_cache_args[@]}"
 
       - name: Upload executor result
         if: always() && steps.executor.outcome != 'skipped'
