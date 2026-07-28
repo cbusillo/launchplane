@@ -36,7 +36,11 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingTerminationKind,
     RouteBindingTlsOwner,
 )
-from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
+from control_plane.contracts.runtime_identity import (
+    RuntimeIdentity,
+    RuntimeIdentityStatus,
+    compare_runtime_identity,
+)
 
 
 ProductTopologyAuthorityStatus = Literal["active", "disabled", "missing"]
@@ -740,9 +744,21 @@ def _strict_public_ingress_confirms_placement(
         and observed_identity is not None
         and ingress_expected is not None
         and ingress_observed is not None
-        and expected_identity == observed_identity
-        and ingress_expected == ingress_observed
-        and expected_identity == ingress_expected
+        and compare_runtime_identity(
+            expected=expected_identity,
+            observed=observed_identity,
+        )[0]
+        == "match"
+        and compare_runtime_identity(
+            expected=ingress_expected,
+            observed=ingress_observed,
+        )[0]
+        == "match"
+        and compare_runtime_identity(
+            expected=expected_identity,
+            observed=ingress_expected,
+        )[0]
+        == "match"
     )
 
 

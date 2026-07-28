@@ -47,6 +47,7 @@ def _runtime_identity(
     product: str = "example-site",
     artifact_id: str = "artifact-1",
     image_reference: str = "",
+    deployed_at: str = "",
 ) -> RuntimeIdentity:
     return RuntimeIdentity(
         product=product,
@@ -56,6 +57,7 @@ def _runtime_identity(
         artifact_id=artifact_id,
         source_git_ref="refs/heads/main",
         image_reference=image_reference,
+        deployed_at=deployed_at,
     )
 
 
@@ -284,10 +286,17 @@ def _http_observation(
     observed_at: str = "2026-07-14T11:30:00Z",
     runtime_identity_status: RuntimeIdentityStatus = "match",
     expected_runtime_identity: RuntimeIdentity | None = None,
+    observed_deployed_at: str | None = None,
     monitoring_intent: ProductLaneMonitoringIntent | Literal["legacy"] = "legacy",
 ) -> PublicIngressObservationRecord:
     expected_identity = expected_runtime_identity or _runtime_identity(product=product)
-    observed_identity = expected_identity if runtime_identity_status == "match" else None
+    observed_identity = (
+        expected_identity.model_copy(update={"deployed_at": observed_deployed_at})
+        if runtime_identity_status == "match" and observed_deployed_at is not None
+        else expected_identity
+        if runtime_identity_status == "match"
+        else None
+    )
     status: PublicIngressObservationStatus = (
         "pass" if runtime_identity_status in {"match", "unchecked"} else "fail"
     )
@@ -340,9 +349,16 @@ def _lane_summary(
     runtime_identity_status: RuntimeIdentityStatus = "match",
     health_verified: bool = True,
     health_status: str = "pass",
+    observed_deployed_at: str | None = None,
 ) -> LaunchplaneLaneSummary:
     current_identity = identity or _runtime_identity()
-    observed_identity = current_identity if runtime_identity_status == "match" else None
+    observed_identity = (
+        current_identity.model_copy(update={"deployed_at": observed_deployed_at})
+        if runtime_identity_status == "match" and observed_deployed_at is not None
+        else current_identity
+        if runtime_identity_status == "match"
+        else None
+    )
     return LaunchplaneLaneSummary.model_validate(
         {
             "context": "example-context",
@@ -824,28 +840,34 @@ class ProductTopologyReadModelTests(unittest.TestCase):
         self.assertEqual(topology.observed.ingress.runtime_identity_status, "match")
         self.assertEqual(topology.observed.placement.trust_state, "stale")
 
-    def test_optional_runtime_identity_divergence_does_not_corroborate_placement(self) -> None:
+    def test_optional_runtime_identity_difference_preserves_canonical_match(self) -> None:
         profile = _strict_public_profile()
-        topology = build_product_environment_topology(
-            record_store=_TopologyStore(
-                route_binding=_route_binding(),
-                observations=(
-                    _http_observation(monitoring_intent="public"),
-                    _tls_observation(status="valid"),
-                ),
-            ),
-            profile=profile,
-            lane=profile.lanes[0],
-            lane_summary=_lane_summary(
-                identity=_runtime_identity(
-                    image_reference="ghcr.io/example/example-site@sha256:abc123"
+        identity = _runtime_identity(deployed_at="2026-07-14T10:00:00Z")
+        for observed_deployed_at in ("", "2026-07-14T10:01:00Z"):
+            with self.subTest(observed_deployed_at=observed_deployed_at):
+                topology = build_product_environment_topology(
+                    record_store=_TopologyStore(
+                        route_binding=_route_binding(),
+                        observations=(
+                            _http_observation(
+                                expected_runtime_identity=identity,
+                                observed_deployed_at=observed_deployed_at,
+                                monitoring_intent="public",
+                            ),
+                            _tls_observation(status="valid"),
+                        ),
+                    ),
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    lane_summary=_lane_summary(
+                        identity=identity,
+                        observed_deployed_at=observed_deployed_at,
+                    ),
+                    now=_NOW,
                 )
-            ),
-            now=_NOW,
-        )
 
-        self.assertEqual(topology.observed.ingress.runtime_identity_status, "match")
-        self.assertEqual(topology.observed.placement.trust_state, "stale")
+                self.assertEqual(topology.observed.ingress.runtime_identity_status, "match")
+                self.assertEqual(topology.observed.placement.trust_state, "verified")
 
     def test_prelaunch_or_legacy_runtime_proof_does_not_corroborate_placement(self) -> None:
         strict_profile = _strict_public_profile()
