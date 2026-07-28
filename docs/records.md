@@ -867,6 +867,19 @@ from Dokploy records, provider target ids, or other provider payloads. Fresh
 failing probes remain verified observations with a failing status, while stale
 route-binding or TLS evidence is called out separately.
 
+Observed placement can remain current between real deploy or promotion events
+when the newest public HTTP observation is a fresh passing strict health probe
+for the exact configured check and its expected and observed runtime identities
+exactly match the recorded placement identity, whose recorded health is verified
+and passing. In that bounded case,
+`observed.placement` uses the public observation as provenance and reports
+verified placement trust. The environment inventory record and the environment
+read model's inventory provenance remain unchanged and may still show their true
+age. Legacy, non-strict, base-page-only, superseded, stale, failing, missing,
+unchecked, unverifiable, or identity-divergent evidence leaves placement trust
+fail closed. No observation writes or re-timestamps deployment or inventory
+records.
+
 Typed topology warnings identify missing or disabled authority, desired versus
 recorded domain divergence, placement disagreement, ingress or TLS ownership
 divergence, stale evidence, missing TLS observations, certificate mismatch,
