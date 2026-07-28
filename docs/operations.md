@@ -916,6 +916,29 @@ owns only the generic wrapper's exact immutable reusable-worker grant; real
 product, context, instance, check, and endpoint values remain explicit operator
 input and DB-backed Launchplane records.
 
+Use the manual Product Prelaunch Rebuild Policy workflow when an Odoo lane must
+authorize a reviewed destructive rebuild before stable target replacement. Run
+`mode=dry-run` first with the exact product/context/instance, enabled state,
+issue-backed approval URL, typed data source, target-replacement confirmation
+phrase, expected target proof, expected-domain JSON array, and operator reason.
+The workflow has no checked-in product, lane, target, domain, volume, or
+notification defaults. Review the current/requested policies, data authority,
+allowed rebuild sources, monitoring intent, complete-profile digest, and plan
+SHA-256. Apply from a second run with identical desired policy fields, the
+reviewed digest, a unique idempotency key, and confirmation
+`APPLY PRODUCT PRELAUNCH REBUILD POLICY`.
+
+Authority uses separate exact-instance
+`product_profile.prelaunch_rebuild.plan` and `.apply` actions tied to the exact
+immutable reusable worker. The service fails closed unless the lane remains
+`prelaunch`, its existing `odoo_data_policy` permits the requested source, and
+`empty` rebuilds are explicitly `resettable`. This workflow changes no data
+policy, health intent, route, provider target, runtime setting, secret, or
+volume identity. After apply, rerun Odoo Target Replacement Plan; add target-
+replacement apply authority only after that plan returns `ready`. Disable the
+policy through the same dry-run/apply workflow after recovery if no further
+prelaunch rebuild should remain authorized.
+
 The manual Product Context Cutover workflow plans or applies the same
 current-authority record move through the Launchplane service. The workflow
 does not carry product/context defaults; operators must provide the product,

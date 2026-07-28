@@ -17,6 +17,7 @@ from control_plane.contracts.product_profile_record import (
     ProductImageProfile,
     ProductLaneHealthMonitoringPolicy,
     ProductLaneProfile,
+    ProductOdooPrelaunchRebuildPolicy,
     ProductPreviewProfile,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -102,7 +103,10 @@ def build_product_profile_record(
                 base_url=lane.base_url,
                 health_url=_lane_health_url(manifest=manifest, lane=lane),
                 odoo_stable_bootstrap=lane.odoo_stable_bootstrap,
-                odoo_prelaunch_rebuild=lane.odoo_prelaunch_rebuild,
+                odoo_prelaunch_rebuild=_lane_odoo_prelaunch_rebuild(
+                    lane=lane,
+                    existing_profile=existing_profile,
+                ),
                 odoo_data_policy=lane.odoo_data_policy,
                 health_monitoring=_lane_health_monitoring(
                     lane=lane,
@@ -132,6 +136,24 @@ def _lane_health_monitoring(
         None,
     )
     return existing_lane.health_monitoring if existing_lane is not None else lane.health_monitoring
+
+
+def _lane_odoo_prelaunch_rebuild(
+    *,
+    lane: ProductOnboardingLaneManifest,
+    existing_profile: LaunchplaneProductProfileRecord | None,
+) -> ProductOdooPrelaunchRebuildPolicy:
+    if existing_profile is None:
+        return lane.odoo_prelaunch_rebuild
+    existing_lane = next(
+        (candidate for candidate in existing_profile.lanes if candidate.instance == lane.instance),
+        None,
+    )
+    return (
+        existing_lane.odoo_prelaunch_rebuild
+        if existing_lane is not None
+        else lane.odoo_prelaunch_rebuild
+    )
 
 
 def _lane_health_url(

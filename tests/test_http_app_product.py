@@ -70,6 +70,7 @@ from tests.http_app_test_support import (
     _MissingProductReadStore,
     _post_product_expected_config,
     _post_product_health_monitoring,
+    _post_product_prelaunch_rebuild_policy,
     _post_product_profile,
     _post_product_preview_tls,
     _post_work_graph_issue_inbox_reconcile,
@@ -77,6 +78,7 @@ from tests.http_app_test_support import (
     _product_environment_read_policy,
     _product_expected_config_policy,
     _product_health_monitoring_policy,
+    _product_prelaunch_rebuild_policy_policy,
     _product_profile_read_policy,
     _product_preview_tls_policy,
     _product_profile_write_policy,
@@ -107,6 +109,7 @@ from tests.support.product_reads import (
 )
 from tests.support.profiles import (
     _generic_site_profile_payload,
+    _odoo_profile_payload_with_prod_lane,
     _product_profile_payload,
 )
 from tests.support.stores import _sqlite_database_url, _write_runtime_key_safety_policy
@@ -360,6 +363,61 @@ def _product_health_monitoring_identity(
     return _identity(
         workflow_ref=(
             "every/verireel/.github/workflows/product-health-monitoring.yml@refs/heads/main"
+        ),
+        job_workflow_ref=job_workflow_ref,
+        event_name="workflow_dispatch",
+    )
+
+
+def _product_prelaunch_rebuild_policy_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "odoo-product",
+        "context": "cm",
+        "instance": "prod",
+        "enabled": True,
+        "approval_issue_url": "https://github.com/example/launchplane/issues/123",
+        "data_source_mode": "empty",
+        "confirmation": "rebuild wip production",
+        "expected_target_name": "expected-target",
+        "expected_domains": ["example.invalid"],
+        "mode": "dry-run",
+        "reason": "Authorize an issue-backed WIP rebuild.",
+        "reviewed_plan_sha256": "",
+    }
+
+
+def _product_prelaunch_rebuild_policy_profile() -> LaunchplaneProductProfileRecord:
+    payload = _odoo_profile_payload_with_prod_lane("odoo-product")
+    lanes = list(cast(tuple[dict[str, object], ...], payload["lanes"]))
+    prod_lane = lanes[1]
+    prod_lane["odoo_data_policy"] = {
+        "data_authority": "resettable",
+        "allowed_rebuild_sources": ["empty"],
+        "requires_backup_before_destroy": True,
+        "requires_restore_proof": True,
+        "requires_runtime_identity": True,
+    }
+    prod_lane["odoo_prelaunch_rebuild"] = {"enabled": False}
+    prod_lane["health_monitoring"] = {
+        "monitoring_intent": "prelaunch",
+        "checks": [],
+    }
+    payload["lanes"] = tuple(lanes)
+    return LaunchplaneProductProfileRecord.model_validate(payload)
+
+
+def _product_prelaunch_rebuild_policy_identity(
+    *,
+    job_workflow_ref: str = (
+        "cbusillo/launchplane/.github/workflows/"
+        "reusable-product-prelaunch-rebuild-policy.yml@"
+        "0123456789abcdef0123456789abcdef01234567"
+    ),
+) -> GitHubActionsIdentity:
+    return _identity(
+        workflow_ref=(
+            "every/verireel/.github/workflows/product-prelaunch-rebuild-policy.yml@refs/heads/main"
         ),
         job_workflow_ref=job_workflow_ref,
         event_name="workflow_dispatch",
@@ -2268,6 +2326,40 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             "health_monitoring_bounded_apply_required",
         )
 
+    async def test_write_product_profile_requires_bounded_apply_for_prelaunch_rebuild_changes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            existing_profile = _product_prelaunch_rebuild_policy_profile()
+            record_store.write_product_profile_record(existing_profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="odoo-product"),
+                record_store_factory=lambda: record_store,
+            )
+            replacement_payload = existing_profile.model_dump(mode="json")
+            replacement_payload["lanes"][1]["odoo_prelaunch_rebuild"] = {
+                "enabled": True,
+                "approval_issue_url": "https://github.com/example/launchplane/issues/123",
+                "data_source_mode": "empty",
+                "confirmation": "rebuild wip production",
+                "expected_target_name": "expected-target",
+                "expected_domains": ["example.invalid"],
+            }
+
+            response = await _post_product_profile(
+                app,
+                replacement_payload,
+                idempotency_key="profile-prelaunch-rebuild-change",
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "prelaunch_rebuild_bounded_apply_required",
+        )
+
     async def test_write_product_profile_replays_idempotent_request(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -3081,6 +3173,214 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         route = response.json()["paths"]["/v1/product-profiles/health-monitoring/apply"]["post"]
         self.assertEqual(route["operationId"], "apply_product_health_monitoring")
+
+    async def test_apply_product_prelaunch_rebuild_policy_dry_run_preserves_profile(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_prelaunch_rebuild_policy_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_prelaunch_rebuild_policy_identity()),
+                authz_policy=_product_prelaunch_rebuild_policy_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_product_prelaunch_rebuild_policy(
+                app,
+                _product_prelaunch_rebuild_policy_payload(),
+            )
+            stored_profile = store.read_product_profile_record("odoo-product")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(
+            payload["records"],
+            {
+                "product_profile": "odoo-product",
+                "context": "cm",
+                "instance": "prod",
+            },
+        )
+        self.assertEqual(payload["result"]["operation"], "update")
+        self.assertFalse(payload["result"]["current_policy"]["enabled"])
+        self.assertTrue(payload["result"]["requested_policy"]["enabled"])
+        self.assertEqual(payload["result"]["data_authority"], "resettable")
+        self.assertRegex(payload["result"]["plan_sha256"], r"^[0-9a-f]{64}$")
+        self.assertFalse(stored_profile.lanes[1].odoo_prelaunch_rebuild.enabled)
+
+    async def test_apply_product_prelaunch_rebuild_policy_persists_and_replays_reviewed_plan(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_prelaunch_rebuild_policy_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_prelaunch_rebuild_policy_identity()),
+                authz_policy=_product_prelaunch_rebuild_policy_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            dry_run_response = await _post_product_prelaunch_rebuild_policy(
+                app,
+                _product_prelaunch_rebuild_policy_payload(),
+            )
+            apply_payload = {
+                **_product_prelaunch_rebuild_policy_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+            }
+            apply_response = await _post_product_prelaunch_rebuild_policy(
+                app,
+                apply_payload,
+                idempotency_key="product-prelaunch-rebuild-policy-apply",
+            )
+            replay_response = await _post_product_prelaunch_rebuild_policy(
+                app,
+                apply_payload,
+                idempotency_key="product-prelaunch-rebuild-policy-apply",
+            )
+            stored_profile = store.read_product_profile_record("odoo-product")
+
+        self.assertEqual(apply_response.status_code, 202)
+        self.assertTrue(apply_response.json()["result"]["applied"])
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertTrue(stored_profile.lanes[1].odoo_prelaunch_rebuild.enabled)
+        self.assertEqual(
+            stored_profile.lanes[1].health_monitoring.monitoring_intent,
+            "prelaunch",
+        )
+        self.assertEqual(stored_profile.source, "service:product-prelaunch-rebuild-policy")
+
+    async def test_apply_product_prelaunch_rebuild_policy_rejects_stale_plan(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            profile = _product_prelaunch_rebuild_policy_profile()
+            store.write_product_profile_record(profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_prelaunch_rebuild_policy_identity()),
+                authz_policy=_product_prelaunch_rebuild_policy_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            dry_run_response = await _post_product_prelaunch_rebuild_policy(
+                app,
+                _product_prelaunch_rebuild_policy_payload(),
+            )
+            store.write_product_profile_record(
+                profile.model_copy(
+                    update={
+                        "updated_at": "2026-07-28T00:01:00Z",
+                        "source": "concurrent-change",
+                    }
+                )
+            )
+            apply_response = await _post_product_prelaunch_rebuild_policy(
+                app,
+                {
+                    **_product_prelaunch_rebuild_policy_payload(),
+                    "mode": "apply",
+                    "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+                },
+                idempotency_key="product-prelaunch-rebuild-policy-stale",
+            )
+
+        self.assertEqual(apply_response.status_code, 409)
+        self.assertEqual(apply_response.json()["error"]["code"], "stale")
+
+    async def test_apply_product_prelaunch_rebuild_policy_requires_exact_instance_authority(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_prelaunch_rebuild_policy_identity()),
+            authz_policy=_product_prelaunch_rebuild_policy_policy(instance="testing"),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("state")),
+        )
+
+        response = await _post_product_prelaunch_rebuild_policy(
+            app,
+            _product_prelaunch_rebuild_policy_payload(),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_apply_product_prelaunch_rebuild_policy_requires_idempotency_key(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_prelaunch_rebuild_policy_identity()),
+            authz_policy=_product_prelaunch_rebuild_policy_policy(),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("state")),
+        )
+
+        response = await _post_product_prelaunch_rebuild_policy(
+            app,
+            {
+                **_product_prelaunch_rebuild_policy_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": "a" * 64,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_required")
+
+    async def test_apply_product_prelaunch_rebuild_policy_requires_database_storage(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            store.write_product_profile_record(_product_prelaunch_rebuild_policy_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_prelaunch_rebuild_policy_identity()),
+                authz_policy=_product_prelaunch_rebuild_policy_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_product_prelaunch_rebuild_policy(
+                app,
+                _product_prelaunch_rebuild_policy_payload(),
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_required")
+
+    async def test_openapi_includes_product_prelaunch_rebuild_policy_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_prelaunch_rebuild_policy_identity()),
+            authz_policy=_product_prelaunch_rebuild_policy_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/product-profiles/prelaunch-rebuild/apply"]["post"]
+        self.assertEqual(
+            route["operationId"],
+            "apply_product_prelaunch_rebuild_policy",
+        )
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request_schema["title"], "ProductPrelaunchRebuildPolicyApplyRequest")
+        self.assertEqual(request_schema["type"], "object")
+        self.assertFalse(request_schema["additionalProperties"])
 
     async def test_apply_product_preview_tls_dry_run_preserves_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

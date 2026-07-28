@@ -2629,6 +2629,42 @@ def _product_health_monitoring_policy(
     )
 
 
+def _product_prelaunch_rebuild_policy_policy(
+    *,
+    actions: tuple[str, ...] = (
+        "product_profile.prelaunch_rebuild.plan",
+        "product_profile.prelaunch_rebuild.apply",
+    ),
+    product: str = "odoo-product",
+    context: str = "cm",
+    instance: str = "prod",
+) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "schema_version": 2,
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/"
+                        "product-prelaunch-rebuild-policy.yml@refs/heads/main"
+                    ],
+                    "job_workflow_refs": [
+                        "cbusillo/launchplane/.github/workflows/"
+                        "reusable-product-prelaunch-rebuild-policy.yml@"
+                        "0123456789abcdef0123456789abcdef01234567"
+                    ],
+                    "event_names": ["workflow_dispatch"],
+                    "products": [product],
+                    "contexts": [context],
+                    "instances": [instance],
+                    "actions": list(actions),
+                }
+            ],
+        }
+    )
+
+
 def _product_config_policy(
     *,
     action: str,
@@ -4205,6 +4241,28 @@ async def _post_product_health_monitoring(
         app,
         "POST",
         "/v1/product-profiles/health-monitoring/apply",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
+async def _post_product_prelaunch_rebuild_policy(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/product-profiles/prelaunch-rebuild/apply",
         headers=request_headers,
         payload=payload,
     )
