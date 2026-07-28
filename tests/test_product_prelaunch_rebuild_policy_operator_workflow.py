@@ -8,6 +8,9 @@ from tests.support.workflows import load_workflow
 
 class ProductPrelaunchRebuildPolicyOperatorWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.workflow = load_workflow(
+            ".github/workflows/product-prelaunch-rebuild-policy.yml"
+        )
         self.worker = load_workflow(
             ".github/workflows/reusable-product-prelaunch-rebuild-policy.yml"
         )
@@ -95,6 +98,62 @@ class ProductPrelaunchRebuildPolicyOperatorWorkflowTests(unittest.TestCase):
             "health_check:",
         ):
             self.assertNotIn(forbidden, workflow_text)
+
+    def test_dispatch_wrapper_calls_immutable_worker(self) -> None:
+        trigger = self.workflow.data["on"]
+        assert isinstance(trigger, dict)
+        self.assertEqual(set(trigger), {"workflow_dispatch"})
+        self.assertEqual(self.workflow.permissions, {"contents": "read", "id-token": "write"})
+        self.assertEqual(set(self.workflow.jobs), {"apply"})
+        self.assertEqual(
+            self.workflow.job_uses("apply"),
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-product-prelaunch-rebuild-policy.yml@"
+            "f63623c4228b227d2baa3325de3d0a576fc8af9f",
+        )
+        forwarded_inputs = self.workflow.job("apply")["with"]
+        assert isinstance(forwarded_inputs, dict)
+        self.assertEqual(
+            set(forwarded_inputs),
+            {
+                "mode",
+                "product",
+                "context",
+                "instance",
+                "enabled",
+                "approval_issue_url",
+                "data_source_mode",
+                "policy_confirmation",
+                "expected_target_name",
+                "expected_domains_json",
+                "reviewed_plan_sha256",
+                "reason",
+                "idempotency_key",
+                "confirmation",
+            },
+        )
+
+    def test_dispatch_wrapper_has_no_real_target_defaults(self) -> None:
+        trigger = self.workflow.data["on"]
+        assert isinstance(trigger, dict)
+        workflow_dispatch = trigger["workflow_dispatch"]
+        assert isinstance(workflow_dispatch, dict)
+        inputs = workflow_dispatch["inputs"]
+        assert isinstance(inputs, dict)
+        for name in (
+            "product",
+            "context",
+            "instance",
+            "approval_issue_url",
+            "policy_confirmation",
+            "expected_target_name",
+        ):
+            value = inputs[name]
+            assert isinstance(value, dict)
+            if name in {"product", "context", "instance"}:
+                self.assertNotIn("default", value)
+            else:
+                self.assertEqual(value.get("default"), "")
 
 
 if __name__ == "__main__":
