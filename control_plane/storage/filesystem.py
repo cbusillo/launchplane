@@ -78,6 +78,7 @@ from control_plane.contracts.odoo_stable_bootstrap_operation import (
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
+from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.odoo_stable_lane import (
     ODOO_STABLE_LANE_BLOCKING_STATUSES,
     OdooStableLaneOperationConflictError,
@@ -2148,6 +2149,12 @@ class FilesystemRecordStore:
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> Path:
         return self._write_model("launchplane_public_ingress_incidents", record.incident_id, record)
 
+    def read_public_ingress_incident_record(self, incident_id: str) -> PublicIngressIncidentRecord:
+        for record in self.list_public_ingress_incident_records(limit=None):
+            if record.incident_id == incident_id:
+                return record
+        raise FileNotFoundError(f"Public ingress incident '{incident_id}' was not found.")
+
     def write_public_ingress_incident_event_record(
         self, record: PublicIngressIncidentEventRecord
     ) -> Path:
@@ -2299,6 +2306,31 @@ class FilesystemRecordStore:
             and (not destination_kind or record.destination_kind == destination_kind)
         ]
         records.sort(key=lambda record: (record.attempted_at, record.attempt_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def list_outbox_delivery_records(
+        self,
+        *,
+        states: tuple[str, ...] = (),
+        kind: str = "",
+        aggregate_type: str = "",
+        aggregate_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[OutboxDeliveryRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                OutboxDeliveryRecord,
+                "launchplane_outbox_deliveries",
+            )
+            if (not states or record.state in states)
+            and (not kind or record.kind == kind)
+            and (not aggregate_type or record.aggregate_type == aggregate_type)
+            and (not aggregate_id or record.aggregate_id == aggregate_id)
+        ]
+        records.sort(key=lambda record: (record.created_at, record.delivery_id))
         if limit is not None:
             records = records[:limit]
         return tuple(records)

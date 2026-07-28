@@ -25,6 +25,16 @@ from control_plane.contracts.product_environment_read_model import (
     ProductReadModelStore,
     ProductSiteOverview,
 )
+from control_plane.contracts.product_incident_read_model import (
+    ProductIncidentEnvironmentScope,
+    ProductEnvironmentIncidentList,
+    ProductIncidentDetail,
+    ProductIncidentReadModelCapabilityError,
+    ProductIncidentStatusFilter,
+    build_product_environment_incident_detail,
+    build_product_environment_incident_list,
+    require_product_incident_read_store,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_operational_readiness import ProductOperationalReadiness
 from control_plane.contracts.protected_artifacts import (
@@ -129,6 +139,22 @@ class ProductEnvironmentResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     environment: ProductEnvironmentDetail
+
+
+class ProductEnvironmentIncidentsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    incident_list: ProductEnvironmentIncidentList
+
+
+class ProductEnvironmentIncidentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    incident: ProductIncidentDetail
 
 
 class ProductOperationalReadinessResponse(BaseModel):
@@ -887,6 +913,132 @@ def register_product_environment_read_routes(
             environment=environment_detail,
         )
 
+    def list_product_environment_incidents(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        environment: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        status: Annotated[ProductIncidentStatusFilter, Query()] = "all",
+        limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    ) -> ProductEnvironmentIncidentsResponse:
+        trace_id = common.next_trace_id()
+        result = _build_product_environment_read_result(
+            dependencies=common,
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+            params={"product": product, "environment": environment},
+        )
+        _require_product_environment_result_authorization(
+            dependencies=common,
+            identity=identity,
+            trace_id=trace_id,
+            result=result,
+        )
+        environment_detail = ProductEnvironmentDetail.model_validate(result.payload["environment"])
+        incident_scope = ProductIncidentEnvironmentScope(
+            product=environment_detail.product,
+            display_name=environment_detail.display_name,
+            environment=environment_detail.environment,
+            context=environment_detail.context,
+            instance=environment_detail.environment,
+            recorded_at=(
+                environment_detail.provenance.refreshed_at
+                or environment_detail.provenance.recorded_at
+            ),
+        )
+        try:
+            incident_store = require_product_incident_read_store(record_store)
+            incident_list = build_product_environment_incident_list(
+                record_store=incident_store,
+                product=product,
+                environment=environment,
+                status=status,
+                limit=limit,
+                scope=incident_scope,
+            )
+        except ProductIncidentReadModelCapabilityError as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        return ProductEnvironmentIncidentsResponse(
+            trace_id=trace_id,
+            incident_list=incident_list,
+        )
+
+    def read_product_environment_incident(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        environment: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        incident_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        observation_limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    ) -> ProductEnvironmentIncidentResponse:
+        trace_id = common.next_trace_id()
+        result = _build_product_environment_read_result(
+            dependencies=common,
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+            params={"product": product, "environment": environment},
+        )
+        _require_product_environment_result_authorization(
+            dependencies=common,
+            identity=identity,
+            trace_id=trace_id,
+            result=result,
+        )
+        environment_detail = ProductEnvironmentDetail.model_validate(result.payload["environment"])
+        incident_scope = ProductIncidentEnvironmentScope(
+            product=environment_detail.product,
+            display_name=environment_detail.display_name,
+            environment=environment_detail.environment,
+            context=environment_detail.context,
+            instance=environment_detail.environment,
+            recorded_at=(
+                environment_detail.provenance.refreshed_at
+                or environment_detail.provenance.recorded_at
+            ),
+        )
+        try:
+            incident_store = require_product_incident_read_store(record_store)
+            incident = build_product_environment_incident_detail(
+                record_store=incident_store,
+                product=product,
+                environment=environment,
+                incident_id=incident_id,
+                observation_limit=observation_limit,
+                scope=incident_scope,
+            )
+        except ProductIncidentReadModelCapabilityError as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        return ProductEnvironmentIncidentResponse(
+            trace_id=trace_id,
+            incident=incident,
+        )
+
     def read_product_operational_readiness(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -1058,6 +1210,24 @@ def register_product_environment_read_routes(
         response_model=ProductEnvironmentResponse,
         operation_id="read_product_environment",
         summary="Read one product environment",
+        responses=error_responses,
+    )
+    app.add_api_route(
+        "/v1/products/{product}/environments/{environment}/public-ingress/incidents",
+        list_product_environment_incidents,
+        methods=["GET"],
+        response_model=ProductEnvironmentIncidentsResponse,
+        operation_id="list_product_environment_public_ingress_incidents",
+        summary="List public ingress incidents for one product environment",
+        responses=error_responses,
+    )
+    app.add_api_route(
+        "/v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}",
+        read_product_environment_incident,
+        methods=["GET"],
+        response_model=ProductEnvironmentIncidentResponse,
+        operation_id="read_product_environment_public_ingress_incident",
+        summary="Read one public ingress incident with linked evidence",
         responses=error_responses,
     )
     app.add_api_route(

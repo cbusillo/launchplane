@@ -1021,6 +1021,19 @@ delivery are separate record families: observations say what was measured,
 incidents say whether there is active operator state, and delivery records say
 where Launchplane attempted to notify operators.
 
+The Product Ops incident projection is read-only and remains subordinate to
+those durable records. The environment-scoped list and detail models resolve the
+requested stable lane from the DB-backed product profile, then return incident
+state plus typed links to observations, material events, reminder state,
+notification attempts, and outbox deliveries for that exact product, context,
+and instance. External GitHub, email, and Discord notifications are delivery
+sinks, not incident authority. The projection returns destination kind,
+provider-safe external links, delivery state, bounded failure state, and record
+ids; it does not return destination or policy ids, raw outbox payloads, provider
+operation keys, provider ids, raw target URLs, secret references, or provider
+error text. Product summaries may aggregate active incident state across lanes,
+but detail remains anchored to the lane-owned incident occurrence.
+
 ## Public Ingress Notification Records
 
 Public ingress notification policy records are DB-backed Launchplane records
