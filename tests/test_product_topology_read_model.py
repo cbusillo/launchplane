@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Literal
 import unittest
 
 from control_plane.contracts.data_provenance import FreshnessStatus
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneMonitoringIntent,
+)
 from control_plane.contracts.product_topology_read_model import (
     build_product_environment_topology,
 )
@@ -38,6 +42,23 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIde
 _NOW = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
 
 
+def _runtime_identity(
+    *,
+    product: str = "example-site",
+    artifact_id: str = "artifact-1",
+    image_reference: str = "",
+) -> RuntimeIdentity:
+    return RuntimeIdentity(
+        product=product,
+        context="example-context",
+        instance="prod",
+        deployment_record_id="deployment-1",
+        artifact_id=artifact_id,
+        source_git_ref="refs/heads/main",
+        image_reference=image_reference,
+    )
+
+
 def _profile(
     *,
     product: str = "example-site",
@@ -65,6 +86,25 @@ def _profile(
             "source": "test",
         }
     )
+
+
+def _strict_public_profile(
+    *,
+    product: str = "example-site",
+    domain_name: str = "example.test",
+) -> LaunchplaneProductProfileRecord:
+    payload = _profile(product=product, domain_name=domain_name).model_dump(mode="json")
+    payload["lanes"][0]["health_monitoring"] = {
+        "monitoring_intent": "public",
+        "checks": [
+            {
+                "name": "public-ingress",
+                "kind": "public_http",
+                "require_runtime_identity": True,
+            }
+        ],
+    }
+    return LaunchplaneProductProfileRecord.model_validate(payload)
 
 
 def _route_binding(
@@ -243,15 +283,10 @@ def _http_observation(
     domain_name: str = "example.test",
     observed_at: str = "2026-07-14T11:30:00Z",
     runtime_identity_status: RuntimeIdentityStatus = "match",
+    expected_runtime_identity: RuntimeIdentity | None = None,
+    monitoring_intent: ProductLaneMonitoringIntent | Literal["legacy"] = "legacy",
 ) -> PublicIngressObservationRecord:
-    expected_identity = RuntimeIdentity(
-        product=product,
-        context="example-context",
-        instance="prod",
-        deployment_record_id="deployment-1",
-        artifact_id="artifact-1",
-        source_git_ref="refs/heads/main",
-    )
+    expected_identity = expected_runtime_identity or _runtime_identity(product=product)
     observed_identity = expected_identity if runtime_identity_status == "match" else None
     status: PublicIngressObservationStatus = (
         "pass" if runtime_identity_status in {"match", "unchecked"} else "fail"
@@ -286,6 +321,7 @@ def _http_observation(
         instance="prod",
         check_name="public-ingress",
         check_kind="public_http",
+        monitoring_intent=monitoring_intent,
         observed_at=observed_at,
         status=status,
         failure_code=failure_code,
@@ -294,6 +330,69 @@ def _http_observation(
         expected_runtime_identity=expected_identity,
         targets=(target,),
         summary=target.summary,
+    )
+
+
+def _lane_summary(
+    *,
+    identity: RuntimeIdentity | None = None,
+    freshness_status: FreshnessStatus = "stale",
+    runtime_identity_status: RuntimeIdentityStatus = "match",
+    health_verified: bool = True,
+    health_status: str = "pass",
+) -> LaunchplaneLaneSummary:
+    current_identity = identity or _runtime_identity()
+    observed_identity = current_identity if runtime_identity_status == "match" else None
+    return LaunchplaneLaneSummary.model_validate(
+        {
+            "context": "example-context",
+            "instance": "prod",
+            "inventory": {
+                "context": "example-context",
+                "instance": "prod",
+                "artifact_identity": {"artifact_id": current_identity.artifact_id},
+                "source_git_ref": current_identity.source_git_ref,
+                "deploy": {
+                    "target_name": "example-site-prod",
+                    "target_type": "application",
+                    "deploy_mode": "test",
+                    "deployment_id": current_identity.deployment_record_id,
+                    "status": "pass",
+                    "started_at": "2026-07-14T09:55:00Z",
+                    "finished_at": "2026-07-14T10:00:00Z",
+                },
+                "runtime_identity": current_identity.model_dump(mode="json"),
+                "destination_health": {
+                    "verified": health_verified,
+                    "urls": ("https://example.test/healthz",),
+                    "timeout_seconds": 30,
+                    "status": health_status,
+                    "runtime_identity_status": runtime_identity_status,
+                    "runtime_identity_detail": "Recorded deployment runtime identity evidence.",
+                    "observed_runtime_identity": (
+                        observed_identity.model_dump(mode="json")
+                        if observed_identity is not None
+                        else None
+                    ),
+                },
+                "updated_at": "2026-07-14T10:00:00Z",
+                "deployment_record_id": current_identity.deployment_record_id,
+            },
+            "provider_target": _provider_target().model_dump(mode="json"),
+            "provenance": {
+                "source_kind": "record",
+                "source_record_id": "environment-inventory-prod",
+                "recorded_at": "2026-07-14T10:00:00Z",
+                "refreshed_at": "2026-07-14T10:00:00Z",
+                "freshness_status": freshness_status,
+                "stale_after": (
+                    "2026-07-14T10:30:00Z"
+                    if freshness_status == "stale"
+                    else "2099-01-01T00:00:00Z"
+                ),
+                "detail": "Launchplane environment inventory evidence.",
+            },
+        }
     )
 
 
@@ -594,6 +693,255 @@ class ProductTopologyReadModelTests(unittest.TestCase):
             "public_runtime_identity_unverified",
             {warning.code for warning in unverified.warnings},
         )
+
+    def test_fresh_strict_public_runtime_proof_corroborates_stale_placement(self) -> None:
+        profile = _strict_public_profile()
+        identity = _runtime_identity()
+        lane_summary = _lane_summary(identity=identity)
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=_route_binding(),
+                observations=(
+                    _http_observation(
+                        expected_runtime_identity=identity,
+                        monitoring_intent="public",
+                    ),
+                    _tls_observation(status="valid"),
+                ),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=lane_summary,
+            now=_NOW,
+        )
+
+        self.assertEqual(lane_summary.provenance.freshness_status, "stale")
+        self.assertEqual(topology.observed.placement.trust_state, "verified")
+        self.assertEqual(topology.observed.placement.runtime_identity_status, "match")
+        self.assertEqual(
+            topology.observed.placement.expected_runtime_identity,
+            topology.observed.placement.observed_runtime_identity,
+        )
+        self.assertEqual(topology.observed.placement.provenance.source_kind, "provider")
+        self.assertEqual(
+            topology.observed.placement.provenance.source_record_id,
+            "http-observation-example-site-match",
+        )
+        self.assertEqual(topology.observed.trust_state, "verified")
+        self.assertEqual(topology.trust_state, "recorded")
+
+    def test_stale_public_runtime_proof_does_not_corroborate_placement(self) -> None:
+        profile = _strict_public_profile()
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=_route_binding(),
+                observations=(
+                    _http_observation(
+                        observed_at="2026-07-14T09:30:00Z",
+                        monitoring_intent="public",
+                    ),
+                    _tls_observation(status="valid"),
+                ),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=_lane_summary(),
+            now=_NOW,
+        )
+
+        self.assertEqual(topology.observed.ingress.trust_state, "stale")
+        self.assertEqual(topology.observed.placement.trust_state, "stale")
+        self.assertEqual(topology.observed.placement.provenance.source_kind, "record")
+
+    def test_runtime_proof_does_not_replace_missing_or_unsupported_placement_trust(
+        self,
+    ) -> None:
+        profile = _strict_public_profile()
+        for freshness_status in ("missing", "unsupported"):
+            with self.subTest(freshness_status=freshness_status):
+                topology = build_product_environment_topology(
+                    record_store=_TopologyStore(
+                        route_binding=_route_binding(),
+                        observations=(
+                            _http_observation(monitoring_intent="public"),
+                            _tls_observation(status="valid"),
+                        ),
+                    ),
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    lane_summary=_lane_summary(freshness_status=freshness_status),
+                    now=_NOW,
+                )
+
+                self.assertEqual(
+                    topology.observed.placement.trust_state,
+                    freshness_status,
+                )
+                self.assertEqual(topology.observed.placement.provenance.source_kind, "record")
+
+    def test_non_strict_public_runtime_proof_does_not_corroborate_placement(self) -> None:
+        profile_payload = _strict_public_profile().model_dump(mode="json")
+        profile_payload["lanes"][0]["health_monitoring"]["checks"][0][
+            "require_runtime_identity"
+        ] = False
+        profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=_route_binding(),
+                observations=(
+                    _http_observation(monitoring_intent="public"),
+                    _tls_observation(status="valid"),
+                ),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=_lane_summary(),
+            now=_NOW,
+        )
+
+        self.assertEqual(topology.observed.ingress.runtime_identity_status, "match")
+        self.assertEqual(topology.observed.placement.trust_state, "stale")
+
+    def test_different_public_runtime_identity_does_not_corroborate_placement(self) -> None:
+        profile = _strict_public_profile()
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=_route_binding(),
+                observations=(
+                    _http_observation(
+                        expected_runtime_identity=_runtime_identity(artifact_id="artifact-2"),
+                        monitoring_intent="public",
+                    ),
+                    _tls_observation(status="valid"),
+                ),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=_lane_summary(),
+            now=_NOW,
+        )
+
+        self.assertEqual(topology.observed.ingress.runtime_identity_status, "match")
+        self.assertEqual(topology.observed.placement.trust_state, "stale")
+
+    def test_optional_runtime_identity_divergence_does_not_corroborate_placement(self) -> None:
+        profile = _strict_public_profile()
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=_route_binding(),
+                observations=(
+                    _http_observation(monitoring_intent="public"),
+                    _tls_observation(status="valid"),
+                ),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=_lane_summary(
+                identity=_runtime_identity(
+                    image_reference="ghcr.io/example/example-site@sha256:abc123"
+                )
+            ),
+            now=_NOW,
+        )
+
+        self.assertEqual(topology.observed.ingress.runtime_identity_status, "match")
+        self.assertEqual(topology.observed.placement.trust_state, "stale")
+
+    def test_prelaunch_or_legacy_runtime_proof_does_not_corroborate_placement(self) -> None:
+        strict_profile = _strict_public_profile()
+        prelaunch_payload = strict_profile.model_dump(mode="json")
+        prelaunch_payload["lanes"][0]["health_monitoring"]["monitoring_intent"] = "prelaunch"
+        cases = (
+            (
+                "prelaunch_lane",
+                LaunchplaneProductProfileRecord.model_validate(prelaunch_payload),
+                _http_observation(monitoring_intent="public"),
+            ),
+            ("legacy_observation", strict_profile, _http_observation()),
+        )
+        for label, profile, observation in cases:
+            with self.subTest(case=label):
+                topology = build_product_environment_topology(
+                    record_store=_TopologyStore(
+                        route_binding=_route_binding(),
+                        observations=(observation, _tls_observation(status="valid")),
+                    ),
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    lane_summary=_lane_summary(),
+                    now=_NOW,
+                )
+
+                self.assertEqual(topology.observed.placement.trust_state, "stale")
+
+    def test_failing_public_runtime_proof_does_not_corroborate_placement(self) -> None:
+        profile = _strict_public_profile()
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=_route_binding(),
+                observations=(
+                    _http_observation(
+                        runtime_identity_status="unverifiable",
+                        monitoring_intent="public",
+                    ),
+                    _tls_observation(status="valid"),
+                ),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=_lane_summary(),
+            now=_NOW,
+        )
+
+        self.assertEqual(topology.observed.ingress.status, "fail")
+        self.assertEqual(topology.observed.placement.trust_state, "stale")
+
+    def test_failed_recorded_health_does_not_corroborate_placement(self) -> None:
+        profile = _strict_public_profile()
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=_route_binding(),
+                observations=(
+                    _http_observation(monitoring_intent="public"),
+                    _tls_observation(status="valid"),
+                ),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=_lane_summary(health_status="fail"),
+            now=_NOW,
+        )
+
+        self.assertEqual(topology.observed.ingress.status, "pass")
+        self.assertEqual(topology.observed.placement.runtime_identity_status, "match")
+        self.assertEqual(topology.observed.placement.trust_state, "stale")
+
+    def test_newer_equivalent_public_evidence_fences_older_strict_proof(self) -> None:
+        profile = _strict_public_profile()
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=_route_binding(),
+                observations=(
+                    _http_observation(
+                        observed_at="2026-07-14T11:30:00Z",
+                        monitoring_intent="public",
+                    ),
+                    _http_observation(
+                        observed_at="2026-07-14T11:45:00Z",
+                        runtime_identity_status="unchecked",
+                        monitoring_intent="public",
+                    ),
+                    _tls_observation(status="valid"),
+                ),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=_lane_summary(),
+            now=_NOW,
+        )
+
+        self.assertEqual(topology.observed.ingress.runtime_identity_status, "match")
+        self.assertEqual(topology.observed.placement.trust_state, "stale")
 
     def test_projection_diagnoses_cm_website_tls_hostname_mismatch(self) -> None:
         profile = _profile(

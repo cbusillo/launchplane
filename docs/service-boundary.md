@@ -2230,6 +2230,19 @@ context. Raw context names remain evidence metadata, while provider target ids,
 host ids, certificate ids, edge addresses, provider evidence maps, runtime
 values, secret plaintext, secret ciphertext, and product-specific driver
 payloads are not exposed.
+
+For a public-monitoring lane, the read-only topology projection may corroborate
+observed placement from the newest fresh passing strict health probe only when
+the exact configured check requires runtime identity and the probe's expected
+and observed identities both equal the recorded placement identity, whose
+recorded health is verified and passing. The
+placement provenance then names that public observation. Environment inventory,
+deployment evidence, and their environment-level provenance are neither updated
+nor re-timestamped. Non-strict, legacy, base-page-only, superseded, stale,
+failing, missing, unchecked, unverifiable, or mismatched observations remain
+fail closed, and route, provider-target, TLS, and authorization readiness are
+still evaluated independently.
+
 `/v1/repo-product-mapping` and `/v1/agent/context` are also native FastAPI routes.
 
 `GET /v1/products/{product}/environments` returns the product's stable

@@ -840,6 +840,19 @@ passes without treating old evidence as current for an entire workday, while the
 14-day expiry window gives operators enough time to review ownership and
 rotation before a certificate crosses into an outage condition.
 
+The product topology read model may use the newest fresh strict public health
+probe to corroborate observed placement between deployments. This applies only
+to a public-monitoring lane whose exact enabled check requires runtime identity,
+when the health target passes and its expected and observed identities match
+each other and the recorded placement identity, whose recorded health is also
+verified and passing. The placement projection then
+uses the public observation as its current provenance; the environment inventory
+record, its timestamp, and the environment-level provenance remain unchanged.
+Legacy, non-strict, base-page-only, older-than-latest, stale, failing, missing,
+unchecked, unverifiable, or mismatched evidence never refreshes placement trust.
+This is a read-only corroboration rule, not an inventory heartbeat or a substitute
+for deployment, promotion, route, provider-target, or TLS authority.
+
 Notification routing is a separate service-backed policy and delivery concern,
 not lane-owned text config. The initial notification destinations are GitHub
 issues, email, and Discord; each is selected by DB-backed policy and evidenced
