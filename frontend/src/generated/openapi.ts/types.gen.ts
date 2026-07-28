@@ -1194,6 +1194,29 @@ export type ProductEnvironmentDriverExtensions = {
     odoo: ProductOdooEnvironmentExtension | null;
 };
 
+export type ProductEnvironmentIncidentList = {
+    context: string;
+    display_name: string;
+    environment: string;
+    incidents: Array<ProductIncidentSummary>;
+    instance: string;
+    product: string;
+    provenance: DataProvenance;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductEnvironmentIncidentResponse = {
+    incident: ProductIncidentDetail;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type ProductEnvironmentIncidentsResponse = {
+    incident_list: ProductEnvironmentIncidentList;
+    status: 'ok';
+    trace_id: string;
+};
+
 export type ProductEnvironmentListResponse = {
     products: Array<ProductSiteOverview>;
     status: 'ok';
@@ -1288,6 +1311,128 @@ export type ProductHealthMonitoringSummary = {
 
 export type ProductImageProfile = {
     repository: string;
+};
+
+export type ProductIncidentDetail = {
+    events: Array<ProductIncidentEventSummary>;
+    incident: ProductIncidentSummary;
+    material_evidence: ProductIncidentMaterialEvidence | null;
+    notification_attempts: Array<ProductIncidentNotificationAttemptSummary>;
+    observations: Array<ProductIncidentObservationSummary>;
+    outbox_deliveries: Array<ProductIncidentOutboxDeliverySummary>;
+    reminders: Array<ProductIncidentReminderSummary>;
+};
+
+export type ProductIncidentEventSummary = {
+    delivery_eligible: boolean;
+    event: 'opened' | 'updated' | 'reminder' | 'resolved' | 'baseline';
+    event_id: string;
+    material_fingerprint_sha256: string;
+    observation_id: string;
+    occurred_at: string;
+    previous_material_fingerprint_sha256: string;
+    reason: 'incident_opened' | 'material_change' | 'reminder_due' | 'recovered' | 'monitoring_intent_changed' | 'migration_baseline' | 'duplicate_reconciled';
+    reminder_window_ended_at: string;
+    reminder_window_index: number | null;
+    reminder_window_started_at: string;
+    severity: 'warning' | 'critical';
+    summary: string;
+    suppression_reason: '' | 'acknowledged' | 'silenced' | 'migration_reconciliation';
+};
+
+export type ProductIncidentMaterialEvidence = {
+    affected_targets: Array<'base_url' | 'health_url' | 'private_health_url' | 'monitoring_intent' | 'provider' | 'tls_domain'>;
+    check_kind: 'public_http' | 'private_http' | 'provider' | 'tls';
+    failure_code: 'connection_timeout' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
+    failure_layer: 'configuration' | 'dns' | 'network' | 'redirect' | 'http' | 'tls' | 'runtime_identity' | 'provider' | 'unknown';
+    route_authority_kind: string;
+    runtime_identity_mismatched_fields: Array<string>;
+    runtime_identity_status: string;
+    severity: 'warning' | 'critical';
+    tls_status: 'valid' | 'expiring' | 'expired' | 'hostname_mismatch' | 'untrusted' | 'self_signed' | 'unreachable' | 'unknown' | 'unsupported' | '';
+};
+
+export type ProductIncidentNotificationAttemptSummary = {
+    action: string;
+    attempt_id: string;
+    attempted_at: string;
+    delivery_status: 'delivered' | 'skipped' | 'failed';
+    destination_kind: 'github_issue' | 'email' | 'discord';
+    error_message: string;
+    event: string;
+    external_url: string;
+    incident_event_id: string;
+    observation_id: string;
+};
+
+export type ProductIncidentObservationSummary = {
+    failure_code: 'connection_timeout' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error' | '';
+    incident_event_id: string;
+    material_fingerprint_sha256: string;
+    notification_sent: boolean;
+    observed_at: string;
+    purpose: 'probe' | 'reconciliation';
+    record_id: string;
+    status: 'pass' | 'fail' | 'skipped';
+    summary: string;
+};
+
+export type ProductIncidentOutboxDeliverySummary = {
+    action: string;
+    attempt: number;
+    created_at: string;
+    delivery_id: string;
+    error_code: string;
+    external_url: string;
+    max_attempts: number;
+    next_attempt_at: string;
+    state: 'pending' | 'running' | 'delivered' | 'failed' | 'reconcile_required';
+    updated_at: string;
+};
+
+export type ProductIncidentReminderSummary = {
+    interval_seconds: number;
+    last_reminded_at: string;
+    last_window_index: number;
+    material_event_id: string;
+    next_reminder_at: string;
+    reminder_state_id: string;
+    status: 'active' | 'suppressed' | 'policy_inactive' | 'resolved';
+    updated_at: string;
+};
+
+export type ProductIncidentSummary = {
+    check_kind: 'public_http' | 'private_http' | 'provider' | 'tls';
+    check_name: string;
+    consecutive_recovery_observations: number;
+    context: string;
+    display_name: string;
+    environment: string;
+    failure_code: 'connection_timeout' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
+    failure_layer: 'configuration' | 'dns' | 'network' | 'redirect' | 'http' | 'tls' | 'runtime_identity' | 'provider' | 'unknown';
+    incident_id: string;
+    instance: string;
+    last_reminded_at: string;
+    latest_material_event: 'opened' | 'updated' | 'reminder' | 'resolved' | 'baseline' | '';
+    latest_material_event_at: string;
+    latest_material_event_id: string;
+    latest_observed_at: string;
+    material_fingerprint_sha256: string;
+    next_reminder_at: string;
+    notification_state: 'active' | 'acknowledged' | 'silenced';
+    notification_state_changed_at: string;
+    opened_at: string;
+    product: string;
+    provenance: DataProvenance;
+    recovery_observation_threshold: number;
+    resolution_reason: 'recovered' | 'monitoring_intent_changed' | 'duplicate_reconciled' | '';
+    resolved_at: string;
+    schema_version: number;
+    severity: 'warning' | 'critical';
+    silenced_until: string;
+    status: 'open' | 'resolved';
+    summary: string;
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
 
 export type ProductLaneHealthCheck = {
@@ -2675,6 +2820,74 @@ export type ReadProductPromotionWorkflowDeliveryResponses = {
 };
 
 export type ReadProductPromotionWorkflowDeliveryResponse = ReadProductPromotionWorkflowDeliveryResponses[keyof ReadProductPromotionWorkflowDeliveryResponses];
+
+export type ListProductEnvironmentPublicIngressIncidentsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+        environment: string;
+    };
+    query?: {
+        status?: 'all' | 'open' | 'resolved';
+        limit?: number;
+    };
+    url: '/v1/products/{product}/environments/{environment}/public-ingress/incidents';
+};
+
+export type ListProductEnvironmentPublicIngressIncidentsErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ListProductEnvironmentPublicIngressIncidentsError = ListProductEnvironmentPublicIngressIncidentsErrors[keyof ListProductEnvironmentPublicIngressIncidentsErrors];
+
+export type ListProductEnvironmentPublicIngressIncidentsResponses = {
+    200: ProductEnvironmentIncidentsResponse;
+};
+
+export type ListProductEnvironmentPublicIngressIncidentsResponse = ListProductEnvironmentPublicIngressIncidentsResponses[keyof ListProductEnvironmentPublicIngressIncidentsResponses];
+
+export type ReadProductEnvironmentPublicIngressIncidentData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+        environment: string;
+        incident_id: string;
+    };
+    query?: {
+        observation_limit?: number;
+    };
+    url: '/v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}';
+};
+
+export type ReadProductEnvironmentPublicIngressIncidentErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadProductEnvironmentPublicIngressIncidentError = ReadProductEnvironmentPublicIngressIncidentErrors[keyof ReadProductEnvironmentPublicIngressIncidentErrors];
+
+export type ReadProductEnvironmentPublicIngressIncidentResponses = {
+    200: ProductEnvironmentIncidentResponse;
+};
+
+export type ReadProductEnvironmentPublicIngressIncidentResponse = ReadProductEnvironmentPublicIngressIncidentResponses[keyof ReadProductEnvironmentPublicIngressIncidentResponses];
 
 export type ReadRepoProductMappingData = {
     body?: never;

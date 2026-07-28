@@ -155,6 +155,12 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/products/{product}/activity": "read_product_activity",
     "/v1/products/{product}/environments": "list_product_environments",
     "/v1/products/{product}/environments/{environment}": "read_product_environment",
+    "/v1/products/{product}/environments/{environment}/public-ingress/incidents": (
+        "list_product_environment_public_ingress_incidents"
+    ),
+    "/v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}": (
+        "read_product_environment_public_ingress_incident"
+    ),
     "/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness": (
         "read_product_operational_readiness"
     ),

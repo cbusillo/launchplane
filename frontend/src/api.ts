@@ -16,6 +16,8 @@ import type {
   MergeTrainPolicyTargetsResponse,
   ProductActivityResponse,
   ProductEnvironmentConfigStatusResponse,
+  ProductEnvironmentIncidentResponse,
+  ProductEnvironmentIncidentsResponse,
   ProductOperationalReadinessResponse,
   ProductEnvironmentResponse,
   ProductOverviewResponse,
@@ -219,6 +221,33 @@ export function readProductEnvironment(
 ): Promise<ProductEnvironmentResponse> {
   return requestJson<ProductEnvironmentResponse>(
     `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function listProductEnvironmentIncidents(
+  product: string,
+  environment: string,
+  signal?: AbortSignal,
+): Promise<ProductEnvironmentIncidentsResponse> {
+  return requestJson<ProductEnvironmentIncidentsResponse>(
+    `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}/public-ingress/incidents`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function readProductEnvironmentIncident(
+  product: string,
+  environment: string,
+  incidentId: string,
+  signal?: AbortSignal,
+): Promise<ProductEnvironmentIncidentResponse> {
+  return requestJson<ProductEnvironmentIncidentResponse>(
+    `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}/public-ingress/incidents/${encodeURIComponent(incidentId)}`,
     "GET",
     undefined,
     signal,

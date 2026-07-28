@@ -803,6 +803,21 @@ GitHub issue sinks must be closed and other operators must see recovery. Public,
 private, and provider checks use the configured consecutive-pass recovery
 threshold; only the threshold-crossing pass creates the single recovery event.
 
+Inspect active incident state from Product Ops before following an external
+notification. The product index derives its active-incident summary from the
+existing product read model. An environment's incident history is available at
+`GET /v1/products/{product}/environments/{environment}/public-ingress/incidents`,
+and one occurrence with its linked observations, material events, reminder
+state, notification attempts, and outbox evidence is available at the matching
+`/{incident_id}` route. Both reads require `product_environment.read`, resolve
+the stable lane from its DB-backed product profile, and return `404` rather than
+revealing an incident owned by another lane. Treat GitHub issues, email, and
+Discord messages as delivery evidence only: do not infer recovery from a closed
+or missing sink, and do not clear outbox rows or destination state to force a
+new opening. The operator projection deliberately omits raw destination values,
+policy identities, outbox payloads, provider operation details, target URLs,
+and provider error text.
+
 TLS observations reuse the same monitor run, record family, and incident
 lifecycle. For each active environment route binding, Launchplane probes one
 TLS target per bound domain so primary names and aliases are recorded

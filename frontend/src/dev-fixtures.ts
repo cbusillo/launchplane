@@ -10,10 +10,13 @@ import type {
   ProductActionAvailability,
   ProductActivityReadModel,
   ProductEnvironmentConfigStatus,
+  ProductEnvironmentIncidentList,
   ProductConfigApplyResponse,
   ProductConfigWriteAvailability,
   ProductEnvironmentDetail,
   ProductEnvironmentSummary,
+  ProductIncidentDetail,
+  ProductIncidentSummary,
   ProductOperationalReadiness,
   ProductOperationalReadinessDimension,
   ProductPromotionDryRunResponse,
@@ -223,6 +226,190 @@ export function environmentForFixture(
             trust_state: "recorded",
           },
         ],
+  };
+}
+
+export function incidentsForFixture(
+  fixture: DataFixtureMode,
+  product: string,
+  environment: string,
+): ProductEnvironmentIncidentList | null {
+  const detail = environmentForFixture(fixture, product, environment);
+  if (!detail) {
+    return null;
+  }
+  const incidentMode = new URLSearchParams(window.location.search).get("incident");
+  if (incidentMode === "error") {
+    throw new Error("Incident history is intentionally unavailable.");
+  }
+  const activeIncident =
+    incidentMode === "empty" || incidentMode === "stale"
+      ? null
+      : incidentSummaryForFixture(detail);
+  const resolvedIncident = activeIncident
+    ? {
+        ...activeIncident,
+        incident_id: `${activeIncident.incident_id}-resolved`,
+        status: "resolved" as const,
+        severity: "warning" as const,
+        opened_at: "2026-07-13T09:00:00Z",
+        latest_observed_at: "2026-07-13T10:15:00Z",
+        resolved_at: "2026-07-13T10:15:00Z",
+        resolution_reason: "recovered" as const,
+        latest_material_event_id: "incident-event-resolved-example",
+        latest_material_event: "resolved" as const,
+        latest_material_event_at: "2026-07-13T10:15:00Z",
+        next_reminder_at: "",
+        last_reminded_at: "2026-07-13T09:45:00Z",
+        consecutive_recovery_observations: 2,
+        summary: "Public ingress recovered after the required observation threshold.",
+      }
+    : null;
+  return {
+    product: detail.product,
+    display_name: detail.display_name,
+    environment: detail.environment,
+    context: detail.context,
+    instance: detail.environment,
+    incidents: [activeIncident, resolvedIncident].filter(
+      (incident): incident is ProductIncidentSummary => incident !== null,
+    ),
+    trust_state:
+      incidentMode === "stale" ? "stale" : detail.health_monitoring.trust_state,
+    provenance: provenance(
+      incidentMode === "stale" ? "stale" : detail.health_monitoring.trust_state,
+      activeIncident
+        ? "Launchplane incident history is available for this environment."
+        : incidentMode === "stale"
+          ? "The last incident history refresh is stale and must not be treated as current."
+        : "Launchplane recorded no public ingress incidents for this environment.",
+    ),
+  };
+}
+
+export function incidentForFixture(
+  fixture: DataFixtureMode,
+  product: string,
+  environment: string,
+  incidentId: string,
+): ProductIncidentDetail | null {
+  const incidentList = incidentsForFixture(fixture, product, environment);
+  const incident = incidentList?.incidents.find(
+    (candidate) => candidate.incident_id === incidentId,
+  );
+  if (!incident) {
+    return null;
+  }
+  const resolved = incident.status === "resolved";
+  const eventId = incident.latest_material_event_id || `event-${incident.incident_id}`;
+  const observationId = resolved
+    ? `observation-${incident.incident_id}-resolved`
+    : `observation-${incident.incident_id}-latest`;
+  return {
+    incident,
+    material_evidence: {
+      check_kind: incident.check_kind,
+      failure_code: incident.failure_code,
+      failure_layer: incident.failure_layer,
+      severity: incident.severity,
+      affected_targets: ["health_url"],
+      route_authority_kind: "public_urls",
+      runtime_identity_status: "",
+      runtime_identity_mismatched_fields: [],
+      tls_status: "",
+    },
+    observations: [
+      {
+        record_id: observationId,
+        purpose: "probe",
+        observed_at: incident.latest_observed_at,
+        status: resolved ? "pass" : "fail",
+        failure_code: resolved ? "" : incident.failure_code,
+        summary: resolved
+          ? "The public path passed the required recovery observation threshold."
+          : incident.summary,
+        incident_event_id: eventId,
+        material_fingerprint_sha256: incident.material_fingerprint_sha256,
+        notification_sent: !resolved,
+      },
+      ...(!resolved
+        ? [
+            {
+              record_id: `observation-${incident.incident_id}-opened`,
+              purpose: "probe" as const,
+              observed_at: incident.opened_at,
+              status: "fail" as const,
+              failure_code: incident.failure_code,
+              summary: "The first durable failing observation opened this incident.",
+              incident_event_id: eventId,
+              material_fingerprint_sha256: incident.material_fingerprint_sha256,
+              notification_sent: true,
+            },
+          ]
+        : []),
+    ],
+    events: [
+      {
+        event_id: eventId,
+        event: incident.latest_material_event || (resolved ? "resolved" : "opened"),
+        reason: resolved ? "recovered" : "incident_opened",
+        occurred_at: incident.latest_material_event_at || incident.opened_at,
+        observation_id: observationId,
+        severity: incident.severity,
+        material_fingerprint_sha256: incident.material_fingerprint_sha256,
+        previous_material_fingerprint_sha256: "",
+        delivery_eligible: true,
+        suppression_reason: "",
+        reminder_window_index: null,
+        reminder_window_started_at: "",
+        reminder_window_ended_at: "",
+        summary: resolved
+          ? "Launchplane resolved the incident after the recovery threshold."
+          : "Launchplane opened a material public ingress incident.",
+      },
+    ],
+    reminders: incident.next_reminder_at
+      ? [
+          {
+            reminder_state_id: `reminder-${incident.incident_id}`,
+            status: "active",
+            material_event_id: eventId,
+            interval_seconds: 21600,
+            last_window_index: 0,
+            last_reminded_at: incident.last_reminded_at,
+            next_reminder_at: incident.next_reminder_at,
+            updated_at: incident.latest_observed_at,
+          },
+        ]
+      : [],
+    notification_attempts: [
+      {
+        attempt_id: `attempt-${incident.incident_id}`,
+        event: resolved ? "resolved" : "opened",
+        destination_kind: "github_issue",
+        delivery_status: "delivered",
+        attempted_at: incident.latest_material_event_at || incident.opened_at,
+        observation_id: observationId,
+        incident_event_id: eventId,
+        external_url: "https://github.com/example/example/issues/42",
+        action: resolved ? "closed" : "created",
+        error_message: "",
+      },
+    ],
+    outbox_deliveries: [
+      {
+        delivery_id: `outbox-${incident.incident_id}`,
+        state: "delivered",
+        created_at: incident.latest_material_event_at || incident.opened_at,
+        updated_at: incident.latest_material_event_at || incident.opened_at,
+        next_attempt_at: incident.latest_material_event_at || incident.opened_at,
+        attempt: 1,
+        max_attempts: 6,
+        external_url: "https://github.com/example/example/issues/42",
+        action: resolved ? "closed" : "created",
+        error_code: "",
+      },
+    ],
   };
 }
 
@@ -1808,14 +1995,82 @@ const missingEvidenceProduct: ProductSiteOverview = {
 };
 
 function incidentFixtureState(open: boolean) {
+  const fixtureState = new URLSearchParams(window.location.search).get("incident");
+  const notificationState =
+    fixtureState === "acknowledged"
+      ? ("acknowledged" as const)
+      : fixtureState === "silenced"
+        ? ("silenced" as const)
+        : ("active" as const);
+  const severity = fixtureState === "warning" ? ("warning" as const) : ("critical" as const);
   return {
     incident_last_reminded_at: "",
     incident_latest_event: open ? ("opened" as const) : ("" as const),
     incident_latest_event_at: open ? OBSERVED_AT : "",
     incident_material_fingerprint_sha256: open ? "fixture-material-fingerprint" : "",
-    incident_next_reminder_at: "",
-    incident_notification_state: open ? ("active" as const) : ("" as const),
-    incident_severity: open ? ("critical" as const) : ("" as const),
+    incident_next_reminder_at:
+      open && notificationState === "active" ? "2026-07-14T20:32:00Z" : "",
+    incident_notification_state: open ? notificationState : ("" as const),
+    incident_severity: open ? severity : ("" as const),
+  };
+}
+
+function incidentSummaryForFixture(
+  detail: ProductEnvironmentDetail,
+): ProductIncidentSummary | null {
+  const ingress = detail.public_ingress;
+  const check = detail.health_monitoring.checks.find(
+    (candidate) => candidate.incident_id === ingress.incident_id,
+  );
+  if (!ingress.incident_id || ingress.incident_status !== "open") {
+    return null;
+  }
+  const failureCode = (check?.failure_code || ingress.failure_code) as ProductIncidentSummary["failure_code"];
+  const failureLayer: ProductIncidentSummary["failure_layer"] = failureCode.startsWith("tls_")
+    ? "tls"
+    : failureCode === "wrong_runtime_identity"
+      ? "runtime_identity"
+      : failureCode === "dns_failure"
+        ? "dns"
+        : "network";
+  const notificationState =
+    ingress.incident_notification_state || check?.incident_notification_state || "active";
+  return {
+    schema_version: 1,
+    incident_id: ingress.incident_id,
+    product: detail.product,
+    display_name: detail.display_name,
+    environment: detail.environment,
+    context: detail.context,
+    instance: detail.environment,
+    check_name: check?.name || "public-ingress",
+    check_kind: (check?.kind || "public_http") as ProductIncidentSummary["check_kind"],
+    status: "open",
+    severity: ingress.incident_severity || check?.incident_severity || "critical",
+    failure_code: failureCode,
+    failure_layer: failureLayer,
+    summary: check?.summary || ingress.summary,
+    opened_at: ingress.incident_opened_at || OBSERVED_AT,
+    latest_observed_at: ingress.observed_at || OBSERVED_AT,
+    resolved_at: "",
+    resolution_reason: "",
+    notification_state: notificationState,
+    notification_state_changed_at: ingress.incident_latest_event_at || OBSERVED_AT,
+    silenced_until:
+      notificationState === "silenced" ? "2026-07-15T02:32:00Z" : "",
+    latest_material_event_id: `event-${ingress.incident_id}`,
+    latest_material_event: ingress.incident_latest_event || "opened",
+    latest_material_event_at: ingress.incident_latest_event_at || OBSERVED_AT,
+    material_fingerprint_sha256: ingress.incident_material_fingerprint_sha256,
+    recovery_observation_threshold: 2,
+    consecutive_recovery_observations: 0,
+    next_reminder_at: ingress.incident_next_reminder_at,
+    last_reminded_at: ingress.incident_last_reminded_at,
+    trust_state: "recorded",
+    provenance: provenance(
+      "recorded",
+      "Launchplane material incident occurrence and reminder state.",
+    ),
   };
 }
 

@@ -23,6 +23,7 @@ import {
 } from "./dev-fixture-loader";
 import { EnvironmentActionsView } from "./EnvironmentActions";
 import { EnvironmentDiagnostics } from "./EnvironmentDiagnostics";
+import { EnvironmentIncidents } from "./EnvironmentIncidents";
 import {
   ManagedSecretsView,
   RuntimeSettingsView,
@@ -464,7 +465,9 @@ function EnvironmentPage({
         view={view}
       />
 
-      {view === "overview" ? <EnvironmentOverview detail={detail} /> : null}
+      {view === "overview" ? (
+        <EnvironmentOverview detail={detail} fixtureMode={fixtureMode} />
+      ) : null}
       {view === "actions" ? (
         <EnvironmentActionsView
           detail={detail}
@@ -498,12 +501,25 @@ function EnvironmentPage({
   );
 }
 
-function EnvironmentOverview({ detail }: { detail: ProductEnvironmentDetail }) {
+function EnvironmentOverview({
+  detail,
+  fixtureMode,
+}: {
+  detail: ProductEnvironmentDetail;
+  fixtureMode: DevFixtureMode;
+}) {
   const tlsDomains = detail.topology.observed.tls_domains;
   const observedPlacement = detail.topology.observed.placement;
   const effectiveChecks = detail.health_monitoring.checks.filter(
     (check) => check.probe_effective,
   );
+  const openIncidentCheck = effectiveChecks.find(
+    (check) => check.incident_eligible && check.incident_status === "open",
+  );
+  const openIncidentSeverity =
+    openIncidentCheck?.incident_severity || detail.public_ingress.incident_severity;
+  const currentIncidentId =
+    openIncidentCheck?.incident_id || detail.public_ingress.incident_id;
   const actionableMonitoringFailure = effectiveChecks.some(
     (check) => check.incident_eligible && check.status === "fail",
   );
@@ -526,8 +542,12 @@ function EnvironmentOverview({ detail }: { detail: ProductEnvironmentDetail }) {
           label="Monitoring"
           timestamp={evidenceTimestamp(detail.public_ingress.provenance)}
           tone={
-            actionableMonitoringFailure
+            openIncidentSeverity === "critical"
               ? "danger"
+              : openIncidentSeverity === "warning"
+                ? "warning"
+                : actionableMonitoringFailure
+                  ? "danger"
               : readinessMonitoringFailure
                 ? "warning"
                 : conditionTone(
@@ -536,7 +556,11 @@ function EnvironmentOverview({ detail }: { detail: ProductEnvironmentDetail }) {
                   )
           }
           trustState={detail.health_monitoring.trust_state}
-          value={humanize(detail.health_monitoring.monitoring_intent)}
+          value={
+            openIncidentSeverity
+              ? `Active incident · ${humanize(openIncidentSeverity)}`
+              : humanize(detail.health_monitoring.monitoring_intent)
+          }
         />
         <ConditionTile
           detail={primaryTls?.summary || trustLabel(primaryTls?.trust_state ?? "missing")}
@@ -584,6 +608,14 @@ function EnvironmentOverview({ detail }: { detail: ProductEnvironmentDetail }) {
         <TlsEvidence detail={detail} tlsDomains={tlsDomains} />
         <PlacementEvidence detail={detail} />
       </div>
+
+      <EnvironmentIncidents
+        currentIncidentId={currentIncidentId}
+        environment={detail.environment}
+        fixtureMode={fixtureMode}
+        monitoringTrustState={detail.health_monitoring.trust_state}
+        product={detail.product}
+      />
 
       <TopologyWarnings detail={detail} warnings={warningItems} />
       {detail.driver_extensions.odoo ? <OdooDataSafety detail={detail} /> : null}
@@ -935,6 +967,19 @@ function diagnosisFor(
   warnings: WarningItem[],
 ): Diagnosis | null {
   const errorWarning = warnings.find((warning) => warning.severity === "error");
+  const openIncident = detail.health_monitoring.checks.find(
+    (check) => check.incident_eligible && check.incident_status === "open",
+  );
+  if (openIncident) {
+    return {
+      title: openIncident.summary || `${humanize(openIncident.name)} incident open`,
+      detail: openIncident.failure_code
+        ? `Failure code: ${humanize(openIncident.failure_code)}.`
+        : "Launchplane recorded an open material incident for this health check.",
+      targetId: "incident-history",
+      severity: openIncident.incident_severity === "warning" ? "warning" : "error",
+    };
+  }
   if (primaryTls && tlsTone(primaryTls) === "danger") {
     return {
       title: primaryTls.summary || `${primaryTls.domain_name} TLS needs attention`,

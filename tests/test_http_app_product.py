@@ -8,8 +8,19 @@ from typing import Any, cast
 from unittest.mock import patch
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentEventRecord,
+    PublicIngressIncidentMaterialFingerprint,
+    PublicIngressIncidentRecord,
+    PublicIngressIncidentReminderStateRecord,
+    PublicIngressNotificationAttemptRecord,
+    PublicIngressObservationRecord,
+    PublicIngressTargetObservation,
+    public_ingress_material_fingerprint_sha256,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
@@ -136,6 +147,149 @@ def _product_preview_tls_payload() -> dict[str, object]:
         "reason": "Enable trusted preview TLS.",
         "reviewed_plan_sha256": "",
     }
+
+
+def _seed_product_incident_read_records(database_url: str) -> None:
+    store = PostgresRecordStore(database_url=database_url)
+    try:
+        fingerprint = PublicIngressIncidentMaterialFingerprint.model_validate(
+            {
+                "check_kind": "public_http",
+                "failure_code": "connection_timeout",
+                "failure_layer": "network",
+                "severity": "critical",
+                "affected_targets": ("health_url",),
+                "route_authority": {
+                    "kind": "public_urls",
+                    "target_keys": ("health_url",),
+                },
+            }
+        )
+        fingerprint_sha256 = public_ingress_material_fingerprint_sha256(fingerprint)
+        incident = PublicIngressIncidentRecord.model_validate(
+            {
+                "schema_version": 2,
+                "incident_id": "incident-example-site-prod",
+                "product": "example-site",
+                "context": "example-site",
+                "instance": "prod",
+                "check_name": "public-ingress",
+                "check_kind": "public_http",
+                "status": "open",
+                "opened_at": "2026-07-28T12:00:00Z",
+                "opened_observation_id": "observation-example-site-opened",
+                "latest_observation_id": "observation-example-site-latest",
+                "latest_observed_at": "2026-07-28T13:45:00Z",
+                "failure_code": "connection_timeout",
+                "state_version": 2,
+                "severity": "critical",
+                "material_fingerprint": fingerprint,
+                "material_fingerprint_sha256": fingerprint_sha256,
+                "material_fingerprint_complete": True,
+                "latest_material_event_id": "event-example-site-opened",
+                "latest_material_event": "opened",
+                "latest_material_event_at": "2026-07-28T12:00:00Z",
+                "notification_state": "active",
+                "notification_state_changed_at": "2026-07-28T12:00:00Z",
+                "recovery_observation_threshold": 2,
+                "summary": "Provider failed at https://private.example.invalid/healthz.",
+            }
+        )
+        store.write_public_ingress_incident_record(incident)
+        store.write_public_ingress_observation_record(
+            PublicIngressObservationRecord(
+                schema_version=2,
+                record_id=incident.latest_observation_id,
+                product=incident.product,
+                context=incident.context,
+                instance=incident.instance,
+                check_name=incident.check_name,
+                check_kind=incident.check_kind,
+                monitoring_intent="public",
+                observed_at=incident.latest_observed_at,
+                status="fail",
+                failure_code=incident.failure_code,
+                targets=(
+                    PublicIngressTargetObservation(
+                        target="health_url",
+                        url="https://example-site.example/healthz",
+                        status="fail",
+                        failure_code=incident.failure_code,
+                        summary="The request timed out.",
+                    ),
+                ),
+                incident_id=incident.incident_id,
+                incident_event_id=incident.latest_material_event_id,
+                material_fingerprint=fingerprint,
+                material_fingerprint_sha256=fingerprint_sha256,
+                summary=incident.summary,
+            )
+        )
+        store.write_public_ingress_incident_event_record(
+            PublicIngressIncidentEventRecord(
+                event_id=incident.latest_material_event_id,
+                incident_id=incident.incident_id,
+                event="opened",
+                reason="incident_opened",
+                occurred_at=incident.opened_at,
+                observation_id=incident.opened_observation_id,
+                material_fingerprint_sha256=fingerprint_sha256,
+                severity="critical",
+                summary="Provider error included private.example.invalid internals.",
+            )
+        )
+        store.write_public_ingress_incident_reminder_state_record(
+            PublicIngressIncidentReminderStateRecord(
+                reminder_state_id="reminder-example-site-prod",
+                incident_id=incident.incident_id,
+                policy_id="policy-example-site",
+                status="active",
+                material_event_id=incident.latest_material_event_id,
+                interval_seconds=3600,
+                window_anchor_at=incident.opened_at,
+                next_reminder_at="2026-07-28T15:00:00Z",
+                updated_at="2026-07-28T14:00:00Z",
+            )
+        )
+        store.write_public_ingress_notification_attempt_record(
+            PublicIngressNotificationAttemptRecord(
+                attempt_id="attempt-example-site-prod",
+                incident_id=incident.incident_id,
+                event="opened",
+                policy_id="policy-example-site",
+                destination_id="operator-private-destination",
+                destination_kind="github_issue",
+                delivery_status="delivered",
+                attempted_at="2026-07-28T12:01:00Z",
+                observation_id=incident.opened_observation_id,
+                incident_event_id=incident.latest_material_event_id,
+                external_url="https://github.com/example/example/issues/1",
+                external_id="private-provider-id",
+                action="created",
+            )
+        )
+        store.write_outbox_delivery_record(
+            OutboxDeliveryRecord(
+                delivery_id="outbox-example-site-prod",
+                kind="public_ingress_notification",
+                state="delivered",
+                aggregate_type="public_ingress_incident",
+                aggregate_id=incident.incident_id,
+                dedupe_key="public_ingress_notification:private-dedupe-key",
+                created_at="2026-07-28T12:00:30Z",
+                updated_at="2026-07-28T12:01:00Z",
+                next_attempt_at="2026-07-28T12:00:30Z",
+                attempt=1,
+                provider_operation_key="private-provider-operation",
+                provider_id="github",
+                external_id="private-provider-id",
+                external_url="https://github.com/example/example/issues/1",
+                action="created",
+                payload={"incident_id": incident.incident_id},
+            )
+        )
+    finally:
+        store.close()
 
 
 def _product_preview_tls_profile() -> LaunchplaneProductProfileRecord:
@@ -1683,6 +1837,92 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("edge-host-private-456", response_text)
         self.assertNotIn("certificate-private-789", response_text)
 
+    async def test_product_environment_incident_reads_expose_redacted_evidence(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_product_environment_read_records(database_url)
+            _seed_product_incident_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context="example-site"),
+                record_store_factory=lambda: app_store,
+            )
+            headers = {"Authorization": "Bearer valid-token"}
+
+            list_response = await _asgi_get(
+                app,
+                "/v1/products/example-site/environments/prod/public-ingress/incidents",
+                headers=headers,
+            )
+            detail_response = await _asgi_get(
+                app,
+                "/v1/products/example-site/environments/prod/public-ingress/incidents/incident-example-site-prod",
+                headers=headers,
+            )
+            app_store.close()
+
+        self.assertEqual(list_response.status_code, 200)
+        incident_list = list_response.json()["incident_list"]
+        self.assertEqual(incident_list["environment"], "prod")
+        incidents_by_id = {
+            incident["incident_id"]: incident for incident in incident_list["incidents"]
+        }
+        self.assertIn("incident-example-site-prod", incidents_by_id)
+        self.assertEqual(
+            incidents_by_id["incident-example-site-prod"]["next_reminder_at"],
+            "2026-07-28T15:00:00Z",
+        )
+
+        self.assertEqual(detail_response.status_code, 200)
+        detail_payload = detail_response.json()["incident"]
+        self.assertEqual(
+            detail_payload["observations"][0]["record_id"], "observation-example-site-latest"
+        )
+        self.assertEqual(detail_payload["events"][0]["event"], "opened")
+        self.assertEqual(detail_payload["notification_attempts"][0]["delivery_status"], "delivered")
+        self.assertEqual(detail_payload["outbox_deliveries"][0]["state"], "delivered")
+        response_text = detail_response.text
+        self.assertNotIn("operator-private-destination", response_text)
+        self.assertNotIn("private-provider-operation", response_text)
+        self.assertNotIn("private-dedupe-key", response_text)
+        self.assertNotIn("private-provider-id", response_text)
+        self.assertNotIn("private.example.invalid", response_text)
+        self.assertNotIn('"payload"', response_text)
+
+    async def test_product_environment_incident_detail_hides_other_lane_incidents(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_product_environment_read_records(database_url)
+            _seed_product_incident_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            incident = app_store.read_public_ingress_incident_record("incident-example-site-prod")
+            app_store.write_public_ingress_incident_record(
+                incident.model_copy(
+                    update={
+                        "context": "example-site-testing",
+                        "instance": "testing",
+                    }
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context="example-site"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/products/example-site/environments/prod/public-ingress/incidents/incident-example-site-prod",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
     async def test_product_environment_reads_require_identity(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -1696,6 +1936,10 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             await _get_product_activity(app, authorization=""),
             await _get_product_environments(app, authorization=""),
             await _get_product_environment(app, authorization=""),
+            await _asgi_get(
+                app,
+                "/v1/products/example-site/environments/prod/public-ingress/incidents",
+            ),
         ]
 
         for response in responses:
@@ -1773,11 +2017,18 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
 
         list_response = await _get_products(app)
         detail_response = await _get_product_environment(app)
+        incident_response = await _asgi_get(
+            app,
+            "/v1/products/example-site/environments/prod/public-ingress/incidents",
+            headers={"Authorization": "Bearer valid-token"},
+        )
 
         self.assertEqual(list_response.status_code, 503)
         self.assertEqual(detail_response.status_code, 503)
+        self.assertEqual(incident_response.status_code, 503)
         self.assertEqual(list_response.json()["error"]["code"], "database_storage_required")
         self.assertEqual(detail_response.json()["error"]["code"], "database_storage_required")
+        self.assertEqual(incident_response.json()["error"]["code"], "database_storage_required")
 
     async def test_product_environment_reads_accept_local_operator_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1860,6 +2111,14 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             "/v1/products/{product}/environments/{environment}": (
                 "read_product_environment",
                 "ProductEnvironmentResponse",
+            ),
+            "/v1/products/{product}/environments/{environment}/public-ingress/incidents": (
+                "list_product_environment_public_ingress_incidents",
+                "ProductEnvironmentIncidentsResponse",
+            ),
+            "/v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}": (
+                "read_product_environment_public_ingress_incident",
+                "ProductEnvironmentIncidentResponse",
             ),
         }
         for path, (operation_id, response_model_name) in expected_routes.items():

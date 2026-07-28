@@ -154,6 +154,171 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
+  test("operator sees active incidents across product workspaces", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/products?fixture=products");
+
+    const incidentRegion = page.getByRole("region", {
+      name: "Active public ingress incidents",
+    });
+    await expect(incidentRegion).toBeVisible();
+    await expect(
+      incidentRegion.getByRole("heading", { name: "1 open incident" }),
+    ).toBeVisible();
+    await expect(incidentRegion.getByText("Atlas Commerce", { exact: true })).toBeVisible();
+    await expect(
+      incidentRegion.getByRole("link", { name: "Inspect incident" }),
+    ).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "product-incidents-active");
+    diagnostics.assertClean();
+  });
+
+  test("operator inspects incident timeline observations and deliveries", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/products/atlas-commerce/environments/prod?fixture=products",
+    );
+
+    const incidentRegion = page.getByRole("region", { name: "Public ingress incidents" });
+    await expect(incidentRegion).toBeVisible();
+    await expect(
+      incidentRegion.getByRole("heading", { name: "Public ingress incidents" }),
+    ).toBeVisible();
+    await expect(
+      incidentRegion.getByText("Critical incident", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(
+      incidentRegion.getByText("Notifications active", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(incidentRegion.getByText("Next reminder", { exact: true })).toBeVisible();
+    await expect(
+      incidentRegion.getByRole("heading", { name: "Material timeline" }),
+    ).toBeVisible();
+    await expect(
+      incidentRegion.getByRole("heading", { name: "Observation evidence" }),
+    ).toBeVisible();
+    await expect(
+      incidentRegion.getByRole("heading", { name: "Notification delivery" }),
+    ).toBeVisible();
+    await expect(
+      incidentRegion.getByRole("heading", { name: "Reminder state" }),
+    ).toBeVisible();
+    await expect(incidentRegion.locator(".incident-history-trust .evidence-badge")).toHaveAttribute(
+      "data-state",
+      "recorded",
+    );
+    await expect(
+      incidentRegion.getByRole("link", { name: "Open delivery sink" }),
+    ).toBeVisible();
+
+    await incidentRegion.locator('.incident-list-item[data-status="resolved"]').click();
+    await expect(incidentRegion.getByText("Resolved", { exact: true }).last()).toBeVisible();
+    await expect(incidentRegion.getByText("Resolution", { exact: true })).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "environment-incident-detail");
+    diagnostics.assertClean();
+  });
+
+  test("operator sees acknowledged incident state without reminder scheduling", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=acknowledged",
+    );
+
+    const incidentRegion = page.getByRole("region", { name: "Public ingress incidents" });
+    await expect(incidentRegion.getByText("Acknowledged", { exact: true }).first()).toBeVisible();
+    await expect(incidentRegion.getByText("Next reminder", { exact: true })).toHaveCount(0);
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "environment-incident-acknowledged");
+    diagnostics.assertClean();
+  });
+
+  test("operator sees silenced incident state at narrow width", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+
+    await page.goto(
+      "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=silenced",
+    );
+
+    const incidentRegion = page.getByRole("region", { name: "Public ingress incidents" });
+    await expect(incidentRegion.getByText("Silenced", { exact: true }).first()).toBeVisible();
+    await expect(incidentRegion.getByText("Next reminder", { exact: true })).toHaveCount(0);
+    const horizontalOverflow = await page.evaluate(
+      () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    );
+    expect(horizontalOverflow).toBe(false);
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "environment-incident-silenced-narrow");
+    diagnostics.assertClean();
+  });
+
+  test("operator sees a clean empty incident history", async ({ page }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=empty",
+    );
+
+    const incidentRegion = page.getByRole("region", { name: "Public ingress incidents" });
+    await expect(incidentRegion.getByText("No incidents recorded", { exact: true })).toBeVisible();
+    await expect(incidentRegion.getByText("Incident evidence is incomplete", { exact: true })).toHaveCount(0);
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "environment-incidents-empty");
+    diagnostics.assertClean();
+  });
+
+  test("operator sees stale incident history as incomplete", async ({ page }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=stale",
+    );
+
+    const incidentRegion = page.getByRole("region", { name: "Public ingress incidents" });
+    await expect(
+      incidentRegion.getByText("Incident evidence is incomplete", { exact: true }),
+    ).toBeVisible();
+    await expect(incidentRegion.locator(".incident-history-trust .evidence-badge")).toHaveAttribute(
+      "data-state",
+      "stale",
+    );
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "environment-incidents-stale");
+    diagnostics.assertClean();
+  });
+
+  test("operator can retry unavailable incident history", async ({ page }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=error",
+    );
+
+    const incidentRegion = page.getByRole("region", { name: "Public ingress incidents" });
+    await expect(
+      incidentRegion.getByText("Incident history is intentionally unavailable."),
+    ).toBeVisible();
+    await expect(
+      incidentRegion.getByRole("button", { name: "Retry incident history" }),
+    ).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "environment-incidents-error");
+    diagnostics.assertClean();
+  });
+
   test("operator can review recent product activity", async ({
     page,
   }, testInfo) => {

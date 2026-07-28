@@ -217,6 +217,13 @@ cleanup scope so the store is always closed.
   - `GET /v1/product-profiles/{product}/context-cutover-audit`, requiring
     `product_profile.read` for the stored product profile in the Launchplane
     service context and returning redacted current-authority metadata only
+  - `GET /v1/products/{product}/environments/{environment}/public-ingress/incidents`,
+    requiring `product_environment.read` for the profile-resolved stable lane
+    and returning a bounded list of lane-owned incident occurrences
+  - `GET /v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}`,
+    requiring `product_environment.read` for the profile-resolved stable lane
+    and returning typed observation, event, reminder, notification-attempt, and
+    outbox-delivery evidence without raw notification or provider internals
 - authenticated evidence routes:
   - `POST /v1/products/public-ingress-monitor/run-once` (native FastAPI for
     bearer-token callers, with Pydantic/OpenAPI contract coverage,
@@ -1621,6 +1628,15 @@ through seven days. Existing policies migrate to the generic six-hour cadence.
 Discord webhook URLs, SMTP credentials, and operator destination values must not
 be encoded in text-file defaults or source. Dry-run and apply summaries return
 the effective reminder interval without returning secret material.
+
+The Product Ops incident list and detail routes are read-only projections over
+the durable incident record family; they do not add a second incident authority
+or expose notification-policy mutation. They scope every incident id back to the
+product profile's exact context and instance and fail closed when DB-backed
+incident/outbox capabilities are unavailable. The detail projection may expose
+provider-safe external delivery links and bounded delivery state, but not
+destination ids, policy ids, raw outbox payloads, provider operation keys,
+provider ids, raw target URLs, secret references, or provider error text.
 
 Every Code notification policy writes use
 `POST /v1/every-code/notification-policies/apply`. The request carries

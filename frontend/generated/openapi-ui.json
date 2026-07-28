@@ -1944,6 +1944,300 @@
         "summary": "Read Product Promotion Workflow Delivery"
       }
     },
+    "/v1/products/{product}/environments/{environment}/public-ingress/incidents": {
+      "get": {
+        "operationId": "list_product_environment_public_ingress_incidents",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "open",
+                "resolved"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductEnvironmentIncidentsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List public ingress incidents for one product environment"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}": {
+      "get": {
+        "operationId": "read_product_environment_public_ingress_incident",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "incident_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Incident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "observation_limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Observation Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductEnvironmentIncidentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read one public ingress incident with linked evidence"
+      }
+    },
     "/v1/repo-product-mapping": {
       "get": {
         "operationId": "read_repo_product_mapping",
@@ -9514,6 +9808,116 @@
           "odoo"
         ]
       },
+      "ProductEnvironmentIncidentList": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "incidents": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductIncidentSummary"
+            },
+            "title": "Incidents",
+            "type": "array"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "trust_state": {
+            "default": "recorded",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "display_name",
+          "environment",
+          "incidents",
+          "instance",
+          "product",
+          "provenance",
+          "trust_state"
+        ],
+        "title": "ProductEnvironmentIncidentList",
+        "type": "object"
+      },
+      "ProductEnvironmentIncidentResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "incident": {
+            "$ref": "#/components/schemas/ProductIncidentDetail"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "incident",
+          "status",
+          "trace_id"
+        ],
+        "title": "ProductEnvironmentIncidentResponse",
+        "type": "object"
+      },
+      "ProductEnvironmentIncidentsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "incident_list": {
+            "$ref": "#/components/schemas/ProductEnvironmentIncidentList"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "incident_list",
+          "status",
+          "trace_id"
+        ],
+        "title": "ProductEnvironmentIncidentsResponse",
+        "type": "object"
+      },
       "ProductEnvironmentListResponse": {
         "additionalProperties": false,
         "properties": {
@@ -10076,6 +10480,903 @@
         "required": [
           "repository"
         ]
+      },
+      "ProductIncidentDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "events": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductIncidentEventSummary"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "incident": {
+            "$ref": "#/components/schemas/ProductIncidentSummary"
+          },
+          "material_evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductIncidentMaterialEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notification_attempts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductIncidentNotificationAttemptSummary"
+            },
+            "title": "Notification Attempts",
+            "type": "array"
+          },
+          "observations": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductIncidentObservationSummary"
+            },
+            "title": "Observations",
+            "type": "array"
+          },
+          "outbox_deliveries": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductIncidentOutboxDeliverySummary"
+            },
+            "title": "Outbox Deliveries",
+            "type": "array"
+          },
+          "reminders": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductIncidentReminderSummary"
+            },
+            "title": "Reminders",
+            "type": "array"
+          }
+        },
+        "required": [
+          "events",
+          "incident",
+          "material_evidence",
+          "notification_attempts",
+          "observations",
+          "outbox_deliveries",
+          "reminders"
+        ],
+        "title": "ProductIncidentDetail",
+        "type": "object"
+      },
+      "ProductIncidentEventSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery_eligible": {
+            "title": "Delivery Eligible",
+            "type": "boolean"
+          },
+          "event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              }
+            ],
+            "title": "Event"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "material_fingerprint_sha256": {
+            "title": "Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "observation_id": {
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "previous_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Previous Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "incident_opened",
+              "material_change",
+              "reminder_due",
+              "recovered",
+              "monitoring_intent_changed",
+              "migration_baseline",
+              "duplicate_reconciled"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "reminder_window_ended_at": {
+            "default": "",
+            "title": "Reminder Window Ended At",
+            "type": "string"
+          },
+          "reminder_window_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reminder Window Index"
+          },
+          "reminder_window_started_at": {
+            "default": "",
+            "title": "Reminder Window Started At",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "warning",
+              "critical"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "suppression_reason": {
+            "default": "",
+            "enum": [
+              "",
+              "acknowledged",
+              "silenced",
+              "migration_reconciliation"
+            ],
+            "title": "Suppression Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "delivery_eligible",
+          "event",
+          "event_id",
+          "material_fingerprint_sha256",
+          "observation_id",
+          "occurred_at",
+          "previous_material_fingerprint_sha256",
+          "reason",
+          "reminder_window_ended_at",
+          "reminder_window_index",
+          "reminder_window_started_at",
+          "severity",
+          "summary",
+          "suppression_reason"
+        ],
+        "title": "ProductIncidentEventSummary",
+        "type": "object"
+      },
+      "ProductIncidentMaterialEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "affected_targets": {
+            "default": [],
+            "items": {
+              "enum": [
+                "base_url",
+                "health_url",
+                "private_health_url",
+                "monitoring_intent",
+                "provider",
+                "tls_domain"
+              ],
+              "type": "string"
+            },
+            "title": "Affected Targets",
+            "type": "array"
+          },
+          "check_kind": {
+            "enum": [
+              "public_http",
+              "private_http",
+              "provider",
+              "tls"
+            ],
+            "title": "Check Kind",
+            "type": "string"
+          },
+          "failure_code": {
+            "enum": [
+              "connection_timeout",
+              "dns_failure",
+              "health_status_error",
+              "http_error",
+              "invalid_url",
+              "private_endpoint_disabled",
+              "private_endpoint_mismatch",
+              "private_endpoint_not_found",
+              "private_url",
+              "monitoring_intent_changed",
+              "provider_check_unavailable",
+              "redirect_loop",
+              "self_redirect",
+              "tls_chain_failure",
+              "tls_expired",
+              "tls_expiring",
+              "tls_failure",
+              "tls_hostname_mismatch",
+              "tls_self_signed",
+              "tls_unsupported",
+              "wrong_runtime_identity",
+              "unknown_error"
+            ],
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "failure_layer": {
+            "enum": [
+              "configuration",
+              "dns",
+              "network",
+              "redirect",
+              "http",
+              "tls",
+              "runtime_identity",
+              "provider",
+              "unknown"
+            ],
+            "title": "Failure Layer",
+            "type": "string"
+          },
+          "route_authority_kind": {
+            "default": "",
+            "title": "Route Authority Kind",
+            "type": "string"
+          },
+          "runtime_identity_mismatched_fields": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Runtime Identity Mismatched Fields",
+            "type": "array"
+          },
+          "runtime_identity_status": {
+            "default": "",
+            "title": "Runtime Identity Status",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "warning",
+              "critical"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "tls_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "valid",
+                  "expiring",
+                  "expired",
+                  "hostname_mismatch",
+                  "untrusted",
+                  "self_signed",
+                  "unreachable",
+                  "unknown",
+                  "unsupported"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Tls Status"
+          }
+        },
+        "required": [
+          "affected_targets",
+          "check_kind",
+          "failure_code",
+          "failure_layer",
+          "route_authority_kind",
+          "runtime_identity_mismatched_fields",
+          "runtime_identity_status",
+          "severity",
+          "tls_status"
+        ],
+        "title": "ProductIncidentMaterialEvidence",
+        "type": "object"
+      },
+      "ProductIncidentNotificationAttemptSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "default": "",
+            "title": "Action",
+            "type": "string"
+          },
+          "attempt_id": {
+            "title": "Attempt Id",
+            "type": "string"
+          },
+          "attempted_at": {
+            "title": "Attempted At",
+            "type": "string"
+          },
+          "delivery_status": {
+            "enum": [
+              "delivered",
+              "skipped",
+              "failed"
+            ],
+            "title": "Delivery Status",
+            "type": "string"
+          },
+          "destination_kind": {
+            "enum": [
+              "github_issue",
+              "email",
+              "discord"
+            ],
+            "title": "Destination Kind",
+            "type": "string"
+          },
+          "error_message": {
+            "default": "",
+            "title": "Error Message",
+            "type": "string"
+          },
+          "event": {
+            "title": "Event",
+            "type": "string"
+          },
+          "external_url": {
+            "default": "",
+            "title": "External Url",
+            "type": "string"
+          },
+          "incident_event_id": {
+            "default": "",
+            "title": "Incident Event Id",
+            "type": "string"
+          },
+          "observation_id": {
+            "title": "Observation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "attempt_id",
+          "attempted_at",
+          "delivery_status",
+          "destination_kind",
+          "error_message",
+          "event",
+          "external_url",
+          "incident_event_id",
+          "observation_id"
+        ],
+        "title": "ProductIncidentNotificationAttemptSummary",
+        "type": "object"
+      },
+      "ProductIncidentObservationSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "failure_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "connection_timeout",
+                  "dns_failure",
+                  "health_status_error",
+                  "http_error",
+                  "invalid_url",
+                  "private_endpoint_disabled",
+                  "private_endpoint_mismatch",
+                  "private_endpoint_not_found",
+                  "private_url",
+                  "monitoring_intent_changed",
+                  "provider_check_unavailable",
+                  "redirect_loop",
+                  "self_redirect",
+                  "tls_chain_failure",
+                  "tls_expired",
+                  "tls_expiring",
+                  "tls_failure",
+                  "tls_hostname_mismatch",
+                  "tls_self_signed",
+                  "tls_unsupported",
+                  "wrong_runtime_identity",
+                  "unknown_error"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Failure Code"
+          },
+          "incident_event_id": {
+            "default": "",
+            "title": "Incident Event Id",
+            "type": "string"
+          },
+          "material_fingerprint_sha256": {
+            "default": "",
+            "title": "Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "notification_sent": {
+            "default": false,
+            "title": "Notification Sent",
+            "type": "boolean"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "purpose": {
+            "enum": [
+              "probe",
+              "reconciliation"
+            ],
+            "title": "Purpose",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "failure_code",
+          "incident_event_id",
+          "material_fingerprint_sha256",
+          "notification_sent",
+          "observed_at",
+          "purpose",
+          "record_id",
+          "status",
+          "summary"
+        ],
+        "title": "ProductIncidentObservationSummary",
+        "type": "object"
+      },
+      "ProductIncidentOutboxDeliverySummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "default": "",
+            "title": "Action",
+            "type": "string"
+          },
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "delivery_id": {
+            "title": "Delivery Id",
+            "type": "string"
+          },
+          "error_code": {
+            "default": "",
+            "title": "Error Code",
+            "type": "string"
+          },
+          "external_url": {
+            "default": "",
+            "title": "External Url",
+            "type": "string"
+          },
+          "max_attempts": {
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "next_attempt_at": {
+            "title": "Next Attempt At",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "running",
+              "delivered",
+              "failed",
+              "reconcile_required"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "attempt",
+          "created_at",
+          "delivery_id",
+          "error_code",
+          "external_url",
+          "max_attempts",
+          "next_attempt_at",
+          "state",
+          "updated_at"
+        ],
+        "title": "ProductIncidentOutboxDeliverySummary",
+        "type": "object"
+      },
+      "ProductIncidentReminderSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "interval_seconds": {
+            "title": "Interval Seconds",
+            "type": "integer"
+          },
+          "last_reminded_at": {
+            "default": "",
+            "title": "Last Reminded At",
+            "type": "string"
+          },
+          "last_window_index": {
+            "title": "Last Window Index",
+            "type": "integer"
+          },
+          "material_event_id": {
+            "title": "Material Event Id",
+            "type": "string"
+          },
+          "next_reminder_at": {
+            "default": "",
+            "title": "Next Reminder At",
+            "type": "string"
+          },
+          "reminder_state_id": {
+            "title": "Reminder State Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "suppressed",
+              "policy_inactive",
+              "resolved"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "interval_seconds",
+          "last_reminded_at",
+          "last_window_index",
+          "material_event_id",
+          "next_reminder_at",
+          "reminder_state_id",
+          "status",
+          "updated_at"
+        ],
+        "title": "ProductIncidentReminderSummary",
+        "type": "object"
+      },
+      "ProductIncidentSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "check_kind": {
+            "enum": [
+              "public_http",
+              "private_http",
+              "provider",
+              "tls"
+            ],
+            "title": "Check Kind",
+            "type": "string"
+          },
+          "check_name": {
+            "title": "Check Name",
+            "type": "string"
+          },
+          "consecutive_recovery_observations": {
+            "minimum": 0,
+            "title": "Consecutive Recovery Observations",
+            "type": "integer"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "failure_code": {
+            "enum": [
+              "connection_timeout",
+              "dns_failure",
+              "health_status_error",
+              "http_error",
+              "invalid_url",
+              "private_endpoint_disabled",
+              "private_endpoint_mismatch",
+              "private_endpoint_not_found",
+              "private_url",
+              "monitoring_intent_changed",
+              "provider_check_unavailable",
+              "redirect_loop",
+              "self_redirect",
+              "tls_chain_failure",
+              "tls_expired",
+              "tls_expiring",
+              "tls_failure",
+              "tls_hostname_mismatch",
+              "tls_self_signed",
+              "tls_unsupported",
+              "wrong_runtime_identity",
+              "unknown_error"
+            ],
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "failure_layer": {
+            "enum": [
+              "configuration",
+              "dns",
+              "network",
+              "redirect",
+              "http",
+              "tls",
+              "runtime_identity",
+              "provider",
+              "unknown"
+            ],
+            "title": "Failure Layer",
+            "type": "string"
+          },
+          "incident_id": {
+            "title": "Incident Id",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "last_reminded_at": {
+            "default": "",
+            "title": "Last Reminded At",
+            "type": "string"
+          },
+          "latest_material_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Latest Material Event"
+          },
+          "latest_material_event_at": {
+            "default": "",
+            "title": "Latest Material Event At",
+            "type": "string"
+          },
+          "latest_material_event_id": {
+            "default": "",
+            "title": "Latest Material Event Id",
+            "type": "string"
+          },
+          "latest_observed_at": {
+            "title": "Latest Observed At",
+            "type": "string"
+          },
+          "material_fingerprint_sha256": {
+            "default": "",
+            "title": "Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "next_reminder_at": {
+            "default": "",
+            "title": "Next Reminder At",
+            "type": "string"
+          },
+          "notification_state": {
+            "enum": [
+              "active",
+              "acknowledged",
+              "silenced"
+            ],
+            "title": "Notification State",
+            "type": "string"
+          },
+          "notification_state_changed_at": {
+            "default": "",
+            "title": "Notification State Changed At",
+            "type": "string"
+          },
+          "opened_at": {
+            "title": "Opened At",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "recovery_observation_threshold": {
+            "minimum": 1,
+            "title": "Recovery Observation Threshold",
+            "type": "integer"
+          },
+          "resolution_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "recovered",
+                  "monitoring_intent_changed",
+                  "duplicate_reconciled"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Resolution Reason"
+          },
+          "resolved_at": {
+            "default": "",
+            "title": "Resolved At",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "severity": {
+            "enum": [
+              "warning",
+              "critical"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "silenced_until": {
+            "default": "",
+            "title": "Silenced Until",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "resolved"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "trust_state": {
+            "default": "recorded",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "check_kind",
+          "check_name",
+          "consecutive_recovery_observations",
+          "context",
+          "display_name",
+          "environment",
+          "failure_code",
+          "failure_layer",
+          "incident_id",
+          "instance",
+          "last_reminded_at",
+          "latest_material_event",
+          "latest_material_event_at",
+          "latest_material_event_id",
+          "latest_observed_at",
+          "material_fingerprint_sha256",
+          "next_reminder_at",
+          "notification_state",
+          "notification_state_changed_at",
+          "opened_at",
+          "product",
+          "provenance",
+          "recovery_observation_threshold",
+          "resolution_reason",
+          "resolved_at",
+          "schema_version",
+          "severity",
+          "silenced_until",
+          "status",
+          "summary",
+          "trust_state"
+        ],
+        "title": "ProductIncidentSummary",
+        "type": "object"
       },
       "ProductLaneHealthCheck": {
         "additionalProperties": false,
