@@ -1758,9 +1758,8 @@ gate check. Plan payload generation and apply operation creation occur only
 after an exact `ready` result. Apply uses a
 complete explicit `artifact_id`/`source_git_ref` pair when supplied; otherwise it
 pins both values from the current environment record before enqueue. The plan
-request and reusable plan worker accept the same pair so a newly published
-immutable recovery artifact can be reviewed before apply once a caller advances
-to the landed worker contract. Plan and apply both read the selected manifest,
+workflow accepts the same pair so a newly published immutable recovery artifact
+can be reviewed before apply. Plan and apply both read the selected manifest,
 require its source commit and image repository to match, and reject artifacts
 whose `odoo_install_modules` omit Launchplane's required safety modules. Apply
 repeats those checks before creating a durable operation. Both

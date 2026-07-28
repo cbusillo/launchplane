@@ -98,6 +98,7 @@
     "Manage Launchplane Authorization",
     "Merge Train Runner",
     "Odoo Config Parameter Override",
+    "Odoo Artifact Publish",
     "Odoo Driver Route Smoke",
     "Odoo Prod Backup Verification",
     "Odoo Prod Backup Restore Plan",

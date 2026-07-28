@@ -53,8 +53,8 @@ remote code or move workflow data across trust boundaries.
   whose full-SHA `job_workflow_ref` is itself part of the active policy trust
   boundary. The approved set is limited to managed authz administration,
   route-binding reconciliation, exact-instance product health-policy mutation,
-  and exact-instance Odoo target-replacement plan/apply workers whose actions
-  are separately authorized.
+  exact-instance immutable Odoo artifact publication, and exact-instance Odoo
+  target-replacement plan/apply workers whose actions are separately authorized.
 - Changes to an approved privileged worker's `workflow_call` interface require
   two landings. First land the worker contract without changing caller pins,
   then pin each caller to that landed commit and start passing the new input or
