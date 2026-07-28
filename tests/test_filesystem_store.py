@@ -1279,6 +1279,12 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 instance_name="prod",
             )
             open_records = store.list_public_ingress_incident_records(status="open")
+            loaded_record = store.read_public_ingress_incident_record(open_record.incident_id)
+            escaped_record = open_record.model_copy(update={"incident_id": "../outside"})
+            (state_dir / "outside.json").write_text(
+                escaped_record.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
 
             self.assertTrue(written_path.exists())
             self.assertEqual(
@@ -1288,6 +1294,9 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertEqual(
                 [record.incident_id for record in open_records], [open_record.incident_id]
             )
+            self.assertEqual(loaded_record.incident_id, open_record.incident_id)
+            with self.assertRaises(FileNotFoundError):
+                store.read_public_ingress_incident_record(escaped_record.incident_id)
 
     def test_write_and_list_public_ingress_notification_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -15,6 +15,9 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     product_lane_monitoring_incident_eligible,
 )
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
 from control_plane.contracts.public_ingress_monitoring import (
     PUBLIC_HTTP_STALE_AFTER_SECONDS,
     PublicIngressIncidentEventKind,
@@ -33,7 +36,11 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingTerminationKind,
     RouteBindingTlsOwner,
 )
-from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
+from control_plane.contracts.runtime_identity import (
+    RuntimeIdentity,
+    RuntimeIdentityStatus,
+    compare_runtime_identity,
+)
 
 
 ProductTopologyAuthorityStatus = Literal["active", "disabled", "missing"]
@@ -300,6 +307,14 @@ class _ObservedTlsEvidence:
     tls: PublicIngressTlsObservation
 
 
+@dataclass(frozen=True)
+class _ObservedIngressEvidence:
+    projection: ProductObservedIngress
+    runtime_target_observation: PublicIngressObservationRecord | None = None
+    absolute_newest_observation: PublicIngressObservationRecord | None = None
+    runtime_target: PublicIngressTargetObservation | None = None
+
+
 def build_product_environment_topology(
     *,
     record_store: object,
@@ -546,12 +561,17 @@ def _observed_topology(
     provider_recorded: ProductProviderRecordedTopology,
     now: datetime,
 ) -> tuple[ProductObservedTopology, tuple[_ObservedTlsEvidence, ...]]:
-    placement = _observed_placement(lane_summary)
-    ingress = _observed_ingress(
+    ingress_evidence = _observed_ingress(
         record_store=record_store,
         profile=profile,
         lane=lane,
         now=now,
+    )
+    ingress = ingress_evidence.projection
+    placement = _observed_placement(
+        lane_summary,
+        lane=lane,
+        ingress_evidence=ingress_evidence,
     )
     domain_roles: dict[str, ProductTopologyDomainRole] = {
         domain.domain_name: domain.role for domain in desired.domains
@@ -606,6 +626,9 @@ def _observed_topology(
 
 def _observed_placement(
     lane_summary: LaunchplaneLaneSummary | None,
+    *,
+    lane: ProductLaneProfile,
+    ingress_evidence: _ObservedIngressEvidence,
 ) -> ProductObservedPlacement:
     if lane_summary is None:
         return ProductObservedPlacement()
@@ -613,11 +636,16 @@ def _observed_placement(
     observed_identity: RuntimeIdentity | None = None
     status: RuntimeIdentityStatus = "unchecked"
     detail = ""
+    health_verified = False
+    health_status = "skipped"
+    provenance = lane_summary.provenance
     if lane_summary.inventory is not None:
         expected_identity = lane_summary.inventory.runtime_identity
         observed_identity = lane_summary.inventory.destination_health.observed_runtime_identity
         status = lane_summary.inventory.destination_health.runtime_identity_status
         detail = lane_summary.inventory.destination_health.runtime_identity_detail
+        health_verified = lane_summary.inventory.destination_health.verified
+        health_status = lane_summary.inventory.destination_health.status
     elif lane_summary.latest_deployment is not None:
         expected_identity = lane_summary.latest_deployment.runtime_identity
         observed_identity = (
@@ -625,19 +653,112 @@ def _observed_placement(
         )
         status = lane_summary.latest_deployment.destination_health.runtime_identity_status
         detail = lane_summary.latest_deployment.destination_health.runtime_identity_detail
+        health_verified = lane_summary.latest_deployment.destination_health.verified
+        health_status = lane_summary.latest_deployment.destination_health.status
     if status == "unchecked":
         trust_state: FreshnessStatus = "missing"
     else:
         trust_state = lane_summary.provenance.freshness_status
         if trust_state in {"recorded", "verified"}:
             trust_state = "verified"
+        elif trust_state == "stale" and _strict_public_ingress_confirms_placement(
+            lane=lane,
+            ingress_evidence=ingress_evidence,
+            expected_identity=expected_identity,
+            observed_identity=observed_identity,
+            runtime_identity_status=status,
+            health_verified=health_verified,
+            health_status=health_status,
+        ):
+            ingress = ingress_evidence.projection
+            expected_identity = ingress.expected_runtime_identity
+            observed_identity = ingress.observed_runtime_identity
+            status = ingress.runtime_identity_status
+            detail = ingress.runtime_identity_detail
+            trust_state = "verified"
+            provenance = ingress.provenance.model_copy(
+                update={
+                    "detail": (
+                        "Fresh strict public ingress runtime identity evidence "
+                        "corroborates the recorded placement."
+                    )
+                }
+            )
     return ProductObservedPlacement(
         expected_runtime_identity=expected_identity,
         observed_runtime_identity=observed_identity,
         runtime_identity_status=status,
         runtime_identity_detail=detail,
         trust_state=trust_state,
-        provenance=lane_summary.provenance,
+        provenance=provenance,
+    )
+
+
+def _strict_public_ingress_confirms_placement(
+    *,
+    lane: ProductLaneProfile,
+    ingress_evidence: _ObservedIngressEvidence,
+    expected_identity: RuntimeIdentity | None,
+    observed_identity: RuntimeIdentity | None,
+    runtime_identity_status: RuntimeIdentityStatus,
+    health_verified: bool,
+    health_status: str,
+) -> bool:
+    ingress = ingress_evidence.projection
+    observation = ingress_evidence.runtime_target_observation
+    absolute_newest_observation = ingress_evidence.absolute_newest_observation
+    runtime_target = ingress_evidence.runtime_target
+    if (
+        lane.health_monitoring.monitoring_intent != "public"
+        or ingress.monitoring_intent != "public"
+        or not ingress.incident_eligible
+        or ingress.status != "pass"
+        or ingress.trust_state != "verified"
+        or ingress.runtime_identity_status != "match"
+        or runtime_identity_status != "match"
+        or not health_verified
+        or health_status != "pass"
+        or observation is None
+        or absolute_newest_observation is None
+        or observation.record_id != absolute_newest_observation.record_id
+        or observation.monitoring_intent != "public"
+        or observation.status != "pass"
+        or runtime_target is None
+        or runtime_target.target != "health_url"
+        or runtime_target.status != "pass"
+    ):
+        return False
+    check_token = canonical_health_check_record_token(observation.check_name)
+    if not any(
+        check.enabled
+        and check.kind == "public_http"
+        and check.require_runtime_identity
+        and canonical_health_check_record_token(check.name) == check_token
+        for check in lane.health_monitoring.checks
+    ):
+        return False
+    ingress_expected = ingress.expected_runtime_identity
+    ingress_observed = ingress.observed_runtime_identity
+    return (
+        expected_identity is not None
+        and observed_identity is not None
+        and ingress_expected is not None
+        and ingress_observed is not None
+        and compare_runtime_identity(
+            expected=expected_identity,
+            observed=observed_identity,
+        )[0]
+        == "match"
+        and compare_runtime_identity(
+            expected=ingress_expected,
+            observed=ingress_observed,
+        )[0]
+        == "match"
+        and compare_runtime_identity(
+            expected=expected_identity,
+            observed=ingress_expected,
+        )[0]
+        == "match"
     )
 
 
@@ -647,14 +768,14 @@ def _observed_ingress(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     now: datetime,
-) -> ProductObservedIngress:
+) -> _ObservedIngressEvidence:
     monitoring_intent = lane.health_monitoring.monitoring_intent
     incident_eligible = product_lane_monitoring_incident_eligible(
         monitoring_intent=monitoring_intent,
         check_kind="public_http",
     )
     if monitoring_intent == "private":
-        return ProductObservedIngress(
+        projection = ProductObservedIngress(
             monitoring_intent=monitoring_intent,
             incident_eligible=False,
             status="not_expected",
@@ -669,6 +790,7 @@ def _observed_ingress(
                 detail="Launchplane product-profile private monitoring intent.",
             ),
         )
+        return _ObservedIngressEvidence(projection=projection)
     records = _optional_records(
         record_store,
         "list_public_ingress_observation_records",
@@ -683,15 +805,17 @@ def _observed_ingress(
         for record in records
         if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
     )
+    newest_observation = observations[0] if observations else None
     latest = next(
         (record for record in observations if _public_runtime_identity_target(record) is not None),
-        observations[0] if observations else None,
+        newest_observation,
     )
     if latest is None:
-        return ProductObservedIngress(
+        projection = ProductObservedIngress(
             monitoring_intent=monitoring_intent,
             incident_eligible=incident_eligible,
         )
+        return _ObservedIngressEvidence(projection=projection)
     incident = _latest_open_incident(
         record_store=record_store,
         product=profile.product,
@@ -738,7 +862,7 @@ def _observed_ingress(
         record_store=record_store,
         incident_id=incident.incident_id if incident is not None else "",
     )
-    return ProductObservedIngress(
+    projection = ProductObservedIngress(
         monitoring_intent=monitoring_intent,
         incident_eligible=incident_eligible,
         status=latest.status,
@@ -772,6 +896,12 @@ def _observed_ingress(
         stale_after=stale_after_value,
         trust_state=trust_state,
         provenance=provenance,
+    )
+    return _ObservedIngressEvidence(
+        projection=projection,
+        runtime_target_observation=latest,
+        absolute_newest_observation=newest_observation,
+        runtime_target=runtime_target,
     )
 
 

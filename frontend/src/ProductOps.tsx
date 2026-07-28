@@ -8,6 +8,7 @@ import {
   Radar,
   RefreshCw,
   Search,
+  ShieldAlert,
   ShieldQuestion,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -30,6 +31,7 @@ import { safeExternalUrl } from "./url";
 import type {
   DataProvenance,
   ProductEnvironmentSummary,
+  ProductHealthMonitoringCheckSummary,
   ProductSiteOverview,
   ProductTopologyWarning,
 } from "./generated/openapi.ts";
@@ -119,6 +121,8 @@ export function ProductIndexRoute({
           traceId={resource.traceId}
         />
       ) : null}
+
+      <ProductIncidentOverview products={products} />
 
       <div className="directory-head" aria-hidden="true">
         <span>Product</span>
@@ -428,6 +432,8 @@ function ProductWorkspace({
         </div>
       ) : null}
 
+      <ProductIncidentOverview compact products={[product]} />
+
       <section className="workspace-signal-strip" aria-label="Product summary">
         <SignalTile
           tone={environmentOperationalTone(testing)}
@@ -512,6 +518,109 @@ function ProductWorkspace({
 
       <ProductDiagnostics product={product} />
     </article>
+  );
+}
+
+interface ActiveProductIncident {
+  check: ProductHealthMonitoringCheckSummary;
+  displayName: string;
+  environment: ProductEnvironmentSummary;
+  product: string;
+}
+
+function ProductIncidentOverview({
+  compact = false,
+  products,
+}: {
+  compact?: boolean;
+  products: ProductSiteOverview[];
+}) {
+  const incidents = products.flatMap((product) =>
+    product.environments.flatMap((environment) =>
+      environment.health_monitoring.checks
+        .filter((check) => check.incident_eligible && check.incident_status === "open")
+        .map((check) => ({
+          check,
+          displayName: product.display_name,
+          environment,
+          product: product.product,
+        })),
+    ),
+  );
+  const evidenceIncomplete = products.some((product) =>
+    product.environments.some((environment) =>
+      ["missing", "stale"].includes(environment.health_monitoring.trust_state),
+    ),
+  );
+
+  return (
+    <section
+      className="product-incident-overview"
+      data-compact={compact}
+      data-has-incidents={incidents.length > 0}
+      aria-label="Active public ingress incidents"
+    >
+      <div className="product-incident-overview-head">
+        <span className="product-incident-overview-icon" aria-hidden="true">
+          <ShieldAlert size={18} />
+        </span>
+        <div>
+          <p className="eyebrow">Incident response</p>
+          <h2>
+            {incidents.length
+              ? `${incidents.length} open incident${incidents.length === 1 ? "" : "s"}`
+              : "No open incidents recorded"}
+          </h2>
+          <p>
+            {incidents.length
+              ? "Launchplane material incident records require operator attention."
+              : evidenceIncomplete
+                ? "No open incident records were returned, but monitoring evidence is incomplete."
+                : "All incident-eligible health checks returned without an open incident record."}
+          </p>
+        </div>
+      </div>
+      {incidents.length ? (
+        <ul className="product-incident-list">
+          {incidents.map((incident) => (
+            <ProductIncidentRow
+              incident={incident}
+              key={`${incident.product}:${incident.environment.environment}:${incident.check.incident_id}`}
+            />
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
+}
+
+function ProductIncidentRow({ incident }: { incident: ActiveProductIncident }) {
+  return (
+    <li data-severity={incident.check.incident_severity || "critical"}>
+      <span>
+        <strong>{incident.displayName}</strong>
+        <small>
+          {environmentLabel(incident.environment.environment)} · {humanize(incident.check.name)}
+        </small>
+      </span>
+      <span>
+        <strong>{humanize(incident.check.incident_severity || "critical")}</strong>
+        <small>{humanize(incident.check.incident_notification_state || "active")}</small>
+      </span>
+      <span>
+        <strong>{incident.check.summary}</strong>
+        <small>{humanize(incident.check.failure_code || "material failure")}</small>
+      </span>
+      <AppLink
+        to={productEnvironmentPath(
+          incident.product,
+          incident.environment.environment,
+        )}
+      >
+        Inspect incident
+        <ArrowRight size={14} aria-hidden="true" />
+      </AppLink>
+    </li>
   );
 }
 

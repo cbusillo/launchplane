@@ -231,10 +231,24 @@ Add product/environment read models before replacing the UI:
   refresh, and cleanup actions with explicit enabled/disabled reasons
 - activity: deployments, promotions, preview events, cleanup events, and authz or
   policy changes that matter to operators
+- incidents: active cross-product summaries plus environment-scoped incident
+  history and detail with linked observations, material events, reminder state,
+  and redacted delivery evidence
 
 Low-level records remain useful for diagnostics, but diagnostics are secondary.
 Normal operators should not need to choose a raw context or understand provider
 lookup rows before taking safe action.
+
+Incidents remain children of product environments rather than a separate raw
+record browser. Product summaries surface active incident count and severity;
+the environment view owns lifecycle state, material evidence, observation
+history, and delivery evidence for one occurrence. GitHub, email, and Discord
+notifications are sinks, not authority. Incident surfaces are `inspect` actions
+only until a typed write contract owns acknowledgement or silence input,
+confirmation, authorization, idempotency, replay, and result states. The read
+model may show provider-safe external links and bounded delivery failures, but
+must not expose destination or policy identities, raw outbox payloads, provider
+operation internals, raw target URLs, secret references, or provider error text.
 
 The first product/site read endpoints are:
 
@@ -244,6 +258,8 @@ The first product/site read endpoints are:
 - `GET /v1/products/{product}/environments`
 - `GET /v1/products/{product}/environments/{environment}`
 - `GET /v1/products/{product}/environments/{environment}/config-status`
+- `GET /v1/products/{product}/environments/{environment}/public-ingress/incidents`
+- `GET /v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}`
 - `GET /v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness?action={authz_action}&artifact_id={artifact_id}&expected_current_artifact_id={expected_current_artifact_id}`
 
 These endpoints are profile and driver driven. A standard `generic-web` site

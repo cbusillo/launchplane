@@ -867,6 +867,19 @@ from Dokploy records, provider target ids, or other provider payloads. Fresh
 failing probes remain verified observations with a failing status, while stale
 route-binding or TLS evidence is called out separately.
 
+Observed placement can remain current between real deploy or promotion events
+when the newest public HTTP observation is a fresh passing strict health probe
+for the exact configured check and its expected and observed runtime identities
+match the recorded placement identity under the canonical runtime identity
+comparison, whose recorded health is verified and passing. In that bounded case,
+`observed.placement` uses the public observation as provenance and reports
+verified placement trust. The environment inventory record and the environment
+read model's inventory provenance remain unchanged and may still show their true
+age. Legacy, non-strict, base-page-only, superseded, stale, failing, missing,
+unchecked, unverifiable, or identity-divergent evidence leaves placement trust
+fail closed. No observation writes or re-timestamps deployment or inventory
+records.
+
 Typed topology warnings identify missing or disabled authority, desired versus
 recorded domain divergence, placement disagreement, ingress or TLS ownership
 divergence, stale evidence, missing TLS observations, certificate mismatch,
@@ -1007,6 +1020,19 @@ considers a lane to be in a public-ingress incident. Notification routing and
 delivery are separate record families: observations say what was measured,
 incidents say whether there is active operator state, and delivery records say
 where Launchplane attempted to notify operators.
+
+The Product Ops incident projection is read-only and remains subordinate to
+those durable records. The environment-scoped list and detail models resolve the
+requested stable lane from the DB-backed product profile, then return incident
+state plus typed links to observations, material events, reminder state,
+notification attempts, and outbox deliveries for that exact product, context,
+and instance. External GitHub, email, and Discord notifications are delivery
+sinks, not incident authority. The projection returns destination kind,
+provider-safe external links, delivery state, bounded failure state, and record
+ids; it does not return destination or policy ids, raw outbox payloads, provider
+operation keys, provider ids, raw target URLs, secret references, or provider
+error text. Product summaries may aggregate active incident state across lanes,
+but detail remains anchored to the lane-owned incident occurrence.
 
 ## Public Ingress Notification Records
 

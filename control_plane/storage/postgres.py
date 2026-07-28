@@ -9496,6 +9496,13 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    def read_public_ingress_incident_record(self, incident_id: str) -> PublicIngressIncidentRecord:
+        return self._read_model(
+            model_type=PublicIngressIncidentRecord,
+            orm_model=LaunchplanePublicIngressIncidentRow,
+            filters=(LaunchplanePublicIngressIncidentRow.incident_id == incident_id,),
+        )
+
     def write_public_ingress_incident_event_record(
         self, record: PublicIngressIncidentEventRecord
     ) -> None:

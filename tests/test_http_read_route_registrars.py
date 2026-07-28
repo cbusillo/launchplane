@@ -267,6 +267,20 @@ class FastApiReadRouteRegistrarTests(unittest.TestCase):
                 "control_plane.http_routes.products",
             ),
             (
+                "/v1/products/{product}/environments/{environment}/public-ingress/incidents",
+                "list_product_environment_incidents",
+                "list_product_environment_public_ingress_incidents",
+                "ProductEnvironmentIncidentsResponse",
+                "control_plane.http_routes.products",
+            ),
+            (
+                "/v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}",
+                "read_product_environment_incident",
+                "read_product_environment_public_ingress_incident",
+                "ProductEnvironmentIncidentResponse",
+                "control_plane.http_routes.products",
+            ),
+            (
                 "/v1/product-profiles",
                 "list_product_profiles",
                 "list_product_profiles",
@@ -392,6 +406,14 @@ class FastApiReadRouteRegistrarTests(unittest.TestCase):
                 ("GET", "/v1/products/{product}/activity"),
                 ("GET", "/v1/products/{product}/environments"),
                 ("GET", "/v1/products/{product}/environments/{environment}"),
+                (
+                    "GET",
+                    "/v1/products/{product}/environments/{environment}/public-ingress/incidents",
+                ),
+                (
+                    "GET",
+                    "/v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}",
+                ),
                 (
                     "GET",
                     "/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness",
