@@ -53,6 +53,9 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/product-health-monitoring.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml"}
     ),
+    Path(".github/workflows/product-prelaunch-rebuild-policy.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-product-prelaunch-rebuild-policy.yml"}
+    ),
     Path(".github/workflows/odoo-testing-route-binding-refresh.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-odoo-testing-route-binding-refresh.yml"}
     ),
@@ -206,6 +209,12 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     "cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml": (
         ActionClassification(
             "First-party same-repository", "exact-instance product health policy mutation"
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-product-prelaunch-rebuild-policy.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "exact-instance product prelaunch rebuild policy mutation",
         )
     ),
     "docker/build-push-action": ActionClassification(

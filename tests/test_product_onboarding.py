@@ -320,6 +320,28 @@ class ProductOnboardingTests(unittest.TestCase):
             "public",
         )
 
+    def test_existing_onboarding_preserves_prelaunch_rebuild_authority(self) -> None:
+        existing_manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+        existing_profile = build_product_profile_record(
+            manifest=existing_manifest,
+            updated_at="2026-07-28T18:00:00Z",
+        )
+        replacement_payload = _manifest_payload()
+        replacement_lanes = cast(list[dict[str, object]], replacement_payload["lanes"])
+        replacement_lanes[1]["odoo_prelaunch_rebuild"] = {"enabled": False}
+        replacement_manifest = ProductOnboardingManifest.model_validate(replacement_payload)
+
+        replacement_profile = build_product_profile_record(
+            manifest=replacement_manifest,
+            updated_at="2026-07-28T18:01:00Z",
+            existing_profile=existing_profile,
+        )
+
+        self.assertEqual(
+            replacement_profile.lanes[1].odoo_prelaunch_rebuild,
+            existing_profile.lanes[1].odoo_prelaunch_rebuild,
+        )
+
     def test_reusable_odoo_artifact_publish_standardizes_request_shape(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-artifact-publish.yml").read_text(
             encoding="utf-8"

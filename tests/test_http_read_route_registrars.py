@@ -426,6 +426,14 @@ class FastApiReadRouteRegistrarTests(unittest.TestCase):
             ("POST", "/v1/product-profiles/health-monitoring/apply"),
             [
                 ("POST", "/v1/product-profiles/health-monitoring/apply"),
+                ("POST", "/v1/product-profiles/prelaunch-rebuild/apply"),
+                ("POST", "/v1/product-profiles/preview-tls/apply"),
+            ],
+        )
+        assert_slice(
+            ("POST", "/v1/product-profiles/prelaunch-rebuild/apply"),
+            [
+                ("POST", "/v1/product-profiles/prelaunch-rebuild/apply"),
                 ("POST", "/v1/product-profiles/preview-tls/apply"),
                 ("GET", "/v1/product-profiles/{product}"),
             ],

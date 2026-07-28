@@ -1171,6 +1171,15 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
                 target=AuthorizationTarget(scope="instance", instances=("testing",)),
             )
         )
+        self.assertFalse(
+            policy.allows(
+                identity=_actions_identity(),
+                action="product_profile.prelaunch_rebuild.plan",
+                product="verireel",
+                context="verireel",
+                target=AuthorizationTarget(scope="instance", instances=("testing",)),
+            )
+        )
         self.assertTrue(
             policy.allows(
                 identity=_actions_identity(),

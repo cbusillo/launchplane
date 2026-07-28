@@ -156,6 +156,7 @@ owner checks and fail closed for stale owners.
 
 DB-only mutations should reserve and complete inside the same transaction as
 their business write. `POST /v1/product-profiles/preview-tls/apply`,
+`POST /v1/product-profiles/prelaunch-rebuild/apply`,
 `POST /v1/route-bindings/reconcile`, and
 `POST /v1/route-bindings/external/reconcile` use that boundary: the reservation
 insert occurs before the domain write, and the domain record plus completed
@@ -802,6 +803,22 @@ cannot change existing health-monitoring authority, and onboarding updates
 preserve it; operators use this bounded apply path instead. Concurrent profile
 edits fail stale instead of being overwritten.
 
+Odoo prelaunch rebuild policy changes use
+`POST /v1/product-profiles/prelaunch-rebuild/apply`. The request identifies one
+exact product/context/instance lane and can change only that lane's
+`odoo_prelaunch_rebuild` policy plus server-owned profile audit fields. Enabling
+the policy requires issue-backed approval, a typed `empty` or
+`upstream_restore` source, a target-replacement confirmation phrase, and exact
+target/domain proofs. The lane must still be in `prelaunch` monitoring intent,
+and its separately owned `odoo_data_policy` must already authorize the source;
+an `empty` rebuild additionally requires `resettable` data authority. The route
+does not mutate data authority, health monitoring, routes, provider targets,
+runtime settings, secrets, or volume identities. Dry-run returns typed current
+and requested policies plus a plan SHA-256 bound to the complete profile. Apply
+requires the reviewed digest and an idempotency key, then compare-and-writes only
+the selected policy. Whole-profile writes cannot change existing prelaunch
+rebuild authority, and onboarding updates preserve it.
+
 For initial seed or repair work, operators can write the same DB-backed record
 directly with
 `uv run launchplane product-profiles upsert --database-url ... --allow-direct-db-mutation`.
@@ -1117,7 +1134,9 @@ that set a prelaunch data source must match this policy and the lane's
 `odoo_data_policy.allowed_rebuild_sources` before Launchplane will treat missing
 Odoo volume keys as intentional. This keeps provisional lanes such as OPW
 testing/prod auditable without making environment names like `prod` destructive
-authority by themselves.
+authority by themselves. Existing lane policy changes use the bounded
+`Product Prelaunch Rebuild Policy` workflow and service endpoint rather than a
+whole-profile write or onboarding replay.
 
 `odoo_data_policy` records the lane's data authority separately from operational
 driver defaults. `resettable` lanes may explicitly allow `empty` rebuilds;

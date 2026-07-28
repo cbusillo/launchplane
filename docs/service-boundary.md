@@ -267,6 +267,9 @@ cleanup scope so the store is always closed.
   - `POST /v1/product-profiles/health-monitoring/apply` (native FastAPI for
     exact-lane reviewed public-check planning, profile compare-and-write, and
     apply-only atomic idempotency enforcement)
+  - `POST /v1/product-profiles/prelaunch-rebuild/apply` (native FastAPI for
+    exact-lane reviewed Odoo prelaunch-rebuild policy planning, profile
+    compare-and-write, and apply-only atomic idempotency enforcement)
   - `POST /v1/product-profiles/preview-tls/apply` (native FastAPI for
     Launchplane-operator workflow callers, DB-backed dry-run/apply planning,
     reviewed-plan continuity, and apply-only idempotency enforcement)
@@ -1549,6 +1552,7 @@ refresh/destroy flow.
 - `POST /v1/product-profiles`
 - `POST /v1/product-profiles/expected-config/apply`
 - `POST /v1/product-profiles/health-monitoring/apply`
+- `POST /v1/product-profiles/prelaunch-rebuild/apply`
 - `POST /v1/product-profiles/preview-tls/apply`
 
 Product profiles are Launchplane-owned product/driver bindings. They are written
@@ -1583,6 +1587,22 @@ a registered endpoint key; the service requires an active private endpoint
 record owned by the exact lane and never returns or logs its internal URL.
 Strict public runtime-identity checks must resolve to a lane-owned HTTPS host.
 The requested intent must retain its required enabled public or private check.
+
+Prelaunch-rebuild apply is an exact-instance mutation for one Odoo stable lane's
+`odoo_prelaunch_rebuild` policy. Dry-run requires
+`product_profile.prelaunch_rebuild.plan`; apply requires the separate
+`product_profile.prelaunch_rebuild.apply` action, the reviewed plan SHA-256, and
+an idempotency key. Both actions authorize against the request product, context,
+and exact instance and require an immutable reusable-workflow identity. The
+request may carry only policy approval/source/confirmation/target/domain proof
+fields. Launchplane requires `prelaunch` monitoring intent, validates the source
+against the separately stored lane data policy, and requires `resettable` data
+authority for an `empty` rebuild. It does not accept or mutate data authority,
+health checks, routes, provider identifiers, runtime settings, secrets, volume
+names, or a replacement product profile. Whole-profile writes and onboarding
+updates preserve existing prelaunch-rebuild authority after this bounded path is
+established.
+
 The plan binds the complete current profile digest. Apply rebuilds the candidate
 from fresh DB-backed state and commits the profile compare-and-write with
 completed replay evidence atomically, so reviewed-plan drift and concurrent

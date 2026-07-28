@@ -45331,6 +45331,199 @@
         "summary": "Plan or apply legacy product context cleanup"
       }
     },
+    "/v1/product-profiles/prelaunch-rebuild/apply": {
+      "post": {
+        "operationId": "apply_product_prelaunch_rebuild_policy",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "approval_issue_url": {
+                    "default": "",
+                    "title": "Approval Issue Url",
+                    "type": "string"
+                  },
+                  "confirmation": {
+                    "default": "",
+                    "title": "Confirmation",
+                    "type": "string"
+                  },
+                  "context": {
+                    "title": "Context",
+                    "type": "string"
+                  },
+                  "data_source_mode": {
+                    "default": "empty",
+                    "enum": [
+                      "empty",
+                      "upstream_restore"
+                    ],
+                    "title": "Data Source Mode",
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "default": false,
+                    "title": "Enabled",
+                    "type": "boolean"
+                  },
+                  "expected_domains": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "title": "Expected Domains",
+                    "type": "array"
+                  },
+                  "expected_target_name": {
+                    "default": "",
+                    "title": "Expected Target Name",
+                    "type": "string"
+                  },
+                  "instance": {
+                    "title": "Instance",
+                    "type": "string"
+                  },
+                  "mode": {
+                    "default": "dry-run",
+                    "enum": [
+                      "dry-run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "title": "Reason",
+                    "type": "string"
+                  },
+                  "reviewed_plan_sha256": {
+                    "default": "",
+                    "title": "Reviewed Plan Sha256",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "const": 1,
+                    "default": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "context",
+                  "instance",
+                  "reason"
+                ],
+                "title": "ProductPrelaunchRebuildPolicyApplyRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan or apply product prelaunch rebuild policy"
+      }
+    },
     "/v1/product-profiles/preview-tls/apply": {
       "post": {
         "operationId": "apply_product_preview_tls",
