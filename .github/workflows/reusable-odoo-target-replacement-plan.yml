@@ -16,6 +16,16 @@ name: Reusable Odoo Target Replacement Plan
         description: Future replacement strategy to plan around.
         required: true
         type: string
+      artifact_id:
+        description: Optional stored artifact ID to plan instead of the current inventory artifact.
+        required: false
+        default: ""
+        type: string
+      source_git_ref:
+        description: Required when artifact_id is set; must match the stored artifact manifest.
+        required: false
+        default: ""
+        type: string
       allow_empty_data:
         description: Allow missing Odoo volume env keys.
         required: true
@@ -53,6 +63,8 @@ jobs:
       PRODUCT: ${{ inputs.product }}
       INSTANCE: ${{ inputs.instance }}
       STRATEGY: ${{ inputs.strategy }}
+      REQUESTED_ARTIFACT_ID: ${{ inputs.artifact_id }}
+      REQUESTED_SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
       ALLOW_EMPTY_DATA: ${{ inputs.allow_empty_data }}
       DATA_SOURCE_MODE: ${{ inputs.data_source_mode }}
       CONFIRMATION: ${{ inputs.confirmation }}
@@ -85,7 +97,15 @@ jobs:
             echo 'allow_empty_data resolved to an invalid value.' >&2
             exit 1
           fi
-          for scalar in PRODUCT INSTANCE STRATEGY DATA_SOURCE_MODE CONFIRMATION; do
+          if [ -n "$REQUESTED_ARTIFACT_ID" ] && [ -z "$REQUESTED_SOURCE_GIT_REF" ]; then
+            echo 'source_git_ref is required when artifact_id is set.' >&2
+            exit 1
+          fi
+          if [ -n "$REQUESTED_SOURCE_GIT_REF" ] && [ -z "$REQUESTED_ARTIFACT_ID" ]; then
+            echo 'artifact_id is required when source_git_ref is set.' >&2
+            exit 1
+          fi
+          for scalar in PRODUCT INSTANCE STRATEGY REQUESTED_ARTIFACT_ID REQUESTED_SOURCE_GIT_REF DATA_SOURCE_MODE CONFIRMATION; do
             case "${!scalar}" in
               *$'\n'* | *$'\r'*)
                 echo "${scalar} must be a single-line value." >&2
@@ -170,16 +190,25 @@ jobs:
           resolved_product="$(jq -er '.environment.product | strings | select(length > 0)' "$environment_file")"
           resolved_instance="$(jq -er '.environment.environment | strings | select(length > 0)' "$environment_file")"
           resolved_context="$(jq -er '.environment.context | strings | select(length > 0)' "$environment_file")"
-          artifact_id="$(
+          current_artifact_id="$(
             jq -r \
               '.environment.target.artifact_manifest.artifact_id // "" | strings' \
               "$environment_file"
+          )"
+          current_source_git_ref="$(
+            jq -r '.environment.target.artifact_manifest.source_commit // "" | strings' "$environment_file"
           )"
           if [ "$resolved_product" != "$PRODUCT" ] || [ "$resolved_instance" != "$INSTANCE" ]; then
             echo 'Launchplane returned a different product environment than requested.' >&2
             exit 1
           fi
-          for value in "$resolved_context" "$artifact_id"; do
+          artifact_id="${REQUESTED_ARTIFACT_ID:-$current_artifact_id}"
+          source_git_ref="${REQUESTED_SOURCE_GIT_REF:-$current_source_git_ref}"
+          if [ -z "$current_artifact_id" ] || [ -z "$artifact_id" ] || [ -z "$source_git_ref" ]; then
+            echo 'The selected artifact is missing immutable identity evidence.' >&2
+            exit 1
+          fi
+          for value in "$resolved_context" "$artifact_id" "$source_git_ref"; do
             case "$value" in
               *$'\n'* | *$'\r'*)
                 echo 'Launchplane environment authority must use single-line values.' >&2
@@ -192,12 +221,14 @@ jobs:
           encoded_instance="$(jq -rn --arg value "$resolved_instance" '$value | @uri')"
           encoded_action="$(jq -rn --arg value 'odoo_target_replacement_plan.read' '$value | @uri')"
           encoded_artifact="$(jq -rn --arg value "$artifact_id" '$value | @uri')"
-          route_path="/v1/products/${encoded_product}/contexts/${encoded_context}/instances/${encoded_instance}/operational-readiness?action=${encoded_action}&artifact_id=${encoded_artifact}&expected_current_artifact_id=${encoded_artifact}"
+          encoded_current_artifact="$(jq -rn --arg value "$current_artifact_id" '$value | @uri')"
+          route_path="/v1/products/${encoded_product}/contexts/${encoded_context}/instances/${encoded_instance}/operational-readiness?action=${encoded_action}&artifact_id=${encoded_artifact}&expected_current_artifact_id=${encoded_current_artifact}"
           {
             printf 'artifact_id=%s\n' "$artifact_id"
             printf 'context=%s\n' "$resolved_context"
-            printf 'current_artifact_id=%s\n' "$artifact_id"
+            printf 'current_artifact_id=%s\n' "$current_artifact_id"
             printf 'readiness_route_path=%s\n' "$route_path"
+            printf 'source_git_ref=%s\n' "$source_git_ref"
           } >>"$GITHUB_OUTPUT"
 
       - name: Read target replacement readiness
@@ -291,7 +322,9 @@ jobs:
       - name: Write target replacement plan payload
         id: request
         env:
+          ARTIFACT_ID: ${{ steps.authority.outputs.artifact_id }}
           CURRENT_ARTIFACT_ID: ${{ steps.authority.outputs.current_artifact_id }}
+          SOURCE_GIT_REF: ${{ steps.authority.outputs.source_git_ref }}
         shell: bash
         run: |
           set -euo pipefail
@@ -299,6 +332,8 @@ jobs:
             --arg product "$PRODUCT" \
             --arg instance "$INSTANCE" \
             --arg strategy "$STRATEGY" \
+            --arg artifact_id "$ARTIFACT_ID" \
+            --arg source_git_ref "$SOURCE_GIT_REF" \
             --arg data_source_mode "$DATA_SOURCE_MODE" \
             --arg confirmation "$CONFIRMATION" \
             --arg expected_current_artifact_id "$CURRENT_ARTIFACT_ID" \
@@ -311,6 +346,8 @@ jobs:
                 product: $product,
                 instance: $instance,
                 strategy: $strategy,
+                artifact_id: $artifact_id,
+                source_git_ref: $source_git_ref,
                 allow_empty_data: $allow_empty_data,
                 data_source_mode: $data_source_mode,
                 confirmation: $confirmation,
@@ -321,7 +358,8 @@ jobs:
           idempotency_key="$({
             printf '%s' \
               "odoo-target-replacement-plan:${PRODUCT}:${INSTANCE}:" \
-              "${STRATEGY}:${ALLOW_EMPTY_DATA}:${DATA_SOURCE_MODE}:" \
+              "${STRATEGY}:${ARTIFACT_ID}:${SOURCE_GIT_REF}:" \
+              "${ALLOW_EMPTY_DATA}:${DATA_SOURCE_MODE}:" \
               "${CONFIRMATION}:${CURRENT_ARTIFACT_ID}:" \
               "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
           })"

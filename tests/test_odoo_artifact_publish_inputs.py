@@ -82,6 +82,14 @@ class OdooArtifactPublishInputsTests(unittest.TestCase):
         self.assertEqual(request.context, "cm")
         self.assertEqual(request.instance, "testing")
 
+    def test_publish_inputs_result_rejects_invalid_product_repository(self) -> None:
+        with self.assertRaisesRegex(ValueError, "repository must be formatted as owner/name"):
+            GenericArtifactPublishInputsResult(
+                context="cm",
+                instance="testing",
+                repository="not-a-repository",
+            )
+
     def test_publish_inputs_can_derive_isolated_preview_image_tag(self) -> None:
         profile_payload = _profile_payload()
         profile_payload["preview"] = {

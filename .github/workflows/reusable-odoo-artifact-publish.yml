@@ -18,7 +18,7 @@ name: Reusable Odoo Artifact Publish
         type: string
       product_repository:
         description: >-
-          Source repository to publish. Defaults to the caller repository.
+          Optional expected source repository. Launchplane remains authoritative.
         required: false
         default: ""
         type: string
@@ -82,7 +82,7 @@ name: Reusable Odoo Artifact Publish
         required: true
         type: string
       product_repository:
-        description: Product source repository, formatted as owner/name.
+        description: Expected product source repository, formatted as owner/name.
         required: true
         type: string
       source_git_ref:
@@ -127,19 +127,12 @@ jobs:
         id: source
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
           CONFIRMATION: ${{ inputs.confirmation }}
-          INPUT_PRODUCT_REPOSITORY: ${{ inputs.product_repository }}
           INPUT_SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
-          DEFAULT_REPOSITORY: ${{ github.repository }}
           DEFAULT_SOURCE_GIT_REF: ${{ github.sha }}
         run: |
           set -euo pipefail
-          repository="$INPUT_PRODUCT_REPOSITORY"
           source_git_ref="$INPUT_SOURCE_GIT_REF"
-          if [ -z "$repository" ]; then
-            repository="$DEFAULT_REPOSITORY"
-          fi
           if [ -z "$source_git_ref" ]; then
             source_git_ref="$DEFAULT_SOURCE_GIT_REF"
           fi
@@ -148,28 +141,16 @@ jobs:
               echo "confirmation must be PUBLISH LAUNCHPLANE ODOO ARTIFACT" >&2
               exit 1
             fi
-            if [ -z "$INPUT_PRODUCT_REPOSITORY" ]; then
-              echo "product_repository is required for Launchplane dispatch." \
-                >&2
-              exit 1
-            fi
             if [ -z "$INPUT_SOURCE_GIT_REF" ]; then
               echo "source_git_ref is required for Launchplane dispatch." >&2
               exit 1
             fi
           fi
-          if ! [[ "$repository" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
-            echo "product_repository must be formatted as owner/name." >&2
-            exit 1
-          fi
           if [ -z "${source_git_ref// }" ]; then
             echo "source_git_ref is required." >&2
             exit 1
           fi
-          {
-            echo "repository=$repository"
-            echo "source_git_ref=$source_git_ref"
-          } >>"$GITHUB_OUTPUT"
+          echo "source_git_ref=$source_git_ref" >>"$GITHUB_OUTPUT"
 
       - name: Resolve Launchplane product
         id: product
@@ -199,15 +180,6 @@ jobs:
               "$publish_scope" \
               "$run_scope"
           } >>"$GITHUB_OUTPUT"
-
-      - name: Checkout tenant repo
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ steps.source.outputs.repository }}
-          ref: ${{ steps.source.outputs.source_git_ref }}
-          path: tenant
-          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}
-          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -250,6 +222,7 @@ jobs:
             ${{ runner.temp }}/${{ inputs.context }}-publish-inputs.json
           response-output-path: result
           output-paths: >-
+            repository=result.repository,
             image_repository=result.image_repository,
             image_tag=result.image_tag,
             preview_slug=result.preview_slug,
@@ -258,6 +231,8 @@ jobs:
 
       - name: Validate Launchplane publish inputs
         env:
+          EXPECTED_PRODUCT_REPOSITORY: ${{ inputs.product_repository }}
+          RESOLVED_PRODUCT_REPOSITORY: ${{ steps.publish_inputs.outputs.repository }}
           RESOLVED_IMAGE_REPOSITORY: >-
             ${{ steps.publish_inputs.outputs.image_repository }}
           RESOLVED_IMAGE_TAG: ${{ steps.publish_inputs.outputs.image_tag }}
@@ -267,6 +242,15 @@ jobs:
             ${{ steps.publish_inputs.outputs.shared_addons_repository }}
         run: |
           set -euo pipefail
+          if ! [[ "$RESOLVED_PRODUCT_REPOSITORY" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+            echo "Launchplane publish inputs missing valid repository." >&2
+            exit 1
+          fi
+          if [ -n "$EXPECTED_PRODUCT_REPOSITORY" ] \
+            && [ "$EXPECTED_PRODUCT_REPOSITORY" != "$RESOLVED_PRODUCT_REPOSITORY" ]; then
+            echo "product_repository does not match Launchplane product authority." >&2
+            exit 1
+          fi
           if [ -z "$RESOLVED_IMAGE_REPOSITORY" ]; then
             echo "Launchplane publish inputs missing image_repository." >&2
             exit 1
@@ -283,6 +267,15 @@ jobs:
             echo "Launchplane publish inputs missing valid shared_addons_repository." >&2
             exit 1
           fi
+
+      - name: Checkout tenant repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.publish_inputs.outputs.repository }}
+          ref: ${{ steps.source.outputs.source_git_ref }}
+          path: tenant
+          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}
+          persist-credentials: false
 
       - name: Checkout devkit repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

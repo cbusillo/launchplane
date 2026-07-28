@@ -79,6 +79,7 @@ class GenericArtifactPublishInputsResult(BaseModel):
                 "shared_addons_repository together."
             )
         for field_name, repository in (
+            ("repository", self.repository),
             ("devkit_repository", self.devkit_repository),
             ("shared_addons_repository", self.shared_addons_repository),
         ):

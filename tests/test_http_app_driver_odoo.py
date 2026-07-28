@@ -694,6 +694,7 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
         publish["manifest"] = artifact_manifest_v2(
             artifact_id=f"artifact-{context}-v2",
             image_repository=f"ghcr.io/cbusillo/{product}",
+            tenant_source_repository=f"cbusillo/{product}",
         ).model_dump(mode="json")
         return payload
 
@@ -806,6 +807,36 @@ class FastApiOdooArtifactPublishTests(unittest.IsolatedAsyncioTestCase):
         provenance = request.manifest.dependency_provenance
         assert provenance is not None
         self.assertEqual(provenance.target_platforms, ("linux/amd64", "linux/arm64"))
+
+    async def test_odoo_artifact_publish_rejects_foreign_v2_source_repository(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: _odoo_route_store(
+                    root / "state",
+                    product="odoo-tenant-opw",
+                    context="opw",
+                ),
+                control_plane_root_path=root,
+            )
+            payload = self._v2_payload()
+            publish = cast(dict[str, object], payload["publish"])
+            publish["manifest"] = artifact_manifest_v2(
+                artifact_id="artifact-opw-foreign-source",
+                image_repository="ghcr.io/cbusillo/odoo-tenant-opw",
+                tenant_source_repository="cbusillo/other-product",
+            ).model_dump(mode="json")
+
+            with patch(
+                "control_plane.odoo_artifact_publish_http.ingest_odoo_artifact_publish_evidence"
+            ) as ingest_evidence:
+                response = await _post_odoo_artifact_publish(app, payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        ingest_evidence.assert_not_called()
 
     async def test_odoo_artifact_publish_accepts_product_profile_lane(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -4563,6 +4594,7 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
         manifest = artifact_manifest_v2(
             artifact_id="artifact-cm-testing",
             image_repository=profile.image.repository,
+            odoo_install_modules=("launchplane_settings", "disable_odoo_online"),
         )
         store.write_artifact_manifest(manifest)
         for lane in profile.lanes:
@@ -4721,6 +4753,7 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
             foreign_manifest = artifact_manifest_v2(
                 artifact_id="artifact-foreign",
                 image_repository="ghcr.io/cbusillo/other-product",
+                odoo_install_modules=("launchplane_settings", "disable_odoo_online"),
             )
             store.write_artifact_manifest(foreign_manifest)
             app = create_launchplane_fastapi_app(
@@ -4745,6 +4778,40 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "invalid_request")
         self.assertEqual(operations, ())
 
+    async def test_odoo_target_replacement_apply_rejects_missing_modules_before_enqueue(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store_with_tenant_profile(root / "state")
+            incomplete_manifest = artifact_manifest_v2(
+                artifact_id="artifact-missing-required-modules",
+                image_repository="ghcr.io/cbusillo/odoo-tenant-cm",
+                odoo_install_modules=("website",),
+            )
+            store.write_artifact_manifest(incomplete_manifest)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_odoo_target_replacement_apply(
+                app,
+                self._payload(
+                    artifact_id=incomplete_manifest.artifact_id,
+                    source_git_ref=incomplete_manifest.source_commit,
+                    expected_current_artifact_id="artifact-cm-testing",
+                ),
+                idempotency_key="apply-missing-required-modules",
+            )
+            operations = store.list_odoo_stable_target_replacement_operation_records()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(operations, ())
+
     async def test_explicit_artifact_without_expected_current_preserves_legacy_enqueue(
         self,
     ) -> None:
@@ -4758,6 +4825,7 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
             manifest = artifact_manifest_v2(
                 artifact_id="artifact-explicit",
                 image_repository=profile.image.repository,
+                odoo_install_modules=("launchplane_settings", "disable_odoo_online"),
             )
             store.write_artifact_manifest(manifest)
             app = create_launchplane_fastapi_app(
