@@ -4,7 +4,24 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.workflows.odoo_verification import OdooVerificationEvidence
+
+
+LAUNCHPLANE_REQUIRED_ODOO_MODULES = ("launchplane_settings", "disable_odoo_online")
+
+
+def missing_required_odoo_modules_from_artifact(
+    artifact_manifest: ArtifactIdentityManifest,
+) -> tuple[str, ...]:
+    declared_modules = {
+        str(module).strip()
+        for module in artifact_manifest.odoo_install_modules
+        if str(module).strip()
+    }
+    return tuple(
+        module for module in LAUNCHPLANE_REQUIRED_ODOO_MODULES if module not in declared_modules
+    )
 
 
 class OdooStableTargetReplacementRequest(BaseModel):

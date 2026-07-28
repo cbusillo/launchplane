@@ -1940,7 +1940,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
                 "repository",
-                "${{ steps.source.outputs.repository }}",
+                "${{ steps.publish_inputs.outputs.repository }}",
             ),
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",

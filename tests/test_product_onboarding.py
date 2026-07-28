@@ -368,7 +368,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("${{ steps.product.outputs.publish_idempotency_key }}", workflow_text)
         self.assertIn("fail-result-paths: result.input_status", workflow_text)
         self.assertIn("fail-result-paths: result.status,result.publish_status", workflow_text)
-        self.assertIn("repository: ${{ steps.source.outputs.repository }}", workflow_text)
+        self.assertIn("repository: ${{ steps.publish_inputs.outputs.repository }}", workflow_text)
         self.assertIn("ref: ${{ steps.source.outputs.source_git_ref }}", workflow_text)
         self.assertIn(
             "token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",
@@ -404,8 +404,13 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
         self.assertIn("devkit_repository=result.devkit_repository", workflow_text)
+        self.assertIn("repository=result.repository", workflow_text)
         self.assertIn(
             "shared_addons_repository=result.shared_addons_repository",
+            workflow_text,
+        )
+        self.assertIn(
+            "product_repository does not match Launchplane product authority.",
             workflow_text,
         )
         self.assertIn(

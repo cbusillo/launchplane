@@ -10,8 +10,7 @@ _LAUNCHPLANE_REQUEST = (
     "cbusillo/launchplane/.github/actions/launchplane-request@"
     "adcf937c6aef14e02478724040852d1d2a82a850"
 )
-_PLAN_WORKER_SHA = "0670f543396472f9de5b7c43283b0c924492ec4e"
-_APPLY_WORKER_SHA = "480c9280b1ae3610f05547192783da2230dc7ff5"
+_WORKER_SHA = "480c9280b1ae3610f05547192783da2230dc7ff5"
 
 
 class OdooTargetReplacementWorkflowTests(unittest.TestCase):
@@ -30,8 +29,6 @@ class OdooTargetReplacementWorkflowTests(unittest.TestCase):
                 "type": "choice",
                 "options": ["recreate-in-place", "replace-and-cutover"],
             },
-            "artifact_id": {"required": False, "default": "", "type": "string"},
-            "source_git_ref": {"required": False, "default": "", "type": "string"},
             "allow_empty_data": {"required": True, "default": False, "type": "boolean"},
             "data_source_mode": {
                 "required": True,
@@ -73,18 +70,16 @@ class OdooTargetReplacementWorkflowTests(unittest.TestCase):
                 self.plan_wrapper,
                 "plan",
                 "reusable-odoo-target-replacement-plan.yml",
-                _PLAN_WORKER_SHA,
                 plan_contract,
             ),
             (
                 self.apply_wrapper,
                 "apply",
                 "reusable-odoo-target-replacement-apply.yml",
-                _APPLY_WORKER_SHA,
                 apply_contract,
             ),
         )
-        for workflow, job_id, worker_name, worker_sha, dispatch_contract in expected:
+        for workflow, job_id, worker_name, dispatch_contract in expected:
             with self.subTest(workflow=workflow.label):
                 trigger = workflow.data["on"]
                 self.assertIsInstance(trigger, dict)
@@ -109,7 +104,7 @@ class OdooTargetReplacementWorkflowTests(unittest.TestCase):
                 self.assertEqual(set(workflow.jobs), {job_id})
                 self.assertEqual(
                     workflow.job_uses(job_id),
-                    f"cbusillo/launchplane/.github/workflows/{worker_name}@{worker_sha}",
+                    f"cbusillo/launchplane/.github/workflows/{worker_name}@{_WORKER_SHA}",
                 )
                 self.assertEqual(
                     workflow.job_permissions(job_id),

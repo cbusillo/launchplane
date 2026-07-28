@@ -1059,11 +1059,10 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "payload-file": frozenset(("launchplane-product-legacy-context-cleanup-payload.json",)),
     },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
-        "DEFAULT_REPOSITORY": frozenset(("${{ github.repository }}",)),
+        "EXPECTED_PRODUCT_REPOSITORY": frozenset(("${{ inputs.product_repository }}",)),
         "GITHUB_TOKEN": frozenset(("${{ github.token }}",)),
         "GHCR_TOKEN": frozenset(("${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",)),
         "GHCR_USERNAME": frozenset(("${{ github.repository_owner }}",)),
-        "INPUT_PRODUCT_REPOSITORY": frozenset(("${{ inputs.product_repository }}",)),
         "ODOO_SOURCE_GITHUB_TOKEN": frozenset(
             ("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",)
         ),
@@ -1072,6 +1071,9 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         ),
         "RESOLVED_IMAGE_REPOSITORY": frozenset(
             ("${{ steps.publish_inputs.outputs.image_repository }}",)
+        ),
+        "RESOLVED_PRODUCT_REPOSITORY": frozenset(
+            ("${{ steps.publish_inputs.outputs.repository }}",)
         ),
         "RESOLVED_SHARED_ADDONS_REPOSITORY": frozenset(
             ("${{ steps.publish_inputs.outputs.shared_addons_repository }}",)
@@ -1087,7 +1089,7 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
             (
                 "${{ steps.publish_inputs.outputs.devkit_repository }}",
                 "${{ steps.publish_inputs.outputs.shared_addons_repository }}",
-                "${{ steps.source.outputs.repository }}",
+                "${{ steps.publish_inputs.outputs.repository }}",
             )
         ),
         "token": frozenset(("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",)),

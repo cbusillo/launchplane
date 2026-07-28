@@ -32,9 +32,11 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_id
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.contracts.odoo_stable_target_replacement import (
+    LAUNCHPLANE_REQUIRED_ODOO_MODULES,
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementRequest,
+    missing_required_odoo_modules_from_artifact,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
@@ -100,7 +102,6 @@ DokployRequest = Callable[..., JsonValue]
 DokployConfigReader = Callable[..., tuple[str, str]]
 ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS = 5
 ODOO_INSTALL_MODULES_ENV_KEY = "ODOO_INSTALL_MODULES"
-LAUNCHPLANE_REQUIRED_ODOO_MODULES = ("launchplane_settings", "disable_odoo_online")
 ODOO_REQUIRED_VOLUME_ENV_KEYS = ("ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME", "ODOO_DB_VOLUME")
 
 
@@ -675,19 +676,6 @@ def _merge_required_odoo_install_modules(raw_modules: str) -> str:
     return _merge_odoo_install_modules(LAUNCHPLANE_REQUIRED_ODOO_MODULES, raw_modules)
 
 
-def _missing_required_odoo_modules_from_artifact(
-    artifact_manifest: ArtifactIdentityManifest,
-) -> tuple[str, ...]:
-    declared_modules = {
-        str(module).strip()
-        for module in artifact_manifest.odoo_install_modules
-        if str(module).strip()
-    }
-    return tuple(
-        module for module in LAUNCHPLANE_REQUIRED_ODOO_MODULES if module not in declared_modules
-    )
-
-
 def _normalize_domain(raw_domain: str) -> str:
     return raw_domain.strip().lower().removeprefix("https://").removeprefix("http://").rstrip("/")
 
@@ -1118,11 +1106,18 @@ def build_odoo_stable_target_replacement_plan(
         except FileNotFoundError:
             blockers.append(f"Launchplane has no artifact manifest for {expected_artifact_id!r}.")
         else:
+            if not artifact_manifest_matches_image_repository(
+                artifact_manifest,
+                expected_repository=profile.image.repository,
+            ):
+                blockers.append(
+                    "Selected artifact image repository does not match product profile."
+                )
             if not expected_source_git_ref:
                 blockers.append("Selected artifact is missing immutable source-git evidence.")
             elif artifact_manifest.source_commit != expected_source_git_ref:
                 blockers.append("Selected artifact source ref does not match the stored manifest.")
-            missing_required_modules = _missing_required_odoo_modules_from_artifact(
+            missing_required_modules = missing_required_odoo_modules_from_artifact(
                 artifact_manifest
             )
             if missing_required_modules:
@@ -1252,7 +1247,7 @@ def execute_odoo_stable_target_replacement_apply(
             "Odoo target replacement apply source ref does not match stored artifact manifest. "
             f"Request={source_git_ref} manifest={artifact_manifest.source_commit}."
         )
-    missing_required_modules = _missing_required_odoo_modules_from_artifact(artifact_manifest)
+    missing_required_modules = missing_required_odoo_modules_from_artifact(artifact_manifest)
     if missing_required_modules:
         raise click.ClickException(
             "Odoo target replacement apply requires artifact odoo_install_modules to declare required module(s): "

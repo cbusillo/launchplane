@@ -19,16 +19,6 @@ name: Odoo Target Replacement Plan
         options:
           - recreate-in-place
           - replace-and-cutover
-      artifact_id:
-        description: Optional stored artifact ID to plan instead of the current inventory artifact.
-        required: false
-        default: ""
-        type: string
-      source_git_ref:
-        description: Required when artifact_id is set; must match the stored artifact manifest.
-        required: false
-        default: ""
-        type: string
       allow_empty_data:
         description: Allow missing Odoo volume env keys.
         required: true
@@ -59,7 +49,7 @@ concurrency:
 
 jobs:
   plan:
-    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-plan.yml@0670f543396472f9de5b7c43283b0c924492ec4e # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-plan.yml@480c9280b1ae3610f05547192783da2230dc7ff5 # main
     permissions:
       contents: read
       id-token: write
@@ -67,8 +57,6 @@ jobs:
       product: ${{ inputs.product }}
       instance: ${{ inputs.instance }}
       strategy: ${{ inputs.strategy }}
-      artifact_id: ${{ inputs.artifact_id }}
-      source_git_ref: ${{ inputs.source_git_ref }}
       allow_empty_data: ${{ inputs.allow_empty_data }}
       data_source_mode: ${{ inputs.data_source_mode }}
       confirmation: ${{ inputs.confirmation }}

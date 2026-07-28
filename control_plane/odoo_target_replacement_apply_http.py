@@ -15,6 +15,7 @@ from control_plane.contracts.artifact_identity import (
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
+    missing_required_odoo_modules_from_artifact,
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
@@ -270,6 +271,12 @@ def _validate_target_replacement_apply_artifact_authority(
     if manifest.source_commit != source_git_ref:
         raise ValueError(
             "Odoo target replacement source ref does not match stored artifact manifest."
+        )
+    missing_required_modules = missing_required_odoo_modules_from_artifact(manifest)
+    if missing_required_modules:
+        raise ValueError(
+            "Odoo target replacement requires artifact odoo_install_modules to declare "
+            "required module(s): " + ", ".join(missing_required_modules)
         )
 
 
