@@ -2234,8 +2234,9 @@ payloads are not exposed.
 For a public-monitoring lane, the read-only topology projection may corroborate
 observed placement from the newest fresh passing strict health probe only when
 the exact configured check requires runtime identity and the probe's expected
-and observed identities both equal the recorded placement identity, whose
-recorded health is verified and passing. The
+and observed identities both match the recorded placement identity under the
+canonical runtime identity comparison, whose recorded health is verified and
+passing. The
 placement provenance then names that public observation. Environment inventory,
 deployment evidence, and their environment-level provenance are neither updated
 nor re-timestamped. Non-strict, legacy, base-page-only, superseded, stale,

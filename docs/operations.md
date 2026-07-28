@@ -844,8 +844,9 @@ The product topology read model may use the newest fresh strict public health
 probe to corroborate observed placement between deployments. This applies only
 to a public-monitoring lane whose exact enabled check requires runtime identity,
 when the health target passes and its expected and observed identities match
-each other and the recorded placement identity, whose recorded health is also
-verified and passing. The placement projection then
+each other and the recorded placement identity under the canonical runtime
+identity comparison, whose recorded health is also verified and passing. The
+placement projection then
 uses the public observation as its current provenance; the environment inventory
 record, its timestamp, and the environment-level provenance remain unchanged.
 Legacy, non-strict, base-page-only, older-than-latest, stale, failing, missing,

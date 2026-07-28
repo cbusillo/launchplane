@@ -870,8 +870,8 @@ route-binding or TLS evidence is called out separately.
 Observed placement can remain current between real deploy or promotion events
 when the newest public HTTP observation is a fresh passing strict health probe
 for the exact configured check and its expected and observed runtime identities
-exactly match the recorded placement identity, whose recorded health is verified
-and passing. In that bounded case,
+match the recorded placement identity under the canonical runtime identity
+comparison, whose recorded health is verified and passing. In that bounded case,
 `observed.placement` uses the public observation as provenance and reports
 verified placement trust. The environment inventory record and the environment
 read model's inventory provenance remain unchanged and may still show their true
