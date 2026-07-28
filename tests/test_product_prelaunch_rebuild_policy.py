@@ -210,6 +210,29 @@ class ProductPrelaunchRebuildPolicyTests(unittest.TestCase):
         with self.assertRaises(ProductPrelaunchRebuildPolicyStateError):
             build_product_prelaunch_rebuild_policy_plan(profile=profile, request=_request())
 
+    def test_upstream_restore_accepts_restorable_data_authority(self) -> None:
+        profile_payload = _profile().model_dump(mode="json")
+        profile_payload["lanes"][1]["odoo_data_policy"] = {
+            "data_authority": "restorable",
+            "allowed_rebuild_sources": ["upstream_restore"],
+            "upstream_source": "operator-supplied-source",
+            "requires_backup_before_destroy": True,
+            "requires_restore_proof": True,
+            "requires_runtime_identity": True,
+        }
+        profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        request_payload = _request().model_dump(mode="json")
+        request_payload["data_source_mode"] = "upstream_restore"
+        request = ProductPrelaunchRebuildPolicyApplyRequest.model_validate(request_payload)
+
+        plan = build_product_prelaunch_rebuild_policy_plan(
+            profile=profile,
+            request=request,
+        )
+
+        self.assertEqual(plan.data_authority, "restorable")
+        self.assertEqual(plan.requested_policy.data_source_mode, "upstream_restore")
+
 
 if __name__ == "__main__":
     unittest.main()

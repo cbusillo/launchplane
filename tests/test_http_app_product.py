@@ -3321,6 +3321,30 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
+    async def test_apply_product_prelaunch_rebuild_policy_plan_grant_cannot_apply(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_prelaunch_rebuild_policy_identity()),
+            authz_policy=_product_prelaunch_rebuild_policy_policy(
+                actions=("product_profile.prelaunch_rebuild.plan",)
+            ),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("state")),
+        )
+
+        response = await _post_product_prelaunch_rebuild_policy(
+            app,
+            {
+                **_product_prelaunch_rebuild_policy_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": "a" * 64,
+            },
+            idempotency_key="product-prelaunch-rebuild-policy-plan-only",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
     async def test_apply_product_prelaunch_rebuild_policy_requires_idempotency_key(
         self,
     ) -> None:

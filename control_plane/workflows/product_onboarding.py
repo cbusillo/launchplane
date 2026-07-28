@@ -146,7 +146,11 @@ def _lane_odoo_prelaunch_rebuild(
     if existing_profile is None:
         return lane.odoo_prelaunch_rebuild
     existing_lane = next(
-        (candidate for candidate in existing_profile.lanes if candidate.instance == lane.instance),
+        (
+            candidate
+            for candidate in existing_profile.lanes
+            if candidate.context == lane.context and candidate.instance == lane.instance
+        ),
         None,
     )
     return (

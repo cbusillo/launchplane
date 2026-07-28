@@ -1602,6 +1602,7 @@ health checks, routes, provider identifiers, runtime settings, secrets, volume
 names, or a replacement product profile. Whole-profile writes and onboarding
 updates preserve existing prelaunch-rebuild authority after this bounded path is
 established.
+
 The plan binds the complete current profile digest. Apply rebuilds the candidate
 from fresh DB-backed state and commits the profile compare-and-write with
 completed replay evidence atomically, so reviewed-plan drift and concurrent
