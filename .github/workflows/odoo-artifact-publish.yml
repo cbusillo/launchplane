@@ -1,0 +1,47 @@
+---
+name: Odoo Artifact Publish
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Launchplane product profile key.
+        required: true
+        type: string
+      context:
+        description: Launchplane Odoo context.
+        required: true
+        type: string
+      instance:
+        description: Odoo instance whose artifact should be published.
+        required: true
+        type: string
+      product_repository:
+        description: Product source repository, formatted as owner/name.
+        required: true
+        type: string
+      source_git_ref:
+        description: Source ref or commit SHA attached to the artifact.
+        required: true
+        type: string
+      confirmation:
+        description: Type PUBLISH LAUNCHPLANE ODOO ARTIFACT to confirm.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+jobs:
+  publish:
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-artifact-publish.yml@ebfefbe1efc198af6554d326e59665b74cd8d676 # main
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: ${{ inputs.instance }}
+      product_repository: ${{ inputs.product_repository }}
+      source_git_ref: ${{ inputs.source_git_ref }}
+      confirmation: ${{ inputs.confirmation }}
+    secrets: inherit

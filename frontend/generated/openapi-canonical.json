@@ -33649,6 +33649,11 @@
                         "title": "Allow Empty Data",
                         "type": "boolean"
                       },
+                      "artifact_id": {
+                        "default": "",
+                        "title": "Artifact Id",
+                        "type": "string"
+                      },
                       "confirmation": {
                         "default": "",
                         "title": "Confirmation",
@@ -33682,6 +33687,11 @@
                         "minimum": 1,
                         "title": "Schema Version",
                         "type": "integer"
+                      },
+                      "source_git_ref": {
+                        "default": "",
+                        "title": "Source Git Ref",
+                        "type": "string"
                       },
                       "strategy": {
                         "default": "recreate-in-place",

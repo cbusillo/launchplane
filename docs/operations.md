@@ -1753,7 +1753,11 @@ select the typed `readiness` member for the bounded evidence artifact and exact
 gate check. Plan payload generation and apply operation creation occur only
 after an exact `ready` result. Apply uses a
 complete explicit `artifact_id`/`source_git_ref` pair when supplied; otherwise it
-pins both values from the current environment record before enqueue. Both
+pins both values from the current environment record before enqueue. The plan
+workflow accepts the same pair so a newly published immutable recovery artifact
+can be reviewed before apply. Plan and apply both read the selected manifest,
+require its source commit to match, and reject artifacts whose
+`odoo_install_modules` omit Launchplane's required safety modules. Both
 workers also carry the environment's current artifact as a separate expected
 snapshot; the plan route, apply enqueue path, and operation worker fail closed
 if that lane artifact changes. Candidate artifacts must use the product

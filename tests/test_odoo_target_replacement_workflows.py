@@ -29,6 +29,8 @@ class OdooTargetReplacementWorkflowTests(unittest.TestCase):
                 "type": "choice",
                 "options": ["recreate-in-place", "replace-and-cutover"],
             },
+            "artifact_id": {"required": False, "default": "", "type": "string"},
+            "source_git_ref": {"required": False, "default": "", "type": "string"},
             "allow_empty_data": {"required": True, "default": False, "type": "boolean"},
             "data_source_mode": {
                 "required": True,
@@ -137,6 +139,8 @@ class OdooTargetReplacementWorkflowTests(unittest.TestCase):
                 "product",
                 "instance",
                 "strategy",
+                "artifact_id",
+                "source_git_ref",
                 "allow_empty_data",
                 "data_source_mode",
                 "confirmation",
@@ -318,7 +322,11 @@ class OdooTargetReplacementWorkflowTests(unittest.TestCase):
         assert apply_payload is not None
         self.assertEqual(
             plan_payload.data["env"],
-            {"CURRENT_ARTIFACT_ID": "${{ steps.authority.outputs.current_artifact_id }}"},
+            {
+                "ARTIFACT_ID": "${{ steps.authority.outputs.artifact_id }}",
+                "CURRENT_ARTIFACT_ID": "${{ steps.authority.outputs.current_artifact_id }}",
+                "SOURCE_GIT_REF": "${{ steps.authority.outputs.source_git_ref }}",
+            },
         )
         apply_env = apply_payload.data["env"]
         self.assertIsInstance(apply_env, dict)

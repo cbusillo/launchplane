@@ -1098,18 +1098,38 @@ def build_odoo_stable_target_replacement_plan(
             )
         except click.ClickException as error:
             blockers.append(str(error))
-    expected_artifact_id = ""
-    expected_source_git_ref = ""
+    current_artifact_id = ""
+    current_source_git_ref = ""
     if isinstance(inventory, EnvironmentInventory):
-        expected_artifact_id = (
+        current_artifact_id = (
             inventory.artifact_identity.artifact_id if inventory.artifact_identity else ""
         )
-        expected_source_git_ref = inventory.source_git_ref
+        current_source_git_ref = inventory.source_git_ref
     if (
         request.expected_current_artifact_id
-        and expected_artifact_id != request.expected_current_artifact_id
+        and current_artifact_id != request.expected_current_artifact_id
     ):
         blockers.append("Current inventory artifact changed after operational readiness preflight.")
+    expected_artifact_id = request.artifact_id or current_artifact_id
+    expected_source_git_ref = request.source_git_ref or current_source_git_ref
+    if expected_artifact_id:
+        try:
+            artifact_manifest = record_store.read_artifact_manifest(expected_artifact_id)
+        except FileNotFoundError:
+            blockers.append(f"Launchplane has no artifact manifest for {expected_artifact_id!r}.")
+        else:
+            if not expected_source_git_ref:
+                blockers.append("Selected artifact is missing immutable source-git evidence.")
+            elif artifact_manifest.source_commit != expected_source_git_ref:
+                blockers.append("Selected artifact source ref does not match the stored manifest.")
+            missing_required_modules = _missing_required_odoo_modules_from_artifact(
+                artifact_manifest
+            )
+            if missing_required_modules:
+                blockers.append(
+                    "Odoo target replacement requires artifact odoo_install_modules to declare required module(s): "
+                    + ", ".join(missing_required_modules)
+                )
     expected_target_name = (
         target_record.target_name
         if isinstance(target_record, DokployTargetRecord) and target_record.target_name
@@ -1185,6 +1205,8 @@ def execute_odoo_stable_target_replacement_apply(
             allow_empty_data=request.allow_empty_data,
             data_source_mode=request.data_source_mode,
             confirmation=request.confirmation,
+            artifact_id=request.artifact_id,
+            source_git_ref=request.source_git_ref,
             expected_current_artifact_id=request.expected_current_artifact_id,
         ),
         dokploy_request=dokploy_request,

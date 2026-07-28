@@ -2508,6 +2508,11 @@ requested instance to the owning product lane context, authorizes
 `odoo_target_replacement_plan.read` against that lane context, classifies missing
 product profiles as `driver_route_dependency_not_found`, and remains
 non-idempotent so repeated plan reads can observe changed runtime/provider state.
+The request may select a stored immutable `artifact_id`/`source_git_ref` pair
+while separately fencing the lane's current inventory artifact. Planning reads
+the selected manifest and blocks missing manifests, source mismatches, and Odoo
+artifacts that omit Launchplane-required safety modules before an apply
+operation can be created.
 Its descriptor remains discoverable.
 
 `POST /v1/drivers/odoo/target-replacement-apply` is owned by native FastAPI. It
