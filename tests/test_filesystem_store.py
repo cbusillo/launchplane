@@ -92,6 +92,10 @@ from control_plane.contracts.product_profile_record import (
     ProductPreviewProfile,
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentEventRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentReminderStateRecord,
+)
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationAttemptRecord,
 )
@@ -1335,6 +1339,47 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertTrue(attempt_path.exists())
             self.assertEqual([record.policy_id for record in policies], [policy.policy_id])
             self.assertEqual([record.attempt_id for record in attempts], [attempt.attempt_id])
+
+    def test_write_and_list_public_ingress_material_event_and_reminder_state(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            event = PublicIngressIncidentEventRecord(
+                event_id="public-ingress-event-example-opened-1",
+                incident_id="public-ingress-incident-example-1",
+                event="opened",
+                reason="incident_opened",
+                occurred_at="2026-07-27T12:00:00Z",
+                observation_id="public-ingress-example-1",
+                material_fingerprint_sha256="abc123",
+                severity="critical",
+                summary="Public ingress failed.",
+            )
+            reminder = PublicIngressIncidentReminderStateRecord(
+                reminder_state_id="public-ingress-reminder-example-1",
+                incident_id=event.incident_id,
+                policy_id="example-policy",
+                material_event_id=event.event_id,
+                interval_seconds=21600,
+                window_anchor_at=event.occurred_at,
+                next_reminder_at="2026-07-27T18:00:00Z",
+                updated_at=event.occurred_at,
+            )
+
+            event_path = store.write_public_ingress_incident_event_record(event)
+            reminder_path = store.write_public_ingress_incident_reminder_state_record(reminder)
+
+            self.assertTrue(event_path.exists())
+            self.assertTrue(reminder_path.exists())
+            self.assertEqual(
+                store.list_public_ingress_incident_event_records(incident_id=event.incident_id),
+                (event,),
+            )
+            self.assertEqual(
+                store.list_public_ingress_incident_reminder_state_records(
+                    incident_id=event.incident_id
+                ),
+                (reminder,),
+            )
 
     def test_write_and_list_preview_pr_feedback_notification_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

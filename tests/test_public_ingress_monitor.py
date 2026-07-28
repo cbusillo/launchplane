@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from typing import Callable, Literal
+from typing import Callable, Literal, cast
 from unittest.mock import patch
 from urllib.request import Request
 
@@ -34,6 +34,10 @@ from control_plane.contracts.route_binding_record import RouteBindingSource
 from control_plane.contracts.route_binding_record import RouteBindingTls
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentEventRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentReminderStateRecord,
+)
 from control_plane.contracts.public_ingress_monitoring import PublicIngressCheckKind
 from control_plane.contracts.public_ingress_monitoring import PublicIngressHealthCheckKind
 from control_plane.contracts.public_ingress_monitoring import (
@@ -43,6 +47,9 @@ from control_plane.contracts.public_ingress_monitoring import PublicIngressNotif
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.contracts.public_ingress_monitoring import build_public_ingress_lane_incident_id
 from control_plane.contracts.public_ingress_monitoring import build_public_ingress_observation_id
+from control_plane.contracts.public_ingress_monitoring import (
+    public_ingress_incident_record_sha256,
+)
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
@@ -65,7 +72,7 @@ from tests.support.stores import _sqlite_database_url
 
 
 def _public_health_monitoring(
-    *, require_runtime_identity: bool = False
+    *, require_runtime_identity: bool = False, recovery_observation_threshold: int = 1
 ) -> ProductLaneHealthMonitoringPolicy:
     return ProductLaneHealthMonitoringPolicy(
         monitoring_intent="public",
@@ -73,6 +80,7 @@ def _public_health_monitoring(
             ProductLaneHealthCheck(
                 name="public-ingress",
                 require_runtime_identity=require_runtime_identity,
+                recovery_observation_threshold=recovery_observation_threshold,
             ),
         ),
     )
@@ -83,6 +91,8 @@ class _Store:
         self._profiles = profiles
         self.records: list[PublicIngressObservationRecord] = []
         self.incidents: list[PublicIngressIncidentRecord] = []
+        self.incident_events: list[PublicIngressIncidentEventRecord] = []
+        self.reminder_states: list[PublicIngressIncidentReminderStateRecord] = []
         self.notification_policies: list[PublicIngressNotificationPolicyRecord] = []
         self.notification_attempts: list[PublicIngressNotificationAttemptRecord] = []
         self.lane_summaries: dict[tuple[str, str], LaunchplaneLaneSummary] = {}
@@ -169,6 +179,62 @@ class _Store:
             incident for incident in self.incidents if incident.incident_id != record.incident_id
         ]
         self.incidents.append(record)
+
+    def list_public_ingress_incident_event_records(
+        self,
+        *,
+        incident_id: str = "",
+        event: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentEventRecord, ...]:
+        records = [
+            record
+            for record in self.incident_events
+            if (not incident_id or record.incident_id == incident_id)
+            and (not event or record.event == event)
+        ]
+        records.sort(key=lambda record: (record.occurred_at, record.event_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_public_ingress_incident_event_record(
+        self, record: PublicIngressIncidentEventRecord
+    ) -> None:
+        self.incident_events = [
+            event for event in self.incident_events if event.event_id != record.event_id
+        ]
+        self.incident_events.append(record)
+
+    def list_public_ingress_incident_reminder_state_records(
+        self,
+        *,
+        incident_id: str = "",
+        policy_id: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentReminderStateRecord, ...]:
+        records = [
+            record
+            for record in self.reminder_states
+            if (not incident_id or record.incident_id == incident_id)
+            and (not policy_id or record.policy_id == policy_id)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.reminder_state_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_public_ingress_incident_reminder_state_record(
+        self, record: PublicIngressIncidentReminderStateRecord
+    ) -> None:
+        self.reminder_states = [
+            state
+            for state in self.reminder_states
+            if state.reminder_state_id != record.reminder_state_id
+        ]
+        self.reminder_states.append(record)
 
     def list_public_ingress_notification_policy_records(
         self,
@@ -902,7 +968,15 @@ class PublicIngressMonitorTests(unittest.TestCase):
         tls_incident = next(
             incident for incident in store.incidents if incident.check_kind == "tls"
         )
-        self.assertEqual(_incident_event(incident=tls_incident), "updated")
+        self.assertEqual(_incident_event(incident=tls_incident), "opened")
+        self.assertEqual(
+            [
+                event.event
+                for event in store.incident_events
+                if event.incident_id == tls_incident.incident_id
+            ],
+            ["opened"],
+        )
 
     def test_tls_notification_policy_scope_and_health_kind_alias(self) -> None:
         destination = PublicIngressNotificationDestination(
@@ -1177,6 +1251,13 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(requested_urls, [])
         self.assertEqual(store.records[0].failure_code, "private_endpoint_not_found")
         self.assertEqual(store.records[0].targets[0].url, "private-endpoint://missing-runtime")
+        material_fingerprint = store.records[0].material_fingerprint
+        self.assertIsNotNone(material_fingerprint)
+        assert material_fingerprint is not None
+        self.assertEqual(
+            material_fingerprint.route_authority.kind,
+            "private_endpoint",
+        )
         self.assertEqual(store.incidents[0].failure_code, "private_endpoint_not_found")
 
     def test_private_http_endpoint_reference_fails_closed_when_disabled(self) -> None:
@@ -1318,6 +1399,13 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(store.records[0].check_name, "provider-target")
         self.assertEqual(store.records[0].check_kind, "provider")
         self.assertEqual(store.records[0].failure_code, "provider_check_unavailable")
+        material_fingerprint = store.records[0].material_fingerprint
+        self.assertIsNotNone(material_fingerprint)
+        assert material_fingerprint is not None
+        self.assertEqual(
+            material_fingerprint.route_authority.kind,
+            "provider",
+        )
         self.assertEqual(store.incidents[0].check_name, "provider-target")
 
     def test_multiple_lane_checks_write_separate_records_and_incidents(self) -> None:
@@ -1670,6 +1758,383 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(store.incidents[0].opened_at, "2026-05-29T12:20:00Z")
         self.assertEqual(store.incidents[0].latest_observed_at, "2026-05-29T12:25:00Z")
 
+    def test_equivalent_failure_churn_updates_evidence_without_material_event(self) -> None:
+        store = _Store((_profile(),))
+
+        first = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:20:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=503,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        second = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:25:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=500,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+
+        self.assertEqual(first.incident_events[0].event, "opened")
+        self.assertEqual(second.incident_events, ())
+        self.assertEqual([event.event for event in store.incident_events], ["opened"])
+        self.assertEqual(len(store.records), 2)
+        self.assertEqual(store.records[0].incident_id, store.records[1].incident_id)
+        self.assertEqual(
+            store.records[0].material_fingerprint_sha256,
+            store.records[1].material_fingerprint_sha256,
+        )
+        self.assertEqual(store.incidents[0].latest_observation_id, store.records[1].record_id)
+
+    def test_material_failure_change_emits_one_immediate_update(self) -> None:
+        store = _Store((_profile(),))
+
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:20:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=503,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+
+        def redirect_failure(_url: str, _timeout: int) -> HttpObservation:
+            raise RuntimeError("redirect loop")
+
+        changed = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:25:00Z",
+            http_get=redirect_failure,
+        )
+
+        self.assertEqual([event.event for event in store.incident_events], ["opened", "updated"])
+        self.assertEqual(changed.incident_events[0].reason, "material_change")
+        self.assertEqual(store.incidents[0].failure_code, "redirect_loop")
+
+    def test_route_authority_change_is_material_even_with_same_failure_code(self) -> None:
+        store = _Store((_profile(),))
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:20:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=503,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        store._profiles = (
+            _profile(
+                lane=ProductLaneProfile(
+                    instance="prod",
+                    context="example-site",
+                    base_url="https://replacement.example.test",
+                    health_monitoring=_public_health_monitoring(),
+                )
+            ),
+        )
+
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:25:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=503,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+
+        self.assertEqual([event.event for event in store.incident_events], ["opened", "updated"])
+        self.assertNotEqual(
+            store.records[0].material_fingerprint_sha256,
+            store.records[1].material_fingerprint_sha256,
+        )
+
+    def test_tls_severity_change_is_material(self) -> None:
+        store = _Store((_profile(),))
+        store.route_bindings.append(_route_binding())
+        for checked_at, probe_result in (
+            (
+                "2026-07-14T12:00:00Z",
+                PublicTlsProbeResult(
+                    status="expiring",
+                    failure_code="tls_expiring",
+                    summary="certificate expiring",
+                    certificate=_tls_certificate(days_remaining=7),
+                ),
+            ),
+            (
+                "2026-07-14T12:05:00Z",
+                PublicTlsProbeResult(
+                    status="expired",
+                    failure_code="tls_expired",
+                    summary="certificate expired",
+                    certificate=_tls_certificate(days_remaining=-1),
+                ),
+            ),
+        ):
+            run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at=checked_at,
+                http_get=lambda url, _timeout: HttpObservation(
+                    status_code=200,
+                    final_url=url,
+                    redirect_count=0,
+                ),
+                tls_get=_constant_tls_probe(probe_result),
+            )
+
+        tls_incident_ids = {
+            incident.incident_id for incident in store.incidents if incident.check_kind == "tls"
+        }
+        tls_events = [
+            event for event in store.incident_events if event.incident_id in tls_incident_ids
+        ]
+        self.assertEqual([event.event for event in tls_events], ["opened", "updated"])
+        self.assertEqual([event.severity for event in tls_events], ["warning", "critical"])
+
+    def test_policy_reminder_window_is_bounded_and_idempotent(self) -> None:
+        store = _Store((_profile(),))
+        store.notification_policies.append(
+            _notification_policy(
+                PublicIngressNotificationDestination(
+                    destination_id="discord-ops",
+                    kind="discord",
+                    discord_webhook_secret="discord-webhook",
+                )
+            ).model_copy(update={"reminder_interval_seconds": 900})
+        )
+        discord_posts: list[tuple[str, dict[str, object]]] = []
+        drivers = PublicIngressNotificationDriverSet(
+            discord_sender=lambda webhook_url, payload: discord_posts.append(
+                (webhook_url, payload)
+            ),
+            secret_resolver=lambda secret_name: (
+                "https://discord.com/api/webhooks/test/webhook"
+                if secret_name == "discord-webhook"
+                else ""
+            ),
+        )
+
+        for checked_at in (
+            "2026-05-29T12:00:00Z",
+            "2026-05-29T12:05:00Z",
+            "2026-05-29T12:15:00Z",
+            "2026-05-29T12:15:00Z",
+        ):
+            run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at=checked_at,
+                http_get=lambda url, _timeout: HttpObservation(
+                    status_code=503,
+                    final_url=url,
+                    redirect_count=0,
+                ),
+                notification_drivers=drivers,
+            )
+
+        self.assertEqual([event.event for event in store.incident_events], ["opened", "reminder"])
+        self.assertEqual(len(store.notification_attempts), 2)
+        self.assertEqual(len(discord_posts), 2)
+        reminder_state = store.reminder_states[0]
+        self.assertEqual(reminder_state.last_window_index, 1)
+        self.assertEqual(reminder_state.next_reminder_at, "2026-05-29T12:30:00Z")
+        self.assertTrue(all(attempt.incident_event_id for attempt in store.notification_attempts))
+
+    def test_notification_policy_rejects_unbounded_reminder_cadence(self) -> None:
+        destination = PublicIngressNotificationDestination(
+            destination_id="github-main",
+            kind="github_issue",
+            github_repository="cbusillo/launchplane",
+            github_label="public-ingress",
+        )
+        for reminder_interval_seconds in (899, 604801):
+            with self.subTest(reminder_interval_seconds=reminder_interval_seconds):
+                with self.assertRaises(ValueError):
+                    PublicIngressNotificationPolicyRecord.model_validate(
+                        {
+                            **_notification_policy(destination).model_dump(mode="json"),
+                            "reminder_interval_seconds": reminder_interval_seconds,
+                        }
+                    )
+
+    def test_acknowledgement_suppresses_reminders_and_material_change_reactivates(self) -> None:
+        store = _Store((_profile(),))
+        store.notification_policies.append(
+            _notification_policy(
+                PublicIngressNotificationDestination(
+                    destination_id="github-main",
+                    kind="github_issue",
+                    github_repository="cbusillo/launchplane",
+                    github_label="public-ingress",
+                )
+            ).model_copy(update={"reminder_interval_seconds": 900})
+        )
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:00:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=503,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        incident = store.incidents[0].model_copy(
+            update={
+                "notification_state": "acknowledged",
+                "notification_state_changed_at": "2026-05-29T12:01:00Z",
+                "notification_state_reason": "operator_acknowledged",
+            }
+        )
+        store.write_public_ingress_incident_record(incident)
+
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:15:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=500,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        self.assertEqual([event.event for event in store.incident_events], ["opened"])
+        self.assertEqual(store.reminder_states[0].status, "suppressed")
+
+        def redirect_failure(_url: str, _timeout: int) -> HttpObservation:
+            raise RuntimeError("redirect loop")
+
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:16:00Z",
+            http_get=redirect_failure,
+        )
+        updated = store.incidents[0]
+        self.assertEqual(updated.notification_state, "active")
+        self.assertEqual(store.incident_events[-1].event, "updated")
+        self.assertTrue(store.incident_events[-1].delivery_eligible)
+
+    def test_silence_suppresses_updates_but_never_resolution(self) -> None:
+        store = _Store((_profile(),))
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:00:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=503,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        store.write_public_ingress_incident_record(
+            store.incidents[0].model_copy(
+                update={
+                    "notification_state": "silenced",
+                    "notification_state_changed_at": "2026-05-29T12:01:00Z",
+                    "notification_state_reason": "bounded_rehearsal",
+                    "silenced_until": "2026-05-29T18:00:00Z",
+                }
+            )
+        )
+
+        def redirect_failure(_url: str, _timeout: int) -> HttpObservation:
+            raise RuntimeError("redirect loop")
+
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T13:00:00Z",
+            http_get=redirect_failure,
+        )
+        update_event = store.incident_events[-1]
+        self.assertEqual(update_event.event, "updated")
+        self.assertFalse(update_event.delivery_eligible)
+        self.assertEqual(update_event.suppression_reason, "silenced")
+
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T14:00:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        resolution_event = store.incident_events[-1]
+        self.assertEqual(resolution_event.event, "resolved")
+        self.assertTrue(resolution_event.delivery_eligible)
+
+    def test_recovery_threshold_requires_consecutive_passing_observations(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            base_url="https://example.test",
+            health_monitoring=_public_health_monitoring(recovery_observation_threshold=2),
+        )
+        store = _Store((_profile(lane=lane),))
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:00:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=503,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        first_pass = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:05:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        second_pass = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:10:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+
+        self.assertEqual(first_pass.resolved_incident_count, 0)
+        self.assertEqual(first_pass.incidents[0].consecutive_recovery_observations, 1)
+        self.assertEqual(second_pass.resolved_incident_count, 1)
+        self.assertEqual(store.incidents[0].resolution_reason, "recovered")
+
+    def test_reopened_failure_creates_new_incident_occurrence(self) -> None:
+        store = _Store((_profile(),))
+
+        def status_observer(status_code: int) -> Callable[[str, float], HttpObservation]:
+            def observe(url: str, _timeout: float) -> HttpObservation:
+                return HttpObservation(
+                    status_code=status_code,
+                    final_url=url,
+                    redirect_count=0,
+                )
+
+            return observe
+
+        for checked_at, status_code in (
+            ("2026-05-29T12:00:00Z", 503),
+            ("2026-05-29T12:05:00Z", 200),
+            ("2026-05-29T12:10:00Z", 503),
+        ):
+            run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at=checked_at,
+                http_get=status_observer(status_code),
+            )
+
+        self.assertEqual(len(store.incidents), 2)
+        self.assertEqual(len({incident.incident_id for incident in store.incidents}), 2)
+        self.assertEqual({incident.status for incident in store.incidents}, {"open", "resolved"})
+
     def test_resolves_all_open_public_ingress_incidents_on_recovery(self) -> None:
         store = _Store((_profile(),))
         store.incidents.extend(
@@ -1720,12 +2185,16 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(result.resolved_incident_count, 2)
         self.assertEqual(len(store.incidents), 2)
         self.assertTrue(all(incident.status == "resolved" for incident in store.incidents))
-        self.assertTrue(
-            all(
-                incident.resolved_observation_id == store.records[-1].record_id
-                for incident in store.incidents
-            )
+        recovered = next(
+            incident for incident in store.incidents if incident.resolution_reason == "recovered"
         )
+        duplicate = next(
+            incident
+            for incident in store.incidents
+            if incident.resolution_reason == "duplicate_reconciled"
+        )
+        self.assertEqual(recovered.resolved_observation_id, store.records[-1].record_id)
+        self.assertNotEqual(duplicate.resolved_observation_id, store.records[-1].record_id)
 
     def test_policy_driven_incident_notifications_record_attempts(self) -> None:
         store = _Store((_profile(),))
@@ -1855,6 +2324,124 @@ class PublicIngressMonitorTests(unittest.TestCase):
             },
         )
 
+    def test_postgres_outbox_dedupes_equivalent_failures_and_reminder_replay(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(_profile())
+            store.write_public_ingress_notification_policy_record(
+                _notification_policy(
+                    PublicIngressNotificationDestination(
+                        destination_id="github-main",
+                        kind="github_issue",
+                        github_repository="cbusillo/launchplane",
+                        github_label="public-ingress",
+                    )
+                ).model_copy(update={"reminder_interval_seconds": 900})
+            )
+
+            for checked_at in (
+                "2026-07-27T12:00:00Z",
+                "2026-07-27T12:05:00Z",
+                "2026-07-27T12:15:00Z",
+                "2026-07-27T12:15:00Z",
+            ):
+                run_public_ingress_monitor_once(
+                    record_store=store,
+                    checked_at=checked_at,
+                    http_get=lambda _url, _timeout: HttpObservation(
+                        status_code=503,
+                        final_url="https://example.test",
+                        redirect_count=0,
+                    ),
+                )
+
+            outbox_rows = store.list_outbox_delivery_records(
+                states=("pending",), kind="public_ingress_notification"
+            )
+            events = store.list_public_ingress_incident_event_records()
+            reminders = store.list_public_ingress_incident_reminder_state_records()
+            observations = store.list_public_ingress_observation_records()
+            store.close()
+
+        self.assertEqual([event.event for event in reversed(events)], ["opened", "reminder"])
+        self.assertEqual(len(outbox_rows), 2)
+        self.assertEqual(len({row.dedupe_key for row in outbox_rows}), 2)
+        self.assertEqual(len(observations), 3)
+        self.assertEqual(len(reminders), 1)
+        self.assertEqual(reminders[0].last_window_index, 1)
+        attempt_payloads = [cast(dict[str, object], row.payload["attempt"]) for row in outbox_rows]
+        self.assertEqual(
+            {str(attempt["incident_event_id"]) for attempt in attempt_payloads},
+            {event.event_id for event in events},
+        )
+
+    def test_reminder_outbox_recovers_incident_issue_by_stable_marker(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_profile())
+            store.write_public_ingress_notification_policy_record(
+                _notification_policy(
+                    PublicIngressNotificationDestination(
+                        destination_id="github-main",
+                        kind="github_issue",
+                        github_repository="cbusillo/launchplane",
+                        github_label="public-ingress",
+                    )
+                ).model_copy(update={"reminder_interval_seconds": 900})
+            )
+            for checked_at in ("2026-07-27T12:00:00Z", "2026-07-27T12:15:00Z"):
+                run_public_ingress_monitor_once(
+                    record_store=store,
+                    checked_at=checked_at,
+                    http_get=lambda _url, _timeout: HttpObservation(
+                        status_code=503,
+                        final_url="https://example.test",
+                        redirect_count=0,
+                    ),
+                )
+            reminder_record = next(
+                record
+                for record in store.list_outbox_delivery_records(
+                    states=("pending",), kind="public_ingress_notification"
+                )
+                if cast(dict[str, object], record.payload["attempt"])["event"] == "reminder"
+            )
+            store.close()
+
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        def github_client(action: str, payload: dict[str, object]) -> dict[str, object]:
+            calls.append((action, payload))
+            if action == "find_marker":
+                return {
+                    "url": "https://github.com/cbusillo/launchplane/issues/123",
+                    "id": "issue-123",
+                }
+            self.assertEqual(action, "comment")
+            return {
+                "url": "https://github.com/cbusillo/launchplane/issues/123#issuecomment-1",
+                "id": "comment-1",
+            }
+
+        delivered = deliver_public_ingress_notification_outbox_delivery(
+            record=reminder_record,
+            drivers=PublicIngressNotificationDriverSet(github_client=github_client),
+            mark_provider_started=lambda _key, _provider: None,
+        )
+
+        self.assertEqual([action for action, _payload in calls], ["find_marker", "comment"])
+        self.assertEqual(delivered.state, "delivered")
+        self.assertEqual(delivered.action, "commented_issue")
+
     def test_postgres_transition_fences_same_timestamp_monitoring_authority(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
@@ -1980,6 +2567,69 @@ class PublicIngressMonitorTests(unittest.TestCase):
 
         self.assertEqual(write_result.status, "authority_changed")
         self.assertEqual(stored_incidents, ())
+
+    def test_postgres_transition_fences_unversioned_notification_state_change(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(_profile())
+            run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at="2026-07-27T17:48:00Z",
+                http_get=lambda url, _timeout: HttpObservation(
+                    status_code=503,
+                    final_url=url,
+                    redirect_count=0,
+                ),
+            )
+            stale_incident = store.list_public_ingress_incident_records(status="open")[0]
+            stale_observation = store.list_public_ingress_observation_records()[0]
+            store.write_public_ingress_incident_record(
+                stale_incident.model_copy(
+                    update={
+                        "notification_state": "acknowledged",
+                        "notification_state_changed_at": "2026-07-27T17:48:30Z",
+                        "notification_state_reason": "operator_acknowledged",
+                    }
+                )
+            )
+            next_observation = stale_observation.model_copy(
+                update={
+                    "record_id": "public-ingress-example-site-prod-20260727t174900z",
+                    "observed_at": "2026-07-27T17:49:00Z",
+                    "incident_event_id": "",
+                }
+            )
+            planned_incident = stale_incident.model_copy(
+                update={
+                    "latest_observation_id": next_observation.record_id,
+                    "latest_observed_at": next_observation.observed_at,
+                    "state_version": stale_incident.state_version + 1,
+                }
+            )
+
+            write_result = store.write_public_ingress_transition_with_outbox(
+                observation=next_observation,
+                incidents=(planned_incident,),
+                expected_open_incident_id=stale_incident.incident_id,
+                expected_open_incident_state_version=stale_incident.state_version,
+                expected_open_incident_sha256=public_ingress_incident_record_sha256(stale_incident),
+            )
+            stored_incident = store.list_public_ingress_incident_records(status="open")[0]
+            stored_observation = next(
+                observation
+                for observation in store.list_public_ingress_observation_records()
+                if observation.record_id == next_observation.record_id
+            )
+            store.close()
+
+        self.assertEqual(write_result.status, "incident_changed")
+        self.assertEqual(stored_incident.notification_state, "acknowledged")
+        self.assertEqual(stored_incident.state_version, stale_incident.state_version)
+        self.assertEqual(stored_observation.incident_id, "")
 
     def test_postgres_transition_fences_route_binding_authority_change(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

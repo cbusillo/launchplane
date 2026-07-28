@@ -105,6 +105,7 @@ from control_plane.service_human_auth import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
 from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewDestroyResult,
     VeriReelPreviewInventoryItem,
@@ -5066,11 +5067,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(initial_payload["runtime"]["database_schema_revision"], "")
         self.assertEqual(
             initial_payload["runtime"]["compatible_database_schema_revisions"],
-            ["c6f8a0b2d4e6"],
+            [EXPECTED_ALEMBIC_HEAD_REVISION],
         )
         self.assertEqual(
             initial_payload["runtime"]["schema_migration_target_revision"],
-            "c6f8a0b2d4e6",
+            EXPECTED_ALEMBIC_HEAD_REVISION,
         )
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")

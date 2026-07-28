@@ -816,7 +816,12 @@ Public ingress observations are append-only Launchplane records under
 context, instance, and observation time. It stores the checked base and health
 URLs, pass/fail/skipped status, failure code, redirect and HTTP evidence,
 runtime identity match detail when available, and whether Launchplane delivered
-a configured transition notification. Records also carry the lane's typed
+a configured transition notification. Observations recorded while an incident
+is open carry that incident id; an observation that caused one material event
+also carries the event id. Every observation remains durable even when its
+evidence is equivalent to the previous cycle and therefore does not create a
+notification. Failing observations carry the typed material fingerprint and
+digest used by reconciliation. Records also carry the lane's typed
 `monitoring_intent` and a `purpose` of `probe` or `reconciliation`.
 
 These records are the source for the product environment read model's
@@ -936,15 +941,54 @@ missing production records remain non-ready and never trigger a write.
 
 Public ingress incidents are Launchplane-owned lifecycle records under
 `launchplane_public_ingress_incidents`. They are derived from public-ingress
-observations and keyed by product, context, instance, and incident open time. An
-open incident records the first failing observation and the latest failing
-observation for that lane. A recovery observation resolves the incident with
-`resolution_reason = recovered`. If a public or TLS check becomes ineligible
-because monitoring authority changes, a typed reconciliation observation
-resolves it with `resolution_reason = monitoring_intent_changed`; this is not
-presented as endpoint recovery. Existing notification policies remain in force
-for opened, updated, and resolved events, so actionable failures remain red and
-intent-driven resolution remains auditable.
+observations. One stable active key is product, context, instance, canonical
+check name, and check kind, while `incident_id` is occurrence-scoped and includes
+the open time. Repeated failures update one open occurrence; a later failure
+after resolution opens a new record instead of overwriting history. A partial
+database uniqueness fence permits only one open occurrence per active key.
+
+The incident stores first/latest observation linkage, a monotonically changing
+state version, severity, typed material fingerprint and digest, latest material
+event identity, notification state, and recovery progress. The fingerprint is
+deterministic per check kind. It includes failure code/layer, severity, affected
+target kind, material route authority, TLS state, and bounded expected-runtime
+mismatch identity. It excludes observation ids, timestamps, HTTP status churn
+within one category, retry counters, summaries, certificate timing evidence,
+and other equivalent sensor detail. Public HTTP fingerprints use canonical
+public URLs; private HTTP fingerprints use the endpoint key plus a material
+authority digest rather than the private URL; provider and TLS fingerprints use
+their typed provider or route-binding authority.
+
+Material lifecycle events are append-only records under
+`launchplane_public_ingress_incident_events`. Event kinds are `opened`,
+`updated`, `reminder`, `resolved`, and the non-deliverable `baseline` used only
+to adopt pre-migration incidents. Opening and material-update identities derive
+from the incident, previous material event, and new fingerprint. Reminder
+identities derive from the incident, policy, material event, and bounded reminder
+window. Resolution derives from the incident and previous material event. Raw
+observation identity is evidence linkage, not event identity.
+
+Reminder state is DB-backed under
+`launchplane_public_ingress_incident_reminders`, one record per incident and
+matching notification policy. It stores the material-event anchor, bounded
+cadence, last delivered window, and next due time. A monitor pass emits at most
+one reminder for the current overdue window, so downtime or worker backlog does
+not cause a catch-up storm. A material update resets the anchor. Policy removal
+marks prior state inactive; resolution marks it resolved. Suppressed state may
+retain its internal due window for deterministic resumption, but product read
+models expose no next-reminder timestamp until the state is active again.
+
+Acknowledged incidents suppress reminders for the acknowledged material state.
+A material change clears acknowledgement and remains immediately deliverable.
+Silenced incidents preserve observations and events but suppress update and
+reminder delivery only until their required `silenced_until`; expiry reactivates
+delivery and the next unchanged failure may emit the current overdue reminder.
+Resolution is always deliverable so external issue sinks can close. A recovery
+observation resolves only after the health check's configured consecutive-pass
+threshold and writes one `resolved` event with `resolution_reason = recovered`.
+If monitoring authority makes a check ineligible, a typed reconciliation
+observation resolves it immediately with
+`resolution_reason = monitoring_intent_changed`; this is not endpoint recovery.
 
 TLS certificate observations do not introduce a parallel storage family. They
 reuse `launchplane_public_ingress_observations` with `check_kind = "tls"` and a
@@ -968,17 +1012,23 @@ where Launchplane attempted to notify operators.
 
 Public ingress notification policy records are DB-backed Launchplane records
 under `launchplane_public_ingress_notification_policies`. They select enabled
-destinations for incident events by product, context, and instance. The initial
-destination drivers are GitHub issues, email, and Discord. Policies store
-routing intent and managed secret references only; they must not store Discord
-webhook URLs, SMTP passwords, or production destination values as code defaults.
+destinations for incident events by product, context, and instance and store a
+bounded reminder cadence. The generic default is six hours; accepted policy
+values are 15 minutes through seven days. The initial destination drivers are
+GitHub issues, email, and Discord. Policies store routing intent and managed
+secret references only; they must not store Discord webhook URLs, SMTP
+passwords, or production destination values as code defaults.
 
 Public ingress notification attempt records are append-only evidence under
 `launchplane_public_ingress_notification_attempts`. Each attempt is keyed by the
-incident, event, policy, destination, and observation. Attempts record delivered,
-skipped, or failed status plus provider-safe external ids or URLs. Delivery
-attempts are the idempotency boundary for notifications, while incident records
-remain the source of truth for active public-ingress state.
+incident event, policy, and destination; `observation_id` remains evidence only.
+Attempts record delivered, skipped, or failed status plus provider-safe external
+ids or URLs. GitHub outbox rows use the same material event or reminder-window
+identity and include both an event marker and a stable incident marker. A worker
+can therefore recover the existing issue before commenting or closing even when
+the original opening effect completed before its attempt record committed.
+Delivery attempts are the idempotency boundary for notifications, while incident
+records remain the source of truth for active public-ingress state.
 
 ## Every Code Notification Records
 

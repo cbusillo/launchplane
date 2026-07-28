@@ -53,6 +53,9 @@ from control_plane.contracts.outbox_delivery import (
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
+    ProductLaneHealthCheck,
+    ProductLaneHealthMonitoringPolicy,
+    ProductLaneProfile,
     ProductPreviewProfile,
 )
 from control_plane.contracts.route_binding_record import (
@@ -69,6 +72,10 @@ from control_plane.provider_operations import (
     ProviderObservation,
     ProviderOperationLease,
     run_durable_provider_operation,
+)
+from control_plane.workflows.public_ingress_monitor import (
+    HttpObservation,
+    run_public_ingress_monitor_once,
 )
 from control_plane.odoo_stable_lane import (
     OdooStableLaneOperationConflictError,
@@ -399,6 +406,31 @@ def _product_profile() -> LaunchplaneProductProfileRecord:
         image=ProductImageProfile(),
         preview=ProductPreviewProfile(),
         updated_at="2026-07-13T00:00:00Z",
+        source="test:postgres-integration",
+    )
+
+
+def _public_ingress_profile() -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product="postgres-public-ingress-test",
+        display_name="PostgreSQL Public Ingress Test",
+        repository="example/postgres-public-ingress-test",
+        driver_id="generic-web",
+        image=ProductImageProfile(repository="ghcr.io/example/postgres-public-ingress-test"),
+        runtime_port=3000,
+        health_path="/healthz",
+        lanes=(
+            ProductLaneProfile(
+                context="postgres-public-ingress-test",
+                instance="prod",
+                base_url="https://example.test",
+                health_monitoring=ProductLaneHealthMonitoringPolicy(
+                    monitoring_intent="public",
+                    checks=(ProductLaneHealthCheck(name="public-ingress"),),
+                ),
+            ),
+        ),
+        updated_at="2026-07-27T00:00:00Z",
         source="test:postgres-integration",
     )
 
@@ -968,6 +1000,22 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     column["name"]: column
                     for column in inspector.get_columns("launchplane_outbox_deliveries")
                 }
+                incident_indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes("launchplane_public_ingress_incidents")
+                }
+                incident_columns = {
+                    column["name"]: column
+                    for column in inspector.get_columns("launchplane_public_ingress_incidents")
+                }
+                observation_indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes("launchplane_public_ingress_observations")
+                }
+                observation_columns = {
+                    column["name"]: column
+                    for column in inspector.get_columns("launchplane_public_ingress_observations")
+                }
                 payload_type = _column_type(
                     engine,
                     table_name="launchplane_idempotency_records",
@@ -993,6 +1041,21 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     table_name="launchplane_outbox_deliveries",
                     column_name="max_attempts",
                 )
+                incident_state_version_type = _column_type(
+                    engine,
+                    table_name="launchplane_public_ingress_incidents",
+                    column_name="state_version",
+                )
+                incident_event_payload_type = _column_type(
+                    engine,
+                    table_name="launchplane_public_ingress_incident_events",
+                    column_name="payload",
+                )
+                incident_reminder_payload_type = _column_type(
+                    engine,
+                    table_name="launchplane_public_ingress_incident_reminders",
+                    column_name="payload",
+                )
                 alembic_version = _current_alembic_version(engine)
             finally:
                 store.close()
@@ -1003,6 +1066,9 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertEqual(outbox_payload_type, "jsonb")
         self.assertEqual(outbox_attempt_type, "integer")
         self.assertEqual(outbox_max_attempts_type, "integer")
+        self.assertEqual(incident_state_version_type, "integer")
+        self.assertEqual(incident_event_payload_type, "jsonb")
+        self.assertEqual(incident_reminder_payload_type, "jsonb")
         self.assertTrue(idempotency_columns["response_status_code"]["nullable"])
         self.assertFalse(authz_columns["revision"]["nullable"])
         self.assertTrue(authz_indexes["launchplane_authz_policies_revision_uidx"]["unique"])
@@ -1010,6 +1076,15 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertFalse(outbox_columns["payload"]["nullable"])
         self.assertTrue(outbox_indexes["launchplane_outbox_deliveries_dedupe_uidx"]["unique"])
         self.assertFalse(outbox_indexes["launchplane_outbox_deliveries_claim_idx"]["unique"])
+        self.assertFalse(incident_columns["state_version"]["nullable"])
+        self.assertFalse(observation_columns["check_token"]["nullable"])
+        self.assertFalse(observation_columns["check_kind"]["nullable"])
+        self.assertFalse(
+            observation_indexes["launchplane_public_ingress_observations_check_idx"]["unique"]
+        )
+        self.assertTrue(
+            incident_indexes["launchplane_public_ingress_incidents_open_uidx"]["unique"]
+        )
         self.assertTrue(
             idempotency_indexes["launchplane_idempotency_scope_route_key_idx"]["unique"]
         )
@@ -1437,6 +1512,47 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_concurrent_public_ingress_failures_open_one_incident_and_keep_both_observations(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            store.write_product_profile_record(_public_ingress_profile())
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def monitor(active_store: PostgresRecordStore, checked_at: str) -> None:
+                barrier.wait(timeout=10)
+                run_public_ingress_monitor_once(
+                    record_store=active_store,
+                    checked_at=checked_at,
+                    http_get=lambda url, _timeout: HttpObservation(
+                        status_code=503,
+                        final_url=url,
+                        redirect_count=0,
+                    ),
+                )
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first = executor.submit(monitor, store, "2026-07-27T12:00:00Z")
+                    second = executor.submit(monitor, second_store, "2026-07-27T12:00:01Z")
+                    first.result(timeout=30)
+                    second.result(timeout=30)
+                incidents = store.list_public_ingress_incident_records(status="open")
+                observations = store.list_public_ingress_observation_records(
+                    product="postgres-public-ingress-test"
+                )
+                events = store.list_public_ingress_incident_event_records()
+            finally:
+                second_store.close()
+
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(len(observations), 2)
+        self.assertTrue(
+            all(record.incident_id == incidents[0].incident_id for record in observations)
+        )
+        self.assertEqual([event.event for event in events], ["opened"])
+
     def test_authz_policy_compare_write_serializes_concurrent_writers(self) -> None:
         with _store_for_fresh_head_database() as store:
             initial_record = store.seed_authz_policy_if_absent(

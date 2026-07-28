@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "c6f8a0b2d4e6"
+EXPECTED_ALEMBIC_HEAD_REVISION = "d7f9a1b3c5e7"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -151,6 +151,21 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "launchplane_outbox_deliveries",
         "max_attempts",
         ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_public_ingress_incidents",
+        "state_version",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_public_ingress_incident_events",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_public_ingress_incident_reminders",
+        "payload",
+        ("jsonb",),
     ),
     CriticalColumnType(
         "launchplane_merge_train_controller_states",
@@ -314,6 +329,33 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_outbox_deliveries",
         "launchplane_outbox_deliveries_claim_idx",
         ("state", "next_attempt_at", "lease_expires_at", "created_at"),
+    ),
+    CriticalIndex(
+        "launchplane_public_ingress_observations",
+        "launchplane_public_ingress_observations_incident_idx",
+        ("incident_id", "observed_at"),
+    ),
+    CriticalIndex(
+        "launchplane_public_ingress_observations",
+        "launchplane_public_ingress_observations_check_idx",
+        ("product", "context", "instance", "check_token", "check_kind", "observed_at"),
+    ),
+    CriticalIndex(
+        "launchplane_public_ingress_incidents",
+        "launchplane_public_ingress_incidents_open_uidx",
+        ("product", "context", "instance", "check_token", "check_kind"),
+        unique=True,
+        predicate_expression="status='open'",
+    ),
+    CriticalIndex(
+        "launchplane_public_ingress_incident_events",
+        "launchplane_pi_incident_events_incident_idx",
+        ("incident_id", "occurred_at"),
+    ),
+    CriticalIndex(
+        "launchplane_public_ingress_incident_reminders",
+        "launchplane_pi_incident_reminders_due_idx",
+        ("status", "next_reminder_at"),
     ),
     CriticalIndex(
         "launchplane_merge_train_controller_states",

@@ -220,7 +220,11 @@ cleanup scope so the store is always closed.
 - authenticated evidence routes:
   - `POST /v1/products/public-ingress-monitor/run-once` (native FastAPI for
     bearer-token callers, with Pydantic/OpenAPI contract coverage,
-    idempotency replay preservation, and no legacy `GET` route)
+    idempotency replay preservation, and no legacy `GET` route). The accepted
+    result returns every observation plus changed incident records, durable
+    incident events, per-policy reminder state, and direct delivery attempts.
+    Equivalent failed observations remain in `records` but do not appear as a
+    new event; `reminder` events identify their exact bounded policy window.
   - Native `POST /v1/evidence/*` ingress routes reject non-JSON media types with
     the Launchplane `400 invalid_request` envelope; they require bounded,
     non-chunked `Content-Length` headers and enforce the same 2 MiB byte ceiling
@@ -1612,8 +1616,11 @@ Public ingress notification policy writes use
 `public_ingress_notification_policy.apply`, DB-backed Launchplane storage, and
 an idempotency key when a caller wants retry-safe service semantics. Local
 operator calls must include a non-empty reason. Policies store routing intent and
-managed secret record ids only; Discord webhook URLs, SMTP credentials, and
-operator destination values must not be encoded in text-file defaults or source.
+managed secret record ids only, plus a reminder interval bounded from 15 minutes
+through seven days. Existing policies migrate to the generic six-hour cadence.
+Discord webhook URLs, SMTP credentials, and operator destination values must not
+be encoded in text-file defaults or source. Dry-run and apply summaries return
+the effective reminder interval without returning secret material.
 
 Every Code notification policy writes use
 `POST /v1/every-code/notification-policies/apply`. The request carries
@@ -2236,6 +2243,13 @@ warnings make domain, placement, ingress, ownership, TLS, and freshness
 divergence explicit. A hostname-mismatch read includes the public name,
 recorded terminator/owner, bounded presented certificate names, failure code,
 incident linkage, and a likely cause without requiring provider database access.
+Open incident summaries additionally expose severity, notification state,
+material fingerprint digest, latest material event kind/time, and aggregate next
+and last reminder times. Acknowledgement or silence never changes the health or
+topology status; those fields describe delivery state only. Suppressed reminder
+state does not expose a next-reminder timestamp until delivery is active again.
+Raw private endpoint URLs, destination credentials, operator identities, and
+notification payloads remain outside the product read model.
 
 `GET /v1/products/{product}/environments/{environment}/config-status` is a
 redacted product/site read under the same action. It compares product-profile

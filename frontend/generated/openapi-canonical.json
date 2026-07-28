@@ -12365,6 +12365,84 @@
             "title": "Incident Id",
             "type": "string"
           },
+          "incident_last_reminded_at": {
+            "default": "",
+            "title": "Incident Last Reminded At",
+            "type": "string"
+          },
+          "incident_latest_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Latest Event"
+          },
+          "incident_latest_event_at": {
+            "default": "",
+            "title": "Incident Latest Event At",
+            "type": "string"
+          },
+          "incident_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Incident Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "incident_next_reminder_at": {
+            "default": "",
+            "title": "Incident Next Reminder At",
+            "type": "string"
+          },
+          "incident_notification_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "acknowledged",
+                  "silenced"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Notification State"
+          },
+          "incident_severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Severity"
+          },
           "incident_status": {
             "default": "",
             "title": "Incident Status",
@@ -12543,6 +12621,13 @@
             "default": "",
             "title": "Provider Check",
             "type": "string"
+          },
+          "recovery_observation_threshold": {
+            "default": 1,
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Recovery Observation Threshold",
+            "type": "integer"
           },
           "require_runtime_identity": {
             "default": false,
@@ -12726,6 +12811,84 @@
             "title": "Incident Id",
             "type": "string"
           },
+          "incident_last_reminded_at": {
+            "default": "",
+            "title": "Incident Last Reminded At",
+            "type": "string"
+          },
+          "incident_latest_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Latest Event"
+          },
+          "incident_latest_event_at": {
+            "default": "",
+            "title": "Incident Latest Event At",
+            "type": "string"
+          },
+          "incident_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Incident Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "incident_next_reminder_at": {
+            "default": "",
+            "title": "Incident Next Reminder At",
+            "type": "string"
+          },
+          "incident_notification_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "acknowledged",
+                  "silenced"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Notification State"
+          },
+          "incident_severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Severity"
+          },
           "incident_status": {
             "default": "",
             "title": "Incident Status",
@@ -12900,6 +13063,84 @@
             "default": "",
             "title": "Incident Id",
             "type": "string"
+          },
+          "incident_last_reminded_at": {
+            "default": "",
+            "title": "Incident Last Reminded At",
+            "type": "string"
+          },
+          "incident_latest_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Latest Event"
+          },
+          "incident_latest_event_at": {
+            "default": "",
+            "title": "Incident Latest Event At",
+            "type": "string"
+          },
+          "incident_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Incident Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "incident_next_reminder_at": {
+            "default": "",
+            "title": "Incident Next Reminder At",
+            "type": "string"
+          },
+          "incident_notification_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "acknowledged",
+                  "silenced"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Notification State"
+          },
+          "incident_severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Severity"
           },
           "incident_status": {
             "default": "",
@@ -14973,10 +15214,88 @@
             "title": "Incident Id",
             "type": "string"
           },
+          "incident_last_reminded_at": {
+            "default": "",
+            "title": "Incident Last Reminded At",
+            "type": "string"
+          },
+          "incident_latest_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Latest Event"
+          },
+          "incident_latest_event_at": {
+            "default": "",
+            "title": "Incident Latest Event At",
+            "type": "string"
+          },
+          "incident_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Incident Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "incident_next_reminder_at": {
+            "default": "",
+            "title": "Incident Next Reminder At",
+            "type": "string"
+          },
+          "incident_notification_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "acknowledged",
+                  "silenced"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Notification State"
+          },
           "incident_opened_at": {
             "default": "",
             "title": "Incident Opened At",
             "type": "string"
+          },
+          "incident_severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Severity"
           },
           "incident_status": {
             "default": "",
@@ -16409,6 +16728,13 @@
             "default": "",
             "title": "Product",
             "type": "string"
+          },
+          "reminder_interval_seconds": {
+            "default": 21600,
+            "maximum": 604800.0,
+            "minimum": 900.0,
+            "title": "Reminder Interval Seconds",
+            "type": "integer"
           },
           "schema_version": {
             "default": 1,
@@ -42208,6 +42534,13 @@
                         "default": "",
                         "title": "Provider Check",
                         "type": "string"
+                      },
+                      "recovery_observation_threshold": {
+                        "default": 1,
+                        "maximum": 10,
+                        "minimum": 1,
+                        "title": "Recovery Observation Threshold",
+                        "type": "integer"
                       },
                       "require_runtime_identity": {
                         "default": false,

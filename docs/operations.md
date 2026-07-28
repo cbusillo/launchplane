@@ -726,7 +726,9 @@ fails validation. The public-ingress route and record
 names are compatibility names for the existing health-monitor observation
 family. Observations are sensor evidence; incident records are keyed by product,
 lane, and health-check name so public, private, and provider failures do not
-overwrite each other.
+overwrite each other. The active key is stable, but each opened occurrence has
+its own incident id so recovery followed by a later failure does not replace the
+resolved history.
 
 Probe effectiveness and incident eligibility are separate. Public and TLS
 checks run for `public` and `prelaunch`; their failures open or update incidents
@@ -770,6 +772,37 @@ record changes, even when its human timestamp is unchanged. Email and Discord
 delivery behavior and DB-backed notification policies are unchanged; do not
 disable destinations to perform an intent transition.
 
+Every failing observation is retained and linked to its open incident. The
+monitor derives a typed material fingerprint from failure layer/category,
+severity, affected target, route authority, TLS state, and expected-runtime
+mismatch. Observation ids, timestamps, retries, summaries, and equivalent HTTP
+evidence do not participate. A new incident emits one `opened` event. An open
+incident emits `updated` only when that fingerprint changes; otherwise it
+updates latest evidence without an immediate delivery. The database serializes
+the active incident key and compare-checks both the incident state version and
+the full expected incident digest before committing observation, incident,
+event, reminder, and outbox rows together. Concurrent acknowledgement, silence,
+or monitor passes therefore re-plan against current state instead of overwriting
+operator state, opening a second incident, or losing evidence. Any supported
+non-monitor incident-state mutation must increment `state_version`.
+
+Notification policies carry a reminder interval from 15 minutes through seven
+days; the generic migrated/default interval is six hours. Each incident/policy
+pair stores its material-event anchor, current reminder window, last reminder,
+and next due time. An overdue pass emits only the current window, never every
+missed window. Opening or material update resets the anchor. The outbox and
+notification attempt ids use the material event id or reminder-window event id,
+not the observation id.
+
+Acknowledgement suppresses reminders for the acknowledged fingerprint. A
+material change clears acknowledgement and is immediately eligible for delivery.
+A bounded silence preserves all observations/events but suppresses material
+updates and reminders until `silenced_until`; after expiry the next unresolved
+failure can emit the current reminder. Resolution is never silenced because
+GitHub issue sinks must be closed and other operators must see recovery. Public,
+private, and provider checks use the configured consecutive-pass recovery
+threshold; only the threshold-crossing pass creates the single recovery event.
+
 TLS observations reuse the same monitor run, record family, and incident
 lifecycle. For each active environment route binding, Launchplane probes one
 TLS target per bound domain so primary names and aliases are recorded
@@ -811,6 +844,12 @@ Notification routing is a separate service-backed policy and delivery concern,
 not lane-owned text config. The initial notification destinations are GitHub
 issues, email, and Discord; each is selected by DB-backed policy and evidenced
 by delivery-attempt records.
+GitHub delivery bodies carry a material-event marker for exact replay and a
+stable incident marker for issue recovery. Updates, reminders, and resolutions
+search the incident marker when their queued payload predates the committed
+opening attempt record, then comment or close the recovered issue rather than
+creating a duplicate. Do not clear provider markers or outbox rows to force a
+retry.
 GitHub issue notification delivery uses the managed automation token projected
 as `LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN`; it does not fall back to active
 local `gh` authentication. Verify the configured actor with a token-scoped

@@ -2911,6 +2911,7 @@ def _public_ingress_notification_policy_summary(
         "context": policy.context,
         "instance": policy.instance,
         "status": policy.status,
+        "reminder_interval_seconds": policy.reminder_interval_seconds,
         "destination_count": len(policy.destinations),
         "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
         "created_at": policy.created_at,

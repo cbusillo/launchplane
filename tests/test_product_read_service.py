@@ -14,6 +14,9 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentReminderStateRecord,
+)
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.promotion_record import PromotionRecord
@@ -192,6 +195,17 @@ class _ProductReadStore:
         limit: int | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]:
         _ = (self, product, context_name, instance_name, check_name, check_kind, status, limit)
+        return ()
+
+    def list_public_ingress_incident_reminder_state_records(
+        self,
+        *,
+        incident_id: str = "",
+        policy_id: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentReminderStateRecord, ...]:
+        _ = (self, incident_id, policy_id, status, limit)
         return ()
 
     def list_runtime_environment_records(
