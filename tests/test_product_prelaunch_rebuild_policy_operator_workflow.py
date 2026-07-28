@@ -8,9 +8,7 @@ from tests.support.workflows import load_workflow
 
 class ProductPrelaunchRebuildPolicyOperatorWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.workflow = load_workflow(
-            ".github/workflows/product-prelaunch-rebuild-policy.yml"
-        )
+        self.workflow = load_workflow(".github/workflows/product-prelaunch-rebuild-policy.yml")
         self.worker = load_workflow(
             ".github/workflows/reusable-product-prelaunch-rebuild-policy.yml"
         )
