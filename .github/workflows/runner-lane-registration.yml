@@ -1,37 +1,46 @@
 ---
-name: Runner Lane Registration
+name: Runner Lane Lifecycle
 
 "on":
   workflow_dispatch:
     inputs:
+      operation:
+        description: Runner lane lifecycle operation.
+        required: true
+        default: register
+        type: choice
+        options:
+          - register
+          - retire
       repository:
-        description: owner/name repository to receive the runner lane.
+        description: owner/name repository that owns the runner lane.
         required: true
         type: string
       lane_name:
-        description: Runner lane name to register.
+        description: Exact runner lane name.
         required: true
         type: string
       registration_root:
-        description: Absolute runner root, or auto for service-user home.
+        description: Absolute runner root, or auto for the approved root.
         required: false
         default: auto
         type: string
       runner_package_url:
-        description: GitHub Actions runner tarball URL for mutate=true.
+        description: GitHub Actions runner tarball URL for registration.
         required: false
         default: ""
         type: string
       labels:
-        description: Comma-separated runner labels.
-        required: true
+        description: Comma-separated runner labels for registration.
+        required: false
+        default: ""
         type: string
       audit_record_key:
-        description: Launchplane audit record key.
+        description: Launchplane runner lifecycle audit record key.
         required: true
         type: string
       mutate:
-        description: Register the runner lane.
+        description: Apply the selected runner lane lifecycle operation.
         required: true
         default: false
         type: boolean
@@ -47,11 +56,11 @@ permissions:
 
 concurrency:
   group: >-
-    runner-lane-registration-${{ inputs.repository }}-${{ inputs.lane_name }}
+    runner-lane-lifecycle-${{ inputs.repository }}-${{ inputs.lane_name }}
   cancel-in-progress: false
 
 jobs:
-  runner-lane-registration:
+  runner-lane-lifecycle:
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}
@@ -66,45 +75,68 @@ jobs:
       LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
 
       - name: Validate workflow configuration
         shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          LANE_NAME: ${{ inputs.lane_name }}
+          RUNNER_LABELS_INPUT: ${{ inputs.labels }}
+          MUTATE_REQUESTED: ${{ inputs.mutate }}
+          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
-          if [ -z "${RUNNER_REGISTRATION_HOST:-}" ]; then
-            echo "Missing runner registration host variable." >&2
-            exit 1
-          fi
-          if [ -z "${RUNNER_REGISTRATION_EXECUTION_LANE:-}" ]; then
-            echo "Missing runner registration execution lane variable." >&2
-            exit 1
-          fi
-          if [ -z "${RUNNER_REGISTRATION_SERVICE_USER:-}" ]; then
-            echo "Missing runner registration service user variable." >&2
-            exit 1
-          fi
-          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ]; then
-            echo "Missing Launchplane public URL variable." >&2
-            exit 1
-          fi
+          for required_name in \
+            RUNNER_REGISTRATION_HOST \
+            RUNNER_REGISTRATION_EXECUTION_LANE \
+            RUNNER_REGISTRATION_SERVICE_USER \
+            LAUNCHPLANE_SERVICE_URL; do
+            if [ -z "${!required_name:-}" ]; then
+              echo "Missing ${required_name}." >&2
+              exit 1
+            fi
+          done
           if [ "$(id -un)" != "$RUNNER_REGISTRATION_SERVICE_USER" ]; then
             echo "Runner must execute as expected service user." >&2
             exit 1
           fi
-          if [ "${MUTATE_REQUESTED}" = "true" ] &&
-            [ "${CONFIRMATION}" != "register runner lane" ]; then
-            echo "mutate=true requires confirmation: register runner lane" >&2
+          if ! command -v flock >/dev/null 2>&1; then
+            echo "Runner lane lifecycle requires flock." >&2
             exit 1
           fi
-        env:
-          MUTATE_REQUESTED: ${{ inputs.mutate }}
-          CONFIRMATION: ${{ inputs.confirmation }}
+          case "$OPERATION" in
+            register)
+              if [ -z "$RUNNER_LABELS_INPUT" ]; then
+                echo "operation=register requires labels." >&2
+                exit 1
+              fi
+              expected_confirmation="register runner lane"
+              ;;
+            retire)
+              expected_confirmation="retire ${TARGET_REPOSITORY} ${LANE_NAME}"
+              if [ "$MUTATE_REQUESTED" = "true" ] &&
+                [ ! -x /usr/local/sbin/launchplane-runner-service-retire ]; then
+                echo "Missing reviewed runner service retirement helper." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Unsupported runner lane lifecycle operation." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$MUTATE_REQUESTED" = "true" ] &&
+            [ "$CONFIRMATION" != "$expected_confirmation" ]; then
+            echo "mutate=true requires confirmation: $expected_confirmation" >&2
+            exit 1
+          fi
 
-      - name: Read pre-registration inventory
+      - name: Read pre-lifecycle inventory
         shell: bash
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
@@ -112,15 +144,16 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "Missing runner registration GitHub token secret." >&2
+            echo "Missing runner administration GitHub token secret." >&2
             exit 1
           fi
           GITHUB_TOKEN="$GH_TOKEN" uv run launchplane work-graph \
             runner-inventory \
             --repository "$TARGET_REPOSITORY" \
-            > runner-lane-registration-pre-inventory.json
+            > runner-lane-lifecycle-pre-inventory.json
 
       - name: Run runner lane registration executor
+        if: ${{ inputs.operation == 'register' }}
         id: registration
         shell: bash
         env:
@@ -141,21 +174,11 @@ jobs:
               "runner lane registration executor did not produce a result" \
             '{status:"failed", audit_record_key:$audit_record_key,
               message:$message}' \
-            > runner-lane-registration-result.json
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "Missing runner registration GitHub token secret." >&2
-            exit 1
-          fi
+            > runner-lane-lifecycle-result.json
           if [ "$REGISTRATION_ROOT" = "auto" ]; then
             REGISTRATION_ROOT="$approved_root"
           fi
-          if [ "${REGISTRATION_ROOT#/}" = "$REGISTRATION_ROOT" ]; then
-            echo "registration_root must be absolute or auto." >&2
-            exit 1
-          fi
-          if [ -n "${RUNNER_REGISTRATION_ALLOWED_ROOT:-}" ] &&
-            [ "$REGISTRATION_ROOT" != \
-              "$RUNNER_REGISTRATION_ALLOWED_ROOT" ]; then
+          if [ "$REGISTRATION_ROOT" != "$approved_root" ]; then
             echo "registration_root must match Launchplane approved root." >&2
             exit 1
           fi
@@ -172,7 +195,9 @@ jobs:
           if [ "$MUTATE_REQUESTED" = "true" ]; then
             mutate_flag=--mutate
           fi
-          GITHUB_TOKEN="$GH_TOKEN" uv run launchplane work-graph \
+          GITHUB_TOKEN="$GH_TOKEN" flock -n \
+            /tmp/launchplane-runner-host-hygiene.lock \
+            uv run launchplane work-graph \
             runner-lane-registration-executor \
             --repository "$TARGET_REPOSITORY" \
             --host-name "$RUNNER_REGISTRATION_HOST" \
@@ -186,40 +211,95 @@ jobs:
             --allowed-repository "$TARGET_REPOSITORY" \
             --approved-host "$RUNNER_REGISTRATION_HOST" \
             --allowed-registration-root "$approved_root" \
-            --inventory-file runner-lane-registration-pre-inventory.json \
+            --inventory-file runner-lane-lifecycle-pre-inventory.json \
             --audit-mode service \
             --service-url "$LAUNCHPLANE_SERVICE_URL" \
             "$mutate_flag" \
-            > runner-lane-registration-result.tmp
-          mv \
-            runner-lane-registration-result.tmp \
-            runner-lane-registration-result.json
-          status="$(jq -r '.status // ""' runner-lane-registration-result.json)"
-          echo "registration_status=$status" >>"$GITHUB_OUTPUT"
+            > runner-lane-lifecycle-result.tmp
+          mv runner-lane-lifecycle-result.tmp runner-lane-lifecycle-result.json
+          status="$(jq -r '.status // ""' runner-lane-lifecycle-result.json)"
+          echo "lifecycle_status=$status" >>"$GITHUB_OUTPUT"
 
-      - name: Upload registration result
+      - name: Run runner lane retirement executor
+        if: ${{ inputs.operation == 'retire' }}
+        id: retirement
+        shell: bash
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          LANE_NAME: ${{ inputs.lane_name }}
+          REGISTRATION_ROOT: ${{ inputs.registration_root }}
+          AUDIT_RECORD_KEY: ${{ inputs.audit_record_key }}
+          GH_TOKEN: ${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}
+          MUTATE_REQUESTED: ${{ inputs.mutate }}
+        run: |
+          set -euo pipefail
+          approved_root="${RUNNER_REGISTRATION_ALLOWED_ROOT:-$HOME/actions-runners}"
+          jq -n \
+            --arg audit_record_key "$AUDIT_RECORD_KEY" \
+            --arg message \
+              "runner lane retirement executor did not produce a result" \
+            '{status:"failed", audit_record_key:$audit_record_key,
+              message:$message}' \
+            > runner-lane-lifecycle-result.json
+          if [ "$REGISTRATION_ROOT" = "auto" ]; then
+            REGISTRATION_ROOT="$approved_root"
+          fi
+          if [ "$REGISTRATION_ROOT" != "$approved_root" ]; then
+            echo "registration_root must match Launchplane approved root." >&2
+            exit 1
+          fi
+          mutate_flag=--dry-run
+          if [ "$MUTATE_REQUESTED" = "true" ]; then
+            mutate_flag=--mutate
+          fi
+          GITHUB_TOKEN="$GH_TOKEN" flock -n \
+            /tmp/launchplane-runner-host-hygiene.lock \
+            uv run launchplane work-graph \
+            runner-lane-retirement-executor \
+            --repository "$TARGET_REPOSITORY" \
+            --host-name "$RUNNER_REGISTRATION_HOST" \
+            --execution-lane "$RUNNER_REGISTRATION_EXECUTION_LANE" \
+            --service-user "$RUNNER_REGISTRATION_SERVICE_USER" \
+            --lane-name "$LANE_NAME" \
+            --registration-root "$REGISTRATION_ROOT" \
+            --audit-record-key "$AUDIT_RECORD_KEY" \
+            --allowed-repository "$TARGET_REPOSITORY" \
+            --approved-host "$RUNNER_REGISTRATION_HOST" \
+            --allowed-registration-root "$approved_root" \
+            --required-label launchplane \
+            --required-label launchplane-managed \
+            --inventory-file runner-lane-lifecycle-pre-inventory.json \
+            --audit-mode service \
+            --service-url "$LAUNCHPLANE_SERVICE_URL" \
+            "$mutate_flag" \
+            > runner-lane-lifecycle-result.tmp
+          mv runner-lane-lifecycle-result.tmp runner-lane-lifecycle-result.json
+          status="$(jq -r '.status // ""' runner-lane-lifecycle-result.json)"
+          echo "lifecycle_status=$status" >>"$GITHUB_OUTPUT"
+
+      - name: Upload lifecycle result
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: runner-lane-registration-result
+          name: runner-lane-lifecycle-result
           path: |
-            runner-lane-registration-pre-inventory.json
-            runner-lane-registration-result.json
+            runner-lane-lifecycle-pre-inventory.json
+            runner-lane-lifecycle-result.json
           if-no-files-found: warn
 
-      - name: Fail on unexpected registration result
+      - name: Fail on unexpected lifecycle result
         env:
           MUTATE_REQUESTED: ${{ inputs.mutate }}
-          REGISTRATION_STATUS: >-
-            ${{ steps.registration.outputs.registration_status }}
+          LIFECYCLE_STATUS: >-
+            ${{ steps.registration.outputs.lifecycle_status || steps.retirement.outputs.lifecycle_status }}
         run: |
           if [ "$MUTATE_REQUESTED" = "true" ] &&
-            [ "$REGISTRATION_STATUS" = "blocked" ]; then
-            jq . runner-lane-registration-result.json >&2
+            [ "$LIFECYCLE_STATUS" = "blocked" ]; then
+            jq . runner-lane-lifecycle-result.json >&2
             exit 1
           fi
-          if [ "$REGISTRATION_STATUS" != "blocked" ] &&
-            [ "$REGISTRATION_STATUS" != "completed" ]; then
-            jq . runner-lane-registration-result.json >&2
+          if [ "$LIFECYCLE_STATUS" != "blocked" ] &&
+            [ "$LIFECYCLE_STATUS" != "completed" ]; then
+            jq . runner-lane-lifecycle-result.json >&2
             exit 1
           fi

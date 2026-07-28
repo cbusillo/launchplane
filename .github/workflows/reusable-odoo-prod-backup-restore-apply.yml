@@ -1,0 +1,314 @@
+---
+name: Reusable Odoo Prod Backup Restore Apply
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        required: true
+        type: string
+      context:
+        required: true
+        type: string
+      backup_record_id:
+        required: true
+        type: string
+      verification_record_id:
+        required: true
+        type: string
+      expected_current_artifact_id:
+        required: true
+        type: string
+      expected_old_db_volume:
+        required: true
+        type: string
+      expected_new_db_volume:
+        required: true
+        type: string
+      expected_data_volume:
+        required: true
+        type: string
+      expected_log_volume:
+        required: true
+        type: string
+      plan_fingerprint:
+        required: true
+        type: string
+      confirmation:
+        required: true
+        type: string
+      idempotency_key:
+        required: true
+        type: string
+      no_cache:
+        required: false
+        default: false
+        type: boolean
+      timeout_seconds:
+        required: false
+        default: ""
+        type: string
+      health_timeout_seconds:
+        required: false
+        default: ""
+        type: string
+      launchplane_url:
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    env:
+      PRODUCT: ${{ inputs.product }}
+      CONTEXT: ${{ inputs.context }}
+      BACKUP_RECORD_ID: ${{ inputs.backup_record_id }}
+      VERIFICATION_RECORD_ID: ${{ inputs.verification_record_id }}
+      EXPECTED_CURRENT_ARTIFACT_ID: ${{ inputs.expected_current_artifact_id }}
+      EXPECTED_OLD_DB_VOLUME: ${{ inputs.expected_old_db_volume }}
+      EXPECTED_NEW_DB_VOLUME: ${{ inputs.expected_new_db_volume }}
+      EXPECTED_DATA_VOLUME: ${{ inputs.expected_data_volume }}
+      EXPECTED_LOG_VOLUME: ${{ inputs.expected_log_volume }}
+      PLAN_FINGERPRINT: ${{ inputs.plan_fingerprint }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+      NO_CACHE: ${{ inputs.no_cache }}
+      TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+      HEALTH_TIMEOUT_SECONDS: ${{ inputs.health_timeout_seconds }}
+    steps:
+      - name: Validate destructive restore inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for scalar in \
+            PRODUCT CONTEXT BACKUP_RECORD_ID VERIFICATION_RECORD_ID \
+            EXPECTED_CURRENT_ARTIFACT_ID EXPECTED_OLD_DB_VOLUME \
+            EXPECTED_NEW_DB_VOLUME EXPECTED_DATA_VOLUME EXPECTED_LOG_VOLUME \
+            PLAN_FINGERPRINT CONFIRMATION IDEMPOTENCY_KEY; do
+            value="${!scalar}"
+            if [ -z "$value" ]; then
+              echo "${scalar} is required." >&2
+              exit 1
+            fi
+            case "$value" in
+              *$'\n'* | *$'\r'*)
+                echo "${scalar} must be single-line." >&2
+                exit 1
+                ;;
+            esac
+          done
+          if ! [[ "$PLAN_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'plan_fingerprint must be a SHA-256 value.' >&2
+            exit 1
+          fi
+          if [ "$CONFIRMATION" != "restore-verified-production-backup" ]; then
+            echo 'Destructive restore confirmation phrase does not match.' >&2
+            exit 1
+          fi
+          if [ "$EXPECTED_OLD_DB_VOLUME" = "$EXPECTED_NEW_DB_VOLUME" ]; then
+            echo 'Old and new DB volumes must differ.' >&2
+            exit 1
+          fi
+          for seconds in TIMEOUT_SECONDS HEALTH_TIMEOUT_SECONDS; do
+            value="${!seconds}"
+            if [ -n "$value" ] && ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+              echo "${seconds} must be a positive integer." >&2
+              exit 1
+            fi
+          done
+          mkdir -p .launchplane
+
+      - name: Build restore apply request
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg backup_record_id "$BACKUP_RECORD_ID" \
+            --arg verification_record_id "$VERIFICATION_RECORD_ID" \
+            --arg artifact_id "$EXPECTED_CURRENT_ARTIFACT_ID" \
+            --arg old_db "$EXPECTED_OLD_DB_VOLUME" \
+            --arg new_db "$EXPECTED_NEW_DB_VOLUME" \
+            --arg data_volume "$EXPECTED_DATA_VOLUME" \
+            --arg log_volume "$EXPECTED_LOG_VOLUME" \
+            --arg plan_fingerprint "$PLAN_FINGERPRINT" \
+            --arg confirmation "$CONFIRMATION" \
+            --argjson no_cache "$NO_CACHE" \
+            '{
+              schema_version: 1,
+              product: $product,
+              restore: {
+                schema_version: 1,
+                product: $product,
+                context: $context,
+                instance: "prod",
+                backup_record_id: $backup_record_id,
+                verification_record_id: $verification_record_id,
+                expected_current_artifact_id: $artifact_id,
+                expected_old_db_volume: $old_db,
+                expected_new_db_volume: $new_db,
+                expected_data_volume: $data_volume,
+                expected_log_volume: $log_volume,
+                plan_fingerprint: $plan_fingerprint,
+                confirmation: $confirmation,
+                no_cache: $no_cache
+              }
+            }' > .launchplane/restore-apply-payload.json
+          if [ -n "$TIMEOUT_SECONDS" ]; then
+            jq \
+              --argjson value "$TIMEOUT_SECONDS" \
+              '.restore.timeout_seconds = $value' \
+              .launchplane/restore-apply-payload.json > .launchplane/payload.tmp
+            mv .launchplane/payload.tmp .launchplane/restore-apply-payload.json
+          fi
+          if [ -n "$HEALTH_TIMEOUT_SECONDS" ]; then
+            jq --argjson value "$HEALTH_TIMEOUT_SECONDS" \
+              '.restore.health_timeout_seconds = $value' \
+              .launchplane/restore-apply-payload.json > .launchplane/payload.tmp
+            mv .launchplane/payload.tmp .launchplane/restore-apply-payload.json
+          fi
+
+      - name: Create destructive restore operation
+        id: create_restore
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: >-
+            ${{
+              inputs.launchplane_audience ||
+              vars.LAUNCHPLANE_SERVICE_AUDIENCE
+            }}
+          route-path: /v1/drivers/odoo/prod-backup-restore-apply
+          payload-file: .launchplane/restore-apply-payload.json
+          idempotency-key: ${{ inputs.idempotency_key }}
+          output-paths: operation_id=result.operation_id
+          fail-result-paths: ""
+          log-response-body: "false"
+          response-output-file: odoo-prod-backup-restore-create.json
+
+      - name: Validate restore operation metadata
+        id: restore_metadata
+        env:
+          CREATE_STATUS_CODE: ${{ steps.create_restore.outputs.status-code }}
+          OPERATION_ID: ${{ steps.create_restore.outputs.operation_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$CREATE_STATUS_CODE" != "202" ] || \
+            [ -z "$OPERATION_ID" ]; then
+            echo 'Restore operation was not accepted with operation metadata.' >&2
+            exit 1
+          fi
+          if ! [[ "$OPERATION_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo 'Restore operation ID must be path-safe.' >&2
+            exit 1
+          fi
+          poll_url="/v1/drivers/odoo/prod-backup-restore/operations/${OPERATION_ID}"
+          echo "poll_url=${poll_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Poll destructive restore operation
+        id: poll_restore
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: >-
+            ${{
+              inputs.launchplane_audience ||
+              vars.LAUNCHPLANE_SERVICE_AUDIENCE
+            }}
+          method: GET
+          route-path: ${{ steps.restore_metadata.outputs.poll_url }}
+          poll-result-path: operation.status
+          poll-result-statuses: pending,running
+          poll-interval-ms: 15000
+          poll-timeout-ms: 7200000
+          fail-result-paths: ""
+          log-response-body: "false"
+          response-output-file: odoo-prod-backup-restore-result.json
+
+      - name: Verify destructive restore result
+        env:
+          POLL_STATUS_CODE: ${{ steps.poll_restore.outputs.status-code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$POLL_STATUS_CODE" != "200" ]; then
+            echo "Restore poll failed: HTTP ${POLL_STATUS_CODE}." >&2
+            exit 1
+          fi
+          if ! jq -e \
+            --arg fingerprint "$PLAN_FINGERPRINT" \
+            --arg old_db "$EXPECTED_OLD_DB_VOLUME" \
+            --arg new_db "$EXPECTED_NEW_DB_VOLUME" \
+            --arg data_volume "$EXPECTED_DATA_VOLUME" \
+            --arg log_volume "$EXPECTED_LOG_VOLUME" \
+            '
+              .operation.status == "pass" and
+              .operation.phase == "completed" and
+              .operation.result.restore_status == "pass" and
+              .operation.result.plan_fingerprint == $fingerprint and
+              .operation.result.database_restore_status == "pass" and
+              .operation.result.filestore_stage_status == "pass" and
+              .operation.result.web_quiesce_status == "pass" and
+              .operation.result.filestore_activation_status == "pass" and
+              .operation.result.deployment_status == "pass" and
+              .operation.result.post_deploy_status == "pass" and
+              .operation.result.health_status == "pass" and
+              .operation.result.canonical_status == "pass" and
+              .operation.result.logo_status == "pass" and
+              .operation.result.runtime_identity_status == "match" and
+              .operation.result.old_db_volume == $old_db and
+              .operation.result.new_db_volume == $new_db and
+              .operation.result.data_volume == $data_volume and
+              .operation.result.log_volume == $log_volume and
+              (.operation.result.filestore_quarantine_path | length) > 0
+            ' odoo-prod-backup-restore-result.json >/dev/null; then
+            echo 'Odoo backup restore failed a required check.' >&2
+            jq -c '{
+              operation: {
+                status: .operation.status,
+                phase: .operation.phase,
+                error_code: .operation.error_code,
+                error_message: .operation.error_message,
+                result: .operation.result
+              }
+            }' \
+              odoo-prod-backup-restore-result.json >&2
+            exit 1
+          fi
+          jq '{
+            status,
+            trace_id,
+            operation: {
+              operation_id,
+              status,
+              phase,
+              checkpoints,
+              result
+            }
+          }' odoo-prod-backup-restore-result.json
+
+      - name: Upload restore evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: odoo-prod-backup-restore
+          path: |
+            odoo-prod-backup-restore-create.json
+            odoo-prod-backup-restore-result.json
+          if-no-files-found: ignore
+          retention-days: 30

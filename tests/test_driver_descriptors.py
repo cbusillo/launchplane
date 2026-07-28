@@ -10,6 +10,7 @@ from typing import Any, Literal
 from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.authz_scope import exclusively_instance_scoped_authz_actions
 from control_plane.contracts.driver_descriptor import (
     DriverActionDescriptor,
     DriverCapabilityDescriptor,
@@ -43,7 +44,14 @@ from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
     ODOO_PREVIEW_APPLY_ROUTE,
 )
-from control_plane.odoo_prod_backup_gate_http import ODOO_PROD_BACKUP_GATE_ROUTE
+from control_plane.odoo_prod_backup_gate_http import (
+    ODOO_PROD_BACKUP_GATE_ROUTE,
+    ODOO_PROD_BACKUP_VERIFICATION_ROUTE,
+)
+from control_plane.odoo_prod_backup_restore_http import (
+    ODOO_PROD_BACKUP_RESTORE_APPLY_ROUTE,
+    ODOO_PROD_BACKUP_RESTORE_PLAN_ROUTE,
+)
 from control_plane.odoo_prod_promotion_http import (
     ODOO_PROD_PROMOTION_INPUTS_ROUTE,
     ODOO_PROD_PROMOTION_ROUTE,
@@ -441,6 +449,13 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_odoo_descriptor_marks_prod_rollback_as_destructive(self) -> None:
         descriptor = read_driver_descriptor("odoo")
         actions = {action.action_id: action for action in descriptor.actions}
+        target_replacement_requirements = (
+            "provider_target",
+            "route_binding",
+            "runtime_environment",
+            "managed_secrets",
+            "artifact",
+        )
 
         self.assertEqual(descriptor.base_driver_id, "generic-web")
         self.assertEqual(actions["prod_backup_gate"].safety, "safe_write")
@@ -454,6 +469,14 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(
             actions["stable_bootstrap"].route_path,
             "/v1/drivers/odoo/stable-bootstrap",
+        )
+        self.assertEqual(
+            actions["target_replacement_plan"].readiness_requirements,
+            target_replacement_requirements,
+        )
+        self.assertEqual(
+            actions["target_replacement_apply"].readiness_requirements,
+            target_replacement_requirements,
         )
         setting_groups = {group.group_id: group for group in descriptor.setting_groups}
         self.assertIn("preview_domain_tls", setting_groups)
@@ -1076,11 +1099,40 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             driver_id="odoo",
             route_paths_by_action={
                 "prod_backup_gate": ODOO_PROD_BACKUP_GATE_ROUTE,
+                "prod_backup_verification": ODOO_PROD_BACKUP_VERIFICATION_ROUTE,
+                "prod_backup_restore_plan": ODOO_PROD_BACKUP_RESTORE_PLAN_ROUTE,
+                "prod_backup_restore_apply": ODOO_PROD_BACKUP_RESTORE_APPLY_ROUTE,
                 "prod_promotion_inputs": ODOO_PROD_PROMOTION_INPUTS_ROUTE,
                 "prod_promotion_run": ODOO_PROD_PROMOTION_RUN_ROUTE,
                 "prod_promotion": ODOO_PROD_PROMOTION_ROUTE,
                 "prod_rollback": ODOO_PROD_ROLLBACK_ROUTE,
             },
+        )
+        odoo_actions = {
+            action.action_id: action for action in read_driver_descriptor("odoo").actions
+        }
+        verification_action = odoo_actions["prod_backup_verification"]
+        self.assertEqual(verification_action.safety, "safe_write")
+        self.assertEqual(verification_action.scope, "instance")
+        self.assertEqual(
+            verification_action.authz_action,
+            "odoo_prod_backup_verification.execute",
+        )
+        self.assertEqual(verification_action.writes_records, ("backup_gate",))
+        self.assertIn(
+            verification_action.authz_action,
+            exclusively_instance_scoped_authz_actions(),
+        )
+        restore_action = odoo_actions["prod_backup_restore_apply"]
+        self.assertEqual(restore_action.safety, "destructive")
+        self.assertEqual(restore_action.scope, "instance")
+        self.assertEqual(
+            restore_action.authz_action,
+            "odoo_prod_backup_restore_apply.execute",
+        )
+        self.assertIn(
+            restore_action.authz_action,
+            exclusively_instance_scoped_authz_actions(),
         )
 
     def test_odoo_preview_execution_metadata_matches_descriptors(self) -> None:

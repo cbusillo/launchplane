@@ -62,6 +62,27 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/odoo-target-replacement-apply.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-apply.yml"}
     ),
+    Path(".github/workflows/odoo-prod-backup-verification.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-verification.yml"}
+    ),
+    Path(".github/workflows/odoo-prod-backup-restore-plan.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-restore-plan.yml"}
+    ),
+    Path(".github/workflows/odoo-prod-backup-restore-apply.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-restore-apply.yml"}
+    ),
+    Path(".github/workflows/odoo-prod-retained-volume-backup-import-plan.yml"): frozenset(
+        {
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-odoo-prod-retained-volume-backup-import-plan.yml"
+        }
+    ),
+    Path(".github/workflows/odoo-prod-retained-volume-backup-import-apply.yml"): frozenset(
+        {
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-odoo-prod-retained-volume-backup-import-apply.yml"
+        }
+    ),
 }
 
 
@@ -135,6 +156,36 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
         ActionClassification(
             "First-party same-repository",
             "exact-instance Odoo target replacement apply",
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-verification.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "exact-instance Odoo production backup verification",
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-restore-plan.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "exact-instance Odoo production backup restore planning",
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-restore-apply.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "exact-instance Odoo production backup restore apply",
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-retained-volume-backup-import-plan.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "exact-instance Odoo retained-volume backup import planning",
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-retained-volume-backup-import-apply.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "exact-instance Odoo retained-volume backup import apply",
         )
     ),
     "cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml": (

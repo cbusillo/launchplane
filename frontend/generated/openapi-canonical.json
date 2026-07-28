@@ -2659,6 +2659,16 @@
           "reason": {
             "title": "Reason",
             "type": "string"
+          },
+          "reconciliation_attestation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DurableOperationReconciliationAttestation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -2691,6 +2701,42 @@
           "operation"
         ],
         "title": "DurableOperationCancellationResponse",
+        "type": "object"
+      },
+      "DurableOperationReconciliationAttestation": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_reference": {
+            "title": "Evidence Reference",
+            "type": "string"
+          },
+          "provider_inspected_at": {
+            "title": "Provider Inspected At",
+            "type": "string"
+          },
+          "provider_state": {
+            "title": "Provider State",
+            "type": "string"
+          },
+          "safe_to_release": {
+            "const": true,
+            "title": "Safe To Release",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "provider_inspected_at",
+          "provider_state",
+          "evidence_reference",
+          "safe_to_release"
+        ],
+        "title": "DurableOperationReconciliationAttestation",
         "type": "object"
       },
       "EdgeEndpointApplyEnvelope": {
@@ -8473,6 +8519,82 @@
         "title": "OdooOverrideValue",
         "type": "object"
       },
+      "OdooProdBackupRestoreOperationStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "additionalProperties": true,
+            "title": "Operation",
+            "type": "object"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "operation"
+        ],
+        "title": "OdooProdBackupRestoreOperationStatusResponse",
+        "type": "object"
+      },
+      "OdooProdRetainedVolumeBackupImportOperationStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "additionalProperties": true,
+            "title": "Operation",
+            "type": "object"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "operation"
+        ],
+        "title": "OdooProdRetainedVolumeBackupImportOperationStatusResponse",
+        "type": "object"
+      },
       "OdooStableBootstrapOperationStatusResponse": {
         "additionalProperties": false,
         "properties": {
@@ -8636,10 +8758,18 @@
             },
             "title": "Reconciled Replacement Ids",
             "type": "array"
+          },
+          "reconciled_restore_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reconciled Restore Ids",
+            "type": "array"
           }
         },
         "required": [
           "reconciled_bootstrap_ids",
+          "reconciled_restore_ids",
           "reconciled_replacement_ids",
           "reconciled_count"
         ],
@@ -11858,6 +11988,9 @@
             "title": "Environment",
             "type": "string"
           },
+          "health_monitoring": {
+            "$ref": "#/components/schemas/ProductHealthMonitoringSummary"
+          },
           "health_url": {
             "default": "",
             "title": "Health Url",
@@ -11933,6 +12066,7 @@
           "environment",
           "context",
           "target",
+          "health_monitoring",
           "trust_state",
           "provenance"
         ],
@@ -12035,6 +12169,9 @@
             "title": "Environment",
             "type": "string"
           },
+          "health_monitoring": {
+            "$ref": "#/components/schemas/ProductHealthMonitoringSummary"
+          },
           "health_url": {
             "default": "",
             "title": "Health Url",
@@ -12072,6 +12209,7 @@
         "required": [
           "environment",
           "context",
+          "health_monitoring",
           "trust_state",
           "provenance"
         ],
@@ -12206,6 +12344,235 @@
         "title": "ProductExpectedConfigProfile",
         "type": "object"
       },
+      "ProductHealthMonitoringCheckSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "failure_code": {
+            "default": "",
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "incident_eligible": {
+            "title": "Incident Eligible",
+            "type": "boolean"
+          },
+          "incident_id": {
+            "default": "",
+            "title": "Incident Id",
+            "type": "string"
+          },
+          "incident_last_reminded_at": {
+            "default": "",
+            "title": "Incident Last Reminded At",
+            "type": "string"
+          },
+          "incident_latest_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Latest Event"
+          },
+          "incident_latest_event_at": {
+            "default": "",
+            "title": "Incident Latest Event At",
+            "type": "string"
+          },
+          "incident_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Incident Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "incident_next_reminder_at": {
+            "default": "",
+            "title": "Incident Next Reminder At",
+            "type": "string"
+          },
+          "incident_notification_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "acknowledged",
+                  "silenced"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Notification State"
+          },
+          "incident_severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Severity"
+          },
+          "incident_status": {
+            "default": "",
+            "title": "Incident Status",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "public_http",
+              "private_http",
+              "provider"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "observed_at": {
+            "default": "",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "private_endpoint_configured": {
+            "default": false,
+            "title": "Private Endpoint Configured",
+            "type": "boolean"
+          },
+          "probe_effective": {
+            "title": "Probe Effective",
+            "type": "boolean"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance",
+            "default": {
+              "detail": "Launchplane has not recorded a probe observation for this health check.",
+              "freshness_status": "missing",
+              "recorded_at": "",
+              "refreshed_at": "",
+              "source_kind": "record",
+              "source_record_id": "",
+              "stale_after": ""
+            }
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "status": {
+            "default": "missing",
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "title": "Summary",
+            "type": "string"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "enabled",
+          "probe_effective",
+          "incident_eligible"
+        ],
+        "title": "ProductHealthMonitoringCheckSummary",
+        "type": "object"
+      },
+      "ProductHealthMonitoringSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "checks": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductHealthMonitoringCheckSummary"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "monitoring_intent": {
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Monitoring Intent",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "public_incident_eligible": {
+            "title": "Public Incident Eligible",
+            "type": "boolean"
+          },
+          "trust_state": {
+            "default": "recorded",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "monitoring_intent",
+          "public_incident_eligible",
+          "provenance"
+        ],
+        "title": "ProductHealthMonitoringSummary",
+        "type": "object"
+      },
       "ProductImageProfile": {
         "additionalProperties": false,
         "properties": {
@@ -12255,6 +12622,13 @@
             "title": "Provider Check",
             "type": "string"
           },
+          "recovery_observation_threshold": {
+            "default": 1,
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Recovery Observation Threshold",
+            "type": "integer"
+          },
           "require_runtime_identity": {
             "default": false,
             "title": "Require Runtime Identity",
@@ -12282,6 +12656,16 @@
             },
             "title": "Checks",
             "type": "array"
+          },
+          "monitoring_intent": {
+            "default": "prelaunch",
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Monitoring Intent",
+            "type": "string"
           }
         },
         "title": "ProductLaneHealthMonitoringPolicy",
@@ -12417,14 +12801,107 @@
             "title": "Failure Code",
             "type": "string"
           },
+          "incident_eligible": {
+            "default": false,
+            "title": "Incident Eligible",
+            "type": "boolean"
+          },
           "incident_id": {
             "default": "",
             "title": "Incident Id",
             "type": "string"
           },
+          "incident_last_reminded_at": {
+            "default": "",
+            "title": "Incident Last Reminded At",
+            "type": "string"
+          },
+          "incident_latest_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Latest Event"
+          },
+          "incident_latest_event_at": {
+            "default": "",
+            "title": "Incident Latest Event At",
+            "type": "string"
+          },
+          "incident_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Incident Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "incident_next_reminder_at": {
+            "default": "",
+            "title": "Incident Next Reminder At",
+            "type": "string"
+          },
+          "incident_notification_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "acknowledged",
+                  "silenced"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Notification State"
+          },
+          "incident_severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Severity"
+          },
           "incident_status": {
             "default": "",
             "title": "Incident Status",
+            "type": "string"
+          },
+          "monitoring_intent": {
+            "default": "prelaunch",
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Monitoring Intent",
             "type": "string"
           },
           "observed_at": {
@@ -12586,6 +13063,84 @@
             "default": "",
             "title": "Incident Id",
             "type": "string"
+          },
+          "incident_last_reminded_at": {
+            "default": "",
+            "title": "Incident Last Reminded At",
+            "type": "string"
+          },
+          "incident_latest_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Latest Event"
+          },
+          "incident_latest_event_at": {
+            "default": "",
+            "title": "Incident Latest Event At",
+            "type": "string"
+          },
+          "incident_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Incident Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "incident_next_reminder_at": {
+            "default": "",
+            "title": "Incident Next Reminder At",
+            "type": "string"
+          },
+          "incident_notification_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "acknowledged",
+                  "silenced"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Notification State"
+          },
+          "incident_severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Severity"
           },
           "incident_status": {
             "default": "",
@@ -14649,19 +15204,112 @@
             "title": "Failure Code",
             "type": "string"
           },
+          "incident_eligible": {
+            "default": false,
+            "title": "Incident Eligible",
+            "type": "boolean"
+          },
           "incident_id": {
             "default": "",
             "title": "Incident Id",
             "type": "string"
+          },
+          "incident_last_reminded_at": {
+            "default": "",
+            "title": "Incident Last Reminded At",
+            "type": "string"
+          },
+          "incident_latest_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Latest Event"
+          },
+          "incident_latest_event_at": {
+            "default": "",
+            "title": "Incident Latest Event At",
+            "type": "string"
+          },
+          "incident_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Incident Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "incident_next_reminder_at": {
+            "default": "",
+            "title": "Incident Next Reminder At",
+            "type": "string"
+          },
+          "incident_notification_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "acknowledged",
+                  "silenced"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Notification State"
           },
           "incident_opened_at": {
             "default": "",
             "title": "Incident Opened At",
             "type": "string"
           },
+          "incident_severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Severity"
+          },
           "incident_status": {
             "default": "",
             "title": "Incident Status",
+            "type": "string"
+          },
+          "monitoring_intent": {
+            "default": "prelaunch",
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Monitoring Intent",
             "type": "string"
           },
           "notification_sent": {
@@ -16081,6 +16729,13 @@
             "title": "Product",
             "type": "string"
           },
+          "reminder_interval_seconds": {
+            "default": 21600,
+            "maximum": 604800.0,
+            "minimum": 900.0,
+            "title": "Reminder Interval Seconds",
+            "type": "integer"
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -16899,6 +17554,21 @@
               "target_volume_not_allowlisted",
               "target_volume_not_buildkit_state",
               "target_volume_not_requested",
+              "target_builder_budget_missing",
+              "target_builder_not_allowlisted",
+              "target_generated_cache_below_high_water",
+              "target_generated_cache_budget_invalid",
+              "target_generated_cache_cooldown_active",
+              "target_generated_cache_key_missing",
+              "target_generated_cache_missing_from_report",
+              "target_generated_cache_not_allowlisted",
+              "target_generated_cache_owner_busy",
+              "target_generated_cache_run_active",
+              "target_generated_cache_run_missing",
+              "target_generated_cache_run_not_idle",
+              "target_generated_cache_run_too_recent",
+              "target_generated_cache_runs_missing",
+              "target_generated_cache_safety_failed",
               "retained_warm_builder_missing_from_report",
               "warm_builder_not_retained"
             ],
@@ -16923,6 +17593,8 @@
           "action": {
             "enum": [
               "prune_docker_cache",
+              "prune_dangling_images",
+              "prune_generated_run_cache",
               "remove_buildkit_state_volumes",
               "prune_runner_workdir",
               "restart_runner_service"
@@ -16994,6 +17666,8 @@
           "action": {
             "enum": [
               "prune_docker_cache",
+              "prune_dangling_images",
+              "prune_generated_run_cache",
               "remove_buildkit_state_volumes",
               "prune_runner_workdir",
               "restart_runner_service"
@@ -17006,9 +17680,39 @@
             "title": "Audit Record Key",
             "type": "string"
           },
+          "generated_cache_cooldown_hours": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generated Cache Cooldown Hours",
+            "type": "integer"
+          },
+          "generated_cache_high_water_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generated Cache High Water Bytes",
+            "type": "integer"
+          },
+          "generated_cache_low_water_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generated Cache Low Water Bytes",
+            "type": "integer"
+          },
+          "generated_cache_minimum_age_hours": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generated Cache Minimum Age Hours",
+            "type": "integer"
+          },
           "host_name": {
             "title": "Host Name",
             "type": "string"
+          },
+          "max_used_space_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Max Used Space Bytes",
+            "type": "integer"
           },
           "mutate": {
             "default": false,
@@ -17029,12 +17733,30 @@
             "title": "Schema Version",
             "type": "integer"
           },
+          "target_buildkit_builder": {
+            "default": "",
+            "title": "Target Buildkit Builder",
+            "type": "string"
+          },
           "target_buildkit_state_volumes": {
             "default": [],
             "items": {
               "type": "string"
             },
             "title": "Target Buildkit State Volumes",
+            "type": "array"
+          },
+          "target_generated_cache_key": {
+            "default": "",
+            "title": "Target Generated Cache Key",
+            "type": "string"
+          },
+          "target_generated_cache_run_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Target Generated Cache Run Ids",
             "type": "array"
           }
         },
@@ -17069,6 +17791,37 @@
         "title": "RunnerHostHygieneAuditEvidenceEnvelope",
         "type": "object"
       },
+      "RunnerHostHygieneDockerReclaimableBreakdown": {
+        "additionalProperties": false,
+        "properties": {
+          "build_cache_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Build Cache Bytes",
+            "type": "integer"
+          },
+          "containers_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Containers Bytes",
+            "type": "integer"
+          },
+          "images_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Images Bytes",
+            "type": "integer"
+          },
+          "local_volumes_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Local Volumes Bytes",
+            "type": "integer"
+          }
+        },
+        "title": "RunnerHostHygieneDockerReclaimableBreakdown",
+        "type": "object"
+      },
       "RunnerHostHygieneFinding": {
         "additionalProperties": false,
         "properties": {
@@ -17076,9 +17829,13 @@
             "enum": [
               "docker_reclaimable_above_limit",
               "free_disk_below_minimum",
+              "generated_cache_above_limit",
+              "generated_cache_measurement_partial",
+              "generated_cache_safety_failed",
               "orphan_buildkit_present",
               "required_warm_builder_missing",
-              "runner_workdir_above_limit"
+              "runner_workdir_above_limit",
+              "runner_workdir_measurement_partial"
             ],
             "title": "Code",
             "type": "string"
@@ -17093,6 +17850,219 @@
           "message"
         ],
         "title": "RunnerHostHygieneFinding",
+        "type": "object"
+      },
+      "RunnerHostHygieneGeneratedCacheAgeBucket": {
+        "additionalProperties": false,
+        "properties": {
+          "allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Allocated Bytes",
+            "type": "integer"
+          },
+          "apparent_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Apparent Bytes",
+            "type": "integer"
+          },
+          "bucket": {
+            "enum": [
+              "under_1h",
+              "1h_to_24h",
+              "1d_to_7d",
+              "7d_to_30d",
+              "30d_or_more"
+            ],
+            "title": "Bucket",
+            "type": "string"
+          },
+          "entry_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Entry Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bucket"
+        ],
+        "title": "RunnerHostHygieneGeneratedCacheAgeBucket",
+        "type": "object"
+      },
+      "RunnerHostHygieneGeneratedCacheEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "age_seconds": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Age Seconds",
+            "type": "integer"
+          },
+          "allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Allocated Bytes",
+            "type": "integer"
+          },
+          "apparent_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Apparent Bytes",
+            "type": "integer"
+          },
+          "github_run_state": {
+            "default": "unknown",
+            "enum": [
+              "completed",
+              "active",
+              "unknown"
+            ],
+            "title": "Github Run State",
+            "type": "string"
+          },
+          "open_handle_observations": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Open Handle Observations",
+            "type": "array"
+          },
+          "run_id": {
+            "minimum": 1.0,
+            "title": "Run Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "title": "RunnerHostHygieneGeneratedCacheEntry",
+        "type": "object"
+      },
+      "RunnerHostHygieneGeneratedCacheUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "age_buckets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneGeneratedCacheAgeBucket"
+            },
+            "title": "Age Buckets",
+            "type": "array"
+          },
+          "allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Allocated Bytes",
+            "type": "integer"
+          },
+          "apparent_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Apparent Bytes",
+            "type": "integer"
+          },
+          "cache_key": {
+            "title": "Cache Key",
+            "type": "string"
+          },
+          "cooldown_remaining_seconds": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Cooldown Remaining Seconds",
+            "type": "integer"
+          },
+          "entries": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneGeneratedCacheEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "entries_truncated": {
+            "default": false,
+            "title": "Entries Truncated",
+            "type": "boolean"
+          },
+          "entry_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Entry Count",
+            "type": "integer"
+          },
+          "estimated_daily_growth_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Estimated Daily Growth Bytes",
+            "type": "integer"
+          },
+          "last_cleanup_epoch_seconds": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Last Cleanup Epoch Seconds",
+            "type": "integer"
+          },
+          "last_post_cleanup_allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Last Post Cleanup Allocated Bytes",
+            "type": "integer"
+          },
+          "last_reclaimed_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Last Reclaimed Bytes",
+            "type": "integer"
+          },
+          "last_removed_run_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Last Removed Run Ids",
+            "type": "array"
+          },
+          "measurement_status": {
+            "default": "complete",
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "title": "Measurement Status",
+            "type": "string"
+          },
+          "mode_valid": {
+            "default": false,
+            "title": "Mode Valid",
+            "type": "boolean"
+          },
+          "owner_valid": {
+            "default": false,
+            "title": "Owner Valid",
+            "type": "boolean"
+          },
+          "owner_worker_observations": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Owner Worker Observations",
+            "type": "array"
+          },
+          "symlink_safe": {
+            "default": false,
+            "title": "Symlink Safe",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cache_key"
+        ],
+        "title": "RunnerHostHygieneGeneratedCacheUsage",
         "type": "object"
       },
       "RunnerHostHygieneImageInventoryItem": {
@@ -17148,6 +18118,9 @@
       "RunnerHostHygieneReport": {
         "additionalProperties": false,
         "properties": {
+          "docker_reclaimable_breakdown": {
+            "$ref": "#/components/schemas/RunnerHostHygieneDockerReclaimableBreakdown"
+          },
           "docker_reclaimable_bytes": {
             "default": 0,
             "minimum": 0.0,
@@ -17177,6 +18150,26 @@
             "minimum": 0.0,
             "title": "Free Disk Bytes",
             "type": "integer"
+          },
+          "generated_cache_allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generated Cache Allocated Bytes",
+            "type": "integer"
+          },
+          "generated_cache_apparent_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Generated Cache Apparent Bytes",
+            "type": "integer"
+          },
+          "generated_cache_usage": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneGeneratedCacheUsage"
+            },
+            "title": "Generated Cache Usage",
+            "type": "array"
           },
           "host_name": {
             "title": "Host Name",
@@ -17210,11 +18203,25 @@
             "title": "Orphan Buildkit Volumes",
             "type": "integer"
           },
+          "runner_workdir_allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Runner Workdir Allocated Bytes",
+            "type": "integer"
+          },
           "runner_workdir_bytes": {
             "default": 0,
             "minimum": 0.0,
             "title": "Runner Workdir Bytes",
             "type": "integer"
+          },
+          "runner_workdir_usage": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneRunnerWorkdirUsage"
+            },
+            "title": "Runner Workdir Usage",
+            "type": "array"
           },
           "schema_version": {
             "default": 1,
@@ -17257,6 +18264,41 @@
           "summary"
         ],
         "title": "RunnerHostHygieneReport",
+        "type": "object"
+      },
+      "RunnerHostHygieneRunnerWorkdirUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "allocated_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Allocated Bytes",
+            "type": "integer"
+          },
+          "apparent_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Apparent Bytes",
+            "type": "integer"
+          },
+          "measurement_status": {
+            "default": "complete",
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "title": "Measurement Status",
+            "type": "string"
+          },
+          "root_key": {
+            "title": "Root Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "root_key"
+        ],
+        "title": "RunnerHostHygieneRunnerWorkdirUsage",
         "type": "object"
       },
       "RunnerHostHygieneVolumeInventoryItem": {
@@ -17525,9 +18567,14 @@
               "inventory_repository_mismatch",
               "label_missing",
               "lane_already_exists",
+              "lane_ambiguous",
+              "lane_busy",
+              "lane_missing",
               "mutate_not_requested",
               "registration_root_not_allowed",
-              "repository_not_allowed"
+              "repository_runs_active",
+              "repository_not_allowed",
+              "target_worker_active"
             ],
             "title": "Code",
             "type": "string"
@@ -17547,6 +18594,14 @@
       "RunnerLaneRegistrationPlan": {
         "additionalProperties": false,
         "properties": {
+          "active_run_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Active Run Ids",
+            "type": "array"
+          },
           "audit_record_key": {
             "title": "Audit Record Key",
             "type": "string"
@@ -17586,6 +18641,15 @@
             "title": "Next Steps",
             "type": "array"
           },
+          "operation": {
+            "default": "register",
+            "enum": [
+              "register",
+              "retire"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
           "registration_root": {
             "title": "Registration Root",
             "type": "string"
@@ -17611,6 +18675,11 @@
           "summary": {
             "title": "Summary",
             "type": "string"
+          },
+          "target_worker_active": {
+            "default": false,
+            "title": "Target Worker Active",
+            "type": "boolean"
           }
         },
         "required": [
@@ -17630,6 +18699,14 @@
       "RunnerLaneRegistrationRequest": {
         "additionalProperties": false,
         "properties": {
+          "active_run_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Active Run Ids",
+            "type": "array"
+          },
           "audit_record_key": {
             "default": "",
             "title": "Audit Record Key",
@@ -17655,6 +18732,15 @@
             "title": "Mutate",
             "type": "boolean"
           },
+          "operation": {
+            "default": "register",
+            "enum": [
+              "register",
+              "retire"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
           "registration_root": {
             "title": "Registration Root",
             "type": "string"
@@ -17668,6 +18754,11 @@
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "target_worker_active": {
+            "default": false,
+            "title": "Target Worker Active",
+            "type": "boolean"
           }
         },
         "required": [
@@ -18490,6 +19581,10 @@
             "title": "Search",
             "type": "string"
           },
+          "service": {
+            "title": "Service",
+            "type": "string"
+          },
           "since": {
             "title": "Since",
             "type": "string"
@@ -18507,7 +19602,8 @@
           "source",
           "line_count",
           "since",
-          "search"
+          "search",
+          "service"
         ],
         "title": "TrackedTargetLogRequestResponse",
         "type": "object"
@@ -21936,6 +23032,16 @@
             "schema": {
               "default": "",
               "title": "Search",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "service",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Service",
               "type": "string"
             }
           },
@@ -28497,6 +29603,798 @@
         "summary": "Execute Odoo prod backup gate"
       }
     },
+    "/v1/drivers/odoo/prod-backup-restore-apply": {
+      "post": {
+        "operationId": "write_odoo_prod_backup_restore_apply",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required destructive restore operation idempotency key.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "OdooProdBackupRestoreApplyRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "backup_record_id": {
+                        "title": "Backup Record Id",
+                        "type": "string"
+                      },
+                      "confirmation": {
+                        "title": "Confirmation",
+                        "type": "string"
+                      },
+                      "context": {
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "expected_current_artifact_id": {
+                        "title": "Expected Current Artifact Id",
+                        "type": "string"
+                      },
+                      "expected_data_volume": {
+                        "title": "Expected Data Volume",
+                        "type": "string"
+                      },
+                      "expected_log_volume": {
+                        "title": "Expected Log Volume",
+                        "type": "string"
+                      },
+                      "expected_new_db_volume": {
+                        "title": "Expected New Db Volume",
+                        "type": "string"
+                      },
+                      "expected_old_db_volume": {
+                        "title": "Expected Old Db Volume",
+                        "type": "string"
+                      },
+                      "health_timeout_seconds": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Health Timeout Seconds"
+                      },
+                      "instance": {
+                        "const": "prod",
+                        "default": "prod",
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "no_cache": {
+                        "default": false,
+                        "title": "No Cache",
+                        "type": "boolean"
+                      },
+                      "plan_fingerprint": {
+                        "title": "Plan Fingerprint",
+                        "type": "string"
+                      },
+                      "product": {
+                        "title": "Product",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "default": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "timeout_seconds": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Timeout Seconds"
+                      },
+                      "verification_record_id": {
+                        "title": "Verification Record Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "product",
+                      "context",
+                      "backup_record_id",
+                      "verification_record_id",
+                      "expected_current_artifact_id",
+                      "expected_old_db_volume",
+                      "expected_new_db_volume",
+                      "expected_data_volume",
+                      "expected_log_volume",
+                      "plan_fingerprint",
+                      "confirmation"
+                    ],
+                    "title": "OdooProdBackupRestoreApplyRequest",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "restore": {
+                    "$ref": "#/$defs/OdooProdBackupRestoreApplyRequest"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "restore"
+                ],
+                "title": "OdooProdBackupRestoreApplyEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Enqueue verified Odoo production backup restore"
+      }
+    },
+    "/v1/drivers/odoo/prod-backup-restore-plan": {
+      "post": {
+        "operationId": "write_odoo_prod_backup_restore_plan",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "OdooProdBackupRestoreRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "backup_record_id": {
+                        "title": "Backup Record Id",
+                        "type": "string"
+                      },
+                      "context": {
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "expected_current_artifact_id": {
+                        "title": "Expected Current Artifact Id",
+                        "type": "string"
+                      },
+                      "expected_data_volume": {
+                        "title": "Expected Data Volume",
+                        "type": "string"
+                      },
+                      "expected_log_volume": {
+                        "title": "Expected Log Volume",
+                        "type": "string"
+                      },
+                      "expected_new_db_volume": {
+                        "title": "Expected New Db Volume",
+                        "type": "string"
+                      },
+                      "expected_old_db_volume": {
+                        "title": "Expected Old Db Volume",
+                        "type": "string"
+                      },
+                      "instance": {
+                        "const": "prod",
+                        "default": "prod",
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "product": {
+                        "title": "Product",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "default": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "verification_record_id": {
+                        "title": "Verification Record Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "product",
+                      "context",
+                      "backup_record_id",
+                      "verification_record_id",
+                      "expected_current_artifact_id",
+                      "expected_old_db_volume",
+                      "expected_new_db_volume",
+                      "expected_data_volume",
+                      "expected_log_volume"
+                    ],
+                    "title": "OdooProdBackupRestoreRequest",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "restore": {
+                    "$ref": "#/$defs/OdooProdBackupRestoreRequest"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "restore"
+                ],
+                "title": "OdooProdBackupRestorePlanEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Build verified Odoo production backup restore plan"
+      }
+    },
+    "/v1/drivers/odoo/prod-backup-restore/operations/{operation_id}": {
+      "get": {
+        "operationId": "read_odoo_prod_backup_restore_operation_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OdooProdBackupRestoreOperationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Odoo production backup restore operation status"
+      }
+    },
+    "/v1/drivers/odoo/prod-backup-restore/operations/{operation_id}/cancel": {
+      "post": {
+        "operationId": "cancel_odoo_prod_backup_restore_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DurableOperationCancellationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DurableOperationCancellationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Cancel pending Odoo production backup restore operation"
+      }
+    },
+    "/v1/drivers/odoo/prod-backup-verification": {
+      "post": {
+        "operationId": "write_odoo_prod_backup_verification",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "OdooProdBackupVerificationRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "backup_record_id": {
+                        "title": "Backup Record Id",
+                        "type": "string"
+                      },
+                      "context": {
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "instance": {
+                        "default": "prod",
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "default": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "timeout_seconds": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Timeout Seconds"
+                      }
+                    },
+                    "required": [
+                      "context",
+                      "backup_record_id"
+                    ],
+                    "title": "OdooProdBackupVerificationRequest",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "backup_verification": {
+                    "$ref": "#/$defs/OdooProdBackupVerificationRequest"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "backup_verification"
+                ],
+                "title": "OdooProdBackupVerificationEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Verify Odoo prod backup integrity"
+      }
+    },
     "/v1/drivers/odoo/prod-promotion": {
       "post": {
         "operationId": "write_odoo_prod_promotion",
@@ -29109,6 +31007,671 @@
           }
         },
         "summary": "Execute Odoo prod promotion run"
+      }
+    },
+    "/v1/drivers/odoo/prod-retained-volume-backup-import-apply": {
+      "post": {
+        "operationId": "write_odoo_prod_retained_volume_backup_import_apply",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required retained-volume backup import apply idempotency key.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "OdooProdRetainedVolumeBackupImportApplyRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "backup_record_id": {
+                        "title": "Backup Record Id",
+                        "type": "string"
+                      },
+                      "confirmation": {
+                        "title": "Confirmation",
+                        "type": "string"
+                      },
+                      "context": {
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "expected_active_data_volume": {
+                        "title": "Expected Active Data Volume",
+                        "type": "string"
+                      },
+                      "expected_active_db_volume": {
+                        "title": "Expected Active Db Volume",
+                        "type": "string"
+                      },
+                      "expected_active_log_volume": {
+                        "title": "Expected Active Log Volume",
+                        "type": "string"
+                      },
+                      "expected_current_artifact_id": {
+                        "title": "Expected Current Artifact Id",
+                        "type": "string"
+                      },
+                      "expected_database_user": {
+                        "title": "Expected Database User",
+                        "type": "string"
+                      },
+                      "expected_destination_database_name": {
+                        "title": "Expected Destination Database Name",
+                        "type": "string"
+                      },
+                      "expected_source_compose_project": {
+                        "title": "Expected Source Compose Project",
+                        "type": "string"
+                      },
+                      "instance": {
+                        "const": "prod",
+                        "default": "prod",
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "plan_fingerprint": {
+                        "title": "Plan Fingerprint",
+                        "type": "string"
+                      },
+                      "plan_operation_id": {
+                        "title": "Plan Operation Id",
+                        "type": "string"
+                      },
+                      "product": {
+                        "title": "Product",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "default": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "source_data_volume": {
+                        "title": "Source Data Volume",
+                        "type": "string"
+                      },
+                      "source_database_name": {
+                        "title": "Source Database Name",
+                        "type": "string"
+                      },
+                      "source_db_volume": {
+                        "title": "Source Db Volume",
+                        "type": "string"
+                      },
+                      "staging_clone_volume": {
+                        "title": "Staging Clone Volume",
+                        "type": "string"
+                      },
+                      "timeout_seconds": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Timeout Seconds"
+                      }
+                    },
+                    "required": [
+                      "product",
+                      "context",
+                      "backup_record_id",
+                      "expected_current_artifact_id",
+                      "expected_active_db_volume",
+                      "expected_active_data_volume",
+                      "expected_active_log_volume",
+                      "source_db_volume",
+                      "source_data_volume",
+                      "source_database_name",
+                      "expected_destination_database_name",
+                      "expected_database_user",
+                      "staging_clone_volume",
+                      "expected_source_compose_project",
+                      "plan_operation_id",
+                      "plan_fingerprint",
+                      "confirmation"
+                    ],
+                    "title": "OdooProdRetainedVolumeBackupImportApplyRequest",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "backup_import": {
+                    "$ref": "#/$defs/OdooProdRetainedVolumeBackupImportApplyRequest"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "backup_import"
+                ],
+                "title": "OdooProdRetainedVolumeBackupImportApplyEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Enqueue Odoo retained-volume backup import apply"
+      }
+    },
+    "/v1/drivers/odoo/prod-retained-volume-backup-import-plan": {
+      "post": {
+        "operationId": "write_odoo_prod_retained_volume_backup_import_plan",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required durable retained-volume inspection idempotency key.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$defs": {
+                  "OdooProdRetainedVolumeBackupImportRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "backup_record_id": {
+                        "title": "Backup Record Id",
+                        "type": "string"
+                      },
+                      "context": {
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "expected_active_data_volume": {
+                        "title": "Expected Active Data Volume",
+                        "type": "string"
+                      },
+                      "expected_active_db_volume": {
+                        "title": "Expected Active Db Volume",
+                        "type": "string"
+                      },
+                      "expected_active_log_volume": {
+                        "title": "Expected Active Log Volume",
+                        "type": "string"
+                      },
+                      "expected_current_artifact_id": {
+                        "title": "Expected Current Artifact Id",
+                        "type": "string"
+                      },
+                      "expected_database_user": {
+                        "title": "Expected Database User",
+                        "type": "string"
+                      },
+                      "expected_destination_database_name": {
+                        "title": "Expected Destination Database Name",
+                        "type": "string"
+                      },
+                      "expected_source_compose_project": {
+                        "title": "Expected Source Compose Project",
+                        "type": "string"
+                      },
+                      "instance": {
+                        "const": "prod",
+                        "default": "prod",
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "product": {
+                        "title": "Product",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "default": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "source_data_volume": {
+                        "title": "Source Data Volume",
+                        "type": "string"
+                      },
+                      "source_database_name": {
+                        "title": "Source Database Name",
+                        "type": "string"
+                      },
+                      "source_db_volume": {
+                        "title": "Source Db Volume",
+                        "type": "string"
+                      },
+                      "staging_clone_volume": {
+                        "title": "Staging Clone Volume",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "product",
+                      "context",
+                      "backup_record_id",
+                      "expected_current_artifact_id",
+                      "expected_active_db_volume",
+                      "expected_active_data_volume",
+                      "expected_active_log_volume",
+                      "source_db_volume",
+                      "source_data_volume",
+                      "source_database_name",
+                      "expected_destination_database_name",
+                      "expected_database_user",
+                      "staging_clone_volume",
+                      "expected_source_compose_project"
+                    ],
+                    "title": "OdooProdRetainedVolumeBackupImportRequest",
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "properties": {
+                  "backup_import": {
+                    "$ref": "#/$defs/OdooProdRetainedVolumeBackupImportRequest"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "backup_import"
+                ],
+                "title": "OdooProdRetainedVolumeBackupImportPlanEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Enqueue Odoo retained-volume backup import plan"
+      }
+    },
+    "/v1/drivers/odoo/prod-retained-volume-backup-import/operations/{operation_id}": {
+      "get": {
+        "operationId": "read_odoo_prod_retained_volume_backup_import_operation_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OdooProdRetainedVolumeBackupImportOperationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Odoo retained-volume backup import operation status"
+      }
+    },
+    "/v1/drivers/odoo/prod-retained-volume-backup-import/operations/{operation_id}/cancel": {
+      "post": {
+        "operationId": "cancel_odoo_prod_retained_volume_backup_import_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DurableOperationCancellationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DurableOperationCancellationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Cancel pending Odoo retained-volume backup import operation"
       }
     },
     "/v1/drivers/odoo/prod-rollback": {
@@ -39972,6 +42535,13 @@
                         "title": "Provider Check",
                         "type": "string"
                       },
+                      "recovery_observation_threshold": {
+                        "default": 1,
+                        "maximum": 10,
+                        "minimum": 1,
+                        "title": "Recovery Observation Threshold",
+                        "type": "integer"
+                      },
                       "require_runtime_identity": {
                         "default": false,
                         "title": "Require Runtime Identity",
@@ -39999,6 +42569,16 @@
                         },
                         "title": "Checks",
                         "type": "array"
+                      },
+                      "monitoring_intent": {
+                        "default": "prelaunch",
+                        "enum": [
+                          "public",
+                          "private",
+                          "prelaunch"
+                        ],
+                        "title": "Monitoring Intent",
+                        "type": "string"
                       }
                     },
                     "title": "ProductLaneHealthMonitoringPolicy",
@@ -41475,6 +44055,15 @@
               "schema": {
                 "additionalProperties": false,
                 "properties": {
+                  "check_kind": {
+                    "default": "public_http",
+                    "enum": [
+                      "public_http",
+                      "private_http"
+                    ],
+                    "title": "Check Kind",
+                    "type": "string"
+                  },
                   "check_name": {
                     "title": "Check Name",
                     "type": "string"
@@ -41499,6 +44088,20 @@
                       "apply"
                     ],
                     "title": "Mode",
+                    "type": "string"
+                  },
+                  "monitoring_intent": {
+                    "enum": [
+                      "public",
+                      "private",
+                      "prelaunch"
+                    ],
+                    "title": "Monitoring Intent",
+                    "type": "string"
+                  },
+                  "private_endpoint_key": {
+                    "default": "",
+                    "title": "Private Endpoint Key",
                     "type": "string"
                   },
                   "product": {
@@ -41531,6 +44134,7 @@
                   "context",
                   "instance",
                   "check_name",
+                  "monitoring_intent",
                   "reason"
                 ],
                 "title": "ProductHealthMonitoringApplyRequest",

@@ -31,17 +31,27 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             managed_set_input["options"],
             [
                 "primary",
+                "product-health-monitoring",
                 "odoo-route-binding",
                 "odoo-external-route-binding",
                 "odoo-testing-ingress-route",
                 "odoo-testing-route-binding-refresh",
                 "odoo-testing-target-replacement",
+                "odoo-opw-preview-feedback",
+                "odoo-opw-production-enrollment",
+                "odoo-production-enrollment",
+                "odoo-production-operation-read",
+                "odoo-production-backup-restore",
             ],
         )
         expected_jobs = {
             "reconcile-primary": (
                 "${{ inputs.managed_set == 'primary' }}",
                 "${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-product-health-monitoring": (
+                "${{ inputs.managed_set == 'product-health-monitoring' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON }}",
             ),
             "reconcile-odoo-route-binding": (
                 "${{ inputs.managed_set == 'odoo-route-binding' }}",
@@ -62,6 +72,26 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             "reconcile-odoo-testing-target-replacement": (
                 "${{ inputs.managed_set == 'odoo-testing-target-replacement' }}",
                 "${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_TESTING_TARGET_REPLACEMENT_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-odoo-opw-preview-feedback": (
+                "${{ inputs.managed_set == 'odoo-opw-preview-feedback' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_OPW_PREVIEW_FEEDBACK_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-odoo-opw-production-enrollment": (
+                "${{ inputs.managed_set == 'odoo-opw-production-enrollment' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_OPW_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-odoo-production-enrollment": (
+                "${{ inputs.managed_set == 'odoo-production-enrollment' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-odoo-production-operation-read": (
+                "${{ inputs.managed_set == 'odoo-production-operation-read' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_OPERATION_READ_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-odoo-production-backup-restore": (
+                "${{ inputs.managed_set == 'odoo-production-backup-restore' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_BACKUP_RESTORE_MANAGED_SET_JSON }}",
             ),
         }
         self.assertEqual(set(self.dispatch_workflow.jobs), set(expected_jobs))

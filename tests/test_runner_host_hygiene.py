@@ -21,8 +21,12 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRe
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterPolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterProposal
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneImageInventoryItem
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheBudget
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheEntry
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheUsage
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneReport
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneRunnerWorkdirUsage
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneVolumeInventoryItem
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
@@ -31,6 +35,9 @@ from control_plane.cli_runner_lanes import _runner_host_hygiene_bearer_token
 from control_plane.workflows.runner_host_hygiene_executor import DOCKER_BUILDX_PLUGIN_PATH_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
+from control_plane.workflows.runner_host_hygiene_executor import RunnerWorkdirRoot
+from control_plane.workflows.runner_host_hygiene_executor import _DOCKER_DISK_USAGE_COMMAND
+from control_plane.workflows.runner_host_hygiene_executor import _RUNNER_WORKDIR_USAGE_HELPER
 from control_plane.workflows.runner_host_hygiene_executor import collect_runner_host_hygiene_report
 
 
@@ -61,6 +68,68 @@ class RunnerHostHygieneTests(unittest.TestCase):
         self.assertEqual(report.warm_builders, ("odoo-docker-chris-testing",))
         self.assertEqual(report.findings, ())
         self.assertIn("report-only", report.summary)
+
+    def test_report_marks_partial_runner_workdir_measurement_for_attention(self) -> None:
+        report = evaluate_runner_host_hygiene(
+            policy=RunnerHostHygienePolicy(),
+            observation=RunnerHostHygieneObservation(
+                host_name="chris-testing",
+                observed_at="2026-07-25T23:00:00Z",
+                free_disk_bytes=200,
+                runner_workdir_usage=(
+                    RunnerHostHygieneRunnerWorkdirUsage(
+                        root_key="legacy",
+                        apparent_bytes=100,
+                        allocated_bytes=90,
+                        measurement_status="partial",
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(report.status, "attention")
+        self.assertEqual(
+            [finding.code for finding in report.findings],
+            ["runner_workdir_measurement_partial"],
+        )
+
+    def test_report_marks_generated_cache_budget_and_safety_findings(self) -> None:
+        report = evaluate_runner_host_hygiene(
+            policy=RunnerHostHygienePolicy(
+                generated_cache_budgets=(
+                    RunnerHostHygieneGeneratedCacheBudget(
+                        cache_key="codex-lab-runs",
+                        high_water_bytes=100,
+                    ),
+                )
+            ),
+            observation=RunnerHostHygieneObservation(
+                host_name="chris-testing",
+                observed_at="2026-07-27T00:00:00Z",
+                free_disk_bytes=200,
+                generated_cache_apparent_bytes=120,
+                generated_cache_allocated_bytes=120,
+                generated_cache_usage=(
+                    RunnerHostHygieneGeneratedCacheUsage(
+                        cache_key="codex-lab-runs",
+                        apparent_bytes=120,
+                        allocated_bytes=120,
+                        entry_count=1,
+                        measurement_status="partial",
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(report.status, "attention")
+        self.assertEqual(
+            [finding.code for finding in report.findings],
+            [
+                "generated_cache_above_limit",
+                "generated_cache_measurement_partial",
+                "generated_cache_safety_failed",
+            ],
+        )
 
     def test_report_preserves_sorted_resource_inventory(self) -> None:
         report = evaluate_runner_host_hygiene(
@@ -182,10 +251,11 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 "docker volume ls -q | xargs -r docker volume inspect",
             ): "",
             (
-                "bash",
-                "-lc",
-                "find /opt/actions-runners -mindepth 2 -maxdepth 2 -type d -name _work -exec du -sb {} + 2>/dev/null | awk '{ total += $1 } END { print total + 0 }'",
-            ): "0\n",
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+                "legacy=/opt/actions-runners",
+            ): "0\n0\n",
             ("docker", "version", "--format", "{{.Server.Version}}"): "26.1.5+dfsg1\n",
             ("docker", "version", "--format", "{{.Client.Version}}"): "26.1.5+dfsg1\n",
             ("docker", "buildx", "version"): "github.com/docker/buildx 0.13.1+ds1 0.13.1+ds1-3\n",
@@ -205,8 +275,16 @@ class RunnerHostHygieneTests(unittest.TestCase):
 
         def runner(command: Sequence[str], _timeout: int) -> RemoteCommandResult:
             command_tuple = tuple(command)
+            if command_tuple == _DOCKER_DISK_USAGE_COMMAND:
+                return RemoteCommandResult(returncode=0, stdout=_empty_docker_disk_usage())
             if command_tuple[:3] == ("docker", "volume", "inspect"):
                 return RemoteCommandResult(returncode=1)
+            if command_tuple[:3] == (
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+            ):
+                return RemoteCommandResult(returncode=0, stdout="0\n0\n")
             return RemoteCommandResult(returncode=0, stdout=outputs.get(command_tuple, ""))
 
         report = collect_runner_host_hygiene_report(
@@ -218,6 +296,9 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 repository_scope="cbusillo/launchplane",
                 audit_record_key="runner-host-hygiene/2026-06-04/chris-testing",
                 retained_warm_builders=("odoo-docker-chris-testing",),
+                runner_workdir_roots=(
+                    RunnerWorkdirRoot(key="legacy", path="/opt/actions-runners"),
+                ),
             ),
             remote_runner=runner,
         )
@@ -270,10 +351,11 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 "docker volume ls -q | xargs -r docker volume inspect",
             ): "",
             (
-                "bash",
-                "-lc",
-                "find /opt/actions-runners -mindepth 2 -maxdepth 2 -type d -name _work -exec du -sb {} + 2>/dev/null | awk '{ total += $1 } END { print total + 0 }'",
-            ): "0\n",
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+                "legacy=/opt/actions-runners",
+            ): "0\n0\n",
             ("docker", "version", "--format", "{{.Server.Version}}"): "26.1.5+dfsg1\n",
             ("docker", "version", "--format", "{{.Client.Version}}"): "26.1.5+dfsg1\n",
             ("docker", "buildx", "version"): "github.com/docker/buildx v0.23.0 abcdef\n",
@@ -293,8 +375,16 @@ class RunnerHostHygieneTests(unittest.TestCase):
 
         def runner(command: Sequence[str], _timeout: int) -> RemoteCommandResult:
             command_tuple = tuple(command)
+            if command_tuple == _DOCKER_DISK_USAGE_COMMAND:
+                return RemoteCommandResult(returncode=0, stdout=_empty_docker_disk_usage())
             if command_tuple[:3] == ("docker", "volume", "inspect"):
                 return RemoteCommandResult(returncode=1)
+            if command_tuple[:3] == (
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+            ):
+                return RemoteCommandResult(returncode=0, stdout="0\n0\n")
             return RemoteCommandResult(returncode=0, stdout=outputs.get(command_tuple, ""))
 
         report = collect_runner_host_hygiene_report(
@@ -306,6 +396,9 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 repository_scope="cbusillo/launchplane",
                 audit_record_key="runner-host-hygiene/2026-06-04/chris-testing",
                 retained_warm_builders=("odoo-docker-chris-testing",),
+                runner_workdir_roots=(
+                    RunnerWorkdirRoot(key="legacy", path="/opt/actions-runners"),
+                ),
             ),
             remote_runner=runner,
         )
@@ -391,16 +484,25 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 "docker volume ls -q | xargs -r docker volume inspect",
             ): "",
             (
-                "bash",
-                "-lc",
-                "find /opt/actions-runners -mindepth 2 -maxdepth 2 -type d -name _work -exec du -sb {} + 2>/dev/null | awk '{ total += $1 } END { print total + 0 }'",
-            ): "0\n",
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+                "legacy=/opt/actions-runners",
+            ): "0\n0\n",
         }
 
         def runner(command: Sequence[str], _timeout: int) -> RemoteCommandResult:
             command_tuple = tuple(command)
+            if command_tuple == _DOCKER_DISK_USAGE_COMMAND:
+                return RemoteCommandResult(returncode=0, stdout=_empty_docker_disk_usage())
             if command_tuple[:3] == ("docker", "volume", "inspect"):
                 return RemoteCommandResult(returncode=1)
+            if command_tuple[:3] == (
+                "/usr/bin/sudo",
+                "-n",
+                _RUNNER_WORKDIR_USAGE_HELPER,
+            ):
+                return RemoteCommandResult(returncode=0, stdout="0\n0\n")
             if command_tuple in outputs:
                 return RemoteCommandResult(returncode=0, stdout=outputs[command_tuple])
             return RemoteCommandResult(returncode=1, stderr="not installed")
@@ -414,6 +516,9 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 repository_scope="cbusillo/launchplane",
                 audit_record_key="runner-host-hygiene/2026-06-04/chris-testing",
                 retained_warm_builders=("odoo-docker-chris-testing",),
+                runner_workdir_roots=(
+                    RunnerWorkdirRoot(key="legacy", path="/opt/actions-runners"),
+                ),
             ),
             remote_runner=runner,
         )
@@ -621,6 +726,181 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
         self.assertEqual(plan.status, "ready")
         self.assertEqual(plan.blockers, ())
         self.assertIn("pre-apply", plan.next_steps[0])
+
+    def test_apply_plan_can_bound_one_allowlisted_buildkit_builder(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_docker_cache_prune=True,
+                allowed_buildkit_builders=("odoo-docker-chris-testing",),
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_docker_cache",
+                host_name="chris-testing",
+                mutate=True,
+                target_buildkit_builder="odoo-docker-chris-testing",
+                max_used_space_bytes=64_424_509_440,
+                audit_record_key="runner-host-hygiene/2026-07-25/chris-testing-builder",
+            ),
+            report=_healthy_report(),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.blockers, ())
+
+    def test_apply_plan_can_prune_completed_idle_generated_run_cache(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_generated_run_cache_prune=True,
+                allowed_generated_cache_keys=("codex-lab-runs",),
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_generated_run_cache",
+                host_name="chris-testing",
+                mutate=True,
+                target_generated_cache_key="codex-lab-runs",
+                target_generated_cache_run_ids=(101,),
+                generated_cache_minimum_age_hours=1,
+                generated_cache_high_water_bytes=100,
+                generated_cache_low_water_bytes=10,
+                generated_cache_cooldown_hours=1,
+                audit_record_key="runner-host-hygiene/2026-07-27/generated-cache",
+            ),
+            report=_healthy_report_with_generated_cache(
+                RunnerHostHygieneGeneratedCacheUsage(
+                    cache_key="codex-lab-runs",
+                    apparent_bytes=120,
+                    allocated_bytes=120,
+                    entry_count=1,
+                    owner_valid=True,
+                    mode_valid=True,
+                    symlink_safe=True,
+                    owner_worker_observations=(0, 0),
+                    entries=(
+                        RunnerHostHygieneGeneratedCacheEntry(
+                            run_id=101,
+                            apparent_bytes=120,
+                            allocated_bytes=120,
+                            age_seconds=7_200,
+                            open_handle_observations=(0, 0),
+                            github_run_state="completed",
+                        ),
+                    ),
+                )
+            ),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.blockers, ())
+
+    def test_apply_plan_blocks_generated_cache_when_owner_is_busy(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_generated_run_cache_prune=True,
+                allowed_generated_cache_keys=("codex-lab-runs",),
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_generated_run_cache",
+                host_name="chris-testing",
+                mutate=True,
+                target_generated_cache_key="codex-lab-runs",
+                target_generated_cache_run_ids=(101,),
+                generated_cache_minimum_age_hours=1,
+                generated_cache_high_water_bytes=100,
+                generated_cache_low_water_bytes=10,
+                generated_cache_cooldown_hours=1,
+                audit_record_key="runner-host-hygiene/2026-07-27/generated-cache",
+            ),
+            report=_healthy_report_with_generated_cache(
+                RunnerHostHygieneGeneratedCacheUsage(
+                    cache_key="codex-lab-runs",
+                    apparent_bytes=120,
+                    allocated_bytes=120,
+                    entry_count=1,
+                    owner_valid=True,
+                    mode_valid=True,
+                    symlink_safe=True,
+                    owner_worker_observations=(1, 1),
+                    entries=(
+                        RunnerHostHygieneGeneratedCacheEntry(
+                            run_id=101,
+                            apparent_bytes=120,
+                            allocated_bytes=120,
+                            age_seconds=7_200,
+                            open_handle_observations=(0, 0),
+                            github_run_state="completed",
+                        ),
+                    ),
+                )
+            ),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers],
+            ["target_generated_cache_owner_busy"],
+        )
+
+    def test_apply_plan_blocks_unallowlisted_builder_without_budget(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_docker_cache_prune=True,
+                allowed_buildkit_builders=("odoo-docker-chris-testing",),
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_docker_cache",
+                host_name="chris-testing",
+                mutate=True,
+                target_buildkit_builder="unapproved-builder",
+                audit_record_key="runner-host-hygiene/2026-07-25/chris-testing-builder",
+            ),
+            report=_healthy_report(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers],
+            ["target_builder_budget_missing", "target_builder_not_allowlisted"],
+        )
+
+    def test_apply_plan_allows_dangling_image_prune_under_explicit_policy(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_dangling_image_prune=True,
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_dangling_images",
+                host_name="chris-testing",
+                mutate=True,
+                audit_record_key="runner-host-hygiene/2026-07-25/chris-testing-images",
+            ),
+            report=_healthy_report(),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.blockers, ())
+
+    def test_cache_prune_permission_does_not_enable_image_prune(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_docker_cache_prune=True,
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_dangling_images",
+                host_name="chris-testing",
+                mutate=True,
+                audit_record_key="runner-host-hygiene/2026-07-25/chris-testing-images",
+            ),
+            report=_healthy_report(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual([blocker.code for blocker in plan.blockers], ["action_not_enabled"])
 
     def test_apply_plan_can_target_allowlisted_zero_link_buildkit_state_volume(
         self,
@@ -1020,7 +1300,7 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
                 ),
             )
 
-    def test_apply_audit_record_requires_terminal_post_apply_report(self) -> None:
+    def test_apply_audit_record_requires_completed_post_apply_report(self) -> None:
         request = RunnerHostHygieneApplyRequest(
             action="prune_docker_cache",
             host_name="chris-testing",
@@ -1043,6 +1323,32 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
                 plan=plan,
                 pre_apply_report=_healthy_report(),
             )
+
+    def test_failed_apply_audit_record_can_record_missing_post_evidence(self) -> None:
+        request = RunnerHostHygieneApplyRequest(
+            action="prune_docker_cache",
+            host_name="chris-testing",
+            mutate=True,
+            audit_record_key="runner-host-hygiene/2026-07-25/chris-testing",
+        )
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",), allow_docker_cache_prune=True
+            ),
+            request=request,
+            report=_healthy_report(),
+        )
+
+        audit = RunnerHostHygieneApplyAuditRecord(
+            audit_record_key=request.audit_record_key,
+            status="failed",
+            request=request,
+            plan=plan,
+            pre_apply_report=_healthy_report(),
+            message="terminal evidence collection failed",
+        )
+
+        self.assertIsNone(audit.post_apply_report)
 
     def test_apply_audit_record_requires_terminal_ready_plan(self) -> None:
         request = RunnerHostHygieneApplyRequest(
@@ -1216,6 +1522,159 @@ class RunnerHostHygieneApplyPlanCliTests(unittest.TestCase):
             "planned runner host hygiene apply; no host mutation was executed",
         )
 
+    def test_cli_builds_allowlisted_buildx_apply_plan(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            report_file = Path(temp_dir) / "report.json"
+            report_file.write_text(
+                json.dumps({"report": _healthy_report().model_dump(mode="json")}),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-host-hygiene-apply-plan",
+                    "--action",
+                    "prune_docker_cache",
+                    "--host-name",
+                    "chris-testing",
+                    "--mutate",
+                    "--audit-record-key",
+                    "runner-host-hygiene/2026-07-26/chris-testing",
+                    "--approved-host",
+                    "chris-testing",
+                    "--allow-docker-cache-prune",
+                    "--target-buildkit-builder",
+                    "odoo-docker-chris-testing",
+                    "--allowed-buildkit-builder",
+                    "odoo-docker-chris-testing",
+                    "--max-used-space-bytes",
+                    "64424509440",
+                    "--retained-warm-builder",
+                    "odoo-docker-chris-testing",
+                    "--report-file",
+                    report_file.as_posix(),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["plan"]["status"], "ready")
+        self.assertEqual(
+            payload["request"]["target_buildkit_builder"],
+            "odoo-docker-chris-testing",
+        )
+        self.assertEqual(payload["request"]["max_used_space_bytes"], 64_424_509_440)
+
+    def test_cli_builds_generated_run_cache_apply_plan(self) -> None:
+        generated_usage = RunnerHostHygieneGeneratedCacheUsage(
+            cache_key="codex-lab-runs",
+            apparent_bytes=120,
+            allocated_bytes=120,
+            entry_count=1,
+            owner_valid=True,
+            mode_valid=True,
+            symlink_safe=True,
+            owner_worker_observations=(0, 0),
+            entries=(
+                RunnerHostHygieneGeneratedCacheEntry(
+                    run_id=101,
+                    apparent_bytes=120,
+                    allocated_bytes=120,
+                    age_seconds=7_200,
+                    open_handle_observations=(0, 0),
+                    github_run_state="completed",
+                ),
+            ),
+        )
+        with TemporaryDirectory() as temp_dir:
+            report_file = Path(temp_dir) / "report.json"
+            report_file.write_text(
+                json.dumps(
+                    {
+                        "report": _healthy_report_with_generated_cache(generated_usage).model_dump(
+                            mode="json"
+                        )
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-host-hygiene-apply-plan",
+                    "--action",
+                    "prune_generated_run_cache",
+                    "--host-name",
+                    "chris-testing",
+                    "--mutate",
+                    "--audit-record-key",
+                    "runner-host-hygiene/2026-07-27/generated-cache",
+                    "--approved-host",
+                    "chris-testing",
+                    "--allow-generated-run-cache-prune",
+                    "--allowed-generated-cache-key",
+                    "codex-lab-runs",
+                    "--target-generated-cache-key",
+                    "codex-lab-runs",
+                    "--target-generated-cache-run-id",
+                    "101",
+                    "--generated-cache-minimum-age-hours",
+                    "1",
+                    "--generated-cache-high-water-bytes",
+                    "100",
+                    "--generated-cache-low-water-bytes",
+                    "10",
+                    "--generated-cache-cooldown-hours",
+                    "1",
+                    "--report-file",
+                    report_file.as_posix(),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["plan"]["status"], "ready")
+        self.assertEqual(payload["request"]["target_generated_cache_run_ids"], [101])
+
+    def test_cli_builds_dangling_image_apply_plan(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            report_file = Path(temp_dir) / "report.json"
+            report_file.write_text(
+                json.dumps({"report": _healthy_report().model_dump(mode="json")}),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-host-hygiene-apply-plan",
+                    "--action",
+                    "prune_dangling_images",
+                    "--host-name",
+                    "chris-testing",
+                    "--mutate",
+                    "--audit-record-key",
+                    "runner-host-hygiene/2026-07-26/chris-testing-images",
+                    "--approved-host",
+                    "chris-testing",
+                    "--allow-dangling-image-prune",
+                    "--retained-warm-builder",
+                    "odoo-docker-chris-testing",
+                    "--report-file",
+                    report_file.as_posix(),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["plan"]["status"], "ready")
+        self.assertEqual(payload["request"]["action"], "prune_dangling_images")
+
     def test_cli_builds_adapter_boundary_from_apply_plan_file(self) -> None:
         with TemporaryDirectory() as temp_dir:
             apply_plan = _ready_apply_plan()
@@ -1313,6 +1772,22 @@ def _healthy_report_with_volumes(
     )
 
 
+def _healthy_report_with_generated_cache(
+    usage: RunnerHostHygieneGeneratedCacheUsage,
+) -> RunnerHostHygieneReport:
+    return evaluate_runner_host_hygiene(
+        policy=RunnerHostHygienePolicy(),
+        observation=RunnerHostHygieneObservation(
+            host_name="chris-testing",
+            observed_at="2026-07-27T00:00:00Z",
+            free_disk_bytes=500,
+            generated_cache_apparent_bytes=usage.apparent_bytes,
+            generated_cache_allocated_bytes=usage.allocated_bytes,
+            generated_cache_usage=(usage,),
+        ),
+    )
+
+
 def _attention_report() -> RunnerHostHygieneReport:
     return evaluate_runner_host_hygiene(
         policy=RunnerHostHygienePolicy(minimum_free_disk_bytes=500),
@@ -1367,6 +1842,18 @@ def _adapter_proposal(apply_plan: RunnerHostHygieneApplyPlan) -> RunnerHostHygie
         rollback_plan="Stop if retained builders are missing after pre-apply evidence.",
         pre_apply_evidence=("df", "docker_summary", "warm_builders"),
         post_apply_evidence=("df", "docker_summary", "warm_builders"),
+    )
+
+
+def _empty_docker_disk_usage() -> str:
+    return json.dumps(
+        {
+            "BuildCache": [],
+            "Containers": [],
+            "Images": [],
+            "LayersSize": 0,
+            "Volumes": [],
+        }
     )
 
 

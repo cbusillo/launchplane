@@ -10,6 +10,41 @@ from tests.support.workflows import load_workflow
 
 
 class WorkflowInvariantCheckerTests(unittest.TestCase):
+    def test_postgres_service_uses_ipv4_only_dynamic_host_port(self) -> None:
+        workflow_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn('          - "127.0.0.1::5432"\n', workflow_text)
+
+    def test_postgres_service_uses_ephemeral_data_storage(self) -> None:
+        workflow = load_workflow(".github/workflows/ci.yml")
+        services = workflow.job("postgres_integration").get("services")
+
+        self.assertIsInstance(services, dict)
+        postgres = services.get("postgres") if isinstance(services, dict) else None
+        self.assertIsInstance(postgres, dict)
+        options = postgres.get("options") if isinstance(postgres, dict) else None
+        self.assertIsInstance(options, str)
+        assert isinstance(options, str)
+        self.assertIn(
+            "--tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,size=1g,mode=0700",
+            options,
+        )
+
+    def test_runner_hygiene_dispatch_inputs_are_passed_through_environment(self) -> None:
+        workflow = load_workflow(".github/workflows/runner-host-hygiene.yml")
+        step = workflow.step_named(
+            "runner-host-hygiene", "Run approved runner host hygiene executor"
+        )
+
+        self.assertIsNotNone(step)
+        assert step is not None
+        self.assertNotIn("${{ inputs.", step.run)
+        self.assertNotIn("${{ github.event", step.run)
+        env = step.data.get("env")
+        self.assertIsInstance(env, dict)
+        if isinstance(env, dict):
+            self.assertIn("INPUT_TARGET_BUILDKIT_BUILDER", env)
+
     def test_failure_message_names_invariant_and_workflow(self) -> None:
         workflow = load_workflow(".github/workflows/ci.yml")
 

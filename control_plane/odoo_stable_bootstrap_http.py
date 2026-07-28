@@ -22,6 +22,7 @@ from control_plane.odoo_product_driver_http import (
     OdooRouteDependencyError,
     resolve_odoo_product_route,
 )
+from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
 
 
 ODOO_STABLE_BOOTSTRAP_ROUTE = "/v1/drivers/odoo/stable-bootstrap"
@@ -45,6 +46,10 @@ class OdooStableBootstrapOperationActiveError(ValueError):
             "An Odoo stable bootstrap operation is already active for this product/context/instance."
         )
         self.operation = operation
+
+
+class OdooStableBootstrapLaneBusyError(ValueError):
+    pass
 
 
 class OdooStableBootstrapOperationStore(Protocol):
@@ -133,9 +138,14 @@ def enqueue_odoo_stable_bootstrap_operation(
         created_at=created_at,
         authorization=authorization,
     )
-    operation, created_operation = (
-        operation_store.create_odoo_stable_bootstrap_operation_record_if_no_active_lane(operation)
-    )
+    try:
+        operation, created_operation = (
+            operation_store.create_odoo_stable_bootstrap_operation_record_if_no_active_lane(
+                operation
+            )
+        )
+    except OdooStableLaneOperationConflictError as error:
+        raise OdooStableBootstrapLaneBusyError(str(error)) from error
     if not created_operation:
         if operation.idempotency_key == idempotency_key:
             if operation.request_fingerprint != request_fingerprint:

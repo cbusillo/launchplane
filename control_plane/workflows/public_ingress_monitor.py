@@ -4,10 +4,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+import hashlib
 import json
 import os
 import smtplib
@@ -30,16 +31,28 @@ from control_plane.contracts.product_health_monitoring_migration import (
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneHealthCheck,
+    ProductLaneMonitoringIntent,
     ProductLaneProfile,
+    product_lane_monitoring_incident_eligible,
+    product_lane_monitoring_probe_effective,
+    product_profile_record_sha256,
 )
-from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.private_health_endpoint_record import (
+    PrivateHealthEndpointRecord,
+    private_health_endpoint_record_sha256,
+)
 from control_plane.contracts.public_ingress_monitoring import (
     PUBLIC_TLS_EXPIRING_DAYS,
     PUBLIC_TLS_STALE_AFTER_SECONDS,
     PublicIngressCheckKind,
     PublicIngressFailureCode,
     PublicIngressIncidentEvent,
+    PublicIngressIncidentEventRecord,
+    PublicIngressIncidentMaterialFingerprint,
     PublicIngressIncidentRecord,
+    PublicIngressIncidentReminderStateRecord,
+    PublicIngressIncidentRouteAuthority,
+    PublicIngressIncidentRuntimeMismatch,
     PublicIngressNotificationAttemptRecord,
     PublicIngressNotificationDeliveryStatus,
     PublicIngressNotificationDestination,
@@ -52,15 +65,24 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressTlsProbeEvidence,
     PublicIngressTlsRecordedEvidence,
     PublicIngressTargetObservation,
-    build_public_ingress_lane_incident_id,
+    build_public_ingress_incident_event_id,
+    build_public_ingress_incident_id,
+    build_public_ingress_material_fingerprint,
     build_public_ingress_notification_attempt_id,
     build_public_ingress_observation_id,
+    build_public_ingress_reconciliation_observation_id,
+    build_public_ingress_reminder_state_id,
     build_public_ingress_tls_check_name,
+    public_ingress_material_fingerprint_sha256,
+    public_ingress_failure_layer,
+    public_ingress_incident_record_sha256,
+    public_ingress_incident_severity,
 )
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.route_binding_record import RouteBindingDomain
 from control_plane.contracts.route_binding_record import RouteBindingTerminationKind
 from control_plane.contracts.route_binding_record import RouteBindingTlsOwner
+from control_plane.contracts.route_binding_record import route_binding_record_sha256
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
     RuntimeIdentityStatus,
@@ -87,6 +109,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 MAX_REDIRECTS = 10
 USER_AGENT = "Launchplane public-ingress-monitor/1.0"
 PUBLIC_INGRESS_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"
+MISSING_AUTHORITY_SHA256 = "missing"
 
 
 PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service"]
@@ -151,6 +174,31 @@ class PublicIngressMonitorStore(Protocol):
         self, record: PublicIngressNotificationAttemptRecord
     ) -> object: ...
 
+    def list_public_ingress_incident_event_records(
+        self,
+        *,
+        incident_id: str = "",
+        event: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentEventRecord, ...]: ...
+
+    def write_public_ingress_incident_event_record(
+        self, record: PublicIngressIncidentEventRecord
+    ) -> object: ...
+
+    def list_public_ingress_incident_reminder_state_records(
+        self,
+        *,
+        incident_id: str = "",
+        policy_id: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentReminderStateRecord, ...]: ...
+
+    def write_public_ingress_incident_reminder_state_record(
+        self, record: PublicIngressIncidentReminderStateRecord
+    ) -> object: ...
+
     def read_private_health_endpoint_record(
         self, endpoint_key: str
     ) -> PrivateHealthEndpointRecord: ...
@@ -177,11 +225,18 @@ class PublicIngressMonitorTarget:
     health_url: str
     check_name: str
     check_kind: PublicIngressCheckKind
+    profile_sha256: str
+    monitoring_intent: ProductLaneMonitoringIntent
+    incident_eligible: bool
     expected_runtime_identity: RuntimeIdentity | None
     require_runtime_identity: bool
     provider: str = ""
     provider_check: str = ""
     private_endpoint_key: str = ""
+    private_endpoint_sha256: str = ""
+    private_endpoint_material_sha256: str = ""
+    route_binding_sha256: str = ""
+    recovery_observation_threshold: int = 1
     resolution_failure_code: PublicIngressFailureCode | None = None
     resolution_failure_summary: str = ""
     tls_domain_name: str = ""
@@ -239,12 +294,37 @@ class PublicIngressMonitorResult(BaseModel):
     pass_count: int = Field(default=0, ge=0)
     fail_count: int = Field(default=0, ge=0)
     skipped_count: int = Field(default=0, ge=0)
+    reconciliation_count: int = Field(default=0, ge=0)
+    authority_changed_count: int = Field(default=0, ge=0)
     open_incident_count: int = Field(default=0, ge=0)
     resolved_incident_count: int = Field(default=0, ge=0)
     delivery_attempt_count: int = Field(default=0, ge=0)
     records: tuple[PublicIngressObservationRecord, ...] = ()
     incidents: tuple[PublicIngressIncidentRecord, ...] = ()
+    incident_events: tuple[PublicIngressIncidentEventRecord, ...] = ()
+    reminder_states: tuple[PublicIngressIncidentReminderStateRecord, ...] = ()
     delivery_attempts: tuple[PublicIngressNotificationAttemptRecord, ...] = ()
+
+
+@dataclass(frozen=True)
+class _StoredMonitorTransition:
+    observation: PublicIngressObservationRecord
+    incidents: tuple[PublicIngressIncidentRecord, ...]
+    incident_events: tuple[PublicIngressIncidentEventRecord, ...]
+    reminder_states: tuple[PublicIngressIncidentReminderStateRecord, ...]
+    delivery_attempts: tuple[PublicIngressNotificationAttemptRecord, ...]
+    authority_changed: bool = False
+
+
+@dataclass(frozen=True)
+class _PlannedIncidentTransition:
+    observation: PublicIngressObservationRecord
+    incidents: tuple[PublicIngressIncidentRecord, ...]
+    incident_events: tuple[PublicIngressIncidentEventRecord, ...]
+    reminder_states: tuple[PublicIngressIncidentReminderStateRecord, ...]
+    expected_open_incident_id: str = ""
+    expected_open_incident_state_version: int = 0
+    expected_open_incident_sha256: str = ""
 
 
 HttpGet = Callable[[str, int], HttpObservation]
@@ -253,12 +333,18 @@ TlsGet = Callable[[str, int], PublicTlsProbeResult]
 
 def discover_public_ingress_monitor_targets(
     record_store: PublicIngressMonitorStore,
+    *,
+    profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
 ) -> tuple[PublicIngressMonitorTarget, ...]:
     targets: list[PublicIngressMonitorTarget] = []
-    for profile in record_store.list_product_profile_records():
+    product_profiles = profiles or record_store.list_product_profile_records()
+    for profile in product_profiles:
         for lane in profile.lanes:
             for check in lane.health_monitoring.checks:
-                if not check.enabled:
+                if not check.enabled or not product_lane_monitoring_probe_effective(
+                    monitoring_intent=lane.health_monitoring.monitoring_intent,
+                    check_kind=check.kind,
+                ):
                     continue
                 if check.kind == "public_http" and not _profile_uses_generic_web(profile):
                     continue
@@ -291,13 +377,19 @@ def _health_check_monitor_target(
     health_url = ""
     resolution_failure_code: PublicIngressFailureCode | None = None
     resolution_failure_summary = ""
+    private_endpoint_sha256 = ""
+    private_endpoint_material_sha256 = ""
     if check.kind == "public_http":
         base_url = lane.base_url.strip().rstrip("/")
         health_url = check.url.strip() or _monitor_health_url(
             profile=profile, lane=lane, base_url=base_url
         )
         if not (base_url or health_url):
-            return None
+            health_url = f"invalid-health-check://{canonical_health_check_record_token(check.name) or 'public-ingress'}"
+            resolution_failure_code = "invalid_url"
+            resolution_failure_summary = (
+                "Enabled public HTTP health monitoring has no lane-owned URL."
+            )
     elif check.kind == "private_http":
         if check.private_endpoint_key:
             resolution = _resolved_private_health_url(
@@ -309,6 +401,8 @@ def _health_check_monitor_target(
             health_url = resolution.url
             resolution_failure_code = resolution.failure_code
             resolution_failure_summary = resolution.summary
+            private_endpoint_sha256 = resolution.authority_sha256
+            private_endpoint_material_sha256 = resolution.material_authority_sha256
         if not health_url and not resolution_failure_code:
             return None
     else:
@@ -324,14 +418,23 @@ def _health_check_monitor_target(
         health_url=health_url,
         check_name=check.name,
         check_kind=check.kind,
+        profile_sha256=product_profile_record_sha256(profile),
+        monitoring_intent=lane.health_monitoring.monitoring_intent,
+        incident_eligible=product_lane_monitoring_incident_eligible(
+            monitoring_intent=lane.health_monitoring.monitoring_intent,
+            check_kind=check.kind,
+        ),
         expected_runtime_identity=_expected_runtime_identity(
             record_store=record_store,
             lane=lane,
         ),
         require_runtime_identity=check.require_runtime_identity,
+        recovery_observation_threshold=check.recovery_observation_threshold,
         provider=check.provider,
         provider_check=check.provider_check,
         private_endpoint_key=check.private_endpoint_key,
+        private_endpoint_sha256=private_endpoint_sha256,
+        private_endpoint_material_sha256=private_endpoint_material_sha256,
         resolution_failure_code=resolution_failure_code,
         resolution_failure_summary=resolution_failure_summary,
     )
@@ -342,6 +445,8 @@ class PrivateHealthEndpointResolution:
     url: str = ""
     failure_code: PublicIngressFailureCode | None = None
     summary: str = ""
+    authority_sha256: str = ""
+    material_authority_sha256: str = ""
 
 
 def _resolved_private_health_url(
@@ -363,25 +468,55 @@ def _resolved_private_health_url(
         return PrivateHealthEndpointResolution(
             failure_code="private_endpoint_not_found",
             summary=f"Private health endpoint {endpoint_key!r} was not found.",
+            authority_sha256=MISSING_AUTHORITY_SHA256,
         )
     if not isinstance(endpoint, PrivateHealthEndpointRecord):
         endpoint = PrivateHealthEndpointRecord.model_validate(endpoint)
+    authority_sha256 = private_health_endpoint_record_sha256(endpoint)
+    material_authority_sha256 = _private_health_endpoint_material_sha256(endpoint)
     if endpoint.status != "active":
         return PrivateHealthEndpointResolution(
             failure_code="private_endpoint_disabled",
             summary=f"Private health endpoint {endpoint_key!r} is {endpoint.status}.",
+            authority_sha256=authority_sha256,
+            material_authority_sha256=material_authority_sha256,
         )
     if endpoint.product != profile.product:
         return PrivateHealthEndpointResolution(
             failure_code="private_endpoint_mismatch",
             summary=f"Private health endpoint {endpoint_key!r} belongs to another product.",
+            authority_sha256=authority_sha256,
+            material_authority_sha256=material_authority_sha256,
         )
     if endpoint.context != lane.context or endpoint.instance != lane.instance:
         return PrivateHealthEndpointResolution(
             failure_code="private_endpoint_mismatch",
             summary=f"Private health endpoint {endpoint_key!r} belongs to another lane.",
+            authority_sha256=authority_sha256,
+            material_authority_sha256=material_authority_sha256,
         )
-    return PrivateHealthEndpointResolution(url=endpoint.url)
+    return PrivateHealthEndpointResolution(
+        url=endpoint.url,
+        authority_sha256=authority_sha256,
+        material_authority_sha256=material_authority_sha256,
+    )
+
+
+def _private_health_endpoint_material_sha256(endpoint: PrivateHealthEndpointRecord) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "endpoint_key": endpoint.endpoint_key,
+                "product": endpoint.product,
+                "context": endpoint.context,
+                "instance": endpoint.instance,
+                "url": endpoint.url,
+                "status": endpoint.status,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def run_public_ingress_monitor_once(
@@ -399,12 +534,18 @@ def run_public_ingress_monitor_once(
     public_get = http_get or fetch_public_ingress_url
     private_get = private_http_get or fetch_private_health_url
     tls_probe = tls_get or fetch_public_tls
+    profiles = record_store.list_product_profile_records()
+    targets = discover_public_ingress_monitor_targets(record_store, profiles=profiles)
+    eligible_target_keys = {
+        _monitor_target_key(target) for target in targets if target.incident_eligible
+    }
     records: list[PublicIngressObservationRecord] = []
     incidents: list[PublicIngressIncidentRecord] = []
+    incident_events: list[PublicIngressIncidentEventRecord] = []
+    reminder_states: list[PublicIngressIncidentReminderStateRecord] = []
     delivery_attempts: list[PublicIngressNotificationAttemptRecord] = []
-    open_incident_count = 0
-    resolved_incident_count = 0
-    for target in discover_public_ingress_monitor_targets(record_store):
+    authority_changed_count = 0
+    for target in targets:
         record = check_public_ingress_target(
             target=target,
             checked_at=observed_at,
@@ -412,84 +553,295 @@ def run_public_ingress_monitor_once(
             http_get=(private_get if target.check_kind == "private_http" else public_get),
             tls_get=tls_probe,
         )
-        records.append(record)
-        incident_records = reconcile_public_ingress_incident(
+        stored_transition = _store_monitor_observation(
             record_store=record_store,
             record=record,
-            write_records=False,
+            incident_eligible=target.incident_eligible,
+            expected_profile_sha256=target.profile_sha256,
+            expected_private_endpoint_key=target.private_endpoint_key,
+            expected_private_endpoint_sha256=target.private_endpoint_sha256,
+            expected_route_binding_sha256=target.route_binding_sha256,
+            recovery_observation_threshold=target.recovery_observation_threshold,
+            notify=notify,
+            notification_drivers=notification_drivers,
+        )
+        records.append(stored_transition.observation)
+        incidents.extend(stored_transition.incidents)
+        incident_events.extend(stored_transition.incident_events)
+        reminder_states.extend(stored_transition.reminder_states)
+        delivery_attempts.extend(stored_transition.delivery_attempts)
+        authority_changed_count += int(stored_transition.authority_changed)
+    for record, profile_sha256 in _monitoring_reconciliation_observations(
+        record_store=record_store,
+        profiles=profiles,
+        eligible_target_keys=eligible_target_keys,
+        observed_at=observed_at,
+    ):
+        stored_transition = _store_monitor_observation(
+            record_store=record_store,
+            record=record,
+            incident_eligible=False,
+            expected_profile_sha256=profile_sha256,
+            recovery_observation_threshold=1,
+            notify=notify,
+            notification_drivers=notification_drivers,
+        )
+        records.append(stored_transition.observation)
+        incidents.extend(stored_transition.incidents)
+        incident_events.extend(stored_transition.incident_events)
+        reminder_states.extend(stored_transition.reminder_states)
+        delivery_attempts.extend(stored_transition.delivery_attempts)
+        authority_changed_count += int(stored_transition.authority_changed)
+    return PublicIngressMonitorResult(
+        checked_at=observed_at,
+        target_count=len(targets),
+        pass_count=sum(
+            1 for record in records if record.purpose == "probe" and record.status == "pass"
+        ),
+        fail_count=sum(
+            1 for record in records if record.purpose == "probe" and record.status == "fail"
+        ),
+        skipped_count=sum(
+            1 for record in records if record.purpose == "probe" and record.status == "skipped"
+        ),
+        reconciliation_count=sum(1 for record in records if record.purpose == "reconciliation"),
+        authority_changed_count=authority_changed_count,
+        open_incident_count=sum(1 for incident in incidents if incident.status == "open"),
+        resolved_incident_count=sum(1 for incident in incidents if incident.status == "resolved"),
+        delivery_attempt_count=len(delivery_attempts),
+        records=tuple(records),
+        incidents=tuple(incidents),
+        incident_events=tuple(incident_events),
+        reminder_states=tuple(reminder_states),
+        delivery_attempts=tuple(delivery_attempts),
+    )
+
+
+def _store_monitor_observation(
+    *,
+    record_store: PublicIngressMonitorStore,
+    record: PublicIngressObservationRecord,
+    incident_eligible: bool,
+    expected_profile_sha256: str,
+    expected_private_endpoint_key: str = "",
+    expected_private_endpoint_sha256: str = "",
+    expected_route_binding_sha256: str = "",
+    recovery_observation_threshold: int,
+    notify: bool,
+    notification_drivers: PublicIngressNotificationDrivers | None,
+) -> _StoredMonitorTransition:
+    transition_writer = getattr(record_store, "write_public_ingress_transition_with_outbox", None)
+    plan: _PlannedIncidentTransition | None = None
+    outbox_deliveries: tuple[OutboxDeliveryRecord, ...] = ()
+    for _attempt in range(3):
+        plan = _plan_public_ingress_incident_transition(
+            record_store=record_store,
+            record=record,
+            incident_eligible=incident_eligible,
+            recovery_observation_threshold=recovery_observation_threshold,
         )
         outbox_deliveries = (
             _public_ingress_notification_outbox_deliveries(
                 record_store=record_store,
-                incident_records=incident_records,
-                observation=record,
+                incident_records=plan.incidents,
+                incident_events=plan.incident_events,
+                observation=plan.observation,
             )
             if notify
             else ()
         )
-        transition_writer = getattr(
-            record_store, "write_public_ingress_transition_with_outbox", None
-        )
-        if callable(transition_writer) and outbox_deliveries:
-            transition_writer(
-                observation=record,
-                incidents=incident_records,
-                outbox_deliveries=outbox_deliveries,
-            )
-        else:
-            record_store.write_public_ingress_observation_record(record)
-            for incident in incident_records:
+        if not callable(transition_writer):
+            record_store.write_public_ingress_observation_record(plan.observation)
+            for incident in plan.incidents:
                 record_store.write_public_ingress_incident_record(incident)
-        incidents.extend(incident_records)
-        open_incident_count += sum(1 for incident in incident_records if incident.status == "open")
-        resolved_incident_count += sum(
-            1 for incident in incident_records if incident.status == "resolved"
+            for incident_event in plan.incident_events:
+                record_store.write_public_ingress_incident_event_record(incident_event)
+            for reminder_state in plan.reminder_states:
+                record_store.write_public_ingress_incident_reminder_state_record(reminder_state)
+            break
+        write_result = transition_writer(
+            observation=plan.observation,
+            incidents=plan.incidents,
+            incident_events=plan.incident_events,
+            reminder_states=plan.reminder_states,
+            outbox_deliveries=outbox_deliveries,
+            expected_open_incident_id=plan.expected_open_incident_id,
+            expected_open_incident_state_version=plan.expected_open_incident_state_version,
+            expected_open_incident_sha256=plan.expected_open_incident_sha256,
+            expected_profile_sha256=expected_profile_sha256,
+            expected_private_endpoint_key=expected_private_endpoint_key,
+            expected_private_endpoint_sha256=expected_private_endpoint_sha256,
+            expected_route_binding_sha256=expected_route_binding_sha256,
         )
-        for incident in incident_records:
-            if notify and notification_drivers is not None:
-                direct_destination_kinds: (
-                    tuple[PublicIngressNotificationDestinationKind, ...] | None
-                ) = None
-                if callable(transition_writer) and any(
-                    delivery.aggregate_id == incident.incident_id for delivery in outbox_deliveries
-                ):
-                    direct_destination_kinds = ("email", "discord")
-                delivery_attempts.extend(
-                    deliver_public_ingress_incident_notifications(
-                        record_store=record_store,
-                        event=_incident_event(incident=incident),
-                        incident=incident,
-                        observation=record,
-                        drivers=notification_drivers,
-                        destination_kinds=direct_destination_kinds,
+        write_status = getattr(write_result, "status", "written")
+        if write_status == "incident_changed":
+            continue
+        if write_status == "authority_changed":
+            return _StoredMonitorTransition(
+                observation=record.model_copy(update={"incident_id": "", "incident_event_id": ""}),
+                incidents=(),
+                incident_events=(),
+                reminder_states=(),
+                delivery_attempts=(),
+                authority_changed=True,
+            )
+        break
+    else:
+        raise RuntimeError("public ingress incident changed during three transition attempts")
+    if plan is None:
+        raise RuntimeError("public ingress transition planning did not produce a plan")
+    delivery_attempts: list[PublicIngressNotificationAttemptRecord] = []
+    incidents_by_id = {incident.incident_id: incident for incident in plan.incidents}
+    for incident_event in plan.incident_events:
+        if not incident_event.delivery_eligible:
+            continue
+        incident = incidents_by_id[incident_event.incident_id]
+        if notify and notification_drivers is not None:
+            direct_destination_kinds: (
+                tuple[PublicIngressNotificationDestinationKind, ...] | None
+            ) = None
+            if callable(transition_writer) and any(
+                _outbox_incident_event_id(delivery) == incident_event.event_id
+                for delivery in outbox_deliveries
+            ):
+                direct_destination_kinds = ("email", "discord")
+            delivery_attempts.extend(
+                deliver_public_ingress_incident_notifications(
+                    record_store=record_store,
+                    incident_event=incident_event,
+                    incident=incident,
+                    observation=plan.observation,
+                    drivers=notification_drivers,
+                    destination_kinds=direct_destination_kinds,
+                )
+            )
+    return _StoredMonitorTransition(
+        observation=plan.observation,
+        incidents=plan.incidents,
+        incident_events=plan.incident_events,
+        reminder_states=plan.reminder_states,
+        delivery_attempts=tuple(delivery_attempts),
+    )
+
+
+def _monitor_target_key(
+    target: PublicIngressMonitorTarget,
+) -> tuple[str, str, str, str, str]:
+    return (
+        target.product,
+        target.context,
+        target.instance,
+        canonical_health_check_record_token(target.check_name),
+        target.check_kind,
+    )
+
+
+def _incident_target_key(
+    incident: PublicIngressIncidentRecord,
+) -> tuple[str, str, str, str, str]:
+    return (
+        incident.product,
+        incident.context,
+        incident.instance,
+        canonical_health_check_record_token(incident.check_name),
+        incident.check_kind,
+    )
+
+
+def _monitoring_reconciliation_observations(
+    *,
+    record_store: PublicIngressMonitorStore,
+    profiles: tuple[LaunchplaneProductProfileRecord, ...],
+    eligible_target_keys: set[tuple[str, str, str, str, str]],
+    observed_at: str,
+) -> tuple[tuple[PublicIngressObservationRecord, str], ...]:
+    reconciliations: list[tuple[PublicIngressObservationRecord, str]] = []
+    for profile in profiles:
+        for lane in profile.lanes:
+            open_incidents = record_store.list_public_ingress_incident_records(
+                product=profile.product,
+                context_name=lane.context,
+                instance_name=lane.instance,
+                status="open",
+            )
+            for incident in open_incidents:
+                target_key = _incident_target_key(incident)
+                if target_key in eligible_target_keys:
+                    continue
+                reconciliations.append(
+                    (
+                        _monitoring_reconciliation_observation(
+                            incident=incident,
+                            monitoring_intent=lane.health_monitoring.monitoring_intent,
+                            observed_at=observed_at,
+                        ),
+                        product_profile_record_sha256(profile),
                     )
                 )
-    return PublicIngressMonitorResult(
-        checked_at=observed_at,
-        target_count=len(records),
-        pass_count=sum(1 for record in records if record.status == "pass"),
-        fail_count=sum(1 for record in records if record.status == "fail"),
-        skipped_count=sum(1 for record in records if record.status == "skipped"),
-        open_incident_count=open_incident_count,
-        resolved_incident_count=resolved_incident_count,
-        delivery_attempt_count=len(delivery_attempts),
-        records=tuple(records),
-        incidents=tuple(incidents),
-        delivery_attempts=tuple(delivery_attempts),
+    return tuple(reconciliations)
+
+
+def _monitoring_reconciliation_observation(
+    *,
+    incident: PublicIngressIncidentRecord,
+    monitoring_intent: ProductLaneMonitoringIntent,
+    observed_at: str,
+) -> PublicIngressObservationRecord:
+    summary = (
+        f"Monitoring configuration changed for {incident.product}/{incident.instance}; "
+        f"{incident.check_kind} check {incident.check_name!r} is no longer incident-eligible "
+        f"under {monitoring_intent} intent."
+    )
+    return PublicIngressObservationRecord(
+        record_id=build_public_ingress_reconciliation_observation_id(
+            product=incident.product,
+            context=incident.context,
+            instance=incident.instance,
+            observed_at=observed_at,
+            check_name=incident.check_name,
+        ),
+        product=incident.product,
+        repository=incident.repository,
+        driver_id=incident.driver_id,
+        context=incident.context,
+        instance=incident.instance,
+        check_name=incident.check_name,
+        check_kind=incident.check_kind,
+        purpose="reconciliation",
+        monitoring_intent=monitoring_intent,
+        observed_at=observed_at,
+        status="skipped",
+        failure_code="monitoring_intent_changed",
+        targets=(
+            PublicIngressTargetObservation(
+                target="monitoring_intent",
+                url=f"monitoring-intent://{monitoring_intent}",
+                status="skipped",
+                failure_code="monitoring_intent_changed",
+                summary=summary,
+            ),
+        ),
+        summary=summary,
     )
 
 
 def deliver_public_ingress_incident_notifications(
     *,
     record_store: PublicIngressMonitorStore,
-    event: PublicIngressIncidentEvent,
+    incident_event: PublicIngressIncidentEventRecord,
     incident: PublicIngressIncidentRecord,
     observation: PublicIngressObservationRecord,
     drivers: PublicIngressNotificationDrivers,
     destination_kinds: tuple[PublicIngressNotificationDestinationKind, ...] | None = None,
 ) -> tuple[PublicIngressNotificationAttemptRecord, ...]:
     attempts: list[PublicIngressNotificationAttemptRecord] = []
-    for policy in _matching_notification_policies(record_store=record_store, incident=incident):
+    event = _public_ingress_event_value(incident_event.event)
+    policies = _matching_notification_policies(record_store=record_store, incident=incident)
+    if incident_event.policy_id:
+        policies = tuple(
+            policy for policy in policies if policy.policy_id == incident_event.policy_id
+        )
+    for policy in policies:
         for destination in policy.destinations:
             if destination_kinds is not None and destination.kind not in destination_kinds:
                 continue
@@ -498,7 +850,7 @@ def deliver_public_ingress_incident_notifications(
                 event=event,
                 policy_id=policy.policy_id,
                 destination_id=destination.destination_id,
-                observation_id=observation.record_id,
+                incident_event_id=incident_event.event_id,
             )
             existing_attempt = _notification_attempt(
                 record_store=record_store,
@@ -536,6 +888,7 @@ def deliver_public_ingress_incident_notifications(
                 delivery_status=delivery.delivery_status,
                 attempted_at=observation.observed_at,
                 observation_id=observation.record_id,
+                incident_event_id=incident_event.event_id,
                 external_url=delivery.external_url,
                 external_id=delivery.external_id,
                 action=delivery.action,
@@ -550,12 +903,22 @@ def _public_ingress_notification_outbox_deliveries(
     *,
     record_store: PublicIngressMonitorStore,
     incident_records: tuple[PublicIngressIncidentRecord, ...],
+    incident_events: tuple[PublicIngressIncidentEventRecord, ...],
     observation: PublicIngressObservationRecord,
 ) -> tuple[OutboxDeliveryRecord, ...]:
     deliveries: list[OutboxDeliveryRecord] = []
-    for incident in incident_records:
-        event = _incident_event(incident=incident)
-        for policy in _matching_notification_policies(record_store=record_store, incident=incident):
+    incidents_by_id = {incident.incident_id: incident for incident in incident_records}
+    for incident_event in incident_events:
+        if not incident_event.delivery_eligible:
+            continue
+        incident = incidents_by_id[incident_event.incident_id]
+        event = _public_ingress_event_value(incident_event.event)
+        policies = _matching_notification_policies(record_store=record_store, incident=incident)
+        if incident_event.policy_id:
+            policies = tuple(
+                policy for policy in policies if policy.policy_id == incident_event.policy_id
+            )
+        for policy in policies:
             for destination in policy.destinations:
                 if destination.kind != "github_issue" or destination.status != "enabled":
                     continue
@@ -564,7 +927,7 @@ def _public_ingress_notification_outbox_deliveries(
                     event=event,
                     policy_id=policy.policy_id,
                     destination_id=destination.destination_id,
-                    observation_id=observation.record_id,
+                    incident_event_id=incident_event.event_id,
                 )
                 existing_attempt = _notification_attempt(
                     record_store=record_store,
@@ -588,7 +951,7 @@ def _public_ingress_notification_outbox_deliveries(
                     kind="public_ingress_notification",
                     parts=(attempt_id,),
                 )
-                created_at = observation.observed_at
+                created_at = incident_event.occurred_at
                 deliveries.append(
                     OutboxDeliveryRecord(
                         delivery_id=build_outbox_delivery_id(
@@ -611,46 +974,175 @@ def _public_ingress_notification_outbox_deliveries(
                                 "destination_id": destination.destination_id,
                                 "destination_kind": destination.kind,
                                 "attempted_at": observation.observed_at,
-                                "observation_id": observation.record_id,
+                                "observation_id": incident_event.observation_id,
+                                "incident_event_id": incident_event.event_id,
                             },
                             "destination": _github_notification_destination_payload(destination),
                             "body": body,
                             "existing_issue_url": _latest_external_url(previous_attempts),
                             "marker": attempt_id,
+                            "incident_marker": _public_ingress_incident_marker(
+                                incident.incident_id
+                            ),
                         },
                     )
                 )
     return tuple(deliveries)
 
 
+def _outbox_incident_event_id(delivery: OutboxDeliveryRecord) -> str:
+    attempt = delivery.payload.get("attempt")
+    if not isinstance(attempt, dict):
+        return ""
+    value = attempt.get("incident_event_id")
+    return value.strip() if isinstance(value, str) else ""
+
+
 def reconcile_public_ingress_incident(
     *,
     record_store: PublicIngressMonitorStore,
     record: PublicIngressObservationRecord,
+    incident_eligible: bool = True,
     write_records: bool = True,
 ) -> tuple[PublicIngressIncidentRecord, ...]:
+    plan = _plan_public_ingress_incident_transition(
+        record_store=record_store,
+        record=record,
+        incident_eligible=incident_eligible,
+        recovery_observation_threshold=1,
+    )
+    if write_records:
+        for incident in plan.incidents:
+            record_store.write_public_ingress_incident_record(incident)
+        for incident_event in plan.incident_events:
+            record_store.write_public_ingress_incident_event_record(incident_event)
+        for reminder_state in plan.reminder_states:
+            record_store.write_public_ingress_incident_reminder_state_record(reminder_state)
+    return plan.incidents
+
+
+def _plan_public_ingress_incident_transition(
+    *,
+    record_store: PublicIngressMonitorStore,
+    record: PublicIngressObservationRecord,
+    incident_eligible: bool,
+    recovery_observation_threshold: int,
+) -> _PlannedIncidentTransition:
     open_incidents = _open_incidents(record_store=record_store, record=record)
-    if record.status == "fail":
-        incident_id = build_public_ingress_lane_incident_id(
-            product=record.product,
-            context=record.context,
-            instance=record.instance,
-            check_name=record.check_name,
-        )
-        open_incident = next(
-            (incident for incident in open_incidents if incident.incident_id == incident_id), None
-        )
-        if open_incident is not None:
-            incident = open_incident.model_copy(
-                update={
-                    "latest_observation_id": record.record_id,
-                    "latest_observed_at": record.observed_at,
-                    "failure_code": record.failure_code,
-                    "summary": record.summary,
-                }
+    existing = min(
+        open_incidents,
+        key=lambda incident: (incident.opened_at, incident.incident_id),
+        default=None,
+    )
+    expected_incident_id = existing.incident_id if existing is not None else ""
+    expected_state_version = existing.state_version if existing is not None else 0
+    expected_incident_sha256 = (
+        public_ingress_incident_record_sha256(existing) if existing is not None else ""
+    )
+    incident_events: list[PublicIngressIncidentEventRecord] = []
+    reconciled_duplicates: list[PublicIngressIncidentRecord] = []
+    reconciled_reminder_states: list[PublicIngressIncidentReminderStateRecord] = []
+    for duplicate in open_incidents:
+        if existing is not None and duplicate.incident_id == existing.incident_id:
+            continue
+        if duplicate.schema_version < 2:
+            duplicate, baseline_event = _upgrade_legacy_incident(
+                record_store=record_store,
+                existing=duplicate,
             )
-        else:
+            incident_events.append(baseline_event)
+        resolved_duplicate, resolved_event = _reconcile_duplicate_incident(
+            incident=duplicate,
+            reconciled_at=record.observed_at,
+        )
+        reconciled_duplicates.append(resolved_duplicate)
+        incident_events.append(resolved_event)
+        reconciled_reminder_states.extend(
+            _resolved_reminder_states(
+                record_store=record_store,
+                incident=resolved_duplicate,
+                updated_at=record.observed_at,
+            )
+        )
+
+    def with_reconciled_reminder_states(
+        states: tuple[PublicIngressIncidentReminderStateRecord, ...] = (),
+    ) -> tuple[PublicIngressIncidentReminderStateRecord, ...]:
+        return (*reconciled_reminder_states, *states)
+
+    if existing is not None and existing.schema_version < 2:
+        existing, baseline_event = _upgrade_legacy_incident(
+            record_store=record_store,
+            existing=existing,
+        )
+        incident_events.append(baseline_event)
+    if existing is not None:
+        existing = _expire_incident_silence(existing, observed_at=record.observed_at)
+
+    if not incident_eligible and record.purpose == "reconciliation" and existing is not None:
+        incident, resolved_event = _resolve_incident(
+            incident=existing,
+            record=record,
+            reason="monitoring_intent_changed",
+            summary=(
+                "Monitoring intent changed; this check is no longer incident-eligible. "
+                f"Previous incident evidence: {existing.summary}"
+            ),
+        )
+        reminder_states = _resolved_reminder_states(
+            record_store=record_store,
+            incident=incident,
+            updated_at=record.observed_at,
+        )
+        incident_events.append(resolved_event)
+        return _PlannedIncidentTransition(
+            observation=record.model_copy(
+                update={
+                    "incident_id": incident.incident_id,
+                    "incident_event_id": resolved_event.event_id,
+                }
+            ),
+            incidents=(incident, *reconciled_duplicates),
+            incident_events=tuple(incident_events),
+            reminder_states=with_reconciled_reminder_states(reminder_states),
+            expected_open_incident_id=expected_incident_id,
+            expected_open_incident_state_version=expected_state_version,
+            expected_open_incident_sha256=expected_incident_sha256,
+        )
+    if not incident_eligible:
+        return _PlannedIncidentTransition(
+            observation=record,
+            incidents=tuple(reconciled_duplicates),
+            incident_events=tuple(incident_events),
+            reminder_states=with_reconciled_reminder_states(),
+            expected_open_incident_id=expected_incident_id,
+            expected_open_incident_state_version=expected_state_version,
+            expected_open_incident_sha256=expected_incident_sha256,
+        )
+    if record.status == "fail":
+        fingerprint = _observation_material_fingerprint(record)
+        fingerprint_sha256 = public_ingress_material_fingerprint_sha256(fingerprint)
+        linked_observation = record.model_copy(
+            update={
+                "material_fingerprint": fingerprint,
+                "material_fingerprint_sha256": fingerprint_sha256,
+            }
+        )
+        if existing is None:
+            incident_id = build_public_ingress_incident_id(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+                check_name=record.check_name,
+                opened_at=record.observed_at,
+            )
+            event_id = build_public_ingress_incident_event_id(
+                incident_id=incident_id,
+                event="opened",
+                material_fingerprint_sha256=fingerprint_sha256,
+            )
             incident = PublicIngressIncidentRecord(
+                schema_version=2,
                 incident_id=incident_id,
                 product=record.product,
                 repository=record.repository,
@@ -665,34 +1157,777 @@ def reconcile_public_ingress_incident(
                 latest_observation_id=record.record_id,
                 latest_observed_at=record.observed_at,
                 failure_code=record.failure_code or "unknown_error",
+                state_version=1,
+                severity=fingerprint.severity,
+                material_fingerprint=fingerprint,
+                material_fingerprint_sha256=fingerprint_sha256,
+                material_fingerprint_complete=True,
+                latest_material_event_id=event_id,
+                latest_material_event="opened",
+                latest_material_event_at=record.observed_at,
+                recovery_observation_threshold=recovery_observation_threshold,
                 summary=record.summary,
             )
-        if write_records:
-            record_store.write_public_ingress_incident_record(incident)
-        return (incident,)
-    if record.status == "pass" and open_incidents:
-        resolved_incidents: list[PublicIngressIncidentRecord] = []
-        for open_incident in open_incidents:
-            incident = open_incident.model_copy(
+            incident_event = PublicIngressIncidentEventRecord(
+                event_id=event_id,
+                incident_id=incident_id,
+                event="opened",
+                reason="incident_opened",
+                occurred_at=record.observed_at,
+                observation_id=record.record_id,
+                material_fingerprint_sha256=fingerprint_sha256,
+                severity=fingerprint.severity,
+                summary=record.summary,
+            )
+            reminder_states = _material_event_reminder_states(
+                record_store=record_store,
+                incident=incident,
+                incident_event=incident_event,
+            )
+            return _PlannedIncidentTransition(
+                observation=linked_observation.model_copy(
+                    update={
+                        "incident_id": incident_id,
+                        "incident_event_id": event_id,
+                    }
+                ),
+                incidents=(incident, *reconciled_duplicates),
+                incident_events=(incident_event,),
+                reminder_states=with_reconciled_reminder_states(reminder_states),
+                expected_open_incident_id="",
+                expected_open_incident_state_version=0,
+                expected_open_incident_sha256="",
+            )
+
+        material_changed = _material_incident_changed(
+            incident=existing,
+            fingerprint=fingerprint,
+            fingerprint_sha256=fingerprint_sha256,
+        )
+        if (
+            not material_changed
+            and not existing.material_fingerprint_complete
+            and existing.material_fingerprint_sha256 != fingerprint_sha256
+        ):
+            event_id = build_public_ingress_incident_event_id(
+                incident_id=existing.incident_id,
+                event="baseline",
+                material_fingerprint_sha256=fingerprint_sha256,
+                previous_event_id=existing.latest_material_event_id,
+            )
+            baseline_event = PublicIngressIncidentEventRecord(
+                event_id=event_id,
+                incident_id=existing.incident_id,
+                event="baseline",
+                reason="migration_baseline",
+                occurred_at=record.observed_at,
+                observation_id=record.record_id,
+                material_fingerprint_sha256=fingerprint_sha256,
+                previous_material_fingerprint_sha256=existing.material_fingerprint_sha256,
+                severity=fingerprint.severity,
+                delivery_eligible=False,
+                summary="Legacy incident material state enriched without notification delivery.",
+            )
+            incident = existing.model_copy(
                 update={
-                    "status": "resolved",
                     "latest_observation_id": record.record_id,
                     "latest_observed_at": record.observed_at,
-                    "resolved_at": record.observed_at,
-                    "resolved_observation_id": record.record_id,
+                    "failure_code": record.failure_code,
+                    "state_version": existing.state_version + 1,
+                    "severity": fingerprint.severity,
+                    "material_fingerprint": fingerprint,
+                    "material_fingerprint_sha256": fingerprint_sha256,
+                    "material_fingerprint_complete": True,
+                    "latest_material_event_id": event_id,
+                    "latest_material_event": "baseline",
+                    "latest_material_event_at": record.observed_at,
+                    "recovery_observation_threshold": recovery_observation_threshold,
+                    "consecutive_recovery_observations": 0,
+                    "latest_recovery_observation_id": "",
                     "summary": record.summary,
                 }
             )
-            if write_records:
-                record_store.write_public_ingress_incident_record(incident)
-            resolved_incidents.append(incident)
-        return tuple(resolved_incidents)
-    return ()
+            incident_events.append(baseline_event)
+            return _PlannedIncidentTransition(
+                observation=linked_observation.model_copy(
+                    update={
+                        "incident_id": incident.incident_id,
+                        "incident_event_id": event_id,
+                    }
+                ),
+                incidents=(incident, *reconciled_duplicates),
+                incident_events=tuple(incident_events),
+                reminder_states=with_reconciled_reminder_states(
+                    _material_event_reminder_states(
+                        record_store=record_store,
+                        incident=incident,
+                        incident_event=baseline_event,
+                    )
+                ),
+                expected_open_incident_id=expected_incident_id,
+                expected_open_incident_state_version=expected_state_version,
+                expected_open_incident_sha256=expected_incident_sha256,
+            )
+        if material_changed:
+            notification_state = existing.notification_state
+            notification_state_changed_at = existing.notification_state_changed_at
+            notification_state_reason = existing.notification_state_reason
+            silenced_until = existing.silenced_until
+            delivery_eligible = notification_state != "silenced"
+            suppression_reason = "" if delivery_eligible else "silenced"
+            if notification_state == "acknowledged":
+                notification_state = "active"
+                notification_state_changed_at = record.observed_at
+                notification_state_reason = "material_change"
+            event_id = build_public_ingress_incident_event_id(
+                incident_id=existing.incident_id,
+                event="updated",
+                material_fingerprint_sha256=fingerprint_sha256,
+                previous_event_id=existing.latest_material_event_id,
+            )
+            incident = existing.model_copy(
+                update={
+                    "latest_observation_id": record.record_id,
+                    "latest_observed_at": record.observed_at,
+                    "failure_code": record.failure_code,
+                    "state_version": existing.state_version + 1,
+                    "severity": fingerprint.severity,
+                    "material_fingerprint": fingerprint,
+                    "material_fingerprint_sha256": fingerprint_sha256,
+                    "material_fingerprint_complete": True,
+                    "latest_material_event_id": event_id,
+                    "latest_material_event": "updated",
+                    "latest_material_event_at": record.observed_at,
+                    "notification_state": notification_state,
+                    "notification_state_changed_at": notification_state_changed_at,
+                    "notification_state_reason": notification_state_reason,
+                    "silenced_until": silenced_until,
+                    "recovery_observation_threshold": recovery_observation_threshold,
+                    "consecutive_recovery_observations": 0,
+                    "latest_recovery_observation_id": "",
+                    "summary": record.summary,
+                }
+            )
+            incident_event = PublicIngressIncidentEventRecord(
+                event_id=event_id,
+                incident_id=incident.incident_id,
+                event="updated",
+                reason="material_change",
+                occurred_at=record.observed_at,
+                observation_id=record.record_id,
+                material_fingerprint_sha256=fingerprint_sha256,
+                previous_material_fingerprint_sha256=existing.material_fingerprint_sha256,
+                severity=fingerprint.severity,
+                delivery_eligible=delivery_eligible,
+                suppression_reason=cast(Any, suppression_reason),
+                summary=record.summary,
+            )
+            reminder_states = _material_event_reminder_states(
+                record_store=record_store,
+                incident=incident,
+                incident_event=incident_event,
+            )
+            incident_events.append(incident_event)
+            return _PlannedIncidentTransition(
+                observation=linked_observation.model_copy(
+                    update={
+                        "incident_id": incident.incident_id,
+                        "incident_event_id": event_id,
+                    }
+                ),
+                incidents=(incident, *reconciled_duplicates),
+                incident_events=tuple(incident_events),
+                reminder_states=with_reconciled_reminder_states(reminder_states),
+                expected_open_incident_id=expected_incident_id,
+                expected_open_incident_state_version=expected_state_version,
+                expected_open_incident_sha256=expected_incident_sha256,
+            )
+
+        if existing.latest_observation_id == record.record_id:
+            incident = existing
+        else:
+            incident = existing.model_copy(
+                update={
+                    "latest_observation_id": record.record_id,
+                    "latest_observed_at": record.observed_at,
+                    "failure_code": record.failure_code,
+                    "state_version": existing.state_version + 1,
+                    "severity": fingerprint.severity,
+                    "material_fingerprint": fingerprint,
+                    "material_fingerprint_sha256": fingerprint_sha256,
+                    "material_fingerprint_complete": True,
+                    "recovery_observation_threshold": recovery_observation_threshold,
+                    "consecutive_recovery_observations": 0,
+                    "latest_recovery_observation_id": "",
+                    "summary": record.summary,
+                }
+            )
+        reminder_events, reminder_states = _due_reminder_transition(
+            record_store=record_store,
+            incident=incident,
+            observation=record,
+        )
+        incident_events.extend(reminder_events)
+        return _PlannedIncidentTransition(
+            observation=linked_observation.model_copy(update={"incident_id": incident.incident_id}),
+            incidents=(incident, *reconciled_duplicates),
+            incident_events=tuple(incident_events),
+            reminder_states=with_reconciled_reminder_states(reminder_states),
+            expected_open_incident_id=expected_incident_id,
+            expected_open_incident_state_version=expected_state_version,
+            expected_open_incident_sha256=expected_incident_sha256,
+        )
+
+    if existing is None:
+        return _PlannedIncidentTransition(
+            observation=record,
+            incidents=tuple(reconciled_duplicates),
+            incident_events=tuple(incident_events),
+            reminder_states=with_reconciled_reminder_states(),
+            expected_open_incident_id="",
+            expected_open_incident_state_version=0,
+            expected_open_incident_sha256="",
+        )
+    linked_observation = record.model_copy(update={"incident_id": existing.incident_id})
+    if record.status == "pass":
+        if existing.latest_recovery_observation_id == record.record_id:
+            recovery_count = existing.consecutive_recovery_observations
+        else:
+            recovery_count = existing.consecutive_recovery_observations + 1
+        if recovery_count >= recovery_observation_threshold:
+            incident, resolved_event = _resolve_incident(
+                incident=existing,
+                record=record,
+                reason="recovered",
+                summary=record.summary,
+                recovery_count=recovery_count,
+                recovery_observation_threshold=recovery_observation_threshold,
+            )
+            incident_events.append(resolved_event)
+            return _PlannedIncidentTransition(
+                observation=linked_observation.model_copy(
+                    update={"incident_event_id": resolved_event.event_id}
+                ),
+                incidents=(incident, *reconciled_duplicates),
+                incident_events=tuple(incident_events),
+                reminder_states=with_reconciled_reminder_states(
+                    _resolved_reminder_states(
+                        record_store=record_store,
+                        incident=incident,
+                        updated_at=record.observed_at,
+                    )
+                ),
+                expected_open_incident_id=expected_incident_id,
+                expected_open_incident_state_version=expected_state_version,
+                expected_open_incident_sha256=expected_incident_sha256,
+            )
+        incident = existing.model_copy(
+            update={
+                "latest_observation_id": record.record_id,
+                "latest_observed_at": record.observed_at,
+                "state_version": (
+                    existing.state_version
+                    if existing.latest_recovery_observation_id == record.record_id
+                    else existing.state_version + 1
+                ),
+                "recovery_observation_threshold": recovery_observation_threshold,
+                "consecutive_recovery_observations": recovery_count,
+                "latest_recovery_observation_id": record.record_id,
+            }
+        )
+        return _PlannedIncidentTransition(
+            observation=linked_observation,
+            incidents=(incident, *reconciled_duplicates),
+            incident_events=tuple(incident_events),
+            reminder_states=with_reconciled_reminder_states(),
+            expected_open_incident_id=expected_incident_id,
+            expected_open_incident_state_version=expected_state_version,
+            expected_open_incident_sha256=expected_incident_sha256,
+        )
+    return _PlannedIncidentTransition(
+        observation=linked_observation,
+        incidents=(existing, *reconciled_duplicates),
+        incident_events=tuple(incident_events),
+        reminder_states=with_reconciled_reminder_states(),
+        expected_open_incident_id=expected_incident_id,
+        expected_open_incident_state_version=expected_state_version,
+        expected_open_incident_sha256=expected_incident_sha256,
+    )
+
+
+def _upgrade_legacy_incident(
+    *,
+    record_store: PublicIngressMonitorStore,
+    existing: PublicIngressIncidentRecord,
+) -> tuple[PublicIngressIncidentRecord, PublicIngressIncidentEventRecord]:
+    historical_observation = _legacy_incident_observation(
+        record_store=record_store,
+        incident=existing,
+    )
+    if historical_observation is not None:
+        fingerprint = _observation_material_fingerprint(historical_observation)
+        fingerprint_complete = True
+        observation_id = historical_observation.record_id
+        occurred_at = historical_observation.observed_at
+    else:
+        fingerprint = _legacy_incident_fingerprint(existing)
+        fingerprint_complete = False
+        observation_id = existing.latest_observation_id
+        occurred_at = existing.latest_observed_at
+    fingerprint_sha256 = public_ingress_material_fingerprint_sha256(fingerprint)
+    event_id = build_public_ingress_incident_event_id(
+        incident_id=existing.incident_id,
+        event="baseline",
+        material_fingerprint_sha256=fingerprint_sha256,
+    )
+    baseline = PublicIngressIncidentEventRecord(
+        event_id=event_id,
+        incident_id=existing.incident_id,
+        event="baseline",
+        reason="migration_baseline",
+        occurred_at=occurred_at,
+        observation_id=observation_id,
+        material_fingerprint_sha256=fingerprint_sha256,
+        severity=fingerprint.severity,
+        delivery_eligible=False,
+        summary="Existing incident material state adopted without notification delivery.",
+    )
+    return (
+        existing.model_copy(
+            update={
+                "schema_version": 2,
+                "state_version": max(existing.state_version, 1),
+                "severity": fingerprint.severity,
+                "material_fingerprint": fingerprint,
+                "material_fingerprint_sha256": fingerprint_sha256,
+                "material_fingerprint_complete": fingerprint_complete,
+                "latest_material_event_id": event_id,
+                "latest_material_event": "baseline",
+                "latest_material_event_at": occurred_at,
+                "recovery_observation_threshold": 1,
+            }
+        ),
+        baseline,
+    )
+
+
+def _legacy_incident_observation(
+    *,
+    record_store: PublicIngressMonitorStore,
+    incident: PublicIngressIncidentRecord,
+) -> PublicIngressObservationRecord | None:
+    observations = record_store.list_public_ingress_observation_records(
+        product=incident.product,
+        context_name=incident.context,
+        instance_name=incident.instance,
+        check_name=incident.check_name,
+        check_kind=incident.check_kind,
+        limit=25,
+    )
+    return next(
+        (
+            observation
+            for observation in observations
+            if observation.record_id == incident.latest_observation_id
+            and observation.status == "fail"
+        ),
+        None,
+    )
+
+
+def _legacy_incident_fingerprint(
+    incident: PublicIngressIncidentRecord,
+) -> PublicIngressIncidentMaterialFingerprint:
+    digest = hashlib.sha256(incident.incident_id.encode("utf-8")).hexdigest()
+    route_kind = {
+        "private_http": "private_endpoint",
+        "provider": "provider",
+        "tls": "route_binding",
+    }.get(incident.check_kind, "public_urls")
+    authority_kwargs: dict[str, object] = {
+        "kind": route_kind,
+        "target_keys": (f"legacy-route-sha256:{digest}",),
+    }
+    if route_kind == "private_endpoint":
+        authority_kwargs.update(
+            private_endpoint_key="legacy-private-endpoint",
+            private_endpoint_sha256=digest,
+        )
+    elif route_kind == "provider":
+        authority_kwargs.update(provider="legacy-provider", provider_check="legacy-check")
+    elif route_kind == "route_binding":
+        authority_kwargs.update(domain_name=f"legacy-{digest[:16]}.invalid")
+    target_kind = {
+        "private_http": "private_health_url",
+        "provider": "provider",
+        "tls": "tls_domain",
+    }.get(incident.check_kind, "health_url")
+    return PublicIngressIncidentMaterialFingerprint(
+        check_kind=incident.check_kind,
+        failure_code=incident.failure_code,
+        failure_layer=public_ingress_failure_layer(incident.failure_code),
+        severity=public_ingress_incident_severity(incident.failure_code),
+        affected_targets=(cast(Any, target_kind),),
+        route_authority=PublicIngressIncidentRouteAuthority.model_validate(authority_kwargs),
+        runtime_mismatch=(
+            PublicIngressIncidentRuntimeMismatch(status="unverifiable")
+            if incident.failure_code == "wrong_runtime_identity"
+            else None
+        ),
+        tls_status="unknown" if incident.check_kind == "tls" else "",
+    )
+
+
+def _observation_material_fingerprint(
+    record: PublicIngressObservationRecord,
+) -> PublicIngressIncidentMaterialFingerprint:
+    if record.material_fingerprint is not None:
+        return record.material_fingerprint
+    return build_public_ingress_material_fingerprint(record)
+
+
+def _material_incident_changed(
+    *,
+    incident: PublicIngressIncidentRecord,
+    fingerprint: PublicIngressIncidentMaterialFingerprint,
+    fingerprint_sha256: str,
+) -> bool:
+    if incident.material_fingerprint_sha256 == fingerprint_sha256:
+        return False
+    if incident.material_fingerprint_complete or incident.material_fingerprint is None:
+        return True
+    previous = incident.material_fingerprint
+    return (
+        previous.check_kind != fingerprint.check_kind
+        or previous.failure_code != fingerprint.failure_code
+        or previous.failure_layer != fingerprint.failure_layer
+        or previous.severity != fingerprint.severity
+    )
+
+
+def _expire_incident_silence(
+    incident: PublicIngressIncidentRecord,
+    *,
+    observed_at: str,
+) -> PublicIngressIncidentRecord:
+    if incident.notification_state != "silenced":
+        return incident
+    try:
+        silence_expired = _parse_utc_timestamp(observed_at) >= _parse_utc_timestamp(
+            incident.silenced_until
+        )
+    except ValueError:
+        silence_expired = True
+    if not silence_expired:
+        return incident
+    return incident.model_copy(
+        update={
+            "notification_state": "active",
+            "notification_state_changed_at": observed_at,
+            "notification_state_reason": "silence_expired",
+            "silenced_until": "",
+        }
+    )
+
+
+def _resolve_incident(
+    *,
+    incident: PublicIngressIncidentRecord,
+    record: PublicIngressObservationRecord,
+    reason: Literal["recovered", "monitoring_intent_changed"],
+    summary: str,
+    recovery_count: int = 0,
+    recovery_observation_threshold: int | None = None,
+) -> tuple[PublicIngressIncidentRecord, PublicIngressIncidentEventRecord]:
+    event_id = build_public_ingress_incident_event_id(
+        incident_id=incident.incident_id,
+        event="resolved",
+        material_fingerprint_sha256=incident.material_fingerprint_sha256,
+        previous_event_id=incident.latest_material_event_id,
+    )
+    resolved = incident.model_copy(
+        update={
+            "status": "resolved",
+            "latest_observation_id": record.record_id,
+            "latest_observed_at": record.observed_at,
+            "resolved_at": record.observed_at,
+            "resolved_observation_id": record.record_id,
+            "resolution_reason": reason,
+            "state_version": incident.state_version + 1,
+            "latest_material_event_id": event_id,
+            "latest_material_event": "resolved",
+            "latest_material_event_at": record.observed_at,
+            "recovery_observation_threshold": (
+                recovery_observation_threshold or incident.recovery_observation_threshold
+            ),
+            "consecutive_recovery_observations": recovery_count,
+            "latest_recovery_observation_id": (record.record_id if reason == "recovered" else ""),
+            "summary": summary,
+        }
+    )
+    return (
+        resolved,
+        PublicIngressIncidentEventRecord(
+            event_id=event_id,
+            incident_id=incident.incident_id,
+            event="resolved",
+            reason=reason,
+            occurred_at=record.observed_at,
+            observation_id=record.record_id,
+            material_fingerprint_sha256=incident.material_fingerprint_sha256,
+            previous_material_fingerprint_sha256=incident.material_fingerprint_sha256,
+            severity=incident.severity,
+            summary=summary,
+        ),
+    )
+
+
+def _reconcile_duplicate_incident(
+    *,
+    incident: PublicIngressIncidentRecord,
+    reconciled_at: str,
+) -> tuple[PublicIngressIncidentRecord, PublicIngressIncidentEventRecord]:
+    event_id = build_public_ingress_incident_event_id(
+        incident_id=incident.incident_id,
+        event="resolved",
+        material_fingerprint_sha256=incident.material_fingerprint_sha256,
+        previous_event_id=incident.latest_material_event_id,
+    )
+    summary = (
+        "Duplicate open incident reconciled into the canonical incident. "
+        f"Preserved evidence: {incident.summary}"
+    )
+    resolved = incident.model_copy(
+        update={
+            "status": "resolved",
+            "resolved_at": reconciled_at,
+            "resolved_observation_id": incident.latest_observation_id,
+            "resolution_reason": "duplicate_reconciled",
+            "state_version": incident.state_version + 1,
+            "latest_material_event_id": event_id,
+            "latest_material_event": "resolved",
+            "latest_material_event_at": reconciled_at,
+            "summary": summary,
+        }
+    )
+    return (
+        resolved,
+        PublicIngressIncidentEventRecord(
+            event_id=event_id,
+            incident_id=incident.incident_id,
+            event="resolved",
+            reason="duplicate_reconciled",
+            occurred_at=reconciled_at,
+            observation_id=incident.latest_observation_id,
+            material_fingerprint_sha256=incident.material_fingerprint_sha256,
+            previous_material_fingerprint_sha256=incident.material_fingerprint_sha256,
+            severity=incident.severity,
+            summary=summary,
+        ),
+    )
+
+
+def _material_event_reminder_states(
+    *,
+    record_store: PublicIngressMonitorStore,
+    incident: PublicIngressIncidentRecord,
+    incident_event: PublicIngressIncidentEventRecord,
+) -> tuple[PublicIngressIncidentReminderStateRecord, ...]:
+    policies = _matching_notification_policies(record_store=record_store, incident=incident)
+    existing_states = _incident_reminder_states(
+        record_store=record_store, incident_id=incident.incident_id
+    )
+    states: list[PublicIngressIncidentReminderStateRecord] = []
+    matching_policy_ids = {policy.policy_id for policy in policies}
+    for policy in policies:
+        states.append(
+            PublicIngressIncidentReminderStateRecord(
+                reminder_state_id=build_public_ingress_reminder_state_id(
+                    incident_id=incident.incident_id,
+                    policy_id=policy.policy_id,
+                ),
+                incident_id=incident.incident_id,
+                policy_id=policy.policy_id,
+                status=("active" if incident.notification_state == "active" else "suppressed"),
+                material_event_id=incident_event.event_id,
+                interval_seconds=policy.reminder_interval_seconds,
+                window_anchor_at=incident_event.occurred_at,
+                next_reminder_at=_format_utc_timestamp(
+                    _parse_utc_timestamp(incident_event.occurred_at)
+                    + timedelta(seconds=policy.reminder_interval_seconds)
+                ),
+                updated_at=incident_event.occurred_at,
+            )
+        )
+    states.extend(
+        state.model_copy(
+            update={
+                "status": "policy_inactive",
+                "next_reminder_at": "",
+                "updated_at": incident_event.occurred_at,
+            }
+        )
+        for state in existing_states
+        if state.policy_id not in matching_policy_ids
+    )
+    return tuple(states)
+
+
+def _due_reminder_transition(
+    *,
+    record_store: PublicIngressMonitorStore,
+    incident: PublicIngressIncidentRecord,
+    observation: PublicIngressObservationRecord,
+) -> tuple[
+    tuple[PublicIngressIncidentEventRecord, ...],
+    tuple[PublicIngressIncidentReminderStateRecord, ...],
+]:
+    policies = _matching_notification_policies(record_store=record_store, incident=incident)
+    existing_states = {
+        state.policy_id: state
+        for state in _incident_reminder_states(
+            record_store=record_store, incident_id=incident.incident_id
+        )
+    }
+    events: list[PublicIngressIncidentEventRecord] = []
+    states: list[PublicIngressIncidentReminderStateRecord] = []
+    observed_at = _parse_utc_timestamp(observation.observed_at)
+    matching_policy_ids = {policy.policy_id for policy in policies}
+    for policy in policies:
+        state = existing_states.get(policy.policy_id)
+        if (
+            state is None
+            or state.material_event_id != incident.latest_material_event_id
+            or state.interval_seconds != policy.reminder_interval_seconds
+        ):
+            state = PublicIngressIncidentReminderStateRecord(
+                reminder_state_id=build_public_ingress_reminder_state_id(
+                    incident_id=incident.incident_id,
+                    policy_id=policy.policy_id,
+                ),
+                incident_id=incident.incident_id,
+                policy_id=policy.policy_id,
+                status="active",
+                material_event_id=incident.latest_material_event_id,
+                interval_seconds=policy.reminder_interval_seconds,
+                window_anchor_at=incident.latest_material_event_at,
+                next_reminder_at=_format_utc_timestamp(
+                    _parse_utc_timestamp(incident.latest_material_event_at)
+                    + timedelta(seconds=policy.reminder_interval_seconds)
+                ),
+                updated_at=observation.observed_at,
+            )
+        anchor = _parse_utc_timestamp(state.window_anchor_at)
+        elapsed_seconds = max(0, int((observed_at - anchor).total_seconds()))
+        window_index = elapsed_seconds // policy.reminder_interval_seconds
+        notification_active = incident.notification_state == "active"
+        if notification_active and window_index >= 1 and window_index > state.last_window_index:
+            window_started_at = _format_utc_timestamp(
+                anchor + timedelta(seconds=window_index * policy.reminder_interval_seconds)
+            )
+            window_ended_at = _format_utc_timestamp(
+                anchor + timedelta(seconds=(window_index + 1) * policy.reminder_interval_seconds)
+            )
+            event_id = build_public_ingress_incident_event_id(
+                incident_id=incident.incident_id,
+                event="reminder",
+                material_fingerprint_sha256=incident.material_fingerprint_sha256,
+                previous_event_id=incident.latest_material_event_id,
+                policy_id=policy.policy_id,
+                reminder_window_index=window_index,
+                reminder_window_started_at=window_started_at,
+            )
+            events.append(
+                PublicIngressIncidentEventRecord(
+                    event_id=event_id,
+                    incident_id=incident.incident_id,
+                    event="reminder",
+                    reason="reminder_due",
+                    occurred_at=observation.observed_at,
+                    observation_id=observation.record_id,
+                    material_fingerprint_sha256=incident.material_fingerprint_sha256,
+                    previous_material_fingerprint_sha256=incident.material_fingerprint_sha256,
+                    severity=incident.severity,
+                    policy_id=policy.policy_id,
+                    reminder_window_index=window_index,
+                    reminder_window_started_at=window_started_at,
+                    reminder_window_ended_at=window_ended_at,
+                    summary=f"Public ingress incident remains unresolved: {incident.summary}",
+                )
+            )
+            state = state.model_copy(
+                update={
+                    "status": "active",
+                    "last_window_index": window_index,
+                    "last_reminder_event_id": event_id,
+                    "last_reminded_at": observation.observed_at,
+                    "next_reminder_at": window_ended_at,
+                    "updated_at": observation.observed_at,
+                }
+            )
+        else:
+            next_window_index = max(1, state.last_window_index + 1)
+            state = state.model_copy(
+                update={
+                    "status": "active" if notification_active else "suppressed",
+                    "next_reminder_at": _format_utc_timestamp(
+                        anchor
+                        + timedelta(seconds=next_window_index * policy.reminder_interval_seconds)
+                    ),
+                    "updated_at": observation.observed_at,
+                }
+            )
+        states.append(state)
+    states.extend(
+        state.model_copy(
+            update={
+                "status": "policy_inactive",
+                "next_reminder_at": "",
+                "updated_at": observation.observed_at,
+            }
+        )
+        for policy_id, state in existing_states.items()
+        if policy_id not in matching_policy_ids
+    )
+    return tuple(events), tuple(states)
+
+
+def _resolved_reminder_states(
+    *,
+    record_store: PublicIngressMonitorStore,
+    incident: PublicIngressIncidentRecord,
+    updated_at: str,
+) -> tuple[PublicIngressIncidentReminderStateRecord, ...]:
+    return tuple(
+        state.model_copy(
+            update={
+                "status": "resolved",
+                "next_reminder_at": "",
+                "updated_at": updated_at,
+            }
+        )
+        for state in _incident_reminder_states(
+            record_store=record_store, incident_id=incident.incident_id
+        )
+    )
+
+
+def _incident_reminder_states(
+    *,
+    record_store: PublicIngressMonitorStore,
+    incident_id: str,
+) -> tuple[PublicIngressIncidentReminderStateRecord, ...]:
+    reader = getattr(record_store, "list_public_ingress_incident_reminder_state_records", None)
+    if not callable(reader):
+        return ()
+    return tuple(reader(incident_id=incident_id))
 
 
 def _incident_event(*, incident: PublicIngressIncidentRecord) -> PublicIngressIncidentEvent:
     if incident.status == "resolved":
         return "resolved"
+    if incident.latest_material_event in {"opened", "updated"}:
+        return cast(PublicIngressIncidentEvent, incident.latest_material_event)
     if incident.opened_observation_id == incident.latest_observation_id:
         return "opened"
     return "updated"
@@ -753,7 +1988,8 @@ def check_public_ingress_target(
         )
     status, failure_code = _record_status(target_observations)
     summary = _record_summary(target=target, status=status, observations=target_observations)
-    return PublicIngressObservationRecord(
+    observation = PublicIngressObservationRecord(
+        schema_version=2,
         record_id=build_public_ingress_observation_id(
             product=target.product,
             context=target.context,
@@ -768,6 +2004,8 @@ def check_public_ingress_target(
         instance=target.instance,
         check_name=target.check_name,
         check_kind=target.check_kind,
+        purpose="probe",
+        monitoring_intent=target.monitoring_intent,
         observed_at=checked_at,
         status=status,
         failure_code=failure_code,
@@ -776,6 +2014,23 @@ def check_public_ingress_target(
         expected_runtime_identity=target.expected_runtime_identity,
         targets=tuple(target_observations),
         summary=summary,
+    )
+    if observation.status != "fail":
+        return observation
+    material_fingerprint = build_public_ingress_material_fingerprint(
+        observation,
+        private_endpoint_key=target.private_endpoint_key,
+        private_endpoint_sha256=target.private_endpoint_material_sha256,
+        provider=target.provider,
+        provider_check=target.provider_check,
+    )
+    return observation.model_copy(
+        update={
+            "material_fingerprint": material_fingerprint,
+            "material_fingerprint_sha256": public_ingress_material_fingerprint_sha256(
+                material_fingerprint
+            ),
+        }
     )
 
 
@@ -1249,6 +2504,11 @@ def _tls_monitor_targets(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
 ) -> tuple[PublicIngressMonitorTarget, ...]:
+    if not product_lane_monitoring_probe_effective(
+        monitoring_intent=lane.health_monitoring.monitoring_intent,
+        check_kind="tls",
+    ):
+        return ()
     list_route_bindings = getattr(record_store, "list_route_binding_records", None)
     if not callable(list_route_bindings):
         return ()
@@ -1277,6 +2537,12 @@ def _tls_monitor_targets(
                 health_url="",
                 check_name=build_public_ingress_tls_check_name(domain.domain_name),
                 check_kind="tls",
+                profile_sha256=product_profile_record_sha256(profile),
+                monitoring_intent=lane.health_monitoring.monitoring_intent,
+                incident_eligible=product_lane_monitoring_incident_eligible(
+                    monitoring_intent=lane.health_monitoring.monitoring_intent,
+                    check_kind="tls",
+                ),
                 expected_runtime_identity=None,
                 require_runtime_identity=False,
                 tls_domain_name=domain.domain_name,
@@ -1293,6 +2559,7 @@ def _tls_monitor_targets(
                 tls_freshness_status=route_binding.source.freshness_status,
                 tls_stale_after=route_binding.source.stale_after,
                 tls_provider_evidence=dict(route_binding.tls.provider_evidence),
+                route_binding_sha256=route_binding_record_sha256(route_binding),
             )
         )
     return tuple(targets)
@@ -1566,8 +2833,41 @@ def deliver_public_ingress_notification_outbox_delivery(
         body = _required_payload_text(payload, "body")
         marker = _required_payload_text(payload, "marker")
         existing_issue_url = _optional_payload_text(payload, "existing_issue_url")
-        action = "create" if not existing_issue_url else "comment"
-        if attempt_payload.get("event") == "resolved" and existing_issue_url:
+        incident_marker = _optional_payload_text(payload, "incident_marker")
+        event = _public_ingress_event_value(attempt_payload.get("event"))
+        if (
+            event != "opened"
+            and not existing_issue_url
+            and destination.github_issue_number is None
+            and incident_marker
+        ):
+            incident_response = drivers.github_client(
+                "find_marker",
+                {
+                    "repository": destination.github_repository,
+                    "issue_number": None,
+                    "issue_url": "",
+                    "marker": incident_marker,
+                },
+            )
+            existing_issue_url = str(incident_response.get("url", "")).strip()
+        if (
+            event == "resolved"
+            and not existing_issue_url
+            and destination.github_issue_number is None
+        ):
+            return _skipped_public_ingress_outbox_delivery(
+                record=record,
+                payload=payload,
+                attempt_payload=attempt_payload,
+                marker=marker,
+            )
+        action = (
+            "comment"
+            if destination.github_issue_number is not None or existing_issue_url
+            else "create"
+        )
+        if event == "resolved" and existing_issue_url:
             action = "close"
         provider_operation_key = ":".join(
             (
@@ -1660,6 +2960,11 @@ def _deliver_github_issue_notification(
     body = public_ingress_incident_notification_body(
         event=event, incident=incident, observation=observation
     )
+    if event == "resolved" and not issue_url and destination.github_issue_number is None:
+        return PublicIngressNotificationDelivery(
+            delivery_status="skipped",
+            action="no_prior_issue",
+        )
     if event == "opened" or not issue_url:
         payload: dict[str, object] = {
             "repository": destination.github_repository,
@@ -1733,6 +3038,7 @@ def _delivered_public_ingress_outbox_delivery(
         delivery_status="delivered",
         attempted_at=str(attempt_payload["attempted_at"]),
         observation_id=str(attempt_payload["observation_id"]),
+        incident_event_id=str(attempt_payload.get("incident_event_id") or ""),
         external_url=str(response.get("url", "")).strip(),
         external_id=str(response.get("id", "")).strip() or marker,
         action=_github_notification_action_name(action),
@@ -1744,6 +3050,42 @@ def _delivered_public_ingress_outbox_delivery(
             "external_id": attempt.external_id,
             "external_url": attempt.external_url,
             "action": attempt.action,
+            "error_code": "",
+            "lease_owner": "",
+            "lease_expires_at": "",
+            "payload": {**payload, "attempt_result": attempt.model_dump(mode="json")},
+        }
+    )
+
+
+def _skipped_public_ingress_outbox_delivery(
+    *,
+    record: OutboxDeliveryRecord,
+    payload: dict[str, object],
+    attempt_payload: dict[str, object],
+    marker: str,
+) -> OutboxDeliveryRecord:
+    attempt = PublicIngressNotificationAttemptRecord(
+        attempt_id=str(attempt_payload["attempt_id"]),
+        incident_id=str(attempt_payload["incident_id"]),
+        event=_public_ingress_event_value(attempt_payload.get("event")),
+        policy_id=str(attempt_payload["policy_id"]),
+        destination_id=str(attempt_payload["destination_id"]),
+        destination_kind="github_issue",
+        delivery_status="skipped",
+        attempted_at=str(attempt_payload["attempted_at"]),
+        observation_id=str(attempt_payload["observation_id"]),
+        incident_event_id=str(attempt_payload.get("incident_event_id") or ""),
+        external_id=marker,
+        action="no_prior_issue",
+    )
+    return record.model_copy(
+        update={
+            "state": "delivered",
+            "provider_id": "github",
+            "external_id": marker,
+            "external_url": "",
+            "action": "skipped_no_prior_issue",
             "error_code": "",
             "lease_owner": "",
             "lease_expires_at": "",
@@ -1794,6 +3136,8 @@ def _public_ingress_event_value(value: object) -> PublicIngressIncidentEvent:
         return "opened"
     if value == "updated":
         return "updated"
+    if value == "reminder":
+        return "reminder"
     if value == "resolved":
         return "resolved"
     raise ValueError("outbox public ingress payload has invalid event")
@@ -1892,12 +3236,21 @@ def public_ingress_incident_notification_body(
         f"- failure_code: {incident.failure_code}",
         f"- summary: {incident.summary}",
     ]
+    if incident.status == "resolved":
+        lines.append(f"- resolution_reason: {incident.resolution_reason}")
     for target in observation.targets:
         lines.append(f"- {target.target}: {target.status} {target.summary}")
     if marker.strip():
         lines.append("")
+        lines.append(
+            f"<!-- launchplane-public-ingress-incident:{_public_ingress_incident_marker(incident.incident_id)} -->"
+        )
         lines.append(f"<!-- launchplane-public-ingress-notification:{marker.strip()} -->")
     return "\n".join(lines)
+
+
+def _public_ingress_incident_marker(incident_id: str) -> str:
+    return hashlib.sha256(incident_id.strip().encode("utf-8")).hexdigest()
 
 
 def _latest_external_url(attempts: tuple[PublicIngressNotificationAttemptRecord, ...]) -> str:

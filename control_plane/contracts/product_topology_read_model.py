@@ -11,11 +11,17 @@ from control_plane.contracts.data_provenance import DataProvenance, FreshnessSta
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    ProductLaneMonitoringIntent,
     ProductLaneProfile,
+    product_lane_monitoring_incident_eligible,
 )
 from control_plane.contracts.public_ingress_monitoring import (
     PUBLIC_HTTP_STALE_AFTER_SECONDS,
+    PublicIngressIncidentEventKind,
+    PublicIngressIncidentNotificationState,
     PublicIngressIncidentRecord,
+    PublicIngressIncidentReminderStateRecord,
+    PublicIngressIncidentSeverity,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
     PublicIngressTlsObservation,
@@ -188,6 +194,8 @@ class ProductObservedPlacement(BaseModel):
 class ProductObservedIngress(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    monitoring_intent: ProductLaneMonitoringIntent = "prelaunch"
+    incident_eligible: bool = False
     status: str = "missing"
     failure_code: str = ""
     observed_at: str = ""
@@ -195,6 +203,13 @@ class ProductObservedIngress(BaseModel):
     summary: str = ""
     incident_status: str = ""
     incident_id: str = ""
+    incident_severity: PublicIngressIncidentSeverity | Literal[""] = ""
+    incident_notification_state: PublicIngressIncidentNotificationState | Literal[""] = ""
+    incident_material_fingerprint_sha256: str = ""
+    incident_latest_event: PublicIngressIncidentEventKind | Literal[""] = ""
+    incident_latest_event_at: str = ""
+    incident_next_reminder_at: str = ""
+    incident_last_reminded_at: str = ""
     expected_runtime_identity: RuntimeIdentity | None = None
     observed_runtime_identity: RuntimeIdentity | None = None
     runtime_identity_status: RuntimeIdentityStatus = "unchecked"
@@ -232,6 +247,13 @@ class ProductObservedTlsDomain(BaseModel):
     record_id: str = ""
     incident_status: str = ""
     incident_id: str = ""
+    incident_severity: PublicIngressIncidentSeverity | Literal[""] = ""
+    incident_notification_state: PublicIngressIncidentNotificationState | Literal[""] = ""
+    incident_material_fingerprint_sha256: str = ""
+    incident_latest_event: PublicIngressIncidentEventKind | Literal[""] = ""
+    incident_latest_event_at: str = ""
+    incident_next_reminder_at: str = ""
+    incident_last_reminded_at: str = ""
     trust_state: FreshnessStatus = "missing"
     provenance: DataProvenance = Field(
         default_factory=lambda: _missing_provenance(
@@ -527,9 +549,8 @@ def _observed_topology(
     placement = _observed_placement(lane_summary)
     ingress = _observed_ingress(
         record_store=record_store,
-        product=profile.product,
-        context=lane.context,
-        instance=lane.instance,
+        profile=profile,
+        lane=lane,
         now=now,
     )
     domain_roles: dict[str, ProductTopologyDomainRole] = {
@@ -537,21 +558,25 @@ def _observed_topology(
     }
     for domain in provider_recorded.domains:
         domain_roles[domain.domain_name] = domain.role
-    tls_evidence = tuple(
-        evidence
-        for domain_name, role in domain_roles.items()
-        if (
-            evidence := _observed_tls_evidence(
-                record_store=record_store,
-                product=profile.product,
-                context=lane.context,
-                instance=lane.instance,
-                domain_name=domain_name,
-                role=role,
-                now=now,
+    tls_evidence = (
+        tuple(
+            evidence
+            for domain_name, role in domain_roles.items()
+            if (
+                evidence := _observed_tls_evidence(
+                    record_store=record_store,
+                    product=profile.product,
+                    context=lane.context,
+                    instance=lane.instance,
+                    domain_name=domain_name,
+                    role=role,
+                    now=now,
+                )
             )
+            is not None
         )
-        is not None
+        if lane.health_monitoring.monitoring_intent != "private"
+        else ()
     )
     expected_tls_domains = {
         domain.domain_name for domain in desired.domains if domain.tls_expected
@@ -564,9 +589,10 @@ def _observed_topology(
     observed_tls_by_domain = {
         evidence.projection.domain_name: evidence.projection for evidence in tls_evidence
     }
-    for domain_name in expected_tls_domains:
-        observation = observed_tls_by_domain.get(domain_name)
-        states.append(observation.trust_state if observation is not None else "missing")
+    if lane.health_monitoring.monitoring_intent != "private":
+        for domain_name in expected_tls_domains:
+            observation = observed_tls_by_domain.get(domain_name)
+            states.append(observation.trust_state if observation is not None else "missing")
     return (
         ProductObservedTopology(
             placement=placement,
@@ -618,34 +644,59 @@ def _observed_placement(
 def _observed_ingress(
     *,
     record_store: object,
-    product: str,
-    context: str,
-    instance: str,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
     now: datetime,
 ) -> ProductObservedIngress:
+    monitoring_intent = lane.health_monitoring.monitoring_intent
+    incident_eligible = product_lane_monitoring_incident_eligible(
+        monitoring_intent=monitoring_intent,
+        check_kind="public_http",
+    )
+    if monitoring_intent == "private":
+        return ProductObservedIngress(
+            monitoring_intent=monitoring_intent,
+            incident_eligible=False,
+            status="not_expected",
+            summary="Public ingress is not expected; private monitoring is authoritative.",
+            trust_state="recorded",
+            provenance=DataProvenance(
+                source_kind="record",
+                source_record_id=profile.product,
+                recorded_at=profile.updated_at,
+                refreshed_at=profile.updated_at,
+                freshness_status="recorded",
+                detail="Launchplane product-profile private monitoring intent.",
+            ),
+        )
     records = _optional_records(
         record_store,
         "list_public_ingress_observation_records",
-        product=product,
-        context_name=context,
-        instance_name=instance,
+        product=profile.product,
+        context_name=lane.context,
+        instance_name=lane.instance,
         check_kind="public_http",
         limit=50,
     )
     observations = tuple(
-        record for record in records if isinstance(record, PublicIngressObservationRecord)
+        record
+        for record in records
+        if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
     )
     latest = next(
         (record for record in observations if _public_runtime_identity_target(record) is not None),
         observations[0] if observations else None,
     )
     if latest is None:
-        return ProductObservedIngress()
+        return ProductObservedIngress(
+            monitoring_intent=monitoring_intent,
+            incident_eligible=incident_eligible,
+        )
     incident = _latest_open_incident(
         record_store=record_store,
-        product=product,
-        context=context,
-        instance=instance,
+        product=profile.product,
+        context=lane.context,
+        instance=lane.instance,
         check_name=latest.check_name,
         check_kind="public_http",
     )
@@ -683,7 +734,13 @@ def _observed_ingress(
         stale_after=stale_after_value,
         detail="Launchplane public ingress active observation.",
     )
+    next_reminder_at, last_reminded_at = _incident_reminder_times(
+        record_store=record_store,
+        incident_id=incident.incident_id if incident is not None else "",
+    )
     return ProductObservedIngress(
+        monitoring_intent=monitoring_intent,
+        incident_eligible=incident_eligible,
         status=latest.status,
         failure_code=latest.failure_code or "",
         observed_at=latest.observed_at,
@@ -691,6 +748,17 @@ def _observed_ingress(
         summary=latest.summary,
         incident_status=incident.status if incident is not None else "",
         incident_id=incident.incident_id if incident is not None else "",
+        incident_severity=incident.severity if incident is not None else "",
+        incident_notification_state=(incident.notification_state if incident is not None else ""),
+        incident_material_fingerprint_sha256=(
+            incident.material_fingerprint_sha256 if incident is not None else ""
+        ),
+        incident_latest_event=(incident.latest_material_event if incident is not None else ""),
+        incident_latest_event_at=(
+            incident.latest_material_event_at if incident is not None else ""
+        ),
+        incident_next_reminder_at=next_reminder_at,
+        incident_last_reminded_at=last_reminded_at,
         expected_runtime_identity=latest.expected_runtime_identity,
         observed_runtime_identity=(
             runtime_target.observed_runtime_identity if runtime_target is not None else None
@@ -740,10 +808,14 @@ def _observed_tls_evidence(
         instance_name=instance,
         check_name=check_name,
         check_kind="tls",
-        limit=1,
+        limit=50,
     )
     latest = next(
-        (record for record in records if isinstance(record, PublicIngressObservationRecord)),
+        (
+            record
+            for record in records
+            if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
+        ),
         None,
     )
     if latest is None:
@@ -779,6 +851,10 @@ def _observed_tls_evidence(
         stale_after=tls.probe.stale_after,
         detail="Launchplane active TLS certificate observation.",
     )
+    next_reminder_at, last_reminded_at = _incident_reminder_times(
+        record_store=record_store,
+        incident_id=incident.incident_id if incident is not None else "",
+    )
     projection = ProductObservedTlsDomain(
         domain_name=tls.public_name,
         role=tls.recorded.domain_role or role,
@@ -804,6 +880,17 @@ def _observed_tls_evidence(
         record_id=latest.record_id,
         incident_status=incident.status if incident is not None else "",
         incident_id=(incident.incident_id if incident is not None else tls.incident_id),
+        incident_severity=incident.severity if incident is not None else "",
+        incident_notification_state=(incident.notification_state if incident is not None else ""),
+        incident_material_fingerprint_sha256=(
+            incident.material_fingerprint_sha256 if incident is not None else ""
+        ),
+        incident_latest_event=(incident.latest_material_event if incident is not None else ""),
+        incident_latest_event_at=(
+            incident.latest_material_event_at if incident is not None else ""
+        ),
+        incident_next_reminder_at=next_reminder_at,
+        incident_last_reminded_at=last_reminded_at,
         trust_state=trust_state,
         provenance=provenance,
     )
@@ -836,6 +923,37 @@ def _latest_open_incident(
     )
 
 
+def _incident_reminder_times(
+    *,
+    record_store: object,
+    incident_id: str,
+) -> tuple[str, str]:
+    if not incident_id:
+        return "", ""
+    records = _optional_records(
+        record_store,
+        "list_public_ingress_incident_reminder_state_records",
+        incident_id=incident_id,
+    )
+    reminder_states = tuple(
+        record for record in records if isinstance(record, PublicIngressIncidentReminderStateRecord)
+    )
+    return (
+        min(
+            (
+                state.next_reminder_at
+                for state in reminder_states
+                if state.status == "active" and state.next_reminder_at
+            ),
+            default="",
+        ),
+        max(
+            (state.last_reminded_at for state in reminder_states if state.last_reminded_at),
+            default="",
+        ),
+    )
+
+
 def _topology_warnings(
     *,
     lane: ProductLaneProfile,
@@ -848,6 +966,7 @@ def _topology_warnings(
     now: datetime,
 ) -> tuple[ProductTopologyWarning, ...]:
     warnings: list[ProductTopologyWarning] = []
+    public_monitoring_effective = lane.health_monitoring.monitoring_intent != "private"
     if (lane.base_url or lane.health_url) and not desired.domains:
         warnings.append(
             _warning(
@@ -928,8 +1047,10 @@ def _topology_warnings(
                     detail="The route binding records no ingress owner or termination path.",
                 )
             )
-        if route_binding.tls.owner == "none" and any(
-            domain.tls_expected for domain in desired.domains
+        if (
+            public_monitoring_effective
+            and route_binding.tls.owner == "none"
+            and any(domain.tls_expected for domain in desired.domains)
         ):
             warnings.append(
                 _warning(
@@ -958,7 +1079,7 @@ def _topology_warnings(
                     ),
                 )
             )
-            if observed.ingress.status == "missing":
+            if public_monitoring_effective and observed.ingress.status == "missing":
                 warnings.append(
                     _warning(
                         code="public_ingress_observation_missing",
@@ -970,7 +1091,7 @@ def _topology_warnings(
                         ),
                     )
                 )
-            elif observed.ingress.trust_state == "stale":
+            elif public_monitoring_effective and observed.ingress.trust_state == "stale":
                 warnings.append(
                     _warning(
                         code="stale_public_ingress_observation",
@@ -983,7 +1104,8 @@ def _topology_warnings(
                     )
                 )
             if (
-                observed.ingress.status != "missing"
+                public_monitoring_effective
+                and observed.ingress.status != "missing"
                 and observed.ingress.runtime_identity_status != "match"
             ):
                 warnings.append(
@@ -1004,31 +1126,32 @@ def _topology_warnings(
     expected_tls_domains = {
         domain.domain_name for domain in desired.domains if domain.tls_expected
     } | {domain.domain_name for domain in provider_recorded.domains if domain.tls_expected}
-    for domain_name in sorted(expected_tls_domains):
-        if domain_name not in observed_tls_by_domain:
-            warnings.append(
-                _warning(
-                    code="tls_observation_missing",
-                    scope="tls",
-                    severity=(
-                        "error"
-                        if route_binding is not None
-                        and route_binding.ingress.provider == "external"
-                        else "warning"
-                    ),
-                    domain_name=domain_name,
-                    detail="No TLS certificate observation is recorded for the expected domain.",
+    if public_monitoring_effective:
+        for domain_name in sorted(expected_tls_domains):
+            if domain_name not in observed_tls_by_domain:
+                warnings.append(
+                    _warning(
+                        code="tls_observation_missing",
+                        scope="tls",
+                        severity=(
+                            "error"
+                            if route_binding is not None
+                            and route_binding.ingress.provider == "external"
+                            else "warning"
+                        ),
+                        domain_name=domain_name,
+                        detail="No TLS certificate observation is recorded for the expected domain.",
+                    )
+                )
+        for evidence in tls_evidence:
+            warnings.extend(
+                _tls_warnings(
+                    route_binding=route_binding,
+                    evidence=evidence,
+                    now=now,
                 )
             )
-    for evidence in tls_evidence:
-        warnings.extend(
-            _tls_warnings(
-                route_binding=route_binding,
-                evidence=evidence,
-                now=now,
-            )
-        )
-    if observed.ingress.status == "fail":
+    if public_monitoring_effective and observed.ingress.status == "fail":
         warnings.append(
             _warning(
                 code="public_ingress_failure",

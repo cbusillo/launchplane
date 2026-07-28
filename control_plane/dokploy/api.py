@@ -27,9 +27,23 @@ _DATABASE_URI_CREDENTIAL_PATTERN = re.compile(
 )
 _DOKPLOY_LOG_SINCE_PATTERN = re.compile(r"^(all|\d+[smhd])$")
 _DOKPLOY_LOG_SEARCH_PATTERN = re.compile(r"^[a-zA-Z0-9 ._-]{0,500}$")
+_DOKPLOY_COMPOSE_SERVICE_PATTERN = re.compile(r"^$|^[a-z0-9][a-z0-9._-]{0,127}$")
 type JsonPrimitive = str | int | float | bool | None
 type JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
 type JsonObject = dict[str, JsonValue]
+
+
+class DokployDeploymentFailed(click.ClickException):
+    def __init__(
+        self,
+        *,
+        deployment_id: str,
+        deployment_status: str,
+        message_prefix: str,
+    ) -> None:
+        self.deployment_id = deployment_id
+        self.deployment_status = deployment_status
+        super().__init__(f"{message_prefix}: deployment={deployment_id} status={deployment_status}")
 
 
 def trigger_deployment(
@@ -184,6 +198,16 @@ def normalize_dokploy_log_search(raw_search: str) -> str:
     return search
 
 
+def normalize_dokploy_compose_service_name(raw_service_name: str) -> str:
+    service_name = raw_service_name.strip().lower()
+    if not _DOKPLOY_COMPOSE_SERVICE_PATTERN.fullmatch(service_name):
+        raise click.ClickException(
+            "Dokploy compose log service must contain only lowercase letters, numbers, dots, "
+            "underscores, and dashes."
+        )
+    return service_name
+
+
 def redact_dokploy_log_line(raw_line: str) -> str:
     redacted_line = _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r'\1"[redacted]"', raw_line)
     redacted_line = _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r"\1'[redacted]'", redacted_line)
@@ -262,6 +286,7 @@ def fetch_dokploy_compose_logs(
     compose_id: str,
     app_name: str = "",
     server_id: str = "",
+    service_name: str = "",
     line_count: int = DEFAULT_DOKPLOY_LOG_LINE_COUNT,
     since: str = "all",
     search: str = "",
@@ -274,6 +299,11 @@ def fetch_dokploy_compose_logs(
     normalized_search = normalize_dokploy_log_search(search)
     normalized_app_name = app_name.strip()
     normalized_server_id = server_id.strip()
+    normalized_service_name = normalize_dokploy_compose_service_name(service_name)
+    if normalized_service_name and not normalized_app_name:
+        raise click.ClickException(
+            "Dokploy compose service log selection requires tracked application metadata."
+        )
     query: dict[str, str | int] = {
         "composeId": normalized_compose_id,
         "tail": normalized_line_count,
@@ -297,8 +327,16 @@ def fetch_dokploy_compose_logs(
             if isinstance(containers_payload, list)
             else []
         )
-        web_container = _select_compose_log_container(containers)
-        container_id = str(web_container.get("containerId") or "").strip()
+        selected_container = _select_compose_log_container(
+            containers,
+            app_name=normalized_app_name,
+            service_name=normalized_service_name,
+        )
+        container_id = str(selected_container.get("containerId") or "").strip()
+        if normalized_service_name and not container_id:
+            raise click.ClickException(
+                f"Dokploy compose log service {normalized_service_name!r} has no container id."
+            )
         if container_id:
             query["containerId"] = container_id
     if normalized_search:
@@ -334,7 +372,29 @@ def fetch_dokploy_deployment_logs(
     return lines[-normalized_line_count:]
 
 
-def _select_compose_log_container(containers: list[JsonObject]) -> JsonObject:
+def _select_compose_log_container(
+    containers: list[JsonObject],
+    *,
+    app_name: str = "",
+    service_name: str = "",
+) -> JsonObject:
+    normalized_service_name = normalize_dokploy_compose_service_name(service_name)
+    if normalized_service_name:
+        service_matches = [
+            container
+            for container in containers
+            if _compose_log_container_matches_service(
+                container,
+                app_name=app_name,
+                service_name=normalized_service_name,
+            )
+        ]
+        if len(service_matches) != 1:
+            qualifier = "not found" if not service_matches else "ambiguous"
+            raise click.ClickException(
+                f"Dokploy compose log service {normalized_service_name!r} is {qualifier}."
+            )
+        return service_matches[0]
     for container in containers:
         if _compose_log_container_has_web_service(container):
             return container
@@ -345,6 +405,31 @@ def _select_compose_log_container(containers: list[JsonObject]) -> JsonObject:
         if str(container.get("containerId") or "").strip():
             return container
     return {}
+
+
+def _compose_log_container_matches_service(
+    container: JsonObject,
+    *,
+    app_name: str,
+    service_name: str,
+) -> bool:
+    service_names = _compose_log_container_service_names(container)
+    if service_names:
+        return service_name in service_names
+    normalized_app_name = app_name.strip().lower()
+    if not normalized_app_name:
+        return False
+    for container_name in _compose_log_container_names(container):
+        normalized_name = container_name.strip().lower().strip("/")
+        for separator in ("-", "_", "."):
+            prefix = f"{normalized_app_name}{separator}"
+            replica_match = re.search(rf"{re.escape(separator)}\d+$", normalized_name)
+            if not normalized_name.startswith(prefix) or replica_match is None:
+                continue
+            matched_service_name = normalized_name[len(prefix) : replica_match.start()]
+            if matched_service_name == service_name:
+                return True
+    return False
 
 
 def _compose_log_container_is_web(container: JsonObject) -> bool:
@@ -834,8 +919,10 @@ def _wait_for_deployment_status(
             if latest_status in success_statuses:
                 return f"deployment={latest_key} status={latest_status}"
             if latest_status in failure_statuses:
-                raise click.ClickException(
-                    f"{failure_message_prefix}: deployment={latest_key} status={latest_status}"
+                raise DokployDeploymentFailed(
+                    deployment_id=latest_key,
+                    deployment_status=latest_status,
+                    message_prefix=failure_message_prefix,
                 )
         time.sleep(3)
 

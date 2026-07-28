@@ -53,6 +53,9 @@ from control_plane.contracts.outbox_delivery import (
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
+    ProductLaneHealthCheck,
+    ProductLaneHealthMonitoringPolicy,
+    ProductLaneProfile,
     ProductPreviewProfile,
 )
 from control_plane.contracts.route_binding_record import (
@@ -69,6 +72,14 @@ from control_plane.provider_operations import (
     ProviderObservation,
     ProviderOperationLease,
     run_durable_provider_operation,
+)
+from control_plane.workflows.public_ingress_monitor import (
+    HttpObservation,
+    run_public_ingress_monitor_once,
+)
+from control_plane.odoo_stable_lane import (
+    OdooStableLaneOperationConflictError,
+    OdooStableLaneOperationRecord,
 )
 from control_plane.service_auth import (
     GitHubActionsPolicyRule,
@@ -90,6 +101,10 @@ from control_plane.storage.schema_invariants import (
 )
 from control_plane.storage.schema_migration import migrate_schema, schema_migration_action
 from tests.support.artifact_manifests import artifact_manifest_v2
+from tests.test_odoo_prod_retained_volume_backup_import_storage import (
+    _retained_operation_for_restore_lane,
+)
+from tests.test_odoo_stable_operation_worker import _restore_operation
 
 POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
 LOCK_WAIT_TIMEOUT = "1000ms"
@@ -194,6 +209,61 @@ def _bootstrap_operation(
         finished_at=finished_at,
         error_message=error_message,
     )
+
+
+def _create_cross_kind_stable_lane_operation(
+    *,
+    database_url: str,
+    operation_kind: str,
+    start_barrier: threading.Barrier,
+) -> tuple[str, str]:
+    store = PostgresRecordStore(database_url=database_url)
+    try:
+        start_barrier.wait(timeout=5)
+        try:
+            if operation_kind == "prod_backup_restore":
+                _, created = (
+                    store.create_odoo_prod_backup_restore_operation_record_if_no_active_lane(
+                        _restore_operation("operation-cm-prod-restore-concurrent")
+                    )
+                )
+            else:
+                _, created = (
+                    store.create_odoo_prod_retained_volume_backup_import_operation_record_if_no_active_lane(
+                        _retained_operation_for_restore_lane()
+                    )
+                )
+        except OdooStableLaneOperationConflictError as error:
+            return "conflict", error.owner.operation_kind
+        return "created" if created else "existing", operation_kind
+    finally:
+        store.close()
+
+
+def _claim_cross_kind_stable_lane_operation(
+    *,
+    database_url: str,
+    operation_kind: str,
+    start_barrier: threading.Barrier,
+) -> tuple[str, str]:
+    store = PostgresRecordStore(database_url=database_url)
+    try:
+        start_barrier.wait(timeout=5)
+        claim_kwargs = {
+            "lease_owner": f"worker-{operation_kind}",
+            "lease_expires_at": "2026-07-26T05:10:00Z",
+            "claimed_at": "2026-07-26T05:00:00Z",
+        }
+        claimed: OdooStableLaneOperationRecord | None
+        if operation_kind == "prod_backup_restore":
+            claimed = store.claim_next_odoo_prod_backup_restore_operation_record(**claim_kwargs)
+        else:
+            claimed = store.claim_next_odoo_prod_retained_volume_backup_import_operation_record(
+                **claim_kwargs
+            )
+        return operation_kind, claimed.operation_id if claimed is not None else ""
+    finally:
+        store.close()
 
 
 def _idempotency_record(
@@ -336,6 +406,31 @@ def _product_profile() -> LaunchplaneProductProfileRecord:
         image=ProductImageProfile(),
         preview=ProductPreviewProfile(),
         updated_at="2026-07-13T00:00:00Z",
+        source="test:postgres-integration",
+    )
+
+
+def _public_ingress_profile() -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product="postgres-public-ingress-test",
+        display_name="PostgreSQL Public Ingress Test",
+        repository="example/postgres-public-ingress-test",
+        driver_id="generic-web",
+        image=ProductImageProfile(repository="ghcr.io/example/postgres-public-ingress-test"),
+        runtime_port=3000,
+        health_path="/healthz",
+        lanes=(
+            ProductLaneProfile(
+                context="postgres-public-ingress-test",
+                instance="prod",
+                base_url="https://example.test",
+                health_monitoring=ProductLaneHealthMonitoringPolicy(
+                    monitoring_intent="public",
+                    checks=(ProductLaneHealthCheck(name="public-ingress"),),
+                ),
+            ),
+        ),
+        updated_at="2026-07-27T00:00:00Z",
         source="test:postgres-integration",
     )
 
@@ -905,6 +1000,22 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     column["name"]: column
                     for column in inspector.get_columns("launchplane_outbox_deliveries")
                 }
+                incident_indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes("launchplane_public_ingress_incidents")
+                }
+                incident_columns = {
+                    column["name"]: column
+                    for column in inspector.get_columns("launchplane_public_ingress_incidents")
+                }
+                observation_indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes("launchplane_public_ingress_observations")
+                }
+                observation_columns = {
+                    column["name"]: column
+                    for column in inspector.get_columns("launchplane_public_ingress_observations")
+                }
                 payload_type = _column_type(
                     engine,
                     table_name="launchplane_idempotency_records",
@@ -930,6 +1041,21 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     table_name="launchplane_outbox_deliveries",
                     column_name="max_attempts",
                 )
+                incident_state_version_type = _column_type(
+                    engine,
+                    table_name="launchplane_public_ingress_incidents",
+                    column_name="state_version",
+                )
+                incident_event_payload_type = _column_type(
+                    engine,
+                    table_name="launchplane_public_ingress_incident_events",
+                    column_name="payload",
+                )
+                incident_reminder_payload_type = _column_type(
+                    engine,
+                    table_name="launchplane_public_ingress_incident_reminders",
+                    column_name="payload",
+                )
                 alembic_version = _current_alembic_version(engine)
             finally:
                 store.close()
@@ -940,6 +1066,9 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertEqual(outbox_payload_type, "jsonb")
         self.assertEqual(outbox_attempt_type, "integer")
         self.assertEqual(outbox_max_attempts_type, "integer")
+        self.assertEqual(incident_state_version_type, "integer")
+        self.assertEqual(incident_event_payload_type, "jsonb")
+        self.assertEqual(incident_reminder_payload_type, "jsonb")
         self.assertTrue(idempotency_columns["response_status_code"]["nullable"])
         self.assertFalse(authz_columns["revision"]["nullable"])
         self.assertTrue(authz_indexes["launchplane_authz_policies_revision_uidx"]["unique"])
@@ -947,6 +1076,15 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertFalse(outbox_columns["payload"]["nullable"])
         self.assertTrue(outbox_indexes["launchplane_outbox_deliveries_dedupe_uidx"]["unique"])
         self.assertFalse(outbox_indexes["launchplane_outbox_deliveries_claim_idx"]["unique"])
+        self.assertFalse(incident_columns["state_version"]["nullable"])
+        self.assertFalse(observation_columns["check_token"]["nullable"])
+        self.assertFalse(observation_columns["check_kind"]["nullable"])
+        self.assertFalse(
+            observation_indexes["launchplane_public_ingress_observations_check_idx"]["unique"]
+        )
+        self.assertTrue(
+            incident_indexes["launchplane_public_ingress_incidents_open_uidx"]["unique"]
+        )
         self.assertTrue(
             idempotency_indexes["launchplane_idempotency_scope_route_key_idx"]["unique"]
         )
@@ -1374,6 +1512,47 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_concurrent_public_ingress_failures_open_one_incident_and_keep_both_observations(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            store.write_product_profile_record(_public_ingress_profile())
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def monitor(active_store: PostgresRecordStore, checked_at: str) -> None:
+                barrier.wait(timeout=10)
+                run_public_ingress_monitor_once(
+                    record_store=active_store,
+                    checked_at=checked_at,
+                    http_get=lambda url, _timeout: HttpObservation(
+                        status_code=503,
+                        final_url=url,
+                        redirect_count=0,
+                    ),
+                )
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first = executor.submit(monitor, store, "2026-07-27T12:00:00Z")
+                    second = executor.submit(monitor, second_store, "2026-07-27T12:00:01Z")
+                    first.result(timeout=30)
+                    second.result(timeout=30)
+                incidents = store.list_public_ingress_incident_records(status="open")
+                observations = store.list_public_ingress_observation_records(
+                    product="postgres-public-ingress-test"
+                )
+                events = store.list_public_ingress_incident_event_records()
+            finally:
+                second_store.close()
+
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(len(observations), 2)
+        self.assertTrue(
+            all(record.incident_id == incidents[0].incident_id for record in observations)
+        )
+        self.assertEqual([event.event for event in events], ["opened"])
+
     def test_authz_policy_compare_write_serializes_concurrent_writers(self) -> None:
         with _store_for_fresh_head_database() as store:
             initial_record = store.seed_authz_policy_if_absent(
@@ -2615,6 +2794,80 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(
             [record.operation_id for record in terminal_records], [terminal_record.operation_id]
         )
+
+    def test_cross_kind_stable_lane_creation_is_serialized(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            start_barrier = threading.Barrier(2)
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(
+                        _create_cross_kind_stable_lane_operation,
+                        database_url=store.database_url,
+                        operation_kind=operation_kind,
+                        start_barrier=start_barrier,
+                    )
+                    for operation_kind in (
+                        "prod_backup_restore",
+                        "retained_volume_backup_import",
+                    )
+                ]
+                results = [future.result(timeout=10) for future in futures]
+
+            active_restore_records = store.list_odoo_prod_backup_restore_operation_records(
+                product="odoo-tenant-cm",
+                context_name="cm",
+                instance_name="prod",
+                statuses=("pending", "running"),
+            )
+            active_import_records = (
+                store.list_odoo_prod_retained_volume_backup_import_operation_records(
+                    product="odoo-tenant-cm",
+                    context_name="cm",
+                    instance_name="prod",
+                    statuses=("pending", "running"),
+                )
+            )
+
+        self.assertEqual([result[0] for result in results].count("created"), 1)
+        self.assertEqual([result[0] for result in results].count("conflict"), 1)
+        self.assertEqual(len(active_restore_records) + len(active_import_records), 1)
+
+    def test_cross_kind_stable_lane_claim_is_serialized_for_preexisting_queue(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            restore_operation = _restore_operation("operation-cm-prod-restore-preexisting")
+            retained_operation = _retained_operation_for_restore_lane().model_copy(
+                update={"operation_id": "retained-plan-operation-cm-prod-preexisting"}
+            )
+            store.write_odoo_prod_backup_restore_operation_record(restore_operation)
+            store.write_odoo_prod_retained_volume_backup_import_operation_record(retained_operation)
+
+            start_barrier = threading.Barrier(2)
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(
+                        _claim_cross_kind_stable_lane_operation,
+                        database_url=store.database_url,
+                        operation_kind=operation_kind,
+                        start_barrier=start_barrier,
+                    )
+                    for operation_kind in (
+                        "prod_backup_restore",
+                        "retained_volume_backup_import",
+                    )
+                ]
+                results = dict(future.result(timeout=10) for future in futures)
+
+            stored_restore = store.read_odoo_prod_backup_restore_operation_record(
+                restore_operation.operation_id
+            )
+            stored_import = store.read_odoo_prod_retained_volume_backup_import_operation_record(
+                retained_operation.operation_id
+            )
+
+        self.assertEqual(results["prod_backup_restore"], restore_operation.operation_id)
+        self.assertEqual(results["retained_volume_backup_import"], "")
+        self.assertEqual(stored_restore.status, "running")
+        self.assertEqual(stored_import.status, "pending")
 
 
 def _attempt_stale_owner_completion(

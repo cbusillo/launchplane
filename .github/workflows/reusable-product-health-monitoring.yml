@@ -21,17 +21,30 @@ name: Reusable Product Health Monitoring
         required: true
         type: string
       check_name:
-        description: Existing or new public HTTP check name.
+        description: Existing or new health check name.
+        required: true
+        type: string
+      check_kind:
+        description: Public or registered-private HTTP check kind.
+        required: true
+        type: string
+      monitoring_intent:
+        description: Public, private, or prelaunch lane monitoring intent.
         required: true
         type: string
       enabled:
-        description: Whether the public HTTP check is enabled.
+        description: Whether the health check is enabled.
         required: true
         type: boolean
       require_runtime_identity:
         description: Whether the check must match recorded runtime identity.
         required: true
         type: boolean
+      private_endpoint_key:
+        description: Registered private endpoint key for private HTTP checks.
+        required: false
+        default: ""
+        type: string
       reviewed_plan_sha256:
         description: Plan SHA-256 from the reviewed dry run; required for apply.
         required: false
@@ -72,8 +85,11 @@ jobs:
       CONTEXT: ${{ inputs.context }}
       INSTANCE: ${{ inputs.instance }}
       CHECK_NAME: ${{ inputs.check_name }}
+      CHECK_KIND: ${{ inputs.check_kind }}
+      MONITORING_INTENT: ${{ inputs.monitoring_intent }}
       ENABLED: ${{ inputs.enabled }}
       REQUIRE_RUNTIME_IDENTITY: ${{ inputs.require_runtime_identity }}
+      PRIVATE_ENDPOINT_KEY: ${{ inputs.private_endpoint_key }}
       REVIEWED_PLAN_SHA256: ${{ inputs.reviewed_plan_sha256 }}
       REASON: ${{ inputs.reason }}
       IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
@@ -83,7 +99,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for required in PRODUCT CONTEXT INSTANCE CHECK_NAME REASON; do
+          for required in PRODUCT CONTEXT INSTANCE CHECK_NAME CHECK_KIND MONITORING_INTENT REASON; do
             if [[ -z "${!required//[[:space:]]/}" ]]; then
               echo "${required} is required." >&2
               exit 1
@@ -99,6 +115,31 @@ jobs:
             echo "A disabled check cannot require runtime identity." >&2
             exit 1
           fi
+          case "$CHECK_KIND" in
+            public_http)
+              if [[ -n "${PRIVATE_ENDPOINT_KEY//[[:space:]]/}" ]]; then
+                echo "public_http checks cannot set private_endpoint_key." >&2
+                exit 1
+              fi
+              ;;
+            private_http)
+              if [ "$ENABLED" = "true" ] && [[ -z "${PRIVATE_ENDPOINT_KEY//[[:space:]]/}" ]]; then
+                echo "enabled private_http checks require private_endpoint_key." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "check_kind must be public_http or private_http." >&2
+              exit 1
+              ;;
+          esac
+          case "$MONITORING_INTENT" in
+            public|private|prelaunch) ;;
+            *)
+              echo "monitoring_intent must be public, private, or prelaunch." >&2
+              exit 1
+              ;;
+          esac
           case "$MODE" in
             dry-run)
               if [[ -n "${REVIEWED_PLAN_SHA256//[[:space:]]/}" ]]; then
@@ -142,8 +183,11 @@ jobs:
             --arg context "$CONTEXT" \
             --arg instance "$INSTANCE" \
             --arg check_name "$CHECK_NAME" \
+            --arg check_kind "$CHECK_KIND" \
+            --arg monitoring_intent "$MONITORING_INTENT" \
             --argjson enabled "$ENABLED" \
             --argjson require_runtime_identity "$REQUIRE_RUNTIME_IDENTITY" \
+            --arg private_endpoint_key "$PRIVATE_ENDPOINT_KEY" \
             --arg reviewed_plan_sha256 "$REVIEWED_PLAN_SHA256" \
             --arg reason "$REASON" \
             '{
@@ -153,8 +197,11 @@ jobs:
               context: $context,
               instance: $instance,
               check_name: $check_name,
+              check_kind: $check_kind,
+              monitoring_intent: $monitoring_intent,
               enabled: $enabled,
               require_runtime_identity: $require_runtime_identity,
+              private_endpoint_key: $private_endpoint_key,
               reviewed_plan_sha256: $reviewed_plan_sha256,
               reason: $reason
             }' >"$request_file"
@@ -210,9 +257,12 @@ jobs:
             echo "- Product: ${PRODUCT}"
             echo "- Lane: ${CONTEXT}/${INSTANCE}"
             echo "- Check: ${CHECK_NAME}"
-            echo "- Mode: ${MODE}"
+            echo "- Operation mode: ${MODE}"
+            echo "- Monitoring intent: ${MONITORING_INTENT}"
+            echo "- Check kind: ${CHECK_KIND}"
             echo "- Enabled: ${ENABLED}"
             echo "- Require runtime identity: ${REQUIRE_RUNTIME_IDENTITY}"
+            echo "- Private endpoint configured: $([ -n "${PRIVATE_ENDPOINT_KEY//[[:space:]]/}" ] && echo true || echo false)"
             echo "- Evidence artifact: product-health-monitoring-result"
             if [ -f product-health-monitoring.json ]; then
               echo "- Status: $(jq -r '.status // "unknown"' product-health-monitoring.json)"

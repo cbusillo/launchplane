@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from alembic import command
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -29,6 +29,464 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_material_incident_migration_links_evidence_without_duplicate_opening(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = _alembic_config(database_url)
+            command.upgrade(config, "c6f8a0b2d4e6")
+            engine = create_engine(database_url)
+            observation_id = "public-ingress-example-site-prod-20260727t120000z"
+            incident_id = "public-ingress-incident-example-site-prod"
+            observation_payload = {
+                "schema_version": 1,
+                "record_id": observation_id,
+                "product": "example-site",
+                "repository": "example/example-site",
+                "driver_id": "generic-web",
+                "context": "example-site",
+                "instance": "prod",
+                "check_name": "public-ingress",
+                "check_kind": "public_http",
+                "purpose": "probe",
+                "monitoring_intent": "public",
+                "observed_at": "2026-07-27T12:00:00Z",
+                "status": "fail",
+                "failure_code": "http_error",
+                "base_url": "https://example.test",
+                "health_url": "https://example.test/healthz",
+                "targets": [
+                    {
+                        "target": "base_url",
+                        "url": "https://example.test",
+                        "status": "fail",
+                        "failure_code": "http_error",
+                        "http_status": 503,
+                        "summary": "HTTP 503",
+                    }
+                ],
+                "summary": "Public ingress failed.",
+            }
+            incident_payload = {
+                "schema_version": 1,
+                "incident_id": incident_id,
+                "product": "example-site",
+                "repository": "example/example-site",
+                "driver_id": "generic-web",
+                "context": "example-site",
+                "instance": "prod",
+                "check_name": "public-ingress",
+                "check_kind": "public_http",
+                "status": "open",
+                "opened_at": "2026-07-27T12:00:00Z",
+                "opened_observation_id": observation_id,
+                "latest_observation_id": observation_id,
+                "latest_observed_at": "2026-07-27T12:00:00Z",
+                "failure_code": "http_error",
+                "summary": "Public ingress failed.",
+            }
+            policy_payload = {
+                "schema_version": 1,
+                "policy_id": "example-policy",
+                "product": "example-site",
+                "context": "example-site",
+                "instance": "prod",
+                "status": "enabled",
+                "destinations": [
+                    {
+                        "destination_id": "github-main",
+                        "kind": "github_issue",
+                        "github_repository": "example/launchplane",
+                        "github_label": "public-ingress",
+                    }
+                ],
+                "created_at": "2026-07-27T11:00:00Z",
+                "updated_at": "2026-07-27T11:00:00Z",
+                "source": "test:migration",
+            }
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "insert into launchplane_public_ingress_observations "
+                            "(record_id, product, context, instance, status, observed_at, payload) "
+                            "values (:record_id, :product, :context, :instance, :status, "
+                            ":observed_at, :payload)"
+                        ),
+                        {
+                            "record_id": observation_id,
+                            "product": "example-site",
+                            "context": "example-site",
+                            "instance": "prod",
+                            "status": "fail",
+                            "observed_at": "2026-07-27T12:00:00Z",
+                            "payload": json.dumps(observation_payload),
+                        },
+                    )
+                    connection.execute(
+                        text(
+                            "insert into launchplane_public_ingress_incidents "
+                            "(incident_id, product, context, instance, status, opened_at, "
+                            "latest_observed_at, payload) values (:incident_id, :product, "
+                            ":context, :instance, :status, :opened_at, :latest_observed_at, "
+                            ":payload)"
+                        ),
+                        {
+                            "incident_id": incident_id,
+                            "product": "example-site",
+                            "context": "example-site",
+                            "instance": "prod",
+                            "status": "open",
+                            "opened_at": "2026-07-27T12:00:00Z",
+                            "latest_observed_at": "2026-07-27T12:00:00Z",
+                            "payload": json.dumps(incident_payload),
+                        },
+                    )
+                    connection.execute(
+                        text(
+                            "insert into launchplane_public_ingress_notification_policies "
+                            "(policy_id, product, context, instance, status, updated_at, payload) "
+                            "values (:policy_id, :product, :context, :instance, :status, "
+                            ":updated_at, :payload)"
+                        ),
+                        {
+                            "policy_id": "example-policy",
+                            "product": "example-site",
+                            "context": "example-site",
+                            "instance": "prod",
+                            "status": "enabled",
+                            "updated_at": "2026-07-27T11:00:00Z",
+                            "payload": json.dumps(policy_payload),
+                        },
+                    )
+                command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+                with engine.connect() as connection:
+                    observation_row = connection.execute(
+                        text(
+                            "select incident_id, check_token, check_kind, payload from "
+                            "launchplane_public_ingress_observations where record_id = :record_id"
+                        ),
+                        {"record_id": observation_id},
+                    ).one()
+                    incident_row = connection.execute(
+                        text(
+                            "select state_version, check_token, check_kind, payload from "
+                            "launchplane_public_ingress_incidents where incident_id = :incident_id"
+                        ),
+                        {"incident_id": incident_id},
+                    ).one()
+                    events = connection.execute(
+                        text(
+                            "select payload from launchplane_public_ingress_incident_events "
+                            "where incident_id = :incident_id"
+                        ),
+                        {"incident_id": incident_id},
+                    ).all()
+                    policy_value = connection.execute(
+                        text(
+                            "select payload from launchplane_public_ingress_notification_policies "
+                            "where policy_id = 'example-policy'"
+                        )
+                    ).scalar_one()
+                migrated_observation = (
+                    json.loads(observation_row.payload)
+                    if isinstance(observation_row.payload, str)
+                    else observation_row.payload
+                )
+                migrated_incident = (
+                    json.loads(incident_row.payload)
+                    if isinstance(incident_row.payload, str)
+                    else incident_row.payload
+                )
+                migrated_event = (
+                    json.loads(events[0].payload)
+                    if isinstance(events[0].payload, str)
+                    else events[0].payload
+                )
+                migrated_policy = (
+                    json.loads(policy_value) if isinstance(policy_value, str) else policy_value
+                )
+                self.assertEqual(observation_row.incident_id, incident_id)
+                self.assertEqual(observation_row.check_token, "")
+                self.assertEqual(observation_row.check_kind, "public_http")
+                self.assertEqual(migrated_observation["incident_id"], incident_id)
+                self.assertEqual(
+                    migrated_observation["incident_event_id"],
+                    migrated_event["event_id"],
+                )
+                self.assertTrue(migrated_observation["material_fingerprint_sha256"])
+                self.assertEqual(incident_row.state_version, 1)
+                self.assertEqual(incident_row.check_token, "")
+                self.assertEqual(incident_row.check_kind, "public_http")
+                self.assertEqual(migrated_incident["schema_version"], 2)
+                self.assertEqual(migrated_incident["latest_material_event"], "baseline")
+                self.assertEqual(len(events), 1)
+                self.assertFalse(migrated_event["delivery_eligible"])
+                self.assertEqual(migrated_policy["reminder_interval_seconds"], 21600)
+            finally:
+                engine.dispose()
+
+    def test_material_incident_migration_preserves_terminal_history(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = _alembic_config(database_url)
+            command.upgrade(config, "c6f8a0b2d4e6")
+            engine = create_engine(database_url)
+
+            def incident_payload(
+                *,
+                incident_id: str,
+                check_name: str,
+                opened_at: str,
+                latest_observed_at: str,
+                status: str = "open",
+                resolution_reason: str = "",
+            ) -> dict[str, object]:
+                payload: dict[str, object] = {
+                    "schema_version": 1,
+                    "incident_id": incident_id,
+                    "product": "example-site",
+                    "repository": "example/example-site",
+                    "driver_id": "generic-web",
+                    "context": "example-site",
+                    "instance": "prod",
+                    "check_name": check_name,
+                    "check_kind": "public_http",
+                    "status": status,
+                    "opened_at": opened_at,
+                    "opened_observation_id": f"{incident_id}-opened",
+                    "latest_observation_id": f"{incident_id}-latest",
+                    "latest_observed_at": latest_observed_at,
+                    "failure_code": "http_error",
+                    "summary": "Public ingress failed.",
+                }
+                if status == "resolved":
+                    payload.update(
+                        resolved_at=latest_observed_at,
+                        resolved_observation_id=f"{incident_id}-latest",
+                        resolution_reason=resolution_reason or "recovered",
+                    )
+                return payload
+
+            rows = (
+                (
+                    "resolved-incident",
+                    incident_payload(
+                        incident_id="resolved-incident",
+                        check_name="resolved-check",
+                        opened_at="2026-07-27T10:00:00Z",
+                        latest_observed_at="2026-07-27T10:10:00Z",
+                        status="resolved",
+                        resolution_reason="recovered",
+                    ),
+                ),
+                (
+                    "duplicate-canonical",
+                    incident_payload(
+                        incident_id="duplicate-canonical",
+                        check_name="duplicate-check",
+                        opened_at="2026-07-27T11:00:00Z",
+                        latest_observed_at="2026-07-27T11:05:00Z",
+                    ),
+                ),
+                (
+                    "duplicate-later",
+                    incident_payload(
+                        incident_id="duplicate-later",
+                        check_name="duplicate-check",
+                        opened_at="2026-07-27T11:01:00Z",
+                        latest_observed_at="2026-07-27T11:10:00Z",
+                    ),
+                ),
+            )
+            try:
+                with engine.begin() as connection:
+                    for incident_id, payload in rows:
+                        connection.execute(
+                            text(
+                                "insert into launchplane_public_ingress_incidents "
+                                "(incident_id, product, context, instance, status, opened_at, "
+                                "latest_observed_at, payload) values (:incident_id, :product, "
+                                ":context, :instance, :status, :opened_at, :latest_observed_at, "
+                                ":payload)"
+                            ),
+                            {
+                                "incident_id": incident_id,
+                                "product": "example-site",
+                                "context": "example-site",
+                                "instance": "prod",
+                                "status": payload["status"],
+                                "opened_at": payload["opened_at"],
+                                "latest_observed_at": payload["latest_observed_at"],
+                                "payload": json.dumps(payload),
+                            },
+                        )
+                command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+                with engine.connect() as connection:
+                    migrated_rows = connection.execute(
+                        text(
+                            "select incident_id, status, payload from "
+                            "launchplane_public_ingress_incidents where incident_id in "
+                            "('resolved-incident', 'duplicate-canonical', 'duplicate-later')"
+                        )
+                    ).all()
+                    event_rows = connection.execute(
+                        text(
+                            "select incident_id, event, payload from "
+                            "launchplane_public_ingress_incident_events where incident_id in "
+                            "('resolved-incident', 'duplicate-canonical', 'duplicate-later')"
+                        )
+                    ).all()
+                incidents = {
+                    row.incident_id: (
+                        json.loads(row.payload) if isinstance(row.payload, str) else row.payload
+                    )
+                    for row in migrated_rows
+                }
+                events_by_incident: dict[str, list[dict[str, object]]] = {}
+                for row in event_rows:
+                    events_by_incident.setdefault(row.incident_id, []).append(
+                        json.loads(row.payload) if isinstance(row.payload, str) else row.payload
+                    )
+
+                self.assertEqual(
+                    incidents["resolved-incident"]["latest_material_event"], "resolved"
+                )
+                resolved_events = events_by_incident["resolved-incident"]
+                self.assertEqual(
+                    {event["event"] for event in resolved_events}, {"baseline", "resolved"}
+                )
+                resolved_event = next(
+                    event for event in resolved_events if event["event"] == "resolved"
+                )
+                self.assertFalse(resolved_event["delivery_eligible"])
+                self.assertEqual(
+                    resolved_event["suppression_reason"],
+                    "migration_reconciliation",
+                )
+
+                duplicate_statuses = {row.incident_id: row.status for row in migrated_rows}
+                self.assertEqual(duplicate_statuses["duplicate-canonical"], "open")
+                self.assertEqual(duplicate_statuses["duplicate-later"], "resolved")
+                self.assertEqual(
+                    incidents["duplicate-later"]["resolution_reason"],
+                    "duplicate_reconciled",
+                )
+                self.assertEqual(
+                    incidents["duplicate-later"]["latest_material_event"],
+                    "resolved",
+                )
+                self.assertEqual(
+                    {event["event"] for event in events_by_incident["duplicate-later"]},
+                    {"baseline", "resolved"},
+                )
+            finally:
+                engine.dispose()
+
+    def test_monitoring_intent_migration_backfills_and_downgrades_profile_payloads(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = _alembic_config(database_url)
+            command.upgrade(config, "b3d5f7a9c1e4")
+            engine = create_engine(database_url)
+            profile_payload = {
+                "product": "example-site",
+                "display_name": "Example Site",
+                "repository": "example/example-site",
+                "driver_id": "generic-web",
+                "image": {"repository": "ghcr.io/example/example-site"},
+                "runtime_port": 3000,
+                "health_path": "/healthz",
+                "updated_at": "2026-07-27T16:50:00Z",
+                "source": "test:migration",
+                "lanes": [
+                    {
+                        "instance": "public",
+                        "context": "example-site",
+                        "health_monitoring": {
+                            "checks": [{"name": "public-ingress", "kind": "public_http"}]
+                        },
+                    },
+                    {
+                        "instance": "private",
+                        "context": "example-site",
+                        "health_monitoring": {
+                            "checks": [
+                                {
+                                    "name": "private-runtime",
+                                    "kind": "private_http",
+                                    "private_endpoint_key": "example-private",
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "instance": "prelaunch",
+                        "context": "example-site",
+                        "health_monitoring": {"checks": []},
+                    },
+                ],
+            }
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "insert into launchplane_product_profiles "
+                            "(product, display_name, repository, driver_id, updated_at, payload) "
+                            "values (:product, :display_name, :repository, :driver_id, "
+                            ":updated_at, :payload)"
+                        ),
+                        {
+                            "product": "example-site",
+                            "display_name": "Example Site",
+                            "repository": "example/example-site",
+                            "driver_id": "generic-web",
+                            "updated_at": "2026-07-27T16:50:00Z",
+                            "payload": json.dumps(profile_payload),
+                        },
+                    )
+                command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+                with engine.connect() as connection:
+                    migrated_payload = connection.execute(
+                        text(
+                            "select payload from launchplane_product_profiles "
+                            "where product = 'example-site'"
+                        )
+                    ).scalar_one()
+                migrated = (
+                    json.loads(migrated_payload)
+                    if isinstance(migrated_payload, str)
+                    else migrated_payload
+                )
+                self.assertEqual(
+                    [lane["health_monitoring"]["monitoring_intent"] for lane in migrated["lanes"]],
+                    ["public", "private", "prelaunch"],
+                )
+
+                command.downgrade(config, "b3d5f7a9c1e4")
+                with engine.connect() as connection:
+                    downgraded_payload = connection.execute(
+                        text(
+                            "select payload from launchplane_product_profiles "
+                            "where product = 'example-site'"
+                        )
+                    ).scalar_one()
+                downgraded = (
+                    json.loads(downgraded_payload)
+                    if isinstance(downgraded_payload, str)
+                    else downgraded_payload
+                )
+                self.assertTrue(
+                    all(
+                        "monitoring_intent" not in lane["health_monitoring"]
+                        for lane in downgraded["lanes"]
+                    )
+                )
+            finally:
+                engine.dispose()
+
     def test_compatibility_floor_upgrades_by_default(self) -> None:
         self.assertEqual(
             schema_migration_action(current_revision=AUTHZ_COMPATIBILITY_FLOOR_REVISION),
@@ -104,6 +562,71 @@ class SchemaMigrationTests(unittest.TestCase):
             _alembic_config(database_url).get_main_option("sqlalchemy.url"),
             database_url,
         )
+
+    def test_odoo_stable_lane_migration_rejects_preexisting_cross_kind_queue(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = _alembic_config(database_url)
+            command.upgrade(config, "a1c3e5f7b9d2")
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    common_values = {
+                        "product": "odoo-tenant-cm",
+                        "context": "cm",
+                        "instance": "prod",
+                        "status": "pending",
+                        "phase": "created",
+                        "created_at": "2026-07-26T05:00:00Z",
+                        "updated_at": "2026-07-26T05:00:00Z",
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                        "attempt": 0,
+                        "payload": "{}",
+                    }
+                    connection.execute(
+                        text(
+                            "insert into launchplane_odoo_stable_bootstrap_operations "
+                            "(operation_id, product, context, instance, idempotency_key, status, "
+                            "phase, created_at, updated_at, lease_owner, lease_expires_at, "
+                            "heartbeat_at, attempt, payload) values "
+                            "(:operation_id, :product, :context, :instance, :idempotency_key, "
+                            ":status, :phase, :created_at, :updated_at, :lease_owner, "
+                            ":lease_expires_at, :heartbeat_at, :attempt, :payload)"
+                        ),
+                        {
+                            **common_values,
+                            "operation_id": "bootstrap-preexisting",
+                            "idempotency_key": "bootstrap-preexisting",
+                        },
+                    )
+                    connection.execute(
+                        text(
+                            "insert into launchplane_odoo_prod_backup_restore_operations "
+                            "(operation_id, product, context, instance, idempotency_key, "
+                            "idempotency_scope, status, phase, created_at, updated_at, "
+                            "lease_owner, lease_expires_at, heartbeat_at, attempt, payload) values "
+                            "(:operation_id, :product, :context, :instance, :idempotency_key, "
+                            ":idempotency_scope, :status, :phase, :created_at, :updated_at, "
+                            ":lease_owner, :lease_expires_at, :heartbeat_at, :attempt, :payload)"
+                        ),
+                        {
+                            **common_values,
+                            "operation_id": "restore-preexisting",
+                            "idempotency_key": "restore-preexisting",
+                            "idempotency_scope": "operator",
+                        },
+                    )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "multiple blocking operation kinds",
+                ):
+                    command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            finally:
+                engine.dispose()
 
     def test_sqlite_fenced_schema_allocates_revisions_for_compatibility_writer(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

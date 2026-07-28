@@ -16,11 +16,15 @@ from control_plane.odoo_product_driver_http import (
 from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateRequest,
     OdooProdBackupGateStore,
+    OdooProdBackupVerificationRequest,
+    OdooProdBackupVerificationStore,
     execute_odoo_prod_backup_gate,
+    execute_odoo_prod_backup_verification,
 )
 
 
 ODOO_PROD_BACKUP_GATE_ROUTE = "/v1/drivers/odoo/prod-backup-gate"
+ODOO_PROD_BACKUP_VERIFICATION_ROUTE = "/v1/drivers/odoo/prod-backup-verification"
 
 
 class OdooProdBackupGateProductMismatchError(OdooProductMismatchError):
@@ -38,6 +42,16 @@ class OdooProdBackupGateEnvelope(_ProductRouteEnvelope):
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooProdBackupGateEnvelope":
         _validate_driver_envelope_product(self.product, label="Odoo prod backup gate")
+        return self
+
+
+class OdooProdBackupVerificationEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    backup_verification: OdooProdBackupVerificationRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooProdBackupVerificationEnvelope":
+        _validate_driver_envelope_product(self.product, label="Odoo prod backup verification")
         return self
 
 
@@ -88,3 +102,31 @@ def should_store_odoo_prod_backup_gate_idempotency(
     driver_result: dict[str, object],
 ) -> bool:
     return str(driver_result.get("backup_status", "")).strip() == "pass"
+
+
+def execute_odoo_prod_backup_verification_result(
+    *,
+    control_plane_root: Path,
+    record_store: object,
+    request: OdooProdBackupVerificationEnvelope,
+) -> tuple[dict[str, object], dict[str, object]]:
+    driver_result = execute_odoo_prod_backup_verification(
+        control_plane_root=control_plane_root,
+        record_store=cast(OdooProdBackupVerificationStore, record_store),
+        request=request.backup_verification,
+    )
+    records: dict[str, object] = {
+        "backup_record_id": driver_result.backup_record_id,
+        "backup_verification_record_id": driver_result.verification_record_id,
+    }
+    result = driver_result.model_dump(
+        mode="json",
+        exclude={"context", "instance", "backup_record_id", "verification_record_id"},
+    )
+    return records, result
+
+
+def should_store_odoo_prod_backup_verification_idempotency(
+    driver_result: dict[str, object],
+) -> bool:
+    return str(driver_result.get("verification_status", "")).strip() == "pass"

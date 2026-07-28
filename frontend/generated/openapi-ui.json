@@ -9398,6 +9398,9 @@
             "title": "Environment",
             "type": "string"
           },
+          "health_monitoring": {
+            "$ref": "#/components/schemas/ProductHealthMonitoringSummary"
+          },
           "health_url": {
             "default": "",
             "title": "Health Url",
@@ -9474,6 +9477,7 @@
           "driver_extensions",
           "driver_id",
           "environment",
+          "health_monitoring",
           "health_url",
           "managed_secrets",
           "product",
@@ -9615,6 +9619,9 @@
             "title": "Environment",
             "type": "string"
           },
+          "health_monitoring": {
+            "$ref": "#/components/schemas/ProductHealthMonitoringSummary"
+          },
           "health_url": {
             "default": "",
             "title": "Health Url",
@@ -9655,6 +9662,7 @@
           "context",
           "driver_extensions",
           "environment",
+          "health_monitoring",
           "health_url",
           "provenance",
           "public_ingress",
@@ -9806,6 +9814,254 @@
           "runtime_environment_keys"
         ]
       },
+      "ProductHealthMonitoringCheckSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "failure_code": {
+            "default": "",
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "incident_eligible": {
+            "title": "Incident Eligible",
+            "type": "boolean"
+          },
+          "incident_id": {
+            "default": "",
+            "title": "Incident Id",
+            "type": "string"
+          },
+          "incident_last_reminded_at": {
+            "default": "",
+            "title": "Incident Last Reminded At",
+            "type": "string"
+          },
+          "incident_latest_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Latest Event"
+          },
+          "incident_latest_event_at": {
+            "default": "",
+            "title": "Incident Latest Event At",
+            "type": "string"
+          },
+          "incident_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Incident Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "incident_next_reminder_at": {
+            "default": "",
+            "title": "Incident Next Reminder At",
+            "type": "string"
+          },
+          "incident_notification_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "acknowledged",
+                  "silenced"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Notification State"
+          },
+          "incident_severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Severity"
+          },
+          "incident_status": {
+            "default": "",
+            "title": "Incident Status",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "public_http",
+              "private_http",
+              "provider"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "observed_at": {
+            "default": "",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "private_endpoint_configured": {
+            "default": false,
+            "title": "Private Endpoint Configured",
+            "type": "boolean"
+          },
+          "probe_effective": {
+            "title": "Probe Effective",
+            "type": "boolean"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance",
+            "default": {
+              "detail": "Launchplane has not recorded a probe observation for this health check.",
+              "freshness_status": "missing",
+              "recorded_at": "",
+              "refreshed_at": "",
+              "source_kind": "record",
+              "source_record_id": "",
+              "stale_after": ""
+            }
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "status": {
+            "default": "missing",
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "title": "Summary",
+            "type": "string"
+          },
+          "trust_state": {
+            "default": "missing",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "failure_code",
+          "incident_eligible",
+          "incident_id",
+          "incident_last_reminded_at",
+          "incident_latest_event",
+          "incident_latest_event_at",
+          "incident_material_fingerprint_sha256",
+          "incident_next_reminder_at",
+          "incident_notification_state",
+          "incident_severity",
+          "incident_status",
+          "kind",
+          "name",
+          "observed_at",
+          "private_endpoint_configured",
+          "probe_effective",
+          "provenance",
+          "record_id",
+          "status",
+          "summary",
+          "trust_state"
+        ],
+        "title": "ProductHealthMonitoringCheckSummary",
+        "type": "object"
+      },
+      "ProductHealthMonitoringSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "checks": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductHealthMonitoringCheckSummary"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "monitoring_intent": {
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Monitoring Intent",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "public_incident_eligible": {
+            "title": "Public Incident Eligible",
+            "type": "boolean"
+          },
+          "trust_state": {
+            "default": "recorded",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Trust State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "checks",
+          "monitoring_intent",
+          "provenance",
+          "public_incident_eligible",
+          "trust_state"
+        ],
+        "title": "ProductHealthMonitoringSummary",
+        "type": "object"
+      },
       "ProductImageProfile": {
         "additionalProperties": false,
         "properties": {
@@ -9858,6 +10114,13 @@
             "title": "Provider Check",
             "type": "string"
           },
+          "recovery_observation_threshold": {
+            "default": 1,
+            "maximum": 10,
+            "minimum": 1,
+            "title": "Recovery Observation Threshold",
+            "type": "integer"
+          },
           "require_runtime_identity": {
             "default": false,
             "title": "Require Runtime Identity",
@@ -9876,6 +10139,7 @@
           "private_endpoint_key",
           "provider",
           "provider_check",
+          "recovery_observation_threshold",
           "require_runtime_identity",
           "url"
         ],
@@ -9892,12 +10156,23 @@
             },
             "title": "Checks",
             "type": "array"
+          },
+          "monitoring_intent": {
+            "default": "prelaunch",
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Monitoring Intent",
+            "type": "string"
           }
         },
         "title": "ProductLaneHealthMonitoringPolicy",
         "type": "object",
         "required": [
-          "checks"
+          "checks",
+          "monitoring_intent"
         ]
       },
       "ProductLaneProfile": {
@@ -10040,14 +10315,107 @@
             "title": "Failure Code",
             "type": "string"
           },
+          "incident_eligible": {
+            "default": false,
+            "title": "Incident Eligible",
+            "type": "boolean"
+          },
           "incident_id": {
             "default": "",
             "title": "Incident Id",
             "type": "string"
           },
+          "incident_last_reminded_at": {
+            "default": "",
+            "title": "Incident Last Reminded At",
+            "type": "string"
+          },
+          "incident_latest_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Latest Event"
+          },
+          "incident_latest_event_at": {
+            "default": "",
+            "title": "Incident Latest Event At",
+            "type": "string"
+          },
+          "incident_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Incident Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "incident_next_reminder_at": {
+            "default": "",
+            "title": "Incident Next Reminder At",
+            "type": "string"
+          },
+          "incident_notification_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "acknowledged",
+                  "silenced"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Notification State"
+          },
+          "incident_severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Severity"
+          },
           "incident_status": {
             "default": "",
             "title": "Incident Status",
+            "type": "string"
+          },
+          "monitoring_intent": {
+            "default": "prelaunch",
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Monitoring Intent",
             "type": "string"
           },
           "observed_at": {
@@ -10124,8 +10492,17 @@
         "required": [
           "expected_runtime_identity",
           "failure_code",
+          "incident_eligible",
           "incident_id",
+          "incident_last_reminded_at",
+          "incident_latest_event",
+          "incident_latest_event_at",
+          "incident_material_fingerprint_sha256",
+          "incident_next_reminder_at",
+          "incident_notification_state",
+          "incident_severity",
           "incident_status",
+          "monitoring_intent",
           "observed_at",
           "observed_runtime_identity",
           "provenance",
@@ -10233,6 +10610,84 @@
             "default": "",
             "title": "Incident Id",
             "type": "string"
+          },
+          "incident_last_reminded_at": {
+            "default": "",
+            "title": "Incident Last Reminded At",
+            "type": "string"
+          },
+          "incident_latest_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Latest Event"
+          },
+          "incident_latest_event_at": {
+            "default": "",
+            "title": "Incident Latest Event At",
+            "type": "string"
+          },
+          "incident_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Incident Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "incident_next_reminder_at": {
+            "default": "",
+            "title": "Incident Next Reminder At",
+            "type": "string"
+          },
+          "incident_notification_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "acknowledged",
+                  "silenced"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Notification State"
+          },
+          "incident_severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Severity"
           },
           "incident_status": {
             "default": "",
@@ -10368,6 +10823,13 @@
           "domain_name",
           "failure_code",
           "incident_id",
+          "incident_last_reminded_at",
+          "incident_latest_event",
+          "incident_latest_event_at",
+          "incident_material_fingerprint_sha256",
+          "incident_next_reminder_at",
+          "incident_notification_state",
+          "incident_severity",
           "incident_status",
           "issuer",
           "likely_failure_cause",
@@ -12480,19 +12942,112 @@
             "title": "Failure Code",
             "type": "string"
           },
+          "incident_eligible": {
+            "default": false,
+            "title": "Incident Eligible",
+            "type": "boolean"
+          },
           "incident_id": {
             "default": "",
             "title": "Incident Id",
             "type": "string"
+          },
+          "incident_last_reminded_at": {
+            "default": "",
+            "title": "Incident Last Reminded At",
+            "type": "string"
+          },
+          "incident_latest_event": {
+            "anyOf": [
+              {
+                "enum": [
+                  "opened",
+                  "updated",
+                  "reminder",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "baseline",
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Latest Event"
+          },
+          "incident_latest_event_at": {
+            "default": "",
+            "title": "Incident Latest Event At",
+            "type": "string"
+          },
+          "incident_material_fingerprint_sha256": {
+            "default": "",
+            "title": "Incident Material Fingerprint Sha256",
+            "type": "string"
+          },
+          "incident_next_reminder_at": {
+            "default": "",
+            "title": "Incident Next Reminder At",
+            "type": "string"
+          },
+          "incident_notification_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "active",
+                  "acknowledged",
+                  "silenced"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Notification State"
           },
           "incident_opened_at": {
             "default": "",
             "title": "Incident Opened At",
             "type": "string"
           },
+          "incident_severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "warning",
+                  "critical"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Incident Severity"
+          },
           "incident_status": {
             "default": "",
             "title": "Incident Status",
+            "type": "string"
+          },
+          "monitoring_intent": {
+            "default": "prelaunch",
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Monitoring Intent",
             "type": "string"
           },
           "notification_sent": {
@@ -12549,9 +13104,18 @@
         "type": "object",
         "required": [
           "failure_code",
+          "incident_eligible",
           "incident_id",
+          "incident_last_reminded_at",
+          "incident_latest_event",
+          "incident_latest_event_at",
+          "incident_material_fingerprint_sha256",
+          "incident_next_reminder_at",
+          "incident_notification_state",
           "incident_opened_at",
+          "incident_severity",
           "incident_status",
+          "monitoring_intent",
           "notification_sent",
           "observed_at",
           "provenance",

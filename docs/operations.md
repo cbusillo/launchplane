@@ -391,6 +391,8 @@ Operators mutate shared or production authz through the deployed service, not
 through direct DB commands or a local CLI from an arbitrary checkout. Store the
 complete desired rules for one `managed_set_id` in a protected repository
 secret. `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` owns the primary operator set;
+`LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON` owns the generic
+Product Health Monitoring wrapper's exact immutable worker grant;
 `LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
 Odoo stable managed route-binding set; and
 `LAUNCHPLANE_AUTHZ_ODOO_EXTERNAL_ROUTE_BINDING_MANAGED_SET_JSON` owns the
@@ -402,6 +404,23 @@ testing-only refresh controller and its exact-instance binding grants. The
 `LAUNCHPLANE_AUTHZ_ODOO_TESTING_TARGET_REPLACEMENT_MANAGED_SET_JSON` owns the
 separate exact-instance testing read, plan, and apply grants used by the pinned
 Odoo target-replacement workers. The
+`LAUNCHPLANE_AUTHZ_ODOO_OPW_PREVIEW_FEEDBACK_MANAGED_SET_JSON` owns the isolated
+OPW preview feedback writer grant without requiring operators to read or replace
+the primary managed-set secret. The
+`LAUNCHPLANE_AUTHZ_ODOO_OPW_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON` owns the
+separate exact-instance OPW production inspection and enrollment grants so the
+operator can reconcile that lane without replacing another unreadable managed
+set. `LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON` owns
+additional exact-instance Odoo production inspection and enrollment grants
+without expanding the OPW-specific set or replacing another unreadable managed
+set. `LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_OPERATION_READ_MANAGED_SET_JSON` owns
+separate exact-instance cross-operation read grants, such as allowing an
+immutable production apply worker to read its reviewed plan operation without
+replacing the broader production-enrollment set. The
+`LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_BACKUP_RESTORE_MANAGED_SET_JSON` owns the
+separate exact-instance destructive restore apply grant for the immutable
+production restore wrapper and worker without replacing the broader
+production-enrollment set. The
 `Manage Launchplane Authorization` wrapper selects one of those explicit
 secrets and forwards it into the reusable worker, whose OIDC-minting job remains
 gated by the `launchplane-authz-admin` environment. Never replace the unreadable
@@ -457,6 +476,14 @@ uv run "$skills_home/github/scripts/github_workflow_babysit.py" dispatch \
   --approve-environment launchplane-authz-admin \
   --timeout-seconds 1800
 ```
+
+Do not substitute raw `gh workflow run`, `gh run watch`, or a generic Actions
+run waiter for this helper. GitHub reports a protected-environment approval as
+`status=waiting`; generic waiters commonly treat that as an ordinary
+nonterminal state and may emit no approval diagnostic. The exact-run helper
+reads `pending_deployments` on the first waiting poll, reports the eligible
+reviewer state, and either submits the explicitly authorized approval or stops
+with an actionable split-identity error.
 
 The helper dispatches with the configured automation actor and reviews the
 protected environment with the active local human GitHub account. Those
@@ -688,15 +715,28 @@ The `Public Ingress Monitor` workflow owns both the recurring schedule and
 manual operator reruns, so its GitHub OIDC identity stays scoped only to
 `public_ingress_monitor.run_once`. Both paths call
 `POST /v1/products/public-ingress-monitor/run-once` through GitHub OIDC and are
-authorized in the Launchplane service context. Lanes opt in by declaring
-`health_monitoring.checks[]`: `public_http` checks validate public reachability,
-`private_http` checks resolve a Launchplane-owned private endpoint record by
+authorized in the Launchplane service context. Each lane declares a DB-backed
+`health_monitoring.monitoring_intent` of `public`, `private`, or `prelaunch` plus
+`checks[]`: `public_http` checks validate public reachability, `private_http`
+checks resolve a Launchplane-owned private endpoint record by
 `private_endpoint_key`, and `provider` checks fail closed until a
-provider-specific monitor is wired. The public-ingress route and record
+provider-specific monitor is wired. `public` requires an enabled public check;
+`private` requires an enabled private check; contradictory or missing intent
+fails validation. The public-ingress route and record
 names are compatibility names for the existing health-monitor observation
 family. Observations are sensor evidence; incident records are keyed by product,
 lane, and health-check name so public, private, and provider failures do not
-overwrite each other.
+overwrite each other. The active key is stable, but each opened occurrence has
+its own incident id so recovery followed by a later failure does not replace the
+resolved history.
+
+Probe effectiveness and incident eligibility are separate. Public and TLS
+checks run for `public` and `prelaunch`; their failures open or update incidents
+only for `public`. Private intent suppresses public and TLS probes, while private
+and provider checks remain active and incident-eligible in every intent mode.
+Prelaunch failures therefore stay visible as readiness evidence without being
+reported as public outages. Moving to `public` deterministically activates
+incident eligibility on the next monitor cycle.
 
 `public_http` uses the centralized public outbound HTTP policy. Every initial
 destination and redirect hop is resolved independently; all IPv4 and IPv6
@@ -710,6 +750,58 @@ connect, request, response read, and redirect hops; the operating-system
 resolver still owns its own DNS lookup timeout. `private_http` is intentionally
 separate: only a scoped active private-health endpoint record can select the
 explicit private client, and public checks never fall back to that path.
+
+Use the `Product Health Monitoring` workflow for shared or production intent
+changes. Run `dry-run` first with the exact product/context/instance, check name,
+check kind, requested intent, and any registered private endpoint key; review the
+returned plan SHA-256, then run `apply` with that digest, a unique idempotency
+key, and the exact confirmation phrase. The service validates private endpoint
+scope without returning its URL, rejects check-kind changes under an existing
+name, and compare-and-writes only the selected check and lane intent. Whole
+profile writes cannot change existing health-monitoring authority, and
+onboarding updates preserve it.
+
+When intent makes an open public or TLS incident ineligible, the monitor keeps
+the real probe observation and writes a separate skipped reconciliation
+observation. The incident resolves with `monitoring_intent_changed`, not a false
+recovery. Observation, incident, and GitHub outbox rows are fenced by canonical
+fingerprints of the product profile and any private endpoint or route binding
+used by the target. The checks happen in one transaction, so an in-flight run
+discovered under old authority cannot reopen or resolve operator state after a
+record changes, even when its human timestamp is unchanged. Email and Discord
+delivery behavior and DB-backed notification policies are unchanged; do not
+disable destinations to perform an intent transition.
+
+Every failing observation is retained and linked to its open incident. The
+monitor derives a typed material fingerprint from failure layer/category,
+severity, affected target, route authority, TLS state, and expected-runtime
+mismatch. Observation ids, timestamps, retries, summaries, and equivalent HTTP
+evidence do not participate. A new incident emits one `opened` event. An open
+incident emits `updated` only when that fingerprint changes; otherwise it
+updates latest evidence without an immediate delivery. The database serializes
+the active incident key and compare-checks both the incident state version and
+the full expected incident digest before committing observation, incident,
+event, reminder, and outbox rows together. Concurrent acknowledgement, silence,
+or monitor passes therefore re-plan against current state instead of overwriting
+operator state, opening a second incident, or losing evidence. Any supported
+non-monitor incident-state mutation must increment `state_version`.
+
+Notification policies carry a reminder interval from 15 minutes through seven
+days; the generic migrated/default interval is six hours. Each incident/policy
+pair stores its material-event anchor, current reminder window, last reminder,
+and next due time. An overdue pass emits only the current window, never every
+missed window. Opening or material update resets the anchor. The outbox and
+notification attempt ids use the material event id or reminder-window event id,
+not the observation id.
+
+Acknowledgement suppresses reminders for the acknowledged fingerprint. A
+material change clears acknowledgement and is immediately eligible for delivery.
+A bounded silence preserves all observations/events but suppresses material
+updates and reminders until `silenced_until`; after expiry the next unresolved
+failure can emit the current reminder. Resolution is never silenced because
+GitHub issue sinks must be closed and other operators must see recovery. Public,
+private, and provider checks use the configured consecutive-pass recovery
+threshold; only the threshold-crossing pass creates the single recovery event.
 
 TLS observations reuse the same monitor run, record family, and incident
 lifecycle. For each active environment route binding, Launchplane probes one
@@ -752,6 +844,12 @@ Notification routing is a separate service-backed policy and delivery concern,
 not lane-owned text config. The initial notification destinations are GitHub
 issues, email, and Discord; each is selected by DB-backed policy and evidenced
 by delivery-attempt records.
+GitHub delivery bodies carry a material-event marker for exact replay and a
+stable incident marker for issue recovery. Updates, reminders, and resolutions
+search the incident marker when their queued payload predates the committed
+opening attempt record, then comment or close the recovered issue rather than
+creating a duplicate. Do not clear provider markers or outbox rows to force a
+retry.
 GitHub issue notification delivery uses the managed automation token projected
 as `LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN`; it does not fall back to active
 local `gh` authentication. Verify the configured actor with a token-scoped
@@ -784,7 +882,10 @@ reviewed digest, a unique idempotency key, and confirmation
 `APPLY PRODUCT HEALTH MONITORING`. The service re-reads the complete profile and
 atomically rejects stale or concurrent edits. Authority uses separate exact-
 instance `product_profile.health_monitoring.plan` and `.apply` actions supplied
-through managed authz reconciliation.
+through the dedicated `product-health-monitoring` managed authz set. That set
+owns only the generic wrapper's exact immutable reusable-worker grant; real
+product, context, instance, check, and endpoint values remain explicit operator
+input and DB-backed Launchplane records.
 
 The manual Product Context Cutover workflow plans or applies the same
 current-authority record move through the Launchplane service. The workflow
@@ -878,15 +979,16 @@ Dokploy-hosted.
   fails closed without positive per-job Docker credential isolation evidence, so
   product repositories should not carry local `DOCKER_CONFIG` workaround retries
   as the long-term safety mechanism.
-- To prove repo-scoped runner registration, start with
-  `.github/workflows/runner-lane-registration.yml` in `mutate=false` mode. For
-  the cm-website pilot, capture `runner-inventory` evidence for
-  `cbusillo/odoo-tenant-cm-website`, run the registration workflow with an audit
-  key under `runner-lane-registration/<date>/...`, inspect the uploaded JSON
-  artifact, and only rerun with `mutate=true` after the dry-run evidence and
-  confirmation text have been reviewed. The workflow writes service-backed
-  runner-registration audit evidence and also uploads the local JSON artifact
-  for operator review.
+- For repo-scoped runner lifecycle, use the stable
+  `.github/workflows/runner-lane-registration.yml` workflow path and select
+  `register` or `retire`. Start with `mutate=false`, use an operation-shaped
+  audit key under `runner-lane-registration/<date>/...` or
+  `runner-lane-retirement/<date>/...`, and inspect the uploaded lifecycle JSON.
+  Registration mutation requires `register runner lane`; retirement mutation
+  requires `retire <owner/name> <lane>`. The workflow writes service-backed
+  lifecycle audit evidence through the existing exact OIDC-authorized path,
+  serializes host mutation with runner-host hygiene, and uploads the local JSON
+  artifact for operator review.
 - Deploy verification should probe Launchplane's live health endpoint, currently
   `GET /v1/health`, after the Dokploy update.
 - When rollout health fails, deploy automation should restore the previous
@@ -1049,7 +1151,10 @@ Current derived-state behavior:
   `POST /v1/drivers/odoo/prod-promotion-inputs` resolves the current testing
   artifact, source ref, and deterministic backup-gate record ID from DB-backed
   release tuple and artifact records, `POST /v1/drivers/odoo/prod-backup-gate`
-  captures DB and filestore backup evidence, `POST /v1/drivers/odoo/prod-promotion`
+  captures DB and filestore backup evidence,
+  `POST /v1/drivers/odoo/prod-backup-verification` reads an exact passing Odoo
+  backup-gate record and runs read-only integrity checks against the captured
+  backup, and `POST /v1/drivers/odoo/prod-promotion`
   validates the stored artifact, source release tuple, and required backup gate
   before promoting `testing` to `prod`, and `POST /v1/drivers/odoo/prod-rollback`
   deploys an explicit previous artifact. These routes resolve target identity,
@@ -1167,7 +1272,10 @@ Current derived-state behavior:
   resolves the DB-backed tracked Dokploy target and target id before fetching
   bounded logs. It supports Dokploy `application` and `compose` targets,
   includes route/target/app/server metadata, accepts optional `--since` and
-  `--search`, and redacts likely secret values from returned log lines.
+  `--search`, and redacts likely secret values from returned log lines. Compose
+  runtime reads may also pass `--service <exact-compose-service>` to select one
+  exact service container. Launchplane fails closed when that service is absent
+  or ambiguous; application and deployment log reads reject service selection.
 - `GET /v1/contexts/{context}/instances/{instance}/logs?lines=200` exposes the
   same tracked-target log reader through a native FastAPI service route using
   action `target_logs.read`. The default `source=runtime` reads current
@@ -1363,7 +1471,14 @@ context only, and `context_instance` has both context and instance.
   `ODOO_FILESTORE_PATH`, and `ODOO_BACKUP_ROOT` from DB-backed runtime
   environment records, runs a Dokploy schedule against the compose lane, stops
   the web service while capturing, and writes the backup-gate record only after
-  the capture succeeds.
+  the exact schedule deployment emits nonce-, record-, and database-bound
+  completion evidence with non-empty artifact sizes and SHA-256 values. A
+  provider `done` status without that bounded marker fails the gate. Directory
+  preparation accepts only the dedicated `/volumes/data/backups/launchplane`
+  tree and assigns only its exact backup-root/database/record path to the
+  script-runner identity, so stale root-owned directories cannot make `pg_dump`
+  fail after the provider has reported success or broaden ownership changes to
+  unrelated mounted data.
 - Odoo rollback is image/release-tuple rollback, not VM snapshot rollback. Do not
   invent artifact ids, source commits, backup gates, or env-file overlays to make
   a rollback proceed; write or import the real Launchplane records first.
@@ -1595,6 +1710,14 @@ entrypoints and pin those reviewed reusable workers to a full commit SHA. When
 worker behavior changes, land and validate the reusable contracts first, then
 advance the wrapper pin in a separate reviewed change.
 
+Target-replacement plan and apply readiness intentionally permits a degraded
+current deployment or failed public observation because replacement is the
+repair path for those states. Provider-target authority, route binding, runtime
+environment, managed secrets, and the exact persisted artifact remain required.
+The plan and apply paths independently fence the current inventory artifact,
+and apply still requires passing post-deploy verification before inventory or
+release evidence advances.
+
 The operator UI can inspect that same readiness contract from the environment
 `Actions` route without dispatching a workflow or invoking a descriptor route.
 It derives exact lane and artifact selectors from the product-environment read
@@ -1606,9 +1729,215 @@ discoverable so operators can follow reviewed workflow ownership instead of
 falling back to an arbitrary checkout or local live-target command.
 
 The plan reads the product profile, Launchplane Dokploy target/id records,
-current inventory, live Dokploy target payload, domains, volume env keys, latest
-deployment, and expected runtime identity. It does not create, delete, deploy,
-or change routes.
+current inventory, live Dokploy target payload, domains, exact live
+`ODOO_DATA_VOLUME`, `ODOO_LOG_VOLUME`, and `ODOO_DB_VOLUME` values, latest
+deployment, and expected runtime identity. For `data_source_mode=existing`, the
+plan also resolves desired volume authority from DB-backed runtime records and
+blocks when any desired value differs from the live target. It does not create,
+delete, deploy, change routes, or reinterpret a volume change as existing data.
+
+When production recovery starts from retained physical volumes and no valid
+logical backup exists, use the dedicated retained-volume backup import actions;
+do not add import flags to routine backup or restore. First run
+`Odoo Prod Retained Volume Backup Import Plan` with the exact product, production
+context and instance, current artifact, active database/data/log volumes, source
+database/data volumes, source database name, destination database name, expected
+database owner, fresh staging-clone volume, source compose project, and a new
+backup-record id. Every value is an operator request field checked against
+DB-backed current authority or read-only provider evidence. The plan mounts the
+source volumes read-only, verifies their compose project and `odoo_db` /
+`odoo_data` roles, proves PostgreSQL major version 17, captures the exact
+`PG_VERSION`, `pg_control` SHA-256 and checkpoint metadata, requires the source
+cluster state to be exactly `shut down`, counts and sizes the source filestore,
+proves the staging and destination paths absent, checks active data-volume free
+space, and binds all evidence into a SHA-256 plan fingerprint. PostgreSQL
+control tools are resolved from the image's versioned bindir rather than
+assuming an overridden shell entrypoint preserves the image's tool `PATH`.
+The fingerprint binds the conservative required-capacity calculation but not
+the volatile observed free-byte count. Apply remeasures live free space and
+blocks before backup-record or provider-import effects when it falls below the
+reviewed requirement, while harmless filesystem churn does not invalidate an
+otherwise identical plan.
+
+A failed target replacement can update the live target's runtime identity before
+post-deploy verification fails while production inventory correctly remains on
+the last successful deployment. Retained-volume import accepts that repair state
+only when every identity field except `deployment_record_id` and `deployed_at`
+still matches inventory, `deployed_at` is empty, and the live deployment id
+resolves to an exact failed deployment record for the same target, artifact, and
+source. The accepted live identity is included in the reviewed plan fingerprint,
+so another replacement attempt invalidates apply. This exception neither marks
+the failed deployment successful nor advances production inventory.
+
+The active database container may be stopped or restarting during this repair.
+Plan and apply therefore resolve exactly one database container across all
+states and use only `docker inspect` evidence from it; they never start or
+execute inside that container or mount its corrupt database volume. The
+script-runner remains running-only because it emits the bounded result and
+writes the imported logical backup into the active data volume.
+
+If the provider inspection schedule emits a failure instead of its result, the
+service reads only that exact schedule deployment and accepts one nonce- and
+backup-record-bound failure marker. The marker is honored whether Dokploy marks
+the deployment failed or records it as done, because provider terminal status
+does not reliably preserve the script exit status. The operation checkpoint
+records only the request nonce, backup-record id, inspection deployment id, and
+a bounded failure stage/code pair; raw provider logs and command output are not
+copied into the plan, operation error, or API response. An unreadable exact log
+is recorded as `result/provider_result_log_read_failed`; a missing, duplicate,
+or invalid marker is recorded as `result/provider_result_invalid`. This
+distinguishes a provider inspection failure from a GitHub environment approval
+wait without weakening the fail-closed plan boundary.
+
+Failures before a script result are also bounded. Target lookup, schedule
+runtime resolution, upsert, baseline read, trigger, wait,
+deployment-id extraction, result-log read, and result parsing each have a
+distinct allowlisted code. Their checkpoint records the exact schedule and
+deployment ids when those identities are available, but never persists the
+underlying provider exception text.
+
+Run `Odoo Prod Retained Volume Backup Import Apply` only with the exact reviewed
+plan operation and fingerprint, a stable idempotency key, and confirmation phrase
+`import-retained-volumes-as-production-backup`. The service queues a dedicated
+durable operation and rechecks the recorded authorization after claim and again
+immediately before the first provider effect. Once that effect is authorized,
+the same operation keeps its authorization fence through later effects rather
+than stopping mid-mutation on a policy revision. Apply re-runs the plan and fails
+closed on authority or provider drift before mutation begins.
+It never starts PostgreSQL on, or writes to, either retained source volume. It
+copies the source database volume read-only into the fresh staging volume while
+preserving ownership, verifies the copied `pg_control` fingerprint, and starts
+PostgreSQL 17 only from that clone in an isolated named container and network.
+It proves the requested source database exists by connecting to that exact
+validated database name instead of interpolating the name into SQL. It then
+writes a custom-format dump and source-filestore archive into the active data
+volume's standard Launchplane backup directory. Artifact names and the schema-v1
+manifest use the destination database identity; the archived filestore has that
+identity as its top-level directory. Launchplane verifies sizes and SHA-256
+values and accepts only nonce-, request-, and exact schedule-deployment-bound
+completion evidence.
+
+The clone container and network are removed on exit, while the staging clone
+volume remains labeled for explicit recovery inspection. A passing import writes
+a distinct retained-volume-import backup-gate source. Standard backup
+verification and guarded restore accept that source, but routine production
+promotion accepts only its ordinary backup-before-promote source. This action
+does not update the live target, runtime environment, deployment, inventory, or
+release tuple and performs no cutover. Inspect or cancel it through the deployed
+service operation endpoint; never rerun its provider schedule directly or use a
+local checkout as a live-target fallback.
+
+Use the `Odoo Prod Backup Verification` workflow to exercise the verification
+route through GitHub Actions OIDC. The workflow accepts an exact backup-gate
+record id, stores a bounded workflow artifact, and returns the id of a separate
+durable verification record. Verification recomputes the
+expected paths from DB-backed runtime records, checks manifest identities,
+paths, sizes, and SHA-256 values, runs `pg_restore --list` plus a full archive
+render to `/dev/null`, validates safe tar members under the expected database
+directory, and confirms enough free space on the Odoo data volume to stage the
+uncompressed filestore. Each provider result is bound to a fresh request nonce,
+the exact backup record id, and database name before Launchplane accepts it. The
+route returns hashes, counts, sizes, per-check statuses, and a bounded failure
+code only. If an unexpected verifier exception occurs, the active bounded check
+is marked `fail`; manifest processing additionally reports a bounded path,
+read, validation, artifact-path, or artifact-metadata subphase code. Operators
+can distinguish the manifest, hash, database archive, filestore archive, and
+staging-space phases without exposing provider paths or exception text.
+Filesystem metadata failures in the manifest phase map to the existing bounded
+manifest missing, metadata, size, read, or decode codes; artifact metadata
+failures map to `artifact_missing`. Raw I/O errors and private paths are not
+returned. Verification does not restore a database, extract a filestore, stop
+containers, or mutate served Odoo data.
+
+Production restore is a separate destructive authority. First run
+`Odoo Prod Backup Restore Plan` with the exact product, production context,
+passing backup record, passing durable verification record, current artifact,
+current corrupt database volume, fresh database volume, and unchanged data and
+log volumes. The planner reads all runtime authority from Launchplane records,
+requires the live target to match the old database/data/log snapshot, requires
+the fresh database volume name to be the DB-backed desired value and absent from
+the provider, and binds the verification hashes, counts, sizes, paths, target,
+domains, and runtime identity into the reviewed SHA-256 plan fingerprint.
+
+Run `Odoo Prod Backup Restore Apply` only with that exact fingerprint, a stable
+idempotency key, and confirmation phrase
+`restore-verified-production-backup`. The service creates a dedicated durable
+restore operation; routine existing-data target replacement cannot exercise
+this authority. The reusable workflow posts the exact reviewed apply request
+without independently rebuilding the plan. The service first resolves an
+existing operation by idempotency key so an eligible terminal verification
+failure can enter its bounded replay path after cutover. For a new operation,
+the service still rebuilds the current plan, requires `ready`, and requires the
+exact reviewed fingerprint before persistence. The workflow derives the
+canonical bounded operation-status route from the accepted path-safe operation
+id instead of requiring a redundant service-supplied poll URL. The worker
+rechecks authorization after claim and immediately before the first provider
+effect, then records before/after checkpoints for fresh database restore,
+filestore staging, web quiesce, filestore activation, runtime-environment
+update, deploy, post-deploy work, and verification. Once any provider effect
+starts, an expired lease moves to `reconciliation_required`, keeps the shared
+lane fenced, and requires exact provider inspection rather than automatic
+retry.
+
+The database phase creates the exact fresh volume and restores the complete
+archive with `pg_restore --exit-on-error`; it never runs `pg_resetwal` and never
+attaches or mutates the old corrupt database volume. Filestore staging validates
+every tar member again, rejects absolute/traversal/link/special entries, checks
+the reviewed member count and expanded size, and extracts into a sibling staging
+directory on the unchanged data volume. After the web service is stopped, the
+old filestore is moved to the reviewed quarantine path and the staged tree is
+activated. The data and log volume names cannot change. The old database volume
+and quarantined filestore remain available for explicit later cleanup.
+
+Apply runs the Odoo post-deploy driver with deploy-phase semantics so
+DB-backed website bootstrap and ordinary production post-deploy settings are
+applied before canonical verification. It passes only after deploy and
+post-deploy complete and Launchplane verifies the health endpoint, canonical
+page, logo route, and exact runtime identity. Deployment, inventory,
+release-tuple, phase checkpoint, authorization, provider result, and final
+verification evidence remain durable in Launchplane. A failed or interrupted
+operation must be inspected from its operation record before any new restore is
+planned; do not rerun a provider schedule or use target replacement as a
+recovery shortcut. Missing, duplicate, malformed, mismatched, or unbounded
+provider phase results fail closed with the exact restore phase and an
+allowlisted `provider_result_*` or `provider_evidence_unbounded` code; raw
+provider log text is not persisted in the operation error.
+
+An exact idempotent replay of the same restore apply request may requeue one
+terminal failed operation only when the stored result proves database restore,
+filestore staging, web quiesce, filestore activation, deployment, and
+post-deploy all passed, the ordered durable checkpoints and phase evidence prove
+those same effects plus target-env cutover, and the failure was limited to final
+health, canonical, logo, or runtime identity verification. The requeued
+operation keeps prior checkpoints and evidence, preserves the same operation id,
+and is claimed as attempt 2. Attempt 2 verifies current lane, target, artifact,
+and deployment-record authority; verifies the live target still points at the reviewed new
+database volume plus unchanged data and log volumes, verifies the live runtime
+identity matches the existing failed deployment record, reauthorizes before any
+post-deploy provider effect, reruns only non-destructive deploy-phase
+post-deploy, reruns final health/canonical/logo/runtime-identity checks, then
+reconciles that same deployment record to pass and writes inventory and release
+tuple evidence. It never reruns database restore, filestore staging,
+filestore activation, target volume/env update, or main deploy. Any missing or
+mismatched stored proof, active stable-lane operation, changed live volume
+authority, missing failed deployment identity, or second failed replay remains
+fail-closed and requires operator reconciliation rather than another automatic
+provider mutation. Any operation carrying prior result evidence is barred from
+the full restore path, even if a later stale-lease or malformed-record condition
+changes its attempt number. Replay target-read, parser, post-deploy, readiness,
+and runtime-identity failures persist only an allowlisted
+`live_target_*`, `post_deploy_*`, `readiness_*`, or `runtime_identity_*` replay
+code; raw provider response bodies and live env values are not persisted.
+If an attempt-2 replay lease expires, recovery moves the operation to
+`reconciliation_required`, clears the stale prior result envelope required by
+the reconciliation-state contract, and retains the reviewed plan, deployment
+record id, and ordered checkpoints for operator diagnosis.
+
+Legacy backup-gate manifests created before manifest schema and hash fields were
+introduced remain verifiable: Launchplane validates their recorded identity,
+paths, and sizes, computes current SHA-256 values from the artifacts, and binds
+those values into the verification result. When a manifest does include schema,
+manifest-path, or hash fields, those fields must match exactly.
 
 After a target-replacement apply deploys and the Odoo health, canonical, and
 logo probes pass, lanes whose Odoo data policy requires runtime identity perform
@@ -1639,15 +1968,17 @@ call `POST /v1/drivers/odoo/target-replacement-apply` for the guarded
 `recreate-in-place` path. The service creates a durable operation record and
 returns immediately; the workflow polls
 `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}` until the
-operation status is `pass`, `fail`, or `cancelled`, then uploads the final
-operation payload as
-the workflow artifact. `Idempotency-Key` is required: a repeated request with the
-same key from the same caller identity returns the existing operation, while a
+operation leaves `pending` or `running`, then uploads the final operation payload
+as the workflow artifact. `reconciliation_required` therefore stops polling and
+surfaces as a failed, operator-actionable workflow result instead of waiting for
+the poll timeout. `Idempotency-Key` is required: a repeated request with the same
+key from the same caller identity returns the existing operation, while a
 different key for the same product/context/instance is rejected while a
-`pending` or `running` operation is active. Storage owns that active-lane
-reservation so the worker starts only after the lane is claimed; abandoned
-filesystem reservations recover after a bounded settle window if the owner or
-owner record never appears. The first apply surface is testing-only and keeps
+`pending`, `running`, or `reconciliation_required` operation is active. Storage
+owns that active-lane reservation so the worker starts only after the lane is
+claimed; abandoned filesystem reservations recover after a bounded settle
+window if the owner or owner record never appears. The first apply surface is
+testing-only and keeps
 the existing compose
 target, explicit Odoo volume env keys, and expected hostnames; the operation
 worker re-syncs the Launchplane-rendered compose source, reconciles each expected
@@ -1673,7 +2004,11 @@ exact target, and managed rule against the current active policy. Revoked or
 narrowed authority and legacy operations without provenance fail terminally
 without provider mutation. Operators may cancel pending replacement work with
 `POST /v1/drivers/odoo/target-replacement/operations/{operation_id}/cancel` and
-a non-empty `reason`; running work returns `409 operation_not_pending`.
+a non-empty `reason`. Reconciliation-required work additionally requires a
+structured attestation with a provider inspection timestamp between the fence
+and cancellation request, the observed provider state, an evidence reference,
+and explicit `safe_to_release=true`; running work returns
+`409 operation_not_pending`.
 
 Runtime identity is a driver-owned breadcrumb, not tenant config. Launchplane
 injects `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`, `LAUNCHPLANE_DEPLOYMENT_RECORD_ID`,
@@ -1715,21 +2050,30 @@ policy evidence for that lane.
 The service route creates a durable Odoo stable-bootstrap operation and returns
 an operation id immediately. The GitHub workflow polls
 `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}` until the
-operation status is `pass`, `fail`, or `cancelled`, then uploads the final
-operation payload as
+operation leaves `pending` or `running`, then uploads the final operation payload
+as
 the workflow artifact. `Idempotency-Key` is required: a repeated request with the
 same key returns the existing operation, while a different key for the same
-product/context/instance is rejected while a `pending` or `running` operation is
-active. The operation record stores the request, status, phase,
+product/context/instance is rejected while a `pending`, `running`, or
+`reconciliation_required` operation is active. The operation record stores the
+request, status, phase,
 deployment-record linkage when known, final bootstrap result, and any terminal
 error message so operators can inspect progress after the original HTTP request
 has ended.
 The worker reauthorizes the stored managed rule and exact lane after claim and
 immediately before the destructive Dokploy schedule. Operators may cancel only
-pending work through
+pending work, or reconciliation-required work after inspecting the exact provider
+state, through
 `POST /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}/cancel`; the
-request records a reason and caller identity, while running work fails the
-cancellation request with `409` rather than claiming no external effect occurred.
+request records a reason and caller identity. Reconciliation-required
+cancellation also persists the provider-inspection timestamp, observed state,
+evidence reference, and explicit safe-release attestation; stale or missing
+inspection evidence cannot release the lane. Running work fails the cancellation
+request with `409` rather than claiming no external effect occurred. Unsafe lease
+expiry never frees the shared stable lane automatically: it clears the stale
+lease, records `operation_reconciliation_required`, and keeps all bootstrap,
+target-replacement, restore, and retained-volume-import claims blocked until the
+operator resolves that evidence.
 
 Pending VeriReel backup-gate work uses the equivalent endpoint
 `POST /v1/drivers/verireel/prod-backup-gate/operations/{operation_id}/cancel`.

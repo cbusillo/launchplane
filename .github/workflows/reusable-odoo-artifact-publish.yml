@@ -201,7 +201,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
       - name: Checkout tenant repo
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ steps.source.outputs.repository }}
           ref: ${{ steps.source.outputs.source_git_ref }}
@@ -210,7 +210,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
 
       - name: Set up Python
         run: uv python install 3.13
@@ -221,7 +221,7 @@ jobs:
           node-version: 22
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -285,7 +285,7 @@ jobs:
           fi
 
       - name: Checkout devkit repo
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ steps.publish_inputs.outputs.devkit_repository }}
           path: odoo-devkit
@@ -293,7 +293,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout shared addons repo
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ steps.publish_inputs.outputs.shared_addons_repository }}
           path: odoo-shared-addons

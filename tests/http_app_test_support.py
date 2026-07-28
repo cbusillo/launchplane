@@ -2616,7 +2616,7 @@ def _product_health_monitoring_policy(
                     "job_workflow_refs": [
                         "cbusillo/launchplane/.github/workflows/"
                         "reusable-product-health-monitoring.yml@"
-                        "e61dc9a6161f9b97d2182ca69c4cadaa1df81fca"
+                        "88584ae2800bceabc9d448eba7defddc5da75ec1"
                     ],
                     "event_names": ["workflow_dispatch"],
                     "products": [product],
@@ -3794,6 +3794,28 @@ async def _post_odoo_prod_backup_gate(
     )
 
 
+async def _post_odoo_prod_backup_verification(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/drivers/odoo/prod-backup-verification",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _post_odoo_prod_rollback(
     app: FastAPI,
     payload: dict[str, object],
@@ -4058,6 +4080,7 @@ async def _get_tracked_target_logs(
     source: str = "",
     since: str = "",
     search: str = "",
+    service: str = "",
     authorization: str = "Bearer valid-token",
     headers: dict[str, str] | None = None,
 ) -> _AsgiResponse:
@@ -4073,6 +4096,8 @@ async def _get_tracked_target_logs(
         params["since"] = since
     if search:
         params["search"] = search
+    if service:
+        params["service"] = service
     suffix = f"?{urlencode(params)}" if params else ""
     return await _asgi_get(
         app,

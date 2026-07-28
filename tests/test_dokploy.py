@@ -2,6 +2,9 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
+import sys
+import tarfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -15,6 +18,7 @@ from pydantic import ValidationError
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy import JsonValue
+from control_plane.dokploy import api as dokploy_api
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
@@ -135,6 +139,33 @@ class _FakeDokployTargetStore:
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_wait_for_schedule_deployment_exposes_exact_terminal_failure(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
+                return_value={
+                    "deploymentId": "deployment-failed",
+                    "status": "failed",
+                },
+            ),
+            patch("control_plane.dokploy.api.time.sleep"),
+        ):
+            with self.assertRaises(dokploy_api.DokployDeploymentFailed) as raised:
+                control_plane_dokploy.wait_for_dokploy_schedule_deployment(
+                    host="https://dokploy.example",
+                    token="token",
+                    schedule_id="schedule-one",
+                    before_key="deployment-before",
+                    timeout_seconds=30,
+                )
+
+        self.assertEqual(raised.exception.deployment_id, "deployment-failed")
+        self.assertEqual(raised.exception.deployment_status, "failed")
+        self.assertEqual(
+            raised.exception.format_message(),
+            "Dokploy schedule deployment failed: deployment=deployment-failed status=failed",
+        )
+
     def test_wait_for_target_deployment_tracks_exact_operation_title(self) -> None:
         exact_deployment = {
             "deploymentId": "deployment-exact",
@@ -351,6 +382,126 @@ class DokployConfigTests(unittest.TestCase):
             },
         )
         self.assertEqual(lines, ("two", "THREE_TOKEN=[redacted]"))
+
+    def test_fetch_compose_logs_selects_exact_service(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def capture_request(**kwargs: object) -> object:
+            requests.append(kwargs)
+            if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+                return [
+                    {"containerId": "database", "serviceName": "database"},
+                    {"containerId": "web", "serviceName": "web"},
+                ]
+            return {"logs": "database ready"}
+
+        with patch(
+            "control_plane.dokploy.api.dokploy_request",
+            side_effect=capture_request,
+        ):
+            lines = control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                service_name="database",
+                line_count=10,
+            )
+
+        self.assertEqual(lines, ("database ready",))
+        query = cast(dict[str, object], requests[1]["query"])
+        self.assertEqual(query["containerId"], "database")
+
+    def test_fetch_compose_logs_selects_exact_service_from_container_name(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def capture_request(**kwargs: object) -> object:
+            requests.append(kwargs)
+            if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+                return [
+                    {"containerId": "database", "Name": "/tenant_database_1"},
+                    {"containerId": "web", "Name": "/tenant_web_1"},
+                ]
+            return {"logs": "database ready"}
+
+        with patch(
+            "control_plane.dokploy.api.dokploy_request",
+            side_effect=capture_request,
+        ):
+            lines = control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                service_name="database",
+                line_count=10,
+            )
+
+        self.assertEqual(lines, ("database ready",))
+        query = cast(dict[str, object], requests[1]["query"])
+        self.assertEqual(query["containerId"], "database")
+
+    def test_fetch_compose_logs_rejects_missing_exact_service(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.api.dokploy_request",
+                return_value=[{"containerId": "web", "serviceName": "web"}],
+            ),
+            self.assertRaises(click.ClickException) as error_context,
+        ):
+            control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                service_name="database",
+            )
+
+        self.assertIn("not found", str(error_context.exception))
+
+    def test_fetch_compose_logs_does_not_match_longer_service_name_suffix(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.api.dokploy_request",
+                return_value=[
+                    {
+                        "containerId": "primary-database",
+                        "name": "tenant_primary-database_1",
+                    }
+                ],
+            ),
+            self.assertRaises(click.ClickException) as error_context,
+        ):
+            control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                service_name="database",
+            )
+
+        self.assertIn("not found", str(error_context.exception))
+
+    def test_fetch_compose_logs_rejects_ambiguous_exact_service(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.api.dokploy_request",
+                return_value=[
+                    {"containerId": "database-1", "serviceName": "database"},
+                    {"containerId": "database-2", "serviceName": "database"},
+                ],
+            ),
+            self.assertRaises(click.ClickException) as error_context,
+        ):
+            control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                service_name="database",
+            )
+
+        self.assertIn("ambiguous", str(error_context.exception))
 
     def test_fetch_deployment_logs_calls_dokploy_read_logs_endpoint(self) -> None:
         requests: list[dict[str, object]] = []
@@ -781,6 +932,8 @@ target_name = "opw-testing"
                         "2",
                         "--since",
                         "5m",
+                        "--service",
+                        "database",
                     ],
                 )
 
@@ -791,6 +944,7 @@ target_name = "opw-testing"
             compose_id="compose-123",
             app_name="opw-testing-iul0ql",
             server_id="server-1",
+            service_name="database",
             line_count=2,
             since="5m",
             search="",
@@ -800,6 +954,7 @@ target_name = "opw-testing"
         self.assertEqual(payload["target"]["target_id"], "compose-123")
         self.assertEqual(payload["target"]["target_type"], "compose")
         self.assertEqual(payload["target"]["app_name"], "opw-testing-iul0ql")
+        self.assertEqual(payload["request"]["service"], "database")
         self.assertEqual(payload["logs"]["lines"], ["started", "ODOO_DB_PASSWORD=[redacted]"])
         self.assertNotIn("secret-token", result.output)
 
@@ -2874,6 +3029,19 @@ domains = ["cm-testing.shinycomputers.com"]
         target_definition = control_plane_dokploy.DokployTargetDefinition(
             context="cm", instance="prod", target_id="compose-123", target_name="cm-prod"
         )
+        backup_result: dict[str, object] = {
+            "schema_version": 1,
+            "backup_nonce": "c" * 64,
+            "backup_record_id": "backup-gate-cm-prod-1",
+            "database_name": "cm",
+            "database_dump_sha256": "a" * 64,
+            "filestore_archive_sha256": "b" * 64,
+            "database_dump_size": 4096,
+            "filestore_archive_size": 8192,
+        }
+        encoded_result = base64.b64encode(
+            json.dumps(backup_result, sort_keys=True).encode()
+        ).decode()
         schedule_payloads: list[dict[str, object]] = []
         request_paths: list[str] = []
 
@@ -2900,23 +3068,31 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
-                side_effect=lambda **_kwargs: None,
+                return_value="deployment=schedule-after status=done",
             ),
             patch(
                 "control_plane.dokploy.api.dokploy_request",
                 side_effect=capture_request_path,
             ),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
+                return_value=(
+                    f"{control_plane_dokploy.ODOO_BACKUP_GATE_RESULT_MARKER}={encoded_result}",
+                ),
+            ) as fetch_logs_mock,
         ):
-            control_plane_dokploy.run_compose_odoo_backup_gate(
+            result = control_plane_dokploy.run_compose_odoo_backup_gate(
                 host="https://dokploy.example.com",
                 token="secret-token",
                 target_definition=target_definition,
+                backup_nonce="c" * 64,
                 backup_record_id="backup-gate-cm-prod-1",
                 database_name="cm",
                 filestore_path="/volumes/data/filestore",
                 backup_root="/volumes/data/backups/launchplane",
             )
 
+        self.assertEqual(result, backup_result)
         self.assertEqual(len(schedule_payloads), 1)
         self.assertEqual(
             schedule_payloads[0]["name"],
@@ -2934,7 +3110,414 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertIn("pg_dump", script)
         self.assertIn("tar -C", script)
         self.assertIn("manifest.json", script)
+        self.assertIn('"database_dump_sha256"', script)
+        self.assertIn('"filestore_archive_sha256"', script)
+        self.assertIn(
+            'script_runner_uid=$(docker exec "${script_runner_container_id}" id -u)', script
+        )
+        self.assertIn('-o "$SCRIPT_RUNNER_UID" -g "$SCRIPT_RUNNER_GID"', script)
+        self.assertIn("RESULT_MARKER", script)
+        self.assertIn("BACKUP_NONCE", script)
+        self.assertIn("docker exec -i", script)
+        manifest_script = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        compile(manifest_script, "embedded-odoo-backup-manifest.py", "exec")
         self.assertIn("/api/schedule.runManually", request_paths)
+        fetch_logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            deployment_id="schedule-after",
+            line_count=control_plane_dokploy.MAX_DOKPLOY_LOG_LINE_COUNT,
+        )
+
+    def test_run_compose_odoo_backup_gate_rejects_done_schedule_without_completion_evidence(
+        self,
+    ) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="cm", instance="prod", target_id="compose-123", target_name="cm-prod"
+        )
+
+        with (
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": "cm-prod-app", "serverId": "server-123"},
+            ),
+            patch(
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-123"},
+            ),
+            patch(
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
+                return_value={"deploymentId": "schedule-before"},
+            ),
+            patch(
+                "control_plane.dokploy.api.dokploy_request",
+                return_value={"ok": True},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                return_value="deployment=schedule-after status=done",
+            ),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
+                return_value=("pg_dump: Permission denied",),
+            ),
+            self.assertRaisesRegex(click.ClickException, "no unique bounded result"),
+        ):
+            control_plane_dokploy.run_compose_odoo_backup_gate(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                backup_nonce="c" * 64,
+                backup_record_id="backup-gate-cm-prod-1",
+                database_name="cm",
+                filestore_path="/volumes/data/filestore",
+                backup_root="/volumes/data/backups/launchplane",
+            )
+
+    def test_run_compose_odoo_backup_verification_returns_only_bounded_evidence(
+        self,
+    ) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="cm", instance="prod", target_id="compose-123", target_name="cm-prod"
+        )
+        verification_result: dict[str, object] = {
+            "schema_version": 1,
+            "verification_nonce": "c" * 64,
+            "backup_record_id": "backup-gate-cm-prod-1",
+            "database_name": "cm",
+            "verification_status": "pass",
+            "manifest_status": "pass",
+            "sha256_status": "pass",
+            "pg_restore_status": "pass",
+            "tar_status": "pass",
+            "staging_space_status": "pass",
+            "database_dump_sha256": "a" * 64,
+            "filestore_archive_sha256": "b" * 64,
+            "database_dump_size": 4096,
+            "filestore_archive_size": 8192,
+            "pg_restore_entry_count": 42,
+            "filestore_member_count": 128,
+            "filestore_unpacked_size": 16384,
+            "data_volume_free_bytes": 32768,
+            "staging_required_bytes": 16384,
+            "failure_code": "",
+        }
+        encoded_result = base64.b64encode(
+            json.dumps(verification_result, sort_keys=True).encode()
+        ).decode()
+        schedule_payloads: list[dict[str, object]] = []
+
+        def capture_schedule_payload(**kwargs: object) -> dict[str, str]:
+            schedule_payloads.append(cast("dict[str, object]", kwargs["schedule_payload"]))
+            return {"scheduleId": "schedule-verify"}
+
+        with (
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": "cm-prod-app", "serverId": "server-123"},
+            ),
+            patch(
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
+                side_effect=capture_schedule_payload,
+            ),
+            patch(
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
+                return_value={"deploymentId": "schedule-before"},
+            ),
+            patch(
+                "control_plane.dokploy.api.dokploy_request",
+                return_value={"ok": True},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                return_value="deployment=schedule-after status=success",
+            ),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
+                return_value=(
+                    f"{control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER}={encoded_result}",
+                ),
+            ) as fetch_logs_mock,
+        ):
+            result = control_plane_dokploy.run_compose_odoo_backup_verification(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                verification_nonce="c" * 64,
+                backup_record_id="backup-gate-cm-prod-1",
+                database_name="cm",
+                filestore_path="/volumes/data/filestore",
+                backup_dir="/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-1",
+                database_dump_path=(
+                    "/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-1/cm.dump"
+                ),
+                filestore_archive_path=(
+                    "/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-1/cm-filestore.tar.gz"
+                ),
+                manifest_path=(
+                    "/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-1/manifest.json"
+                ),
+            )
+
+        self.assertEqual(result, verification_result)
+        self.assertEqual(len(schedule_payloads), 1)
+        self.assertEqual(
+            schedule_payloads[0]["name"],
+            control_plane_dokploy.DOKPLOY_ODOO_BACKUP_VERIFICATION_SCHEDULE_NAME,
+        )
+        self.assertEqual(schedule_payloads[0]["command"], "control-plane odoo backup verification")
+        script = str(schedule_payloads[0]["script"])
+        self.assertIn('subprocess.run(\n        ["pg_restore", "--list"', script)
+        self.assertIn('"--file=/dev/null"', script)
+        self.assertIn("tarfile.open", script)
+        self.assertIn("shutil.disk_usage", script)
+        for check_name in (
+            "manifest_status",
+            "sha256_status",
+            "pg_restore_status",
+            "tar_status",
+            "staging_space_status",
+        ):
+            self.assertIn(f'active_check = "{check_name}"', script)
+        self.assertIn('result[active_check] = "fail"', script)
+        self.assertNotIn("docker start", script)
+        self.assertNotIn("docker stop", script)
+        self.assertNotIn("extractall", script)
+        verification_script = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        compile(verification_script, "embedded-odoo-backup-verification.py", "exec")
+        fetch_logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            deployment_id="schedule-after",
+            line_count=control_plane_dokploy.MAX_DOKPLOY_LOG_LINE_COUNT,
+        )
+
+    def test_extract_odoo_backup_verification_result_rejects_unbounded_fields(self) -> None:
+        payload: dict[str, object] = {
+            key: 0 for key in control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_FIELDS
+        }
+        payload["private_path"] = "/volumes/data/private"
+        encoded_result = base64.b64encode(json.dumps(payload).encode()).decode()
+
+        with self.assertRaisesRegex(click.ClickException, "unexpected bounded result shape"):
+            control_plane_dokploy.extract_odoo_backup_verification_result(
+                {
+                    "logs": [
+                        f"{control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER}={encoded_result}"
+                    ]
+                }
+            )
+
+    def test_odoo_backup_verification_marks_unexpected_active_check_failure(self) -> None:
+        script = control_plane_dokploy._build_dokploy_odoo_backup_verification_script(
+            compose_app_name="cm-prod",
+            verification_nonce="c" * 64,
+            backup_record_id="backup-gate-cm-prod-1",
+            database_name="cm_prod",
+            filestore_path="/volumes/data/filestore",
+            backup_dir="/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1",
+            database_dump_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/cm_prod.dump"
+            ),
+            filestore_archive_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/"
+                "cm_prod-filestore.tar.gz"
+            ),
+            manifest_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/manifest.json"
+            ),
+        )
+        verification_script = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        injected_script = verification_script.replace(
+            'try:\n    filestore_root = Path(os.environ["FILESTORE_ROOT"])',
+            'try:\n    raise RuntimeError("private /volumes/data/path")\n'
+            '    filestore_root = Path(os.environ["FILESTORE_ROOT"])',
+            1,
+        )
+        self.assertNotEqual(injected_script, verification_script)
+        environment = {
+            **os.environ,
+            "VERIFICATION_NONCE": "c" * 64,
+            "BACKUP_RECORD_ID": "backup-gate-cm-prod-1",
+            "DATABASE_NAME": "cm_prod",
+            "FILESTORE_ROOT": "/volumes/data/filestore",
+            "BACKUP_DIR": "/volumes/data/backups",
+            "DATABASE_DUMP_PATH": "/volumes/data/backups/cm_prod.dump",
+            "FILESTORE_ARCHIVE_PATH": "/volumes/data/backups/cm_prod-filestore.tar.gz",
+            "MANIFEST_PATH": "/volumes/data/backups/manifest.json",
+            "RESULT_MARKER": control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER,
+        }
+
+        completed = subprocess.run(
+            [sys.executable, "-c", injected_script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+        self.assertNotIn("private /volumes/data/path", completed.stdout)
+        marker_prefix = f"{control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER}="
+        encoded_result = completed.stdout.strip().removeprefix(marker_prefix)
+        result = json.loads(base64.b64decode(encoded_result).decode("utf-8"))
+        self.assertEqual(result["verification_status"], "fail")
+        self.assertEqual(result["manifest_status"], "fail")
+        self.assertEqual(result["failure_code"], "manifest_path_verification_error")
+
+    def test_odoo_backup_verification_maps_manifest_stat_error(self) -> None:
+        script = control_plane_dokploy._build_dokploy_odoo_backup_verification_script(
+            compose_app_name="cm-prod",
+            verification_nonce="c" * 64,
+            backup_record_id="backup-gate-cm-prod-1",
+            database_name="cm_prod",
+            filestore_path="/volumes/data/filestore",
+            backup_dir="/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1",
+            database_dump_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/cm_prod.dump"
+            ),
+            filestore_archive_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/"
+                "cm_prod-filestore.tar.gz"
+            ),
+            manifest_path=(
+                "/volumes/data/backups/launchplane/cm_prod/backup-gate-cm-prod-1/manifest.json"
+            ),
+        )
+        verification_script = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        injected_script = verification_script.replace(
+            '    manifest_path = Path(os.environ["MANIFEST_PATH"])',
+            '    manifest_path = Path(os.environ["MANIFEST_PATH"])\n'
+            "    class UnreadableManifestPath:\n"
+            "        def is_symlink(self):\n"
+            "            return False\n"
+            "        def is_file(self):\n"
+            "            return True\n"
+            "        def stat(self):\n"
+            '            raise PermissionError("private /volumes/data/path")\n'
+            "    manifest_path = UnreadableManifestPath()",
+            1,
+        )
+        self.assertNotEqual(injected_script, verification_script)
+        environment = {
+            **os.environ,
+            "VERIFICATION_NONCE": "c" * 64,
+            "BACKUP_RECORD_ID": "backup-gate-cm-prod-1",
+            "DATABASE_NAME": "cm_prod",
+            "FILESTORE_ROOT": "/volumes/data/filestore",
+            "BACKUP_DIR": "/volumes/data/backups",
+            "DATABASE_DUMP_PATH": "/volumes/data/backups/cm_prod.dump",
+            "FILESTORE_ARCHIVE_PATH": "/volumes/data/backups/cm_prod-filestore.tar.gz",
+            "MANIFEST_PATH": "/volumes/data/backups/manifest.json",
+            "RESULT_MARKER": control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER,
+        }
+
+        completed = subprocess.run(
+            [sys.executable, "-c", injected_script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+        self.assertNotIn("private /volumes/data/path", completed.stdout)
+        marker_prefix = f"{control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER}="
+        encoded_result = completed.stdout.strip().removeprefix(marker_prefix)
+        result = json.loads(base64.b64decode(encoded_result).decode("utf-8"))
+        self.assertEqual(result["verification_status"], "fail")
+        self.assertEqual(result["manifest_status"], "fail")
+        self.assertEqual(result["failure_code"], "manifest_metadata_unreadable")
+
+    def test_odoo_backup_verification_accepts_legacy_manifest_and_computes_hashes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_name = "cm"
+            backup_record_id = "backup-gate-cm-prod-legacy"
+            backup_dir = root / "backups" / database_name / backup_record_id
+            backup_dir.mkdir(parents=True)
+            filestore_root = root / "filestore"
+            filestore_database_path = filestore_root / database_name
+            filestore_database_path.mkdir(parents=True)
+            filestore_file = filestore_database_path / "ab" / "asset"
+            filestore_file.parent.mkdir()
+            filestore_file.write_bytes(b"filestore")
+            database_dump_path = backup_dir / f"{database_name}.dump"
+            database_dump_path.write_bytes(b"legacy-custom-dump")
+            filestore_archive_path = backup_dir / f"{database_name}-filestore.tar.gz"
+            with tarfile.open(filestore_archive_path, "w:gz") as archive:
+                archive.add(filestore_database_path, arcname=database_name)
+            manifest_path = backup_dir / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "backup_record_id": backup_record_id,
+                        "database_name": database_name,
+                        "backup_dir": str(backup_dir),
+                        "database_dump_path": str(database_dump_path),
+                        "filestore_archive_path": str(filestore_archive_path),
+                        "database_dump_size": str(database_dump_path.stat().st_size),
+                        "filestore_archive_size": str(filestore_archive_path.stat().st_size),
+                        "captured_at": "2026-06-14T00:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_pg_restore = fake_bin / "pg_restore"
+            fake_pg_restore.write_text(
+                "#!/bin/sh\nprintf '1; 1259 1 TABLE public example owner\\n'\n",
+                encoding="utf-8",
+            )
+            fake_pg_restore.chmod(0o755)
+            script = control_plane_dokploy._build_dokploy_odoo_backup_verification_script(
+                compose_app_name="cm-prod",
+                verification_nonce="c" * 64,
+                backup_record_id=backup_record_id,
+                database_name=database_name,
+                filestore_path=str(filestore_root),
+                backup_dir=str(backup_dir),
+                database_dump_path=str(database_dump_path),
+                filestore_archive_path=str(filestore_archive_path),
+                manifest_path=str(manifest_path),
+            )
+            verification_script = script.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+            environment = {
+                **os.environ,
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "VERIFICATION_NONCE": "c" * 64,
+                "BACKUP_RECORD_ID": backup_record_id,
+                "DATABASE_NAME": database_name,
+                "FILESTORE_ROOT": str(filestore_root),
+                "BACKUP_DIR": str(backup_dir),
+                "DATABASE_DUMP_PATH": str(database_dump_path),
+                "FILESTORE_ARCHIVE_PATH": str(filestore_archive_path),
+                "MANIFEST_PATH": str(manifest_path),
+                "RESULT_MARKER": (control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER),
+            }
+
+            completed = subprocess.run(
+                [sys.executable, "-c", verification_script],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+
+        marker_prefix = f"{control_plane_dokploy.ODOO_BACKUP_VERIFICATION_RESULT_MARKER}="
+        encoded_result = completed.stdout.strip().removeprefix(marker_prefix)
+        result = json.loads(base64.b64decode(encoded_result).decode("utf-8"))
+        self.assertEqual(result["verification_status"], "pass")
+        self.assertEqual(result["verification_nonce"], "c" * 64)
+        self.assertEqual(result["backup_record_id"], backup_record_id)
+        self.assertEqual(result["database_name"], database_name)
+        self.assertEqual(result["manifest_status"], "pass")
+        self.assertEqual(result["sha256_status"], "pass")
+        self.assertEqual(
+            result["database_dump_sha256"],
+            hashlib.sha256(b"legacy-custom-dump").hexdigest(),
+        )
 
     def test_run_compose_odoo_stable_bootstrap_uses_dedicated_manual_schedule(self) -> None:
         target_definition = control_plane_dokploy.DokployTargetDefinition(

@@ -380,6 +380,7 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     },
     ".github/workflows/runner-lane-registration.yml": {
         "inputs.mutate.default": frozenset(("false",)),
+        "inputs.operation.default": frozenset(("register",)),
         "inputs.registration_root.default": frozenset(("auto",)),
     },
     ".github/workflows/tracked-target-logs.yml": {
@@ -723,6 +724,7 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
     ".github/workflows/runner-lane-registration.yml": {
         "AUDIT_RECORD_KEY": frozenset(("${{ inputs.audit_record_key }}",)),
         "LANE_NAME": frozenset(("${{ inputs.lane_name }}",)),
+        "OPERATION": frozenset(("${{ inputs.operation }}",)),
         "RUNNER_REGISTRATION_EXECUTION_LANE": frozenset(
             ("${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}",)
         ),
@@ -1248,7 +1250,10 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         )
     },
     ".github/workflows/runner-host-hygiene.yml": {
-        "RUNNER_REPOSITORY_SCOPE": frozenset(("${{ github.repository }}",))
+        "GH_TOKEN": frozenset(
+            ("${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_READ_TOKEN }}",)
+        ),
+        "RUNNER_REPOSITORY_SCOPE": frozenset(("${{ github.repository }}",)),
     },
     ".github/workflows/runner-lane-registration.yml": {
         "GH_TOKEN": frozenset(("${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}",))

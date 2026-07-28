@@ -25,6 +25,10 @@ from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionRequest,
     execute_odoo_prod_promotion,
 )
+from control_plane.workflows.odoo_prod_backup_gate import (
+    BACKUP_GATE_SOURCE,
+    RETAINED_VOLUME_BACKUP_IMPORT_SOURCE,
+)
 
 
 def _artifact_manifest() -> ArtifactIdentityManifest:
@@ -45,7 +49,7 @@ def _backup_gate() -> BackupGateRecord:
         context="cm",
         instance="prod",
         created_at="2026-04-27T00:00:00Z",
-        source="test",
+        source=BACKUP_GATE_SOURCE,
         status="pass",
         evidence={"snapshot": "backup.tar.gz"},
     )
@@ -200,6 +204,34 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
         self.assertTrue(replacement_request.verify_health)
         self.assertTrue(replacement_request.verify_canonical)
         self.assertTrue(replacement_request.verify_logo)
+
+    def test_promotion_rejects_retained_volume_recovery_backup_source(self) -> None:
+        record_store = Mock()
+        record_store.read_artifact_manifest.return_value = _artifact_manifest()
+        record_store.read_release_tuple_record.return_value = _source_tuple()
+        record_store.read_backup_gate_record.return_value = _backup_gate().model_copy(
+            update={"source": RETAINED_VOLUME_BACKUP_IMPORT_SOURCE}
+        )
+
+        with patch(
+            "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply"
+        ) as apply_mock:
+            result = execute_odoo_prod_promotion(
+                control_plane_root=Path("/control-plane"),
+                state_dir=Path("/state"),
+                database_url="postgresql://launchplane.example/db",
+                record_store=record_store,
+                request=OdooProdPromotionRequest(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    artifact_id="artifact-cm-new",
+                    backup_record_id="backup-gate-cm-prod-1",
+                ),
+            )
+
+        self.assertEqual(result.promotion_status, "fail")
+        self.assertIn("ordinary production backup gate", result.error_message)
+        apply_mock.assert_not_called()
 
     def test_failed_target_replacement_records_failed_promotion_result(self) -> None:
         record_store = Mock()

@@ -220,7 +220,11 @@ cleanup scope so the store is always closed.
 - authenticated evidence routes:
   - `POST /v1/products/public-ingress-monitor/run-once` (native FastAPI for
     bearer-token callers, with Pydantic/OpenAPI contract coverage,
-    idempotency replay preservation, and no legacy `GET` route)
+    idempotency replay preservation, and no legacy `GET` route). The accepted
+    result returns every observation plus changed incident records, durable
+    incident events, per-policy reminder state, and direct delivery attempts.
+    Equivalent failed observations remain in `records` but do not appear as a
+    new event; `reminder` events identify their exact bounded policy window.
   - Native `POST /v1/evidence/*` ingress routes reject non-JSON media types with
     the Launchplane `400 invalid_request` envelope; they require bounded,
     non-chunked `Content-Length` headers and enforce the same 2 MiB byte ceiling
@@ -1560,18 +1564,24 @@ runtime values, or checked-in product catalogs, and workflow authority for real
 products must be granted through operator-supplied authz input.
 
 Health-monitoring apply is an exact-instance mutation for one stable-lane
-`public_http` check. Dry-run requires
+`public_http` or `private_http` check plus the lane's typed `public`, `private`,
+or `prelaunch` monitoring intent. Dry-run requires
 `product_profile.health_monitoring.plan`; apply requires the separate
 `product_profile.health_monitoring.apply` action, the reviewed plan SHA-256, and
 an idempotency key. Both actions authorize against the request product, context,
 and exact instance. The request excludes URL, domain, provider, proxy,
-certificate, and full-profile fields. Launchplane preserves the existing check
-URL or derives it from the current lane profile, rejects non-public check kinds,
-and requires strict runtime-identity checks to resolve to a lane-owned HTTPS
-host. The plan binds the complete current profile digest. Apply rebuilds the
-candidate from fresh DB-backed state and commits the profile compare-and-write
-with completed replay evidence atomically, so reviewed-plan drift and concurrent
-profile changes fail stale.
+certificate, and full-profile fields. Launchplane preserves an existing public
+check URL or derives it from the current lane profile. Private checks carry only
+a registered endpoint key; the service requires an active private endpoint
+record owned by the exact lane and never returns or logs its internal URL.
+Strict public runtime-identity checks must resolve to a lane-owned HTTPS host.
+The requested intent must retain its required enabled public or private check.
+The plan binds the complete current profile digest. Apply rebuilds the candidate
+from fresh DB-backed state and commits the profile compare-and-write with
+completed replay evidence atomically, so reviewed-plan drift and concurrent
+profile changes fail stale. Existing monitoring authority cannot be changed by
+the broad product-profile write route or overwritten by onboarding; callers use
+this reviewed bounded endpoint instead.
 
 Before authentication or JSON parsing, the ASGI boundary requires
 `application/json`, exactly one bounded `Content-Length`, no transfer encoding,
@@ -1606,8 +1616,11 @@ Public ingress notification policy writes use
 `public_ingress_notification_policy.apply`, DB-backed Launchplane storage, and
 an idempotency key when a caller wants retry-safe service semantics. Local
 operator calls must include a non-empty reason. Policies store routing intent and
-managed secret record ids only; Discord webhook URLs, SMTP credentials, and
-operator destination values must not be encoded in text-file defaults or source.
+managed secret record ids only, plus a reminder interval bounded from 15 minutes
+through seven days. Existing policies migrate to the generic six-hour cadence.
+Discord webhook URLs, SMTP credentials, and operator destination values must not
+be encoded in text-file defaults or source. Dry-run and apply summaries return
+the effective reminder interval without returning secret material.
 
 Every Code notification policy writes use
 `POST /v1/every-code/notification-policies/apply`. The request carries
@@ -2230,6 +2243,13 @@ warnings make domain, placement, ingress, ownership, TLS, and freshness
 divergence explicit. A hostname-mismatch read includes the public name,
 recorded terminator/owner, bounded presented certificate names, failure code,
 incident linkage, and a likely cause without requiring provider database access.
+Open incident summaries additionally expose severity, notification state,
+material fingerprint digest, latest material event kind/time, and aggregate next
+and last reminder times. Acknowledgement or silence never changes the health or
+topology status; those fields describe delivery state only. Suppressed reminder
+state does not expose a next-reminder timestamp until delivery is active again.
+Raw private endpoint URLs, destination credentials, operator identities, and
+notification payloads remain outside the product read model.
 
 `GET /v1/products/{product}/environments/{environment}/config-status` is a
 redacted product/site read under the same action. It compares product-profile
@@ -2916,7 +2936,7 @@ bearer-token callers with OpenAPI contract coverage and idempotency replay
 preservation. It records planned, completed, or failed audit facts supplied by a
 future approved executor, but it does not mutate runner hosts itself.
 
-### Runner lane registration audit evidence
+### Runner lane lifecycle audit evidence
 
 `POST /v1/evidence/runner-lane-registration/audits`
 
@@ -2928,13 +2948,19 @@ Request payload:
   "product": "launchplane",
   "audit": {
     "schema_version": 1,
-    "audit_record_key": "runner-lane-registration/2026-06-08/cm-website/dry-run",
+    "audit_record_key": "runner-lane-retirement/2026-07-26/product/dry-run",
     "status": "planned",
-    "request": "RunnerLaneRegistrationRequest",
-    "plan": "RunnerLaneRegistrationPlan",
+    "request": {
+      "operation": "retire",
+      "contract": "RunnerLaneRegistrationRequest"
+    },
+    "plan": {
+      "operation": "retire",
+      "contract": "RunnerLaneRegistrationPlan"
+    },
     "pre_inventory": "RunnerLaneInventory",
     "post_inventory": null,
-    "message": "planned runner lane registration; no host mutation was executed"
+    "message": "planned runner lane retirement; no runner mutation was executed yet"
   }
 }
 ```
@@ -2945,7 +2971,10 @@ storage, and returns the `runner_lane_registration_audit_record_key` in both the
 accepted records and result details. It is native FastAPI evidence ingress for
 bearer-token callers with OpenAPI contract coverage and idempotency replay
 preservation. The host-side registration executor owns any GitHub registration
-token request and runner `config.sh` execution.
+token request and runner `config.sh` execution. The retirement executor uses the
+same compatibility route and exact authorized workflow identity, writes
+`operation: retire`, and owns the separately guarded service stop, GitHub runner
+deletion, and inactive root cleanup.
 
 For VeriReel's first stable-lane Launchplane slice, use context `verireel` for the
 long-lived `testing` and `prod` instances. Preview evidence remains separate

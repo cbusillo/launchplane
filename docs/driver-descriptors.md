@@ -248,6 +248,14 @@ mint a release tuple. Missing, malformed, mismatched, or unreachable identity
 evidence writes a failed deployment record instead. Lanes that explicitly do
 not require runtime identity keep the existing health-verification behavior.
 
+Odoo target-replacement plan and apply are repair-path actions. Their
+operational-readiness requirements intentionally stop at recorded provider
+target, route binding, runtime environment, managed secrets, and artifact
+authority; they do not require the current deployment or observed topology to
+already pass. The replacement plan still fences the current inventory artifact,
+and apply must pass the normal post-deploy health, canonical, logo, and runtime
+identity checks before inventory can advance.
+
 The `stable_verification` action routes to
 `POST /v1/drivers/generic-web/stable-verification`. Product workflows submit the
 deployment record, optional promotion record, checked URLs, and pass/fail status;
@@ -335,6 +343,12 @@ testing artifact and source ref from Launchplane release tuple and artifact
 records, then returns the deterministic backup-gate record ID for the caller's
 request ID. Tenant workflows should use that response instead of prompting an
 operator to enter artifact or source facts by hand.
+`POST /v1/drivers/odoo/prod-backup-verification` is a separate instance-scoped
+`safe_write` action with dedicated
+`odoo_prod_backup_verification.execute` authorization. It runs a manual
+read-only Dokploy schedule against the lane's existing `script-runner`, returns
+only bounded hashes, counts, sizes, and statuses, and does not advertise or
+perform restore mutation.
 The preferred tenant-facing mutation route is
 `POST /v1/drivers/odoo/prod-promotion-run`, which keeps the full inputs,
 backup-gate, and promotion sequence inside Launchplane while returning each
@@ -475,6 +489,13 @@ Odoo exposes:
 - PR preview desired state, refresh, readiness, inventory, and destroy through
   the generic-web preview lifecycle
 - prod backup gate
+- prod backup verification and guarded restore plan/apply
+- retained-volume backup import plan/apply through distinct
+  `odoo_prod_retained_volume_backup_import_plan.execute` and
+  `odoo_prod_retained_volume_backup_import_apply.execute` scopes; the plan is
+  read-only for Odoo data but is a `safe_write` because it creates and runs a
+  disabled provider inspection schedule, while apply creates only recovery
+  staging and standard backup artifacts and performs no target cutover
 - testing-to-prod promotion
 - prod rollback
 

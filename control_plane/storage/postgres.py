@@ -39,6 +39,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
@@ -88,11 +89,33 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_prod_backup_restore_operation import (
+    ODOO_PROD_BACKUP_RESTORE_OPERATION_PHASE_SEQUENCE,
+    OdooProdBackupRestoreCheckpoint,
+    OdooProdBackupRestoreOperationPhase,
+    OdooProdBackupRestoreOperationRecord,
+    odoo_prod_backup_restore_operation_is_verification_replay_claim,
+    requeue_odoo_prod_backup_restore_verification_replay,
+)
+from control_plane.contracts.odoo_prod_retained_volume_backup_import_operation import (
+    ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_PHASE_SEQUENCE,
+    OdooProdRetainedVolumeBackupImportCheckpoint,
+    OdooProdRetainedVolumeBackupImportOperationPhase,
+    OdooProdRetainedVolumeBackupImportOperationRecord,
+)
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
+)
+from control_plane.odoo_stable_lane import (
+    ODOO_STABLE_LANE_BLOCKING_STATUSES,
+    OdooStableLaneOperationConflictError,
+    OdooStableLaneOperationKind,
+    OdooStableLaneOperationOwner,
+    odoo_stable_lane_cancellation_is_allowed,
+    odoo_stable_lane_operation_priority,
 )
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -108,14 +131,28 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
-from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
-from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.contracts.private_health_endpoint_record import (
+    PrivateHealthEndpointRecord,
+    private_health_endpoint_record_sha256,
+)
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    route_binding_record_sha256,
+)
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
     migrate_product_profile_health_monitoring_payload,
 )
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_monitoring_intent_migration import (
+    migrate_product_profile_monitoring_intent_payload,
+)
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    product_profile_record_sha256,
+)
 from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentEventRecord,
+    PublicIngressIncidentReminderStateRecord,
     PublicIngressNotificationAttemptRecord,
 )
 from control_plane.contracts.public_ingress_monitoring import (
@@ -123,6 +160,9 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    public_ingress_incident_record_sha256,
+)
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import (
@@ -166,6 +206,11 @@ ProductProfileCompareWriteStatus = Literal[
     "idempotency_conflict",
     "reservation_in_progress",
     "reconciliation_required",
+]
+PublicIngressTransitionWriteStatus = Literal[
+    "written",
+    "authority_changed",
+    "incident_changed",
 ]
 ProviderTargetCreateStatus = Literal["created", "exists"]
 MutationReservationDecision = Literal[
@@ -244,6 +289,10 @@ MutationReconciliationRetryStatus = Literal[
 class ProductProfileCompareWriteResult(NamedTuple):
     status: ProductProfileCompareWriteStatus
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
+
+
+class PublicIngressTransitionWriteResult(NamedTuple):
+    status: PublicIngressTransitionWriteStatus
 
 
 class MutationReservationResult(NamedTuple):
@@ -807,6 +856,20 @@ class LaunchplanePublicIngressObservationRow(Base):
             "status",
             desc("observed_at"),
         ),
+        Index(
+            "launchplane_public_ingress_observations_incident_idx",
+            "incident_id",
+            desc("observed_at"),
+        ),
+        Index(
+            "launchplane_public_ingress_observations_check_idx",
+            "product",
+            "context",
+            "instance",
+            "check_token",
+            "check_kind",
+            desc("observed_at"),
+        ),
     )
 
     record_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -815,6 +878,9 @@ class LaunchplanePublicIngressObservationRow(Base):
     instance: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     observed_at: Mapped[str] = mapped_column(String, nullable=False)
+    incident_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    check_token: Mapped[str] = mapped_column(String, nullable=False, default="")
+    check_kind: Mapped[str] = mapped_column(String, nullable=False, default="public_http")
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -957,6 +1023,17 @@ class LaunchplanePublicIngressIncidentRow(Base):
             "status",
             desc("opened_at"),
         ),
+        Index(
+            "launchplane_public_ingress_incidents_open_uidx",
+            "product",
+            "context",
+            "instance",
+            "check_token",
+            "check_kind",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+            sqlite_where=text("status = 'open'"),
+        ),
     )
 
     incident_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -964,8 +1041,57 @@ class LaunchplanePublicIngressIncidentRow(Base):
     context: Mapped[str] = mapped_column(String, nullable=False)
     instance: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
+    check_token: Mapped[str] = mapped_column(String, nullable=False)
+    check_kind: Mapped[str] = mapped_column(String, nullable=False)
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False)
     opened_at: Mapped[str] = mapped_column(String, nullable=False)
     latest_observed_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePublicIngressIncidentEventRow(Base):
+    __tablename__ = "launchplane_public_ingress_incident_events"
+    __table_args__ = (
+        Index(
+            "launchplane_pi_incident_events_incident_idx",
+            "incident_id",
+            desc("occurred_at"),
+        ),
+        Index(
+            "launchplane_pi_incident_events_kind_idx",
+            "event",
+            desc("occurred_at"),
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String, nullable=False)
+    event: Mapped[str] = mapped_column(String, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePublicIngressIncidentReminderRow(Base):
+    __tablename__ = "launchplane_public_ingress_incident_reminders"
+    __table_args__ = (
+        Index(
+            "launchplane_pi_incident_reminders_due_idx",
+            "status",
+            "next_reminder_at",
+        ),
+        Index(
+            "launchplane_pi_incident_reminders_incident_idx",
+            "incident_id",
+            "policy_id",
+        ),
+    )
+
+    reminder_state_id: Mapped[str] = mapped_column(String, primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String, nullable=False)
+    policy_id: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    next_reminder_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1636,6 +1762,110 @@ class LaunchplaneOdooStableTargetReplacementOperationRow(Base):
     instance: Mapped[str] = mapped_column(String, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
     idempotency_scope: Mapped[str] = mapped_column(String, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    lease_owner: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    heartbeat_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOdooProdBackupRestoreOperationRow(Base):
+    __tablename__ = "launchplane_odoo_prod_backup_restore_operations"
+    __table_args__ = (
+        Index(
+            "launchplane_odoo_restore_operation_lane_status_idx",
+            "product",
+            "context",
+            "instance",
+            "status",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_odoo_restore_operation_idempotency_idx",
+            "idempotency_scope",
+            "idempotency_key",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_odoo_restore_active_lane_uidx",
+            "product",
+            "context",
+            "instance",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running')"),
+            sqlite_where=text("status IN ('pending', 'running')"),
+        ),
+        Index(
+            "launchplane_odoo_restore_worker_claim_idx",
+            "status",
+            "lease_expires_at",
+            "updated_at",
+        ),
+    )
+
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_scope: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    lease_owner: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    heartbeat_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow(Base):
+    __tablename__ = "launchplane_odoo_prod_retained_volume_backup_import_operations"
+    __table_args__ = (
+        Index(
+            "launchplane_odoo_retained_import_operation_lane_status_idx",
+            "product",
+            "context",
+            "instance",
+            "status",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_odoo_retained_import_operation_idempotency_idx",
+            "operation_kind",
+            "idempotency_scope",
+            "idempotency_key",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_odoo_retained_import_active_lane_uidx",
+            "product",
+            "context",
+            "instance",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running')"),
+            sqlite_where=text("status IN ('pending', 'running')"),
+        ),
+        Index(
+            "launchplane_odoo_retained_import_worker_claim_idx",
+            "status",
+            "lease_expires_at",
+            "updated_at",
+        ),
+    )
+
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    operation_kind: Mapped[str] = mapped_column(String, nullable=False)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_scope: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     phase: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
@@ -2640,6 +2870,35 @@ class PostgresRecordStore(HumanSessionStore):
         session.execute(
             text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
             {"lock_name": f"launchplane:route-binding:{binding_key}"},
+        )
+
+    def _lock_public_ingress_incident_write(
+        self,
+        session: Any,
+        *,
+        product: str,
+        context_name: str,
+        instance_name: str,
+        check_token: str,
+        check_kind: str,
+    ) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {
+                "lock_name": ":".join(
+                    (
+                        "launchplane",
+                        "public-ingress-incident",
+                        product,
+                        context_name,
+                        instance_name,
+                        check_token,
+                        check_kind,
+                    )
+                )
+            },
         )
 
     @contextmanager
@@ -3950,10 +4209,107 @@ class PostgresRecordStore(HumanSessionStore):
         row.attempt = record.attempt
         row.payload = self._payload_dict(record)
 
+    def _lock_odoo_stable_lane(
+        self,
+        session: Any,
+        *,
+        product: str,
+        context: str,
+        instance: str,
+    ) -> None:
+        dialect_name = session.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            lane_key = "".join(f"{len(value)}:{value}" for value in (product, context, instance))
+            session.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock("
+                    "hashtext('launchplane-odoo-stable-lane'), hashtext(:lane_key))"
+                ),
+                {"lane_key": lane_key},
+            )
+        elif dialect_name == "sqlite":
+            session.execute(text("BEGIN IMMEDIATE"))
+
+    def _active_odoo_stable_lane_operation_owner(
+        self,
+        session: Any,
+        *,
+        product: str,
+        context: str,
+        instance: str,
+    ) -> OdooStableLaneOperationOwner | None:
+        operation_tables: tuple[tuple[OdooStableLaneOperationKind, Any], ...] = (
+            ("stable_bootstrap", LaunchplaneOdooStableBootstrapOperationRow),
+            ("target_replacement", LaunchplaneOdooStableTargetReplacementOperationRow),
+            ("prod_backup_restore", LaunchplaneOdooProdBackupRestoreOperationRow),
+            (
+                "retained_volume_backup_import",
+                LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
+            ),
+        )
+        candidates: list[tuple[tuple[int, str, int, str], OdooStableLaneOperationOwner]] = []
+        for operation_kind, operation_table in operation_tables:
+            rows = session.execute(
+                select(
+                    operation_table.operation_id,
+                    operation_table.status,
+                    operation_table.created_at,
+                ).where(
+                    operation_table.product == product,
+                    operation_table.context == context,
+                    operation_table.instance == instance,
+                    operation_table.status.in_(ODOO_STABLE_LANE_BLOCKING_STATUSES),
+                )
+            ).all()
+            for operation_id, status, created_at in rows:
+                owner = OdooStableLaneOperationOwner(
+                    operation_kind=operation_kind,
+                    operation_id=str(operation_id),
+                )
+                candidates.append(
+                    (
+                        odoo_stable_lane_operation_priority(
+                            status=str(status),
+                            created_at=str(created_at),
+                            operation_kind=operation_kind,
+                            operation_id=str(operation_id),
+                        ),
+                        owner,
+                    )
+                )
+        if not candidates:
+            return None
+        return min(candidates, key=lambda candidate: candidate[0])[1]
+
     def create_odoo_stable_bootstrap_operation_record_if_no_active_lane(
         self, record: OdooStableBootstrapOperationRecord
     ) -> tuple[OdooStableBootstrapOperationRecord, bool]:
         with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            active_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_owner is not None:
+                if active_owner.operation_kind == "stable_bootstrap":
+                    active_row = session.get(
+                        LaunchplaneOdooStableBootstrapOperationRow,
+                        active_owner.operation_id,
+                    )
+                    if active_row is None:
+                        raise RuntimeError("Active Odoo stable bootstrap operation disappeared.")
+                    return (
+                        OdooStableBootstrapOperationRecord.model_validate(active_row.payload),
+                        False,
+                    )
+                raise OdooStableLaneOperationConflictError(active_owner)
             session.add(
                 LaunchplaneOdooStableBootstrapOperationRow(
                     operation_id=record.operation_id,
@@ -3980,7 +4336,7 @@ class PostgresRecordStore(HumanSessionStore):
                     product=record.product,
                     context_name=record.context,
                     instance_name=record.instance,
-                    statuses=("pending", "running"),
+                    statuses=ODOO_STABLE_LANE_BLOCKING_STATUSES,
                     limit=1,
                 )
                 if active_records:
@@ -4037,6 +4393,7 @@ class PostgresRecordStore(HumanSessionStore):
         if record.status != "cancelled" or record.phase != "cancelled":
             raise ValueError("Odoo stable bootstrap cancellation requires a cancelled record.")
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
             statement = (
                 select(LaunchplaneOdooStableBootstrapOperationRow)
                 .where(
@@ -4053,7 +4410,11 @@ class PostgresRecordStore(HumanSessionStore):
                 model_type=OdooStableBootstrapOperationRecord,
                 payload=row.payload,
             )
-            if current_record.status != "pending":
+            if not odoo_stable_lane_cancellation_is_allowed(
+                current_status=current_record.status,
+                reconciliation_required_at=current_record.updated_at,
+                cancellation=record.cancellation,
+            ):
                 return False
             self._sync_odoo_stable_bootstrap_operation_row(row, record)
             session.commit()
@@ -4080,33 +4441,56 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneOdooStableBootstrapOperationRow.created_at.asc(),
                 LaunchplaneOdooStableBootstrapOperationRow.operation_id.asc(),
             )
-            .limit(1)
         )
         if not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update(skip_locked=True)
         with self._session_factory() as session:
-            row = session.scalar(statement)
-            if row is None:
-                return None
-            record = self._read_payload(
-                model_type=OdooStableBootstrapOperationRecord,
-                payload=row.payload,
-            )
-            claimed_record = record.model_copy(
-                update={
-                    "status": "running",
-                    "phase": "running",
-                    "started_at": record.started_at or claimed_at,
-                    "updated_at": claimed_at,
-                    "lease_owner": normalized_lease_owner,
-                    "lease_expires_at": lease_expires_at.strip(),
-                    "heartbeat_at": claimed_at.strip(),
-                    "attempt": record.attempt + 1,
-                }
-            )
-            self._sync_odoo_stable_bootstrap_operation_row(row, claimed_record)
-            session.commit()
-            return claimed_record
+            if self.database_url.startswith("sqlite"):
+                self._lock_odoo_stable_lane(
+                    session,
+                    product="",
+                    context="",
+                    instance="",
+                )
+            for row in session.scalars(statement).all():
+                record = self._read_payload(
+                    model_type=OdooStableBootstrapOperationRecord,
+                    payload=row.payload,
+                )
+                if not self.database_url.startswith("sqlite"):
+                    self._lock_odoo_stable_lane(
+                        session,
+                        product=record.product,
+                        context=record.context,
+                        instance=record.instance,
+                    )
+                active_owner = self._active_odoo_stable_lane_operation_owner(
+                    session,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
+                if active_owner != OdooStableLaneOperationOwner(
+                    operation_kind="stable_bootstrap",
+                    operation_id=record.operation_id,
+                ):
+                    continue
+                claimed_record = record.model_copy(
+                    update={
+                        "status": "running",
+                        "phase": "running",
+                        "started_at": record.started_at or claimed_at,
+                        "updated_at": claimed_at,
+                        "lease_owner": normalized_lease_owner,
+                        "lease_expires_at": lease_expires_at.strip(),
+                        "heartbeat_at": claimed_at.strip(),
+                        "attempt": record.attempt + 1,
+                    }
+                )
+                self._sync_odoo_stable_bootstrap_operation_row(row, claimed_record)
+                session.commit()
+                return claimed_record
+            return None
 
     def heartbeat_odoo_stable_bootstrap_operation_record(
         self,
@@ -4117,6 +4501,7 @@ class PostgresRecordStore(HumanSessionStore):
         lease_expires_at: str,
     ) -> bool:
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
             statement = (
                 select(LaunchplaneOdooStableBootstrapOperationRow)
                 .where(LaunchplaneOdooStableBootstrapOperationRow.operation_id == operation_id)
@@ -4156,6 +4541,7 @@ class PostgresRecordStore(HumanSessionStore):
         lease_owner: str,
     ) -> bool:
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
             statement = (
                 select(LaunchplaneOdooStableBootstrapOperationRow)
                 .where(
@@ -4203,6 +4589,7 @@ class PostgresRecordStore(HumanSessionStore):
             statement = statement.with_for_update(skip_locked=True)
         affected_operation_ids: list[str] = []
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
             rows = session.scalars(statement).all()
             for row in rows:
                 record = self._read_payload(
@@ -4221,7 +4608,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "heartbeat_at": "",
                         }
                     )
-                else:
+                elif record.phase in safe_phases:
                     recovered_record = record.model_copy(
                         update={
                             "status": "fail",
@@ -4231,9 +4618,26 @@ class PostgresRecordStore(HumanSessionStore):
                             "lease_owner": "",
                             "lease_expires_at": "",
                             "heartbeat_at": "",
+                            "error_code": "operation_attempts_exhausted",
+                            "error_message": (
+                                "Odoo stable bootstrap operation exhausted automatic attempts "
+                                f"in safe phase {record.phase!r}."
+                            ),
+                        }
+                    )
+                else:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "reconciliation_required",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 f"Odoo stable bootstrap operation lease expired in "
-                                f"phase {record.phase!r}; unsafe to retry automatically."
+                                f"phase {record.phase!r}; provider state requires operator "
+                                "reconciliation before the lane can be released."
                             ),
                         }
                     )
@@ -4288,6 +4692,33 @@ class PostgresRecordStore(HumanSessionStore):
         self, record: OdooStableTargetReplacementOperationRecord
     ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]:
         with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            active_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_owner is not None:
+                if active_owner.operation_kind == "target_replacement":
+                    active_row = session.get(
+                        LaunchplaneOdooStableTargetReplacementOperationRow,
+                        active_owner.operation_id,
+                    )
+                    if active_row is None:
+                        raise RuntimeError("Active Odoo target replacement operation disappeared.")
+                    return (
+                        OdooStableTargetReplacementOperationRecord.model_validate(
+                            active_row.payload
+                        ),
+                        False,
+                    )
+                raise OdooStableLaneOperationConflictError(active_owner)
             session.add(
                 LaunchplaneOdooStableTargetReplacementOperationRow(
                     operation_id=record.operation_id,
@@ -4315,7 +4746,7 @@ class PostgresRecordStore(HumanSessionStore):
                     product=record.product,
                     context_name=record.context,
                     instance_name=record.instance,
-                    statuses=("pending", "running"),
+                    statuses=ODOO_STABLE_LANE_BLOCKING_STATUSES,
                     limit=1,
                 )
                 if active_records:
@@ -4389,6 +4820,7 @@ class PostgresRecordStore(HumanSessionStore):
         if record.status != "cancelled" or record.phase != "cancelled":
             raise ValueError("Odoo target replacement cancellation requires a cancelled record.")
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
             statement = (
                 select(LaunchplaneOdooStableTargetReplacementOperationRow)
                 .where(
@@ -4406,7 +4838,11 @@ class PostgresRecordStore(HumanSessionStore):
                 model_type=OdooStableTargetReplacementOperationRecord,
                 payload=row.payload,
             )
-            if current_record.status != "pending":
+            if not odoo_stable_lane_cancellation_is_allowed(
+                current_status=current_record.status,
+                reconciliation_required_at=current_record.updated_at,
+                cancellation=record.cancellation,
+            ):
                 return False
             self._sync_odoo_stable_target_replacement_operation_row(row, record)
             session.commit()
@@ -4433,33 +4869,56 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneOdooStableTargetReplacementOperationRow.created_at.asc(),
                 LaunchplaneOdooStableTargetReplacementOperationRow.operation_id.asc(),
             )
-            .limit(1)
         )
         if not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update(skip_locked=True)
         with self._session_factory() as session:
-            row = session.scalar(statement)
-            if row is None:
-                return None
-            record = self._read_payload(
-                model_type=OdooStableTargetReplacementOperationRecord,
-                payload=row.payload,
-            )
-            claimed_record = record.model_copy(
-                update={
-                    "status": "running",
-                    "phase": "running",
-                    "started_at": record.started_at or claimed_at,
-                    "updated_at": claimed_at,
-                    "lease_owner": normalized_lease_owner,
-                    "lease_expires_at": lease_expires_at.strip(),
-                    "heartbeat_at": claimed_at.strip(),
-                    "attempt": record.attempt + 1,
-                }
-            )
-            self._sync_odoo_stable_target_replacement_operation_row(row, claimed_record)
-            session.commit()
-            return claimed_record
+            if self.database_url.startswith("sqlite"):
+                self._lock_odoo_stable_lane(
+                    session,
+                    product="",
+                    context="",
+                    instance="",
+                )
+            for row in session.scalars(statement).all():
+                record = self._read_payload(
+                    model_type=OdooStableTargetReplacementOperationRecord,
+                    payload=row.payload,
+                )
+                if not self.database_url.startswith("sqlite"):
+                    self._lock_odoo_stable_lane(
+                        session,
+                        product=record.product,
+                        context=record.context,
+                        instance=record.instance,
+                    )
+                active_owner = self._active_odoo_stable_lane_operation_owner(
+                    session,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
+                if active_owner != OdooStableLaneOperationOwner(
+                    operation_kind="target_replacement",
+                    operation_id=record.operation_id,
+                ):
+                    continue
+                claimed_record = record.model_copy(
+                    update={
+                        "status": "running",
+                        "phase": "running",
+                        "started_at": record.started_at or claimed_at,
+                        "updated_at": claimed_at,
+                        "lease_owner": normalized_lease_owner,
+                        "lease_expires_at": lease_expires_at.strip(),
+                        "heartbeat_at": claimed_at.strip(),
+                        "attempt": record.attempt + 1,
+                    }
+                )
+                self._sync_odoo_stable_target_replacement_operation_row(row, claimed_record)
+                session.commit()
+                return claimed_record
+            return None
 
     def heartbeat_odoo_stable_target_replacement_operation_record(
         self,
@@ -4470,6 +4929,7 @@ class PostgresRecordStore(HumanSessionStore):
         lease_expires_at: str,
     ) -> bool:
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
             statement = (
                 select(LaunchplaneOdooStableTargetReplacementOperationRow)
                 .where(
@@ -4511,6 +4971,7 @@ class PostgresRecordStore(HumanSessionStore):
         lease_owner: str,
     ) -> bool:
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
             statement = (
                 select(LaunchplaneOdooStableTargetReplacementOperationRow)
                 .where(
@@ -4559,6 +5020,7 @@ class PostgresRecordStore(HumanSessionStore):
             statement = statement.with_for_update(skip_locked=True)
         affected_operation_ids: list[str] = []
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
             rows = session.scalars(statement).all()
             for row in rows:
                 record = self._read_payload(
@@ -4577,7 +5039,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "heartbeat_at": "",
                         }
                     )
-                else:
+                elif record.phase in safe_phases:
                     recovered_record = record.model_copy(
                         update={
                             "status": "fail",
@@ -4587,13 +5049,1024 @@ class PostgresRecordStore(HumanSessionStore):
                             "lease_owner": "",
                             "lease_expires_at": "",
                             "heartbeat_at": "",
+                            "error_code": "operation_attempts_exhausted",
+                            "error_message": (
+                                "Odoo stable target replacement operation exhausted automatic "
+                                f"attempts in safe phase {record.phase!r}."
+                            ),
+                        }
+                    )
+                else:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "reconciliation_required",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_code": "operation_reconciliation_required",
                             "error_message": (
                                 f"Odoo stable target replacement operation lease expired in "
-                                f"phase {record.phase!r}; unsafe to retry automatically."
+                                f"phase {record.phase!r}; provider state requires operator "
+                                "reconciliation before the lane can be released."
                             ),
                         }
                     )
                 self._sync_odoo_stable_target_replacement_operation_row(row, recovered_record)
+            session.commit()
+        return tuple(affected_operation_ids)
+
+    def write_odoo_prod_backup_restore_operation_record(
+        self, record: OdooProdBackupRestoreOperationRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneOdooProdBackupRestoreOperationRow(
+                operation_id=record.operation_id,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+                idempotency_key=record.idempotency_key,
+                idempotency_scope=record.idempotency_scope,
+                status=record.status,
+                phase=record.phase,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+                lease_owner=record.lease_owner,
+                lease_expires_at=record.lease_expires_at,
+                heartbeat_at=record.heartbeat_at,
+                attempt=record.attempt,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def _sync_odoo_prod_backup_restore_operation_row(
+        self,
+        row: LaunchplaneOdooProdBackupRestoreOperationRow,
+        record: OdooProdBackupRestoreOperationRecord,
+    ) -> None:
+        row.product = record.product
+        row.context = record.context
+        row.instance = record.instance
+        row.idempotency_key = record.idempotency_key
+        row.idempotency_scope = record.idempotency_scope
+        row.status = record.status
+        row.phase = record.phase
+        row.created_at = record.created_at
+        row.updated_at = record.updated_at
+        row.lease_owner = record.lease_owner
+        row.lease_expires_at = record.lease_expires_at
+        row.heartbeat_at = record.heartbeat_at
+        row.attempt = record.attempt
+        row.payload = self._payload_dict(record)
+
+    def create_odoo_prod_backup_restore_operation_record_if_no_active_lane(
+        self, record: OdooProdBackupRestoreOperationRecord
+    ) -> tuple[OdooProdBackupRestoreOperationRecord, bool]:
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            active_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_owner is not None:
+                if active_owner.operation_kind == "prod_backup_restore":
+                    active_row = session.get(
+                        LaunchplaneOdooProdBackupRestoreOperationRow,
+                        active_owner.operation_id,
+                    )
+                    if active_row is None:
+                        raise RuntimeError("Active Odoo backup restore operation disappeared.")
+                    return (
+                        OdooProdBackupRestoreOperationRecord.model_validate(active_row.payload),
+                        False,
+                    )
+                raise OdooStableLaneOperationConflictError(active_owner)
+            session.add(
+                LaunchplaneOdooProdBackupRestoreOperationRow(
+                    operation_id=record.operation_id,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                    idempotency_key=record.idempotency_key,
+                    idempotency_scope=record.idempotency_scope,
+                    status=record.status,
+                    phase=record.phase,
+                    created_at=record.created_at,
+                    updated_at=record.updated_at,
+                    lease_owner=record.lease_owner,
+                    lease_expires_at=record.lease_expires_at,
+                    heartbeat_at=record.heartbeat_at,
+                    attempt=record.attempt,
+                    payload=self._payload_dict(record),
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                active_records = self.list_odoo_prod_backup_restore_operation_records(
+                    product=record.product,
+                    context_name=record.context,
+                    instance_name=record.instance,
+                    statuses=ODOO_STABLE_LANE_BLOCKING_STATUSES,
+                    limit=1,
+                )
+                if active_records:
+                    return active_records[0], False
+                return self.create_odoo_prod_backup_restore_operation_record_if_no_active_lane(
+                    record
+                )
+        return record, True
+
+    def requeue_terminal_failed_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        operation_id: str,
+        queued_at: str,
+        authorization: DurableOperationAuthorization,
+    ) -> OdooProdBackupRestoreOperationRecord | None:
+        existing_record = self.read_odoo_prod_backup_restore_operation_record(operation_id.strip())
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session,
+                product=existing_record.product,
+                context=existing_record.context,
+                instance=existing_record.instance,
+            )
+            statement = (
+                select(LaunchplaneOdooProdBackupRestoreOperationRow)
+                .where(
+                    LaunchplaneOdooProdBackupRestoreOperationRow.operation_id
+                    == existing_record.operation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(operation_id)
+            record = self._read_payload(
+                model_type=OdooProdBackupRestoreOperationRecord,
+                payload=row.payload,
+            )
+            active_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_owner is not None or record.status != "fail":
+                return None
+            requeued_record = requeue_odoo_prod_backup_restore_verification_replay(
+                operation=record,
+                queued_at=queued_at,
+                authorization=authorization,
+            )
+            self._sync_odoo_prod_backup_restore_operation_row(row, requeued_record)
+            session.commit()
+            return requeued_record
+
+    def read_odoo_prod_backup_restore_operation_record(
+        self, operation_id: str
+    ) -> OdooProdBackupRestoreOperationRecord:
+        return self._read_model(
+            model_type=OdooProdBackupRestoreOperationRecord,
+            orm_model=LaunchplaneOdooProdBackupRestoreOperationRow,
+            filters=(LaunchplaneOdooProdBackupRestoreOperationRow.operation_id == operation_id,),
+        )
+
+    def list_odoo_prod_backup_restore_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        idempotency_scope: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooProdBackupRestoreOperationRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneOdooProdBackupRestoreOperationRow.product == product)
+        if context_name:
+            filters.append(LaunchplaneOdooProdBackupRestoreOperationRow.context == context_name)
+        if instance_name:
+            filters.append(LaunchplaneOdooProdBackupRestoreOperationRow.instance == instance_name)
+        if idempotency_key:
+            filters.append(
+                LaunchplaneOdooProdBackupRestoreOperationRow.idempotency_key == idempotency_key
+            )
+        if idempotency_scope:
+            filters.append(
+                LaunchplaneOdooProdBackupRestoreOperationRow.idempotency_scope == idempotency_scope
+            )
+        if statuses:
+            filters.append(LaunchplaneOdooProdBackupRestoreOperationRow.status.in_(statuses))
+        return self._list_models(
+            model_type=OdooProdBackupRestoreOperationRecord,
+            orm_model=LaunchplaneOdooProdBackupRestoreOperationRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneOdooProdBackupRestoreOperationRow.updated_at.desc(),
+                LaunchplaneOdooProdBackupRestoreOperationRow.operation_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def cancel_pending_odoo_prod_backup_restore_operation_record(
+        self, record: OdooProdBackupRestoreOperationRecord
+    ) -> bool:
+        if record.status != "cancelled" or record.phase != "cancelled":
+            raise ValueError("Odoo backup restore cancellation requires a cancelled record.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = (
+                select(LaunchplaneOdooProdBackupRestoreOperationRow)
+                .where(
+                    LaunchplaneOdooProdBackupRestoreOperationRow.operation_id == record.operation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(record.operation_id)
+            current_record = self._read_payload(
+                model_type=OdooProdBackupRestoreOperationRecord,
+                payload=row.payload,
+            )
+            if not odoo_stable_lane_cancellation_is_allowed(
+                current_status=current_record.status,
+                reconciliation_required_at=current_record.updated_at,
+                cancellation=record.cancellation,
+            ):
+                return False
+            self._sync_odoo_prod_backup_restore_operation_row(row, record)
+            session.commit()
+            return True
+
+    def claim_next_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> OdooProdBackupRestoreOperationRecord | None:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner or not lease_expires_at.strip() or not claimed_at.strip():
+            raise ValueError("Odoo backup restore claim requires lease evidence.")
+        statement = (
+            select(LaunchplaneOdooProdBackupRestoreOperationRow)
+            .where(LaunchplaneOdooProdBackupRestoreOperationRow.status == "pending")
+            .order_by(
+                LaunchplaneOdooProdBackupRestoreOperationRow.created_at.asc(),
+                LaunchplaneOdooProdBackupRestoreOperationRow.operation_id.asc(),
+            )
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update(skip_locked=True)
+        with self._session_factory() as session:
+            if self.database_url.startswith("sqlite"):
+                self._lock_odoo_stable_lane(
+                    session,
+                    product="",
+                    context="",
+                    instance="",
+                )
+            for row in session.scalars(statement).all():
+                record = self._read_payload(
+                    model_type=OdooProdBackupRestoreOperationRecord,
+                    payload=row.payload,
+                )
+                if not self.database_url.startswith("sqlite"):
+                    self._lock_odoo_stable_lane(
+                        session,
+                        product=record.product,
+                        context=record.context,
+                        instance=record.instance,
+                    )
+                active_owner = self._active_odoo_stable_lane_operation_owner(
+                    session,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
+                if active_owner != OdooStableLaneOperationOwner(
+                    operation_kind="prod_backup_restore",
+                    operation_id=record.operation_id,
+                ):
+                    continue
+                claimed_record = record.model_copy(
+                    update={
+                        "status": "running",
+                        "phase": record.phase if record.checkpoints else "running",
+                        "started_at": record.started_at or claimed_at,
+                        "updated_at": claimed_at,
+                        "lease_owner": normalized_lease_owner,
+                        "lease_expires_at": lease_expires_at.strip(),
+                        "heartbeat_at": claimed_at.strip(),
+                        "attempt": record.attempt + 1,
+                    }
+                )
+                self._sync_odoo_prod_backup_restore_operation_row(row, claimed_record)
+                session.commit()
+                return claimed_record
+            return None
+
+    def heartbeat_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = (
+                select(LaunchplaneOdooProdBackupRestoreOperationRow)
+                .where(LaunchplaneOdooProdBackupRestoreOperationRow.operation_id == operation_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(operation_id)
+            record = self._read_payload(
+                model_type=OdooProdBackupRestoreOperationRecord,
+                payload=row.payload,
+            )
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= heartbeat_at.strip()
+            ):
+                return False
+            heartbeat_record = record.model_copy(
+                update={
+                    "heartbeat_at": heartbeat_at.strip(),
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "updated_at": heartbeat_at.strip(),
+                }
+            )
+            self._sync_odoo_prod_backup_restore_operation_row(row, heartbeat_record)
+            session.commit()
+            return True
+
+    def checkpoint_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        phase: OdooProdBackupRestoreOperationPhase,
+        checkpointed_at: str,
+        evidence: dict[str, str],
+    ) -> OdooProdBackupRestoreOperationRecord | None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = (
+                select(LaunchplaneOdooProdBackupRestoreOperationRow)
+                .where(LaunchplaneOdooProdBackupRestoreOperationRow.operation_id == operation_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(operation_id)
+            record = self._read_payload(
+                model_type=OdooProdBackupRestoreOperationRecord,
+                payload=row.payload,
+            )
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= checkpointed_at.strip()
+            ):
+                return None
+            phase_indexes = {
+                phase_name: index
+                for index, phase_name in enumerate(
+                    ODOO_PROD_BACKUP_RESTORE_OPERATION_PHASE_SEQUENCE
+                )
+            }
+            replay_restart = (
+                phase == "post_deploy_started"
+                and odoo_prod_backup_restore_operation_is_verification_replay_claim(record)
+            )
+            if not replay_restart and phase_indexes[phase] < phase_indexes[record.phase]:
+                return None
+            checkpoint = OdooProdBackupRestoreCheckpoint(
+                phase=phase,
+                recorded_at=checkpointed_at,
+                evidence=evidence,
+            )
+            checkpointed_record = record.model_copy(
+                update={
+                    "phase": phase,
+                    "checkpoints": (*record.checkpoints, checkpoint),
+                    "updated_at": checkpointed_at,
+                }
+            )
+            self._sync_odoo_prod_backup_restore_operation_row(row, checkpointed_record)
+            session.commit()
+            return checkpointed_record
+
+    def complete_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        record: OdooProdBackupRestoreOperationRecord,
+        lease_owner: str,
+    ) -> bool:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = (
+                select(LaunchplaneOdooProdBackupRestoreOperationRow)
+                .where(
+                    LaunchplaneOdooProdBackupRestoreOperationRow.operation_id == record.operation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(record.operation_id)
+            current_record = self._read_payload(
+                model_type=OdooProdBackupRestoreOperationRecord,
+                payload=row.payload,
+            )
+            completed_at = _utc_now_timestamp()
+            if (
+                current_record.status != "running"
+                or current_record.lease_owner != lease_owner.strip()
+                or not current_record.lease_expires_at
+                or current_record.lease_expires_at <= completed_at
+            ):
+                return False
+            self._sync_odoo_prod_backup_restore_operation_row(row, record)
+            session.commit()
+            return True
+
+    def recover_expired_odoo_prod_backup_restore_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]:
+        filters = (
+            LaunchplaneOdooProdBackupRestoreOperationRow.status == "running",
+            (
+                (LaunchplaneOdooProdBackupRestoreOperationRow.lease_expires_at == "")
+                | (LaunchplaneOdooProdBackupRestoreOperationRow.lease_expires_at < now)
+            ),
+        )
+        statement = select(LaunchplaneOdooProdBackupRestoreOperationRow).where(*filters)
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update(skip_locked=True)
+        affected_operation_ids: list[str] = []
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            rows = session.scalars(statement).all()
+            for row in rows:
+                record = self._read_payload(
+                    model_type=OdooProdBackupRestoreOperationRecord,
+                    payload=row.payload,
+                )
+                affected_operation_ids.append(record.operation_id)
+                if record.phase in safe_phases and record.attempt < max_attempts:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "pending",
+                            "phase": "created",
+                            "checkpoints": (),
+                            "started_at": "",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                        }
+                    )
+                elif record.phase in safe_phases:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "updated_at": now,
+                            "finished_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_code": "operation_attempts_exhausted",
+                            "error_message": (
+                                "Odoo production backup restore exhausted automatic attempts in "
+                                f"safe phase {record.phase!r}."
+                            ),
+                        }
+                    )
+                else:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "reconciliation_required",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "result": None,
+                            "error_code": "operation_reconciliation_required",
+                            "error_message": (
+                                "Odoo production backup restore lease expired in "
+                                f"phase {record.phase!r}; provider state requires operator "
+                                "reconciliation before the lane can be released."
+                            ),
+                        }
+                    )
+                self._sync_odoo_prod_backup_restore_operation_row(row, recovered_record)
+            session.commit()
+        return tuple(affected_operation_ids)
+
+    def write_odoo_prod_retained_volume_backup_import_operation_record(
+        self, record: OdooProdRetainedVolumeBackupImportOperationRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow(
+                operation_id=record.operation_id,
+                operation_kind=record.operation_kind,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+                idempotency_key=record.idempotency_key,
+                idempotency_scope=record.idempotency_scope,
+                status=record.status,
+                phase=record.phase,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+                lease_owner=record.lease_owner,
+                lease_expires_at=record.lease_expires_at,
+                heartbeat_at=record.heartbeat_at,
+                attempt=record.attempt,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def _sync_odoo_prod_retained_volume_backup_import_operation_row(
+        self,
+        row: LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
+        record: OdooProdRetainedVolumeBackupImportOperationRecord,
+    ) -> None:
+        row.operation_kind = record.operation_kind
+        row.product = record.product
+        row.context = record.context
+        row.instance = record.instance
+        row.idempotency_key = record.idempotency_key
+        row.idempotency_scope = record.idempotency_scope
+        row.status = record.status
+        row.phase = record.phase
+        row.created_at = record.created_at
+        row.updated_at = record.updated_at
+        row.lease_owner = record.lease_owner
+        row.lease_expires_at = record.lease_expires_at
+        row.heartbeat_at = record.heartbeat_at
+        row.attempt = record.attempt
+        row.payload = self._payload_dict(record)
+
+    def create_odoo_prod_retained_volume_backup_import_operation_record_if_no_active_lane(
+        self, record: OdooProdRetainedVolumeBackupImportOperationRecord
+    ) -> tuple[OdooProdRetainedVolumeBackupImportOperationRecord, bool]:
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            active_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_owner is not None:
+                if active_owner.operation_kind == "retained_volume_backup_import":
+                    active_row = session.get(
+                        LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
+                        active_owner.operation_id,
+                    )
+                    if active_row is None:
+                        raise RuntimeError(
+                            "Active Odoo retained-volume backup import operation disappeared."
+                        )
+                    return (
+                        OdooProdRetainedVolumeBackupImportOperationRecord.model_validate(
+                            active_row.payload
+                        ),
+                        False,
+                    )
+                raise OdooStableLaneOperationConflictError(active_owner)
+            session.add(
+                LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow(
+                    operation_id=record.operation_id,
+                    operation_kind=record.operation_kind,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                    idempotency_key=record.idempotency_key,
+                    idempotency_scope=record.idempotency_scope,
+                    status=record.status,
+                    phase=record.phase,
+                    created_at=record.created_at,
+                    updated_at=record.updated_at,
+                    lease_owner=record.lease_owner,
+                    lease_expires_at=record.lease_expires_at,
+                    heartbeat_at=record.heartbeat_at,
+                    attempt=record.attempt,
+                    payload=self._payload_dict(record),
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                active_records = (
+                    self.list_odoo_prod_retained_volume_backup_import_operation_records(
+                        product=record.product,
+                        context_name=record.context,
+                        instance_name=record.instance,
+                        statuses=ODOO_STABLE_LANE_BLOCKING_STATUSES,
+                        limit=1,
+                    )
+                )
+                if active_records:
+                    return active_records[0], False
+                return self.create_odoo_prod_retained_volume_backup_import_operation_record_if_no_active_lane(
+                    record
+                )
+        return record, True
+
+    def read_odoo_prod_retained_volume_backup_import_operation_record(
+        self, operation_id: str
+    ) -> OdooProdRetainedVolumeBackupImportOperationRecord:
+        return self._read_model(
+            model_type=OdooProdRetainedVolumeBackupImportOperationRecord,
+            orm_model=LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
+            filters=(
+                LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow.operation_id
+                == operation_id,
+            ),
+        )
+
+    def list_odoo_prod_retained_volume_backup_import_operation_records(
+        self,
+        *,
+        operation_kind: str = "",
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        idempotency_scope: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooProdRetainedVolumeBackupImportOperationRecord, ...]:
+        row_type = LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow
+        filters: list[object] = []
+        if operation_kind:
+            filters.append(row_type.operation_kind == operation_kind)
+        if product:
+            filters.append(row_type.product == product)
+        if context_name:
+            filters.append(row_type.context == context_name)
+        if instance_name:
+            filters.append(row_type.instance == instance_name)
+        if idempotency_key:
+            filters.append(row_type.idempotency_key == idempotency_key)
+        if idempotency_scope:
+            filters.append(row_type.idempotency_scope == idempotency_scope)
+        if statuses:
+            filters.append(row_type.status.in_(statuses))
+        return self._list_models(
+            model_type=OdooProdRetainedVolumeBackupImportOperationRecord,
+            orm_model=row_type,
+            filters=filters,
+            order_by=(row_type.updated_at.desc(), row_type.operation_id.desc()),
+            limit=limit,
+        )
+
+    def cancel_pending_odoo_prod_retained_volume_backup_import_operation_record(
+        self, record: OdooProdRetainedVolumeBackupImportOperationRecord
+    ) -> bool:
+        if record.status != "cancelled" or record.phase != "cancelled":
+            raise ValueError(
+                "Odoo retained-volume backup import cancellation requires a cancelled record."
+            )
+        row_type = LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = (
+                select(row_type).where(row_type.operation_id == record.operation_id).limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(record.operation_id)
+            current_record = self._read_payload(
+                model_type=OdooProdRetainedVolumeBackupImportOperationRecord,
+                payload=row.payload,
+            )
+            if not odoo_stable_lane_cancellation_is_allowed(
+                current_status=current_record.status,
+                reconciliation_required_at=current_record.updated_at,
+                cancellation=record.cancellation,
+            ):
+                return False
+            self._sync_odoo_prod_retained_volume_backup_import_operation_row(row, record)
+            session.commit()
+            return True
+
+    def claim_next_odoo_prod_retained_volume_backup_import_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> OdooProdRetainedVolumeBackupImportOperationRecord | None:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner or not lease_expires_at.strip() or not claimed_at.strip():
+            raise ValueError("Odoo retained-volume backup import claim requires lease evidence.")
+        row_type = LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow
+        statement = (
+            select(row_type)
+            .where(row_type.status == "pending")
+            .order_by(row_type.created_at.asc(), row_type.operation_id.asc())
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update(skip_locked=True)
+        with self._session_factory() as session:
+            if self.database_url.startswith("sqlite"):
+                self._lock_odoo_stable_lane(
+                    session,
+                    product="",
+                    context="",
+                    instance="",
+                )
+            for row in session.scalars(statement).all():
+                record = self._read_payload(
+                    model_type=OdooProdRetainedVolumeBackupImportOperationRecord,
+                    payload=row.payload,
+                )
+                if not self.database_url.startswith("sqlite"):
+                    self._lock_odoo_stable_lane(
+                        session,
+                        product=record.product,
+                        context=record.context,
+                        instance=record.instance,
+                    )
+                active_owner = self._active_odoo_stable_lane_operation_owner(
+                    session,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
+                if active_owner != OdooStableLaneOperationOwner(
+                    operation_kind="retained_volume_backup_import",
+                    operation_id=record.operation_id,
+                ):
+                    continue
+                claimed_record = record.model_copy(
+                    update={
+                        "status": "running",
+                        "phase": "running",
+                        "started_at": record.started_at or claimed_at,
+                        "updated_at": claimed_at,
+                        "lease_owner": normalized_lease_owner,
+                        "lease_expires_at": lease_expires_at.strip(),
+                        "heartbeat_at": claimed_at.strip(),
+                        "attempt": record.attempt + 1,
+                    }
+                )
+                self._sync_odoo_prod_retained_volume_backup_import_operation_row(
+                    row,
+                    claimed_record,
+                )
+                session.commit()
+                return claimed_record
+            return None
+
+    def heartbeat_odoo_prod_retained_volume_backup_import_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        row_type = LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = select(row_type).where(row_type.operation_id == operation_id).limit(1)
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(operation_id)
+            record = self._read_payload(
+                model_type=OdooProdRetainedVolumeBackupImportOperationRecord,
+                payload=row.payload,
+            )
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= heartbeat_at.strip()
+            ):
+                return False
+            heartbeat_record = record.model_copy(
+                update={
+                    "heartbeat_at": heartbeat_at.strip(),
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "updated_at": heartbeat_at.strip(),
+                }
+            )
+            self._sync_odoo_prod_retained_volume_backup_import_operation_row(row, heartbeat_record)
+            session.commit()
+            return True
+
+    def checkpoint_odoo_prod_retained_volume_backup_import_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        phase: OdooProdRetainedVolumeBackupImportOperationPhase,
+        checkpointed_at: str,
+        evidence: dict[str, str],
+    ) -> OdooProdRetainedVolumeBackupImportOperationRecord | None:
+        row_type = LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = select(row_type).where(row_type.operation_id == operation_id).limit(1)
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(operation_id)
+            record = self._read_payload(
+                model_type=OdooProdRetainedVolumeBackupImportOperationRecord,
+                payload=row.payload,
+            )
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= checkpointed_at.strip()
+            ):
+                return None
+            phase_indexes = {
+                phase_name: index
+                for index, phase_name in enumerate(
+                    ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_PHASE_SEQUENCE
+                )
+            }
+            if phase_indexes[phase] < phase_indexes[record.phase]:
+                return None
+            checkpoint = OdooProdRetainedVolumeBackupImportCheckpoint(
+                phase=phase,
+                recorded_at=checkpointed_at,
+                evidence=evidence,
+            )
+            checkpointed_record = record.model_copy(
+                update={
+                    "phase": phase,
+                    "checkpoints": (*record.checkpoints, checkpoint),
+                    "updated_at": checkpointed_at,
+                }
+            )
+            self._sync_odoo_prod_retained_volume_backup_import_operation_row(
+                row, checkpointed_record
+            )
+            session.commit()
+            return checkpointed_record
+
+    def complete_odoo_prod_retained_volume_backup_import_operation_record(
+        self,
+        *,
+        record: OdooProdRetainedVolumeBackupImportOperationRecord,
+        lease_owner: str,
+    ) -> bool:
+        row_type = LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = (
+                select(row_type).where(row_type.operation_id == record.operation_id).limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(record.operation_id)
+            current_record = self._read_payload(
+                model_type=OdooProdRetainedVolumeBackupImportOperationRecord,
+                payload=row.payload,
+            )
+            completed_at = _utc_now_timestamp()
+            if (
+                current_record.status != "running"
+                or current_record.lease_owner != lease_owner.strip()
+                or not current_record.lease_expires_at
+                or current_record.lease_expires_at <= completed_at
+            ):
+                return False
+            self._sync_odoo_prod_retained_volume_backup_import_operation_row(row, record)
+            session.commit()
+            return True
+
+    def recover_expired_odoo_prod_retained_volume_backup_import_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]:
+        row_type = LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow
+        filters = (
+            row_type.status == "running",
+            (row_type.lease_expires_at == "") | (row_type.lease_expires_at < now),
+        )
+        statement = select(row_type).where(*filters)
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update(skip_locked=True)
+        affected_operation_ids: list[str] = []
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            rows = session.scalars(statement).all()
+            for row in rows:
+                record = self._read_payload(
+                    model_type=OdooProdRetainedVolumeBackupImportOperationRecord,
+                    payload=row.payload,
+                )
+                affected_operation_ids.append(record.operation_id)
+                if record.phase in safe_phases and record.attempt < max_attempts:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "pending",
+                            "phase": "created",
+                            "checkpoints": (),
+                            "started_at": "",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                        }
+                    )
+                elif record.phase in safe_phases:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "updated_at": now,
+                            "finished_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_code": "operation_attempts_exhausted",
+                            "error_message": (
+                                "Odoo retained-volume backup import exhausted automatic attempts "
+                                f"in safe phase {record.phase!r}."
+                            ),
+                        }
+                    )
+                else:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "reconciliation_required",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_code": "operation_reconciliation_required",
+                            "error_message": (
+                                "Odoo retained-volume backup import lease expired in "
+                                f"phase {record.phase!r}; provider state requires operator "
+                                "reconciliation before the lane can be released."
+                            ),
+                        }
+                    )
+                self._sync_odoo_prod_retained_volume_backup_import_operation_row(
+                    row, recovered_record
+                )
             session.commit()
         return tuple(affected_operation_ids)
 
@@ -7406,7 +8879,9 @@ class PostgresRecordStore(HumanSessionStore):
         self, payload: PayloadDict
     ) -> LaunchplaneProductProfileRecord:
         return LaunchplaneProductProfileRecord.model_validate(
-            migrate_product_profile_health_monitoring_payload(payload)
+            migrate_product_profile_monitoring_intent_payload(
+                migrate_product_profile_health_monitoring_payload(payload)
+            )
         )
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
@@ -7451,6 +8926,9 @@ class PostgresRecordStore(HumanSessionStore):
                 instance=record.instance,
                 status=record.status,
                 observed_at=record.observed_at,
+                incident_id=record.incident_id,
+                check_token=canonical_health_check_record_token(record.check_name),
+                check_kind=record.check_kind,
                 payload=self._payload_dict(record),
             )
         )
@@ -7970,6 +9448,7 @@ class PostgresRecordStore(HumanSessionStore):
         instance_name: str = "",
         check_name: str = "",
         check_kind: str = "",
+        incident_id: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]:
         filters: list[object] = []
@@ -7979,14 +9458,15 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplanePublicIngressObservationRow.context == context_name)
         if instance_name:
             filters.append(LaunchplanePublicIngressObservationRow.instance == instance_name)
-        if check_kind:
+        if check_name:
             filters.append(
-                func.coalesce(
-                    LaunchplanePublicIngressObservationRow.payload["check_kind"].as_string(),
-                    "public_http",
-                )
-                == check_kind
+                LaunchplanePublicIngressObservationRow.check_token
+                == canonical_health_check_record_token(check_name)
             )
+        if check_kind:
+            filters.append(LaunchplanePublicIngressObservationRow.check_kind == check_kind)
+        if incident_id:
+            filters.append(LaunchplanePublicIngressObservationRow.incident_id == incident_id)
         records = self._list_models(
             model_type=PublicIngressObservationRecord,
             orm_model=LaunchplanePublicIngressObservationRow,
@@ -7995,17 +9475,8 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplanePublicIngressObservationRow.observed_at.desc(),
                 LaunchplanePublicIngressObservationRow.record_id.desc(),
             ),
-            limit=None if check_name else limit,
+            limit=limit,
         )
-        if check_name:
-            check_token = canonical_health_check_record_token(check_name)
-            records = tuple(
-                record
-                for record in records
-                if canonical_health_check_record_token(record.check_name) == check_token
-            )
-            if limit is not None:
-                records = records[:limit]
         return records
 
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> None:
@@ -8016,10 +9487,90 @@ class PostgresRecordStore(HumanSessionStore):
                 context=record.context,
                 instance=record.instance,
                 status=record.status,
+                check_token=canonical_health_check_record_token(record.check_name),
+                check_kind=record.check_kind,
+                state_version=record.state_version,
                 opened_at=record.opened_at,
                 latest_observed_at=record.latest_observed_at,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def write_public_ingress_incident_event_record(
+        self, record: PublicIngressIncidentEventRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePublicIngressIncidentEventRow(
+                event_id=record.event_id,
+                incident_id=record.incident_id,
+                event=record.event,
+                occurred_at=record.occurred_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_public_ingress_incident_event_records(
+        self,
+        *,
+        incident_id: str = "",
+        event: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentEventRecord, ...]:
+        filters: list[object] = []
+        if incident_id:
+            filters.append(LaunchplanePublicIngressIncidentEventRow.incident_id == incident_id)
+        if event:
+            filters.append(LaunchplanePublicIngressIncidentEventRow.event == event)
+        return self._list_models(
+            model_type=PublicIngressIncidentEventRecord,
+            orm_model=LaunchplanePublicIngressIncidentEventRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePublicIngressIncidentEventRow.occurred_at.desc(),
+                LaunchplanePublicIngressIncidentEventRow.event_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_public_ingress_incident_reminder_state_record(
+        self, record: PublicIngressIncidentReminderStateRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePublicIngressIncidentReminderRow(
+                reminder_state_id=record.reminder_state_id,
+                incident_id=record.incident_id,
+                policy_id=record.policy_id,
+                status=record.status,
+                next_reminder_at=record.next_reminder_at,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_public_ingress_incident_reminder_state_records(
+        self,
+        *,
+        incident_id: str = "",
+        policy_id: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentReminderStateRecord, ...]:
+        filters: list[object] = []
+        if incident_id:
+            filters.append(LaunchplanePublicIngressIncidentReminderRow.incident_id == incident_id)
+        if policy_id:
+            filters.append(LaunchplanePublicIngressIncidentReminderRow.policy_id == policy_id)
+        if status:
+            filters.append(LaunchplanePublicIngressIncidentReminderRow.status == status)
+        return self._list_models(
+            model_type=PublicIngressIncidentReminderStateRecord,
+            orm_model=LaunchplanePublicIngressIncidentReminderRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePublicIngressIncidentReminderRow.updated_at.desc(),
+                LaunchplanePublicIngressIncidentReminderRow.reminder_state_id.desc(),
+            ),
+            limit=limit,
         )
 
     def write_public_ingress_transition_with_outbox(
@@ -8027,10 +9578,167 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         observation: PublicIngressObservationRecord,
         incidents: tuple[PublicIngressIncidentRecord, ...],
+        incident_events: tuple[PublicIngressIncidentEventRecord, ...] = (),
+        reminder_states: tuple[PublicIngressIncidentReminderStateRecord, ...] = (),
         outbox_deliveries: tuple[OutboxDeliveryRecord, ...] = (),
-    ) -> None:
+        expected_open_incident_id: str = "",
+        expected_open_incident_state_version: int = 0,
+        expected_open_incident_sha256: str = "",
+        expected_profile_sha256: str = "",
+        expected_private_endpoint_key: str = "",
+        expected_private_endpoint_sha256: str = "",
+        expected_route_binding_sha256: str = "",
+    ) -> PublicIngressTransitionWriteResult:
+        check_token = canonical_health_check_record_token(observation.check_name)
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            authority_changed = False
+            if expected_profile_sha256:
+                profile_statement = (
+                    select(LaunchplaneProductProfileRow)
+                    .where(LaunchplaneProductProfileRow.product == observation.product)
+                    .limit(1)
+                )
+                if not self.database_url.startswith("sqlite"):
+                    profile_statement = profile_statement.with_for_update()
+                profile_row = session.scalar(profile_statement)
+                authority_changed = (
+                    profile_row is None
+                    or product_profile_record_sha256(
+                        self._read_product_profile_payload(profile_row.payload)
+                    )
+                    != expected_profile_sha256
+                )
+            if not authority_changed and expected_private_endpoint_sha256:
+                private_endpoint_statement = (
+                    select(LaunchplanePrivateHealthEndpointRow)
+                    .where(
+                        LaunchplanePrivateHealthEndpointRow.endpoint_key
+                        == expected_private_endpoint_key
+                    )
+                    .limit(1)
+                )
+                if not self.database_url.startswith("sqlite"):
+                    private_endpoint_statement = private_endpoint_statement.with_for_update()
+                private_endpoint_row = session.scalar(private_endpoint_statement)
+                private_endpoint_sha256 = (
+                    "missing"
+                    if private_endpoint_row is None
+                    else private_health_endpoint_record_sha256(
+                        PrivateHealthEndpointRecord.model_validate(private_endpoint_row.payload)
+                    )
+                )
+                authority_changed = private_endpoint_sha256 != expected_private_endpoint_sha256
+            if not authority_changed and expected_route_binding_sha256:
+                route_binding_statement = (
+                    select(LaunchplaneRouteBindingRow)
+                    .where(
+                        LaunchplaneRouteBindingRow.product == observation.product,
+                        LaunchplaneRouteBindingRow.context == observation.context,
+                        LaunchplaneRouteBindingRow.instance == observation.instance,
+                    )
+                    .limit(1)
+                )
+                if not self.database_url.startswith("sqlite"):
+                    route_binding_statement = route_binding_statement.with_for_update()
+                route_binding_row = session.scalar(route_binding_statement)
+                route_binding_sha256 = (
+                    "missing"
+                    if route_binding_row is None
+                    else route_binding_record_sha256(
+                        EnvironmentRouteBindingRecord.model_validate(route_binding_row.payload)
+                    )
+                )
+                authority_changed = route_binding_sha256 != expected_route_binding_sha256
+            if authority_changed:
+                session.merge(
+                    LaunchplanePublicIngressObservationRow(
+                        record_id=observation.record_id,
+                        product=observation.product,
+                        context=observation.context,
+                        instance=observation.instance,
+                        status=observation.status,
+                        observed_at=observation.observed_at,
+                        incident_id="",
+                        check_token=check_token,
+                        check_kind=observation.check_kind,
+                        payload=self._payload_dict(
+                            observation.model_copy(
+                                update={
+                                    "incident_id": "",
+                                    "incident_event_id": "",
+                                }
+                            )
+                        ),
+                    )
+                )
+                session.commit()
+                return PublicIngressTransitionWriteResult(status="authority_changed")
+            self._lock_public_ingress_incident_write(
+                session,
+                product=observation.product,
+                context_name=observation.context,
+                instance_name=observation.instance,
+                check_token=check_token,
+                check_kind=observation.check_kind,
+            )
+            current_incident_statement = (
+                select(LaunchplanePublicIngressIncidentRow)
+                .where(
+                    LaunchplanePublicIngressIncidentRow.product == observation.product,
+                    LaunchplanePublicIngressIncidentRow.context == observation.context,
+                    LaunchplanePublicIngressIncidentRow.instance == observation.instance,
+                    LaunchplanePublicIngressIncidentRow.check_token == check_token,
+                    LaunchplanePublicIngressIncidentRow.check_kind == observation.check_kind,
+                    LaunchplanePublicIngressIncidentRow.status == "open",
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                current_incident_statement = current_incident_statement.with_for_update()
+            current_incident_row = session.scalar(current_incident_statement)
+            current_incident_sha256 = ""
+            if current_incident_row is not None:
+                try:
+                    current_incident_sha256 = public_ingress_incident_record_sha256(
+                        PublicIngressIncidentRecord.model_validate(current_incident_row.payload)
+                    )
+                except ValueError:
+                    current_incident_sha256 = "invalid"
+            incident_changed = (
+                current_incident_row is None and bool(expected_open_incident_id)
+            ) or (
+                current_incident_row is not None
+                and (
+                    not expected_open_incident_id
+                    or current_incident_row.incident_id != expected_open_incident_id
+                    or current_incident_row.state_version != expected_open_incident_state_version
+                    or (
+                        bool(expected_open_incident_sha256)
+                        and current_incident_sha256 != expected_open_incident_sha256
+                    )
+                )
+            )
+            if incident_changed:
+                unlinked_observation = observation.model_copy(
+                    update={"incident_id": "", "incident_event_id": ""}
+                )
+                session.merge(
+                    LaunchplanePublicIngressObservationRow(
+                        record_id=observation.record_id,
+                        product=observation.product,
+                        context=observation.context,
+                        instance=observation.instance,
+                        status=observation.status,
+                        observed_at=observation.observed_at,
+                        incident_id="",
+                        check_token=check_token,
+                        check_kind=observation.check_kind,
+                        payload=self._payload_dict(unlinked_observation),
+                    )
+                )
+                session.commit()
+                return PublicIngressTransitionWriteResult(status="incident_changed")
             self._lock_outbox_dedupe_keys(
                 session,
                 dedupe_keys=tuple(delivery.dedupe_key for delivery in outbox_deliveries),
@@ -8043,6 +9751,9 @@ class PostgresRecordStore(HumanSessionStore):
                     instance=observation.instance,
                     status=observation.status,
                     observed_at=observation.observed_at,
+                    incident_id=observation.incident_id,
+                    check_token=check_token,
+                    check_kind=observation.check_kind,
                     payload=self._payload_dict(observation),
                 )
             )
@@ -8054,9 +9765,42 @@ class PostgresRecordStore(HumanSessionStore):
                         context=incident.context,
                         instance=incident.instance,
                         status=incident.status,
+                        check_token=canonical_health_check_record_token(incident.check_name),
+                        check_kind=incident.check_kind,
+                        state_version=incident.state_version,
                         opened_at=incident.opened_at,
                         latest_observed_at=incident.latest_observed_at,
                         payload=self._payload_dict(incident),
+                    )
+                )
+            for event_record in incident_events:
+                existing_event = session.get(
+                    LaunchplanePublicIngressIncidentEventRow, event_record.event_id
+                )
+                if existing_event is None:
+                    session.add(
+                        LaunchplanePublicIngressIncidentEventRow(
+                            event_id=event_record.event_id,
+                            incident_id=event_record.incident_id,
+                            event=event_record.event,
+                            occurred_at=event_record.occurred_at,
+                            payload=self._payload_dict(event_record),
+                        )
+                    )
+                elif existing_event.payload != self._payload_dict(event_record):
+                    raise ValueError(
+                        "public ingress incident event identity reused with different payload"
+                    )
+            for reminder_state in reminder_states:
+                session.merge(
+                    LaunchplanePublicIngressIncidentReminderRow(
+                        reminder_state_id=reminder_state.reminder_state_id,
+                        incident_id=reminder_state.incident_id,
+                        policy_id=reminder_state.policy_id,
+                        status=reminder_state.status,
+                        next_reminder_at=reminder_state.next_reminder_at,
+                        updated_at=reminder_state.updated_at,
+                        payload=self._payload_dict(reminder_state),
                     )
                 )
             for delivery in outbox_deliveries:
@@ -8068,6 +9812,7 @@ class PostgresRecordStore(HumanSessionStore):
                 if existing_delivery is None:
                     session.add(self._outbox_delivery_row(delivery))
             session.commit()
+            return PublicIngressTransitionWriteResult(status="written")
 
     def list_public_ingress_incident_records(
         self,
@@ -8088,12 +9833,11 @@ class PostgresRecordStore(HumanSessionStore):
         if instance_name:
             filters.append(LaunchplanePublicIngressIncidentRow.instance == instance_name)
         if check_kind:
+            filters.append(LaunchplanePublicIngressIncidentRow.check_kind == check_kind)
+        if check_name:
             filters.append(
-                func.coalesce(
-                    LaunchplanePublicIngressIncidentRow.payload["check_kind"].as_string(),
-                    "public_http",
-                )
-                == check_kind
+                LaunchplanePublicIngressIncidentRow.check_token
+                == canonical_health_check_record_token(check_name)
             )
         if status:
             filters.append(LaunchplanePublicIngressIncidentRow.status == status)
@@ -8105,17 +9849,8 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplanePublicIngressIncidentRow.opened_at.desc(),
                 LaunchplanePublicIngressIncidentRow.incident_id.desc(),
             ),
-            limit=None if check_name else limit,
+            limit=limit,
         )
-        if check_name:
-            check_token = canonical_health_check_record_token(check_name)
-            records = tuple(
-                record
-                for record in records
-                if canonical_health_check_record_token(record.check_name) == check_token
-            )
-            if limit is not None:
-                records = records[:limit]
         return records
 
     def write_public_ingress_notification_policy_record(
@@ -8903,6 +10638,8 @@ class PostgresRecordStore(HumanSessionStore):
             "merge_train_policies": 0,
             "merge_train_runs": 0,
             "odoo_stable_bootstrap_operations": 0,
+            "odoo_prod_backup_restore_operations": 0,
+            "odoo_prod_retained_volume_backup_import_operations": 0,
             "odoo_stable_target_replacement_operations": 0,
             "release_tuples": 0,
             "runtime_key_safety_policies": 0,
@@ -9023,6 +10760,23 @@ class PostgresRecordStore(HumanSessionStore):
                     replacement_operation_record
                 )
                 counts["odoo_stable_target_replacement_operations"] += 1
+        if hasattr(filesystem_store, "list_odoo_prod_backup_restore_operation_records"):
+            for (
+                restore_operation_record
+            ) in filesystem_store.list_odoo_prod_backup_restore_operation_records():
+                self.write_odoo_prod_backup_restore_operation_record(restore_operation_record)
+                counts["odoo_prod_backup_restore_operations"] += 1
+        if hasattr(
+            filesystem_store,
+            "list_odoo_prod_retained_volume_backup_import_operation_records",
+        ):
+            for (
+                retained_import_record
+            ) in filesystem_store.list_odoo_prod_retained_volume_backup_import_operation_records():
+                self.write_odoo_prod_retained_volume_backup_import_operation_record(
+                    retained_import_record
+                )
+                counts["odoo_prod_retained_volume_backup_import_operations"] += 1
         for release_tuple_record in filesystem_store.list_release_tuple_records():
             self.write_release_tuple_record(release_tuple_record)
             counts["release_tuples"] += 1

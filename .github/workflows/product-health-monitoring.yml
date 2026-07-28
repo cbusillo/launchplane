@@ -25,12 +25,29 @@ name: Product Health Monitoring
         required: true
         type: string
       check_name:
-        description: Existing or new public HTTP check name.
+        description: Existing or new health check name.
         required: true
         default: public-ingress
         type: string
+      check_kind:
+        description: Health check transport.
+        required: true
+        default: public_http
+        type: choice
+        options:
+          - public_http
+          - private_http
+      monitoring_intent:
+        description: Expected lane availability mode.
+        required: true
+        default: public
+        type: choice
+        options:
+          - public
+          - private
+          - prelaunch
       enabled:
-        description: Whether the public HTTP check is enabled.
+        description: Whether the health check is enabled.
         required: true
         default: true
         type: boolean
@@ -39,6 +56,11 @@ name: Product Health Monitoring
         required: true
         default: true
         type: boolean
+      private_endpoint_key:
+        description: Registered private endpoint key for private_http checks.
+        required: false
+        default: ""
+        type: string
       reviewed_plan_sha256:
         description: Plan SHA-256 from the reviewed dry run; required for apply.
         required: false
@@ -65,15 +87,18 @@ permissions:
 
 jobs:
   apply:
-    uses: cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml@e61dc9a6161f9b97d2182ca69c4cadaa1df81fca # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml@88584ae2800bceabc9d448eba7defddc5da75ec1 # main
     with:
       mode: ${{ inputs.mode }}
       product: ${{ inputs.product }}
       context: ${{ inputs.context }}
       instance: ${{ inputs.instance }}
       check_name: ${{ inputs.check_name }}
+      check_kind: ${{ inputs.check_kind }}
+      monitoring_intent: ${{ inputs.monitoring_intent }}
       enabled: ${{ inputs.enabled }}
       require_runtime_identity: ${{ inputs.require_runtime_identity }}
+      private_endpoint_key: ${{ inputs.private_endpoint_key }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
       reason: ${{ inputs.reason }}
       idempotency_key: ${{ inputs.idempotency_key }}

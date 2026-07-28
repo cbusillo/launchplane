@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "f4c6e8a0b2d4"
+EXPECTED_ALEMBIC_HEAD_REVISION = "d7f9a1b3c5e7"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -103,6 +103,26 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         ("integer", "int4"),
     ),
     CriticalColumnType(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_odoo_prod_retained_volume_backup_import_operations",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_odoo_prod_retained_volume_backup_import_operations",
+        "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
         "launchplane_verireel_prod_backup_gate_operations",
         "payload",
         ("jsonb",),
@@ -133,6 +153,21 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         ("integer", "int4"),
     ),
     CriticalColumnType(
+        "launchplane_public_ingress_incidents",
+        "state_version",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_public_ingress_incident_events",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_public_ingress_incident_reminders",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
         "launchplane_merge_train_controller_states",
         "payload",
         ("jsonb",),
@@ -150,6 +185,12 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
 )
 
 _ACTIVE_OPERATION_PREDICATE_TOKENS = ("status", "pending", "running")
+_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
+    "status",
+    "pending",
+    "running",
+    "reconciliation_required",
+)
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     CriticalIndex(
@@ -198,7 +239,7 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_odoo_bootstrap_active_lane_uidx",
         ("product", "context", "instance"),
         unique=True,
-        predicate_tokens=_ACTIVE_OPERATION_PREDICATE_TOKENS,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
     ),
     CriticalIndex(
         "launchplane_odoo_stable_bootstrap_operations",
@@ -215,11 +256,45 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_odoo_replacement_active_lane_uidx",
         ("product", "context", "instance"),
         unique=True,
-        predicate_tokens=_ACTIVE_OPERATION_PREDICATE_TOKENS,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
     ),
     CriticalIndex(
         "launchplane_odoo_stable_target_replacement_operations",
         "launchplane_odoo_replacement_worker_claim_idx",
+        ("status", "lease_expires_at", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "launchplane_odoo_restore_operation_idempotency_idx",
+        ("idempotency_scope", "idempotency_key", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "launchplane_odoo_restore_active_lane_uidx",
+        ("product", "context", "instance"),
+        unique=True,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_backup_restore_operations",
+        "launchplane_odoo_restore_worker_claim_idx",
+        ("status", "lease_expires_at", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_retained_volume_backup_import_operations",
+        "launchplane_odoo_retained_import_operation_idempotency_idx",
+        ("operation_kind", "idempotency_scope", "idempotency_key", "updated_at"),
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_retained_volume_backup_import_operations",
+        "launchplane_odoo_retained_import_active_lane_uidx",
+        ("product", "context", "instance"),
+        unique=True,
+        predicate_tokens=_ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS,
+    ),
+    CriticalIndex(
+        "launchplane_odoo_prod_retained_volume_backup_import_operations",
+        "launchplane_odoo_retained_import_worker_claim_idx",
         ("status", "lease_expires_at", "updated_at"),
     ),
     CriticalIndex(
@@ -254,6 +329,33 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_outbox_deliveries",
         "launchplane_outbox_deliveries_claim_idx",
         ("state", "next_attempt_at", "lease_expires_at", "created_at"),
+    ),
+    CriticalIndex(
+        "launchplane_public_ingress_observations",
+        "launchplane_public_ingress_observations_incident_idx",
+        ("incident_id", "observed_at"),
+    ),
+    CriticalIndex(
+        "launchplane_public_ingress_observations",
+        "launchplane_public_ingress_observations_check_idx",
+        ("product", "context", "instance", "check_token", "check_kind", "observed_at"),
+    ),
+    CriticalIndex(
+        "launchplane_public_ingress_incidents",
+        "launchplane_public_ingress_incidents_open_uidx",
+        ("product", "context", "instance", "check_token", "check_kind"),
+        unique=True,
+        predicate_expression="status='open'",
+    ),
+    CriticalIndex(
+        "launchplane_public_ingress_incident_events",
+        "launchplane_pi_incident_events_incident_idx",
+        ("incident_id", "occurred_at"),
+    ),
+    CriticalIndex(
+        "launchplane_public_ingress_incident_reminders",
+        "launchplane_pi_incident_reminders_due_idx",
+        ("status", "next_reminder_at"),
     ),
     CriticalIndex(
         "launchplane_merge_train_controller_states",

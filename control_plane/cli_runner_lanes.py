@@ -43,6 +43,8 @@ from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.runner_lane_github import GitHubRunnerLaneRegistrationTokenFetcher
+from control_plane.runner_lane_github import GitHubRunnerLaneRetirer
+from control_plane.runner_lane_github import GitHubRepositoryActiveRunReader
 from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
 from control_plane.workflows.runner_lane_registration_executor import (
     RunnerLaneRegistrationExecutorRequest,
@@ -63,10 +65,22 @@ from control_plane.workflows.runner_lane_registration_executor import (
 from control_plane.workflows.runner_lane_registration_executor import (
     validate_local_executor_environment as validate_runner_registration_environment,
 )
+from control_plane.workflows.runner_lane_retirement_executor import (
+    RunnerLaneRetirementExecutorRequest,
+)
+from control_plane.workflows.runner_lane_retirement_executor import (
+    execute_runner_lane_retirement_executor,
+)
+from control_plane.workflows.runner_lane_retirement_executor import (
+    validate_local_executor_environment as validate_runner_retirement_environment,
+)
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
+from control_plane.workflows.runner_host_hygiene_executor import GeneratedRunCacheRoot
+from control_plane.workflows.runner_host_hygiene_executor import RunnerWorkdirRoot
 from control_plane.workflows.runner_host_hygiene_executor import DOCKER_BUILDX_PLUGIN_PATH_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandRunner
 from control_plane.workflows.runner_host_hygiene_executor import build_local_command_runner
+from control_plane.workflows.runner_host_hygiene_executor import build_github_run_state_reader
 from control_plane.workflows.runner_host_hygiene_executor import (
     build_refreshing_service_audit_poster,
 )
@@ -75,6 +89,9 @@ from control_plane.workflows.runner_host_hygiene_executor import (
 )
 from control_plane.workflows.runner_host_hygiene_executor import (
     validate_local_executor_environment as validate_runner_host_hygiene_environment,
+)
+from control_plane.workflows.runner_host_hygiene_audit_spool import (
+    RunnerHostHygieneAuditSpool,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -88,6 +105,10 @@ def register_runner_lane_commands(work_graph: click.Group) -> None:
     work_graph.add_command(
         runner_lane_registration_executor,
         name="runner-lane-registration-executor",
+    )
+    work_graph.add_command(
+        runner_lane_retirement_executor,
+        name="runner-lane-retirement-executor",
     )
     work_graph.add_command(runner_host_hygiene_report, name="runner-host-hygiene-report")
     work_graph.add_command(runner_host_hygiene_apply_plan, name="runner-host-hygiene-apply-plan")
@@ -822,6 +843,184 @@ def runner_lane_registration_executor(
     click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
+@click.command("runner-lane-retirement-executor")
+@click.option("--repository", required=True, help="owner/name repository whose lane should retire.")
+@click.option("--host-name", required=True, help="Approved runner host name.")
+@click.option("--execution-lane", required=True, help="Approved ops execution lane.")
+@click.option("--service-user", required=True, help="Expected constrained service user.")
+@click.option("--lane-name", required=True, help="Exact runner lane name to retire.")
+@click.option(
+    "--registration-root",
+    required=True,
+    help="Absolute approved root containing the runner lane directory.",
+)
+@click.option("--mutate/--dry-run", default=False, show_default=True)
+@click.option("--audit-record-key", required=True, help="Durable lifecycle audit key.")
+@click.option(
+    "--allowed-repository",
+    "allowed_repositories",
+    multiple=True,
+    help="Repository opted into runner lane retirement. Repeat as needed.",
+)
+@click.option(
+    "--approved-host",
+    "approved_hosts",
+    multiple=True,
+    help="Host approved for runner lane retirement. Repeat as needed.",
+)
+@click.option(
+    "--allowed-registration-root",
+    "allowed_registration_roots",
+    multiple=True,
+    help="Absolute root allowed for runner retirement. Repeat as needed.",
+)
+@click.option(
+    "--required-label",
+    "required_labels",
+    multiple=True,
+    help="Observed managed label required for retirement.",
+)
+@click.option(
+    "--inventory-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="Pre-mutation RunnerLaneInventory JSON from runner-inventory.",
+)
+@click.option(
+    "--github-token-env",
+    default="GITHUB_TOKEN",
+    show_default=True,
+    help="Environment variable containing runner administration authority.",
+)
+@click.option(
+    "--github-api-base-url",
+    default="https://api.github.com",
+    show_default=True,
+    help="GitHub API base URL.",
+)
+@click.option(
+    "--timeout-seconds",
+    default=120,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Timeout for each local runner retirement command.",
+)
+@click.option(
+    "--audit-mode",
+    type=click.Choice(("local", "service")),
+    default="local",
+    show_default=True,
+    help="Where runner lifecycle audit records should be written.",
+)
+@click.option(
+    "--service-url",
+    default="",
+    help="Launchplane service origin for --audit-mode service.",
+)
+@click.option(
+    "--bearer-token-env",
+    default="LAUNCHPLANE_SERVICE_TOKEN",
+    show_default=True,
+    help="Environment variable containing a Launchplane bearer token.",
+)
+def runner_lane_retirement_executor(
+    repository: str,
+    host_name: str,
+    execution_lane: str,
+    service_user: str,
+    lane_name: str,
+    registration_root: str,
+    mutate: bool,
+    audit_record_key: str,
+    allowed_repositories: tuple[str, ...],
+    approved_hosts: tuple[str, ...],
+    allowed_registration_roots: tuple[str, ...],
+    required_labels: tuple[str, ...],
+    inventory_file: Path,
+    github_token_env: str,
+    github_api_base_url: str,
+    timeout_seconds: int,
+    audit_mode: str,
+    service_url: str,
+    bearer_token_env: str,
+) -> None:
+    try:
+        pre_inventory = _load_runner_lane_inventory(inventory_file)
+        github_token_name = github_token_env.strip()
+        github_token = os.environ.get(github_token_name, "").strip() if github_token_name else ""
+        if not github_token:
+            raise click.ClickException(
+                f"Missing GitHub token in environment variable {github_token_name}."
+            )
+        transport = UrllibMergeTrainGitHubTransport(
+            token=github_token,
+            api_base_url=github_api_base_url,
+        )
+        inventory_reader = GitHubRunnerLaneInventoryReader(transport=transport)
+        activity_reader = GitHubRepositoryActiveRunReader(transport=transport)
+        runner_retirer = GitHubRunnerLaneRetirer(transport=transport)
+        if mutate and audit_mode != "service":
+            raise click.ClickException(
+                "runner lane retirement mutation requires --audit-mode service."
+            )
+        audit_poster: RunnerRegistrationAuditPoster = dry_run_audit_poster
+        if audit_mode == "service":
+            token_name = bearer_token_env.strip()
+            if not token_name:
+                raise click.ClickException(
+                    "runner lane retirement executor requires --bearer-token-env."
+                )
+            audit_poster = build_runner_registration_service_audit_poster(
+                service_url=service_url,
+                bearer_token_provider=lambda: _launchplane_service_bearer_token(
+                    service_url=service_url,
+                    token_env=token_name,
+                    label="runner lane retirement",
+                ),
+            )
+        request = RunnerLaneRetirementExecutorRequest(
+            repository=repository,
+            host_name=host_name,
+            execution_lane=execution_lane,
+            service_user=service_user,
+            lane_name=lane_name,
+            registration_root=registration_root,
+            mutate=mutate,
+            audit_record_key=audit_record_key,
+            timeout_seconds=timeout_seconds,
+        )
+        validate_runner_retirement_environment(request=request)
+        result = execute_runner_lane_retirement_executor(
+            request=request,
+            policy=RunnerLaneRegistrationPolicy(
+                allowed_repositories=allowed_repositories,
+                approved_hosts=approved_hosts,
+                allowed_registration_roots=allowed_registration_roots,
+                required_labels=(required_labels or ("launchplane-managed",)),
+            ),
+            pre_inventory=pre_inventory,
+            inventory_reader=lambda repo: inventory_reader.read_runner_lane_inventory(
+                repository=repo
+            ),
+            active_run_reader=lambda repo: activity_reader.read_active_run_ids(repository=repo),
+            runner_retirer=lambda repo, runner_id: runner_retirer.delete_runner(
+                repository=repo,
+                runner_id=runner_id,
+            ),
+            remote_runner=build_runner_registration_command_runner(),
+            audit_poster=audit_poster,
+        )
+    except (
+        OSError,
+        JSONDecodeError,
+        MergeTrainGitHubError,
+        ValidationError,
+        ValueError,
+    ) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
 @click.command("runner-host-hygiene-report")
 @click.option(
     "--observation-file",
@@ -910,6 +1109,8 @@ def runner_host_hygiene_report(
     type=click.Choice(
         (
             "prune_docker_cache",
+            "prune_dangling_images",
+            "prune_generated_run_cache",
             "remove_buildkit_state_volumes",
             "prune_runner_workdir",
             "restart_runner_service",
@@ -960,10 +1161,82 @@ def runner_host_hygiene_report(
     help="BuildKit state volume policy allows removal for. Repeat for each volume.",
 )
 @click.option(
+    "--target-buildkit-builder",
+    default="",
+    help="Exact allowlisted Buildx builder whose cache the request targets.",
+)
+@click.option(
+    "--allowed-buildkit-builder",
+    "allowed_buildkit_builders",
+    multiple=True,
+    help="Buildx builder policy allows bounded pruning for. Repeat for each builder.",
+)
+@click.option(
+    "--max-used-space-bytes",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Retained cache bytes for the default daemon cache or a target builder.",
+)
+@click.option(
+    "--target-generated-cache-key",
+    default="",
+    help="Public generated-cache key the request targets.",
+)
+@click.option(
+    "--target-generated-cache-run-id",
+    "target_generated_cache_run_ids",
+    multiple=True,
+    type=click.IntRange(min=1),
+    help="Completed generated-cache run id targeted for removal. Repeat as needed.",
+)
+@click.option(
+    "--allowed-generated-cache-key",
+    "allowed_generated_cache_keys",
+    multiple=True,
+    help="Generated-cache key allowed by local policy. Repeat as needed.",
+)
+@click.option(
+    "--generated-cache-minimum-age-hours",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+)
+@click.option(
+    "--generated-cache-high-water-bytes",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+)
+@click.option(
+    "--generated-cache-low-water-bytes",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+)
+@click.option(
+    "--generated-cache-cooldown-hours",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+)
+@click.option(
     "--allow-docker-cache-prune/--disallow-docker-cache-prune",
     default=False,
     show_default=True,
     help="Enable Docker cache prune planning in the local policy.",
+)
+@click.option(
+    "--allow-dangling-image-prune/--disallow-dangling-image-prune",
+    default=False,
+    show_default=True,
+    help="Enable dangling-only Docker image prune planning in the local policy.",
+)
+@click.option(
+    "--allow-generated-run-cache-prune/--disallow-generated-run-cache-prune",
+    default=False,
+    show_default=True,
+    help="Enable completed-run generated cache prune planning in the local policy.",
 )
 @click.option(
     "--allow-buildkit-state-volume-remove/--disallow-buildkit-state-volume-remove",
@@ -1011,7 +1284,19 @@ def runner_host_hygiene_apply_plan(
     required_retained_warm_builders: tuple[str, ...],
     target_buildkit_state_volumes: tuple[str, ...],
     allowed_buildkit_state_volumes: tuple[str, ...],
+    target_buildkit_builder: str,
+    allowed_buildkit_builders: tuple[str, ...],
+    max_used_space_bytes: int,
+    target_generated_cache_key: str,
+    target_generated_cache_run_ids: tuple[int, ...],
+    allowed_generated_cache_keys: tuple[str, ...],
+    generated_cache_minimum_age_hours: int,
+    generated_cache_high_water_bytes: int,
+    generated_cache_low_water_bytes: int,
+    generated_cache_cooldown_hours: int,
     allow_docker_cache_prune: bool,
+    allow_dangling_image_prune: bool,
+    allow_generated_run_cache_prune: bool,
     allow_buildkit_state_volume_remove: bool,
     allow_runner_workdir_prune: bool,
     allow_runner_service_restart: bool,
@@ -1027,6 +1312,10 @@ def runner_host_hygiene_apply_plan(
             require_healthy_report=require_healthy_report,
             require_audit_record=require_audit_record,
             allow_docker_cache_prune=allow_docker_cache_prune,
+            allow_dangling_image_prune=allow_dangling_image_prune,
+            allow_generated_run_cache_prune=allow_generated_run_cache_prune,
+            allowed_generated_cache_keys=allowed_generated_cache_keys,
+            allowed_buildkit_builders=allowed_buildkit_builders,
             allow_buildkit_state_volume_remove=allow_buildkit_state_volume_remove,
             allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
             allow_runner_workdir_prune=allow_runner_workdir_prune,
@@ -1037,7 +1326,15 @@ def runner_host_hygiene_apply_plan(
             host_name=host_name,
             mutate=mutate,
             retained_warm_builders=retained_warm_builders,
+            target_buildkit_builder=target_buildkit_builder,
+            max_used_space_bytes=max_used_space_bytes,
             target_buildkit_state_volumes=target_buildkit_state_volumes,
+            target_generated_cache_key=target_generated_cache_key,
+            target_generated_cache_run_ids=target_generated_cache_run_ids,
+            generated_cache_minimum_age_hours=generated_cache_minimum_age_hours,
+            generated_cache_high_water_bytes=generated_cache_high_water_bytes,
+            generated_cache_low_water_bytes=generated_cache_low_water_bytes,
+            generated_cache_cooldown_hours=generated_cache_cooldown_hours,
             audit_record_key=audit_record_key,
         )
         plan = plan_runner_host_hygiene_apply(
@@ -1095,7 +1392,9 @@ def runner_host_hygiene_apply_plan(
     "--privileged-scope",
     "privileged_scopes",
     multiple=True,
-    type=click.Choice(("docker_cache", "docker_volume", "runner_service", "runner_workdir")),
+    type=click.Choice(
+        ("docker_cache", "docker_volume", "generated_cache", "runner_service", "runner_workdir")
+    ),
     help="Privileged host capability requested by the adapter. Repeat for each scope.",
 )
 @click.option(
@@ -1155,7 +1454,9 @@ def runner_host_hygiene_apply_plan(
     "--allowed-privileged-scope",
     "allowed_privileged_scopes",
     multiple=True,
-    type=click.Choice(("docker_cache", "docker_volume", "runner_service", "runner_workdir")),
+    type=click.Choice(
+        ("docker_cache", "docker_volume", "generated_cache", "runner_service", "runner_workdir")
+    ),
     help="Privileged host scope allowed by local policy. Repeat for each scope.",
 )
 @click.option(
@@ -1265,7 +1566,14 @@ def runner_host_hygiene_adapter_boundary_plan(
     "apply_action",
     default="prune_docker_cache",
     show_default=True,
-    type=click.Choice(("prune_docker_cache", "remove_buildkit_state_volumes")),
+    type=click.Choice(
+        (
+            "prune_docker_cache",
+            "prune_dangling_images",
+            "prune_generated_run_cache",
+            "remove_buildkit_state_volumes",
+        )
+    ),
     help="Approved runner host hygiene executor action.",
 )
 @click.option(
@@ -1313,6 +1621,24 @@ def runner_host_hygiene_adapter_boundary_plan(
     help="BuildKit state volume policy allows removal for. Repeat as needed.",
 )
 @click.option(
+    "--target-buildkit-builder",
+    default="",
+    help="Exact allowlisted Buildx builder whose cache should be bounded.",
+)
+@click.option(
+    "--allowed-buildkit-builder",
+    "allowed_buildkit_builders",
+    multiple=True,
+    help="Buildx builder policy allows cache pruning for. Repeat as needed.",
+)
+@click.option(
+    "--max-used-space-bytes",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help="Retained cache bytes for the default daemon cache or targeted Buildx builder.",
+)
+@click.option(
     "--mutate/--dry-run",
     default=False,
     show_default=True,
@@ -1332,6 +1658,47 @@ def runner_host_hygiene_adapter_boundary_plan(
     help="Bounded Docker builder cache prune age filter, passed as until=<value>.",
 )
 @click.option(
+    "--runner-workdir-root",
+    "runner_workdir_roots",
+    multiple=True,
+    required=True,
+    help="Approved runner root formatted as public-key=/absolute/path. Repeat as needed.",
+)
+@click.option(
+    "--generated-run-cache-root",
+    "generated_run_cache_roots",
+    multiple=True,
+    help=(
+        "Approved generated run cache formatted as "
+        "public-key=/absolute/path|owner/repo|high|low|min-age-hours|cooldown-hours."
+    ),
+)
+@click.option(
+    "--target-generated-cache-key",
+    default="",
+    help="Exact public generated-cache key selected for bounded completed-run cleanup.",
+)
+@click.option(
+    "--idle-observation-count",
+    default=2,
+    show_default=True,
+    type=click.IntRange(min=2, max=10),
+    help="Consecutive local idle samples required before mutation.",
+)
+@click.option(
+    "--idle-observation-interval-seconds",
+    default=5,
+    show_default=True,
+    type=click.IntRange(min=0, max=60),
+    help="Delay between consecutive local idle samples.",
+)
+@click.option(
+    "--resolve-action-started/--no-resolve-action-started",
+    default=False,
+    show_default=True,
+    help="Record terminal failed evidence for a prior action_started state without rerunning it.",
+)
+@click.option(
     "--timeout-seconds",
     default=120,
     show_default=True,
@@ -1349,6 +1716,25 @@ def runner_host_hygiene_adapter_boundary_plan(
     show_default=True,
     help="Environment variable containing a GitHub OIDC bearer token.",
 )
+@click.option(
+    "--github-token-env",
+    default="GH_TOKEN",
+    show_default=True,
+    help="Environment variable containing the GitHub token used for run-state evidence.",
+)
+@click.option(
+    "--audit-spool-root",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    help="Absolute host-persistent directory for runner hygiene audit delivery state.",
+)
+@click.option(
+    "--audit-artifact-file",
+    default=Path("runner-host-hygiene-audit-evidence.json"),
+    show_default=True,
+    type=click.Path(path_type=Path, file_okay=True, dir_okay=False),
+    help="Current-run redacted audit envelope copied for workflow artifact upload.",
+)
 def runner_host_hygiene_executor(
     apply_action: RunnerHostHygieneApplyAction,
     host_name: str,
@@ -1359,17 +1745,42 @@ def runner_host_hygiene_executor(
     retained_warm_builders: tuple[str, ...],
     target_buildkit_state_volumes: tuple[str, ...],
     allowed_buildkit_state_volumes: tuple[str, ...],
+    target_buildkit_builder: str,
+    allowed_buildkit_builders: tuple[str, ...],
+    max_used_space_bytes: int,
     mutate: bool,
     minimum_free_disk_bytes: int,
     prune_until: str,
+    runner_workdir_roots: tuple[str, ...],
+    generated_run_cache_roots: tuple[str, ...],
+    target_generated_cache_key: str,
+    idle_observation_count: int,
+    idle_observation_interval_seconds: int,
+    resolve_action_started: bool,
     timeout_seconds: int,
     service_url: str,
     bearer_token_env: str,
+    github_token_env: str,
+    audit_spool_root: Path,
+    audit_artifact_file: Path,
 ) -> None:
     try:
         token_env = bearer_token_env.strip()
         if not token_env:
             raise click.ClickException("runner host hygiene executor requires --bearer-token-env.")
+        parsed_generated_run_cache_roots = _parse_generated_run_cache_roots(
+            generated_run_cache_roots
+        )
+        github_token_env_name = github_token_env.strip()
+        if parsed_generated_run_cache_roots and not github_token_env_name:
+            raise click.ClickException(
+                "runner host hygiene generated cache evidence requires --github-token-env."
+            )
+        github_token = (
+            os.environ.get(github_token_env_name, "").strip()
+            if parsed_generated_run_cache_roots
+            else ""
+        )
         request = RunnerHostHygieneExecutorRequest(
             action=apply_action,
             host_name=host_name,
@@ -1378,12 +1789,21 @@ def runner_host_hygiene_executor(
             repository_scope=repository_scope,
             audit_record_key=audit_record_key,
             retained_warm_builders=retained_warm_builders,
+            target_buildkit_builder=target_buildkit_builder,
+            allowed_buildkit_builders=allowed_buildkit_builders,
+            max_used_space_bytes=max_used_space_bytes,
             target_buildkit_state_volumes=target_buildkit_state_volumes,
             allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
             mutate=mutate,
             minimum_free_disk_bytes=minimum_free_disk_bytes,
             timeout_seconds=timeout_seconds,
             prune_until=prune_until,
+            runner_workdir_roots=_parse_runner_workdir_roots(runner_workdir_roots),
+            generated_run_cache_roots=parsed_generated_run_cache_roots,
+            target_generated_cache_key=target_generated_cache_key,
+            idle_observation_count=idle_observation_count,
+            idle_observation_interval_seconds=idle_observation_interval_seconds,
+            resolve_action_started=resolve_action_started,
         )
         validate_runner_host_hygiene_environment(request=request)
         result = execute_runner_host_hygiene_executor(
@@ -1396,10 +1816,71 @@ def runner_host_hygiene_executor(
                     token_env=token_env,
                 ),
             ),
+            audit_spool=RunnerHostHygieneAuditSpool(
+                root=audit_spool_root,
+                artifact_file=audit_artifact_file,
+            ),
+            github_run_state_reader=(
+                build_github_run_state_reader(bearer_token=github_token)
+                if parsed_generated_run_cache_roots
+                else None
+            ),
         )
     except (OSError, ValidationError, ValueError) as error:
         raise click.ClickException(str(error)) from error
     click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+    if result.audit_delivery_pending:
+        raise click.ClickException("runner host hygiene audit delivery remains pending")
+    if mutate and result.status not in {"completed", "not_needed"}:
+        raise click.ClickException(
+            f"runner host hygiene mutation did not complete: {result.status}"
+        )
+
+
+def _parse_runner_workdir_roots(values: tuple[str, ...]) -> tuple[RunnerWorkdirRoot, ...]:
+    roots: list[RunnerWorkdirRoot] = []
+    for value in values:
+        key, separator, path = value.partition("=")
+        if not separator:
+            raise click.ClickException("runner workdir roots must use public-key=/absolute/path")
+        roots.append(RunnerWorkdirRoot(key=key, path=path))
+    return tuple(roots)
+
+
+def _parse_generated_run_cache_roots(
+    values: tuple[str, ...],
+) -> tuple[GeneratedRunCacheRoot, ...]:
+    roots: list[GeneratedRunCacheRoot] = []
+    for value in values:
+        parts = value.split("|")
+        if len(parts) != 6:
+            raise click.ClickException(
+                "generated run cache roots must use "
+                "public-key=/absolute/path|owner/repo|high|low|min-age-hours|cooldown-hours"
+            )
+        binding, source_repository, high_water, low_water, minimum_age, cooldown = parts
+        key, separator, path = binding.partition("=")
+        if not separator:
+            raise click.ClickException(
+                "generated run cache roots must use public-key=/absolute/path"
+            )
+        try:
+            roots.append(
+                GeneratedRunCacheRoot(
+                    key=key,
+                    path=path,
+                    source_repository=source_repository,
+                    high_water_bytes=int(high_water),
+                    low_water_bytes=int(low_water),
+                    minimum_age_hours=int(minimum_age),
+                    cooldown_hours=int(cooldown),
+                )
+            )
+        except ValueError as error:
+            raise click.ClickException(
+                "generated run cache budget and age fields must be integers"
+            ) from error
+    return tuple(roots)
 
 
 def _load_runner_lane_inventory(inventory_file: Path) -> RunnerLaneInventory:

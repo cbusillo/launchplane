@@ -83,13 +83,15 @@ LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run python -m control_plane
 Do not run `alembic upgrade head` directly against the shared service database
 during a staged rollout. The authorization compatibility image was deployed at
 revision `f3b5d7e9a1c2` before this release advanced the migration target to the
-fenced `f4c6e8a0b2d4` schema. The full reconciliation image accepts f3 only as a
-serialized migration source; its ORM and runtime compatibility contract require
-f4. After the database reaches f4, rollback is supported only to the previously
-deployed compatibility image or another image that understands f4. The runtime
-status route reports the observed database revision, the image's f4-only runtime
-compatibility set, and its migration target so deployment verification can
-enforce this boundary.
+fenced `f4c6e8a0b2d4` schema, then to `a1c3e5f7b9d2` for the dedicated Odoo
+production backup-restore operation table, and then to `b3d5f7a9c1e4` for the
+retained-volume backup-import operation table. The full reconciliation image
+accepts older revisions only as serialized migration sources; its ORM and
+runtime compatibility contract requires b3. After the database reaches b3,
+rollback is supported only to an image that understands both production
+recovery operation tables. The runtime status route reports the observed
+database revision, the image's b3-only runtime compatibility set, and its
+migration target so deployment verification can enforce this boundary.
 
 JSONB `payload` columns remain durable evidence envelopes and original typed
 payload snapshots. Fields that the GUI or drivers need to filter, order, join,
@@ -511,9 +513,17 @@ an ORM column/table or remains only in the evidence payload.
 - Runner host hygiene audit: modeled fields are `audit_record_key`,
   `host_name`, `action`, `status`, and `mutate`. The payload carries the typed
   request, plan, pre/post hygiene reports, retained warm-builder evidence, and
-  operator message. Docker toolchain evidence, host-command output, Docker
-  summaries, and rollout notes stay payload-only until they need queryable
-  operational views.
+  operator message. Generated-cache public keys, apparent and allocated bytes,
+  age buckets, numeric run ids, GitHub completion state, bounded worker and
+  open-handle observations, cleanup history, and hysteresis/cooldown evidence
+  also stay payload-only. Absolute cache paths and source repository identity
+  are executor-local runtime authority and are not persisted in the audit.
+  Docker toolchain evidence, host-command output, Docker summaries, and rollout
+  notes stay payload-only until they need queryable operational views. The host-local audit-delivery envelope is a separate
+  recovery record: it stores planned and optional terminal audit payloads,
+  execution phase, delivery state, idempotency keys, bounded redacted errors,
+  and attempt counts. It is written atomically under an explicit state
+  directory and is not a substitute for the service-owned audit row.
 - Runner lane registration audit: modeled fields are `audit_record_key`,
   `repository`, `host_name`, `lane_name`, `status`, and `mutate`. The payload
   carries the typed request, registration plan, pre/post runner inventory, and
@@ -634,7 +644,15 @@ derived from runtime-environment records, managed secret binding records, driver
 support, and trust metadata; expected config requirements do not store runtime
 values, managed secret IDs, secret plaintext, or ciphertext.
 
-Stable lanes declare synthetic monitoring through `health_monitoring.checks[]`.
+Stable lanes declare synthetic monitoring through `health_monitoring`, which
+contains an explicit `monitoring_intent` of `public`, `private`, or `prelaunch`
+plus `checks[]`. The intent is DB-backed product-profile authority, not a
+checked-in product catalog. `public` requires an enabled `public_http` check;
+`private` requires an enabled `private_http` check; `prelaunch` may retain
+public checks so Launchplane can show readiness evidence before public
+availability is expected. Missing intent on a policy with checks, unknown
+values, and public/private intent without its required check fail validation.
+
 Each check has a stable name and kind. `public_http` checks use an explicit URL
 or the lane `health_url`, or derive one from lane `base_url` plus product
 `health_path`. `private_http` checks monitor internal service endpoints without
@@ -646,15 +664,20 @@ a product/context/instance lane. Private endpoint records reject public URLs,
 and endpoint-key-backed checks fail closed when the record is missing, disabled,
 or scoped to another lane. `provider` checks record provider-health intent and
 fail closed until a provider-specific monitor implementation is wired. The
-monitor records HTTP reachability, redirect failures, private/internal URL skips
-for public checks, and runtime identity comparison when current lane inventory
-or deployment evidence provides an expected identity. Check policy may carry an
-enabled flag and provider-specific routing details, but alert destinations are
-not lane text fields. Public ingress incident notifications are routed through
-DB-backed notification policy records. Legacy product-profile payloads that
-still contain `alert_issue_url` are tolerated during record reads and stripped
-from the migrated health-monitoring shape instead of being treated as runtime
-authority.
+monitor records HTTP reachability, redirect failures, private/internal URL
+rejection for public checks, and runtime identity comparison when current lane
+inventory or deployment evidence provides an expected identity. Public and TLS
+probes are effective for `public` and `prelaunch`, but only `public` makes their
+failures incident-eligible. `private` suppresses public/TLS probes while keeping
+private and provider checks active; private/provider failures remain
+incident-eligible in every intent mode. Public checks never fall back to the
+private client. Check policy may carry an enabled flag and provider-specific
+routing details, but alert destinations are not lane text fields. Public ingress
+incident notifications are routed through DB-backed notification policy
+records. Legacy product-profile payloads receive a versioned generic migration:
+an enabled public check maps to `public`, otherwise an enabled private check maps
+to `private`, and lanes without either map to `prelaunch`. Real product identity
+does not participate in that migration.
 
 The product key is the durable workspace identity. For example,
 `sellyouroutboard` is the SellYourOutboard product workspace; `testing`, `prod`,
@@ -760,18 +783,24 @@ surface for both modes and supplies the target product and requested `none` or
 from service-backed or operator-supplied authz input rather than a checked-in
 product catalog.
 
-Stable-lane public health policy changes use
+Stable-lane health policy and monitoring-intent changes use
 `POST /v1/product-profiles/health-monitoring/apply`. The request identifies one
-exact product/context/instance lane and one health-check name, then supplies only
-the desired enabled and runtime-identity requirements. It cannot carry a URL,
-domain, provider target, proxy record, certificate reference, or replacement
-product profile. Launchplane reads the DB-backed profile, preserves any existing
-public-check URL or derives the check from lane-owned `health_url`/`base_url`,
-and rejects non-public checks. Enabling strict runtime identity requires an HTTPS
-host already owned by that lane. Dry-run returns a canonical plan bound to the
-complete current profile; apply requires the reviewed digest and an idempotency
-key, then compare-and-writes only the selected check plus server-owned profile
-audit fields. Concurrent profile edits fail stale instead of being overwritten.
+exact product/context/instance lane and one health-check name, then supplies the
+desired `monitoring_intent`, `public_http` or `private_http` kind, enabled state,
+and runtime-identity requirement. Public checks cannot carry endpoint URLs;
+Launchplane preserves any existing public-check URL or derives it from lane-owned
+`health_url`/`base_url`. Private checks carry only a registered
+`private_endpoint_key`; apply validates that the record is active and belongs to
+the exact product/context/instance without returning or logging its internal URL.
+The request cannot carry a domain, provider target, proxy record, certificate
+reference, or replacement product profile. Enabling strict public runtime
+identity requires an HTTPS host already owned by that lane. Dry-run returns a
+canonical plan bound to the complete current profile; apply requires the reviewed
+digest and an idempotency key, then compare-and-writes only the selected check,
+lane intent, and server-owned profile audit fields. Whole-profile service writes
+cannot change existing health-monitoring authority, and onboarding updates
+preserve it; operators use this bounded apply path instead. Concurrent profile
+edits fail stale instead of being overwritten.
 
 For initial seed or repair work, operators can write the same DB-backed record
 directly with
@@ -787,15 +816,34 @@ Public ingress observations are append-only Launchplane records under
 context, instance, and observation time. It stores the checked base and health
 URLs, pass/fail/skipped status, failure code, redirect and HTTP evidence,
 runtime identity match detail when available, and whether Launchplane delivered
-a configured transition notification.
+a configured transition notification. Observations recorded while an incident
+is open carry that incident id; an observation that caused one material event
+also carries the event id. Every observation remains durable even when its
+evidence is equivalent to the previous cycle and therefore does not create a
+notification. Failing observations carry the typed material fingerprint and
+digest used by reconciliation. Records also carry the lane's typed
+`monitoring_intent` and a `purpose` of `probe` or `reconciliation`.
 
 These records are the source for the product environment read model's
-`public_ingress` summary. Passing and failing observations are both verified
-evidence of the latest probe; failure marks the lane unhealthy without
-mislabeling current evidence as stale. A public check whose literal or resolved
-destination is non-public records a failing `private_url` observation. The
-`skipped` status remains readable for historical records, but current public
+`public_ingress` and `health_monitoring` summaries. Readiness projections select
+the latest `probe` record so an intent transition cannot replace measured
+reachability with administrative evidence. Passing and failing observations are
+both verified evidence of the latest probe; failure marks the lane unhealthy
+without mislabeling current evidence as stale. A public check whose literal or
+resolved destination is non-public records a failing `private_url` observation.
+The `skipped` status remains readable for historical records, but current public
 checks do not treat a private destination as unsupported or silently healthy.
+
+When a check leaves the incident-eligible set, Launchplane writes a distinct
+`reconciliation` observation with skipped `monitoring_intent_changed` evidence
+and a separate record id. This preserves the last real probe while giving the
+incident transition an explicit durable cause. Canonical fingerprints for the
+product profile and any private-endpoint or route-binding authority used by the
+target are checked in the same database transaction as observation, incident,
+and GitHub outbox writes. If monitoring authority changed after target
+discovery, the stale probe is retained as evidence but cannot open, update, or
+resolve an incident; the next monitor cycle reconciles against current
+authority.
 
 ## Product Environment Topology Projection
 
@@ -893,10 +941,54 @@ missing production records remain non-ready and never trigger a write.
 
 Public ingress incidents are Launchplane-owned lifecycle records under
 `launchplane_public_ingress_incidents`. They are derived from public-ingress
-observations and keyed by product, context, instance, and incident open time. An
-open incident records the first failing observation and the latest failing
-observation for that lane. A recovery observation resolves the incident by
-recording the resolving observation and resolved timestamp.
+observations. One stable active key is product, context, instance, canonical
+check name, and check kind, while `incident_id` is occurrence-scoped and includes
+the open time. Repeated failures update one open occurrence; a later failure
+after resolution opens a new record instead of overwriting history. A partial
+database uniqueness fence permits only one open occurrence per active key.
+
+The incident stores first/latest observation linkage, a monotonically changing
+state version, severity, typed material fingerprint and digest, latest material
+event identity, notification state, and recovery progress. The fingerprint is
+deterministic per check kind. It includes failure code/layer, severity, affected
+target kind, material route authority, TLS state, and bounded expected-runtime
+mismatch identity. It excludes observation ids, timestamps, HTTP status churn
+within one category, retry counters, summaries, certificate timing evidence,
+and other equivalent sensor detail. Public HTTP fingerprints use canonical
+public URLs; private HTTP fingerprints use the endpoint key plus a material
+authority digest rather than the private URL; provider and TLS fingerprints use
+their typed provider or route-binding authority.
+
+Material lifecycle events are append-only records under
+`launchplane_public_ingress_incident_events`. Event kinds are `opened`,
+`updated`, `reminder`, `resolved`, and the non-deliverable `baseline` used only
+to adopt pre-migration incidents. Opening and material-update identities derive
+from the incident, previous material event, and new fingerprint. Reminder
+identities derive from the incident, policy, material event, and bounded reminder
+window. Resolution derives from the incident and previous material event. Raw
+observation identity is evidence linkage, not event identity.
+
+Reminder state is DB-backed under
+`launchplane_public_ingress_incident_reminders`, one record per incident and
+matching notification policy. It stores the material-event anchor, bounded
+cadence, last delivered window, and next due time. A monitor pass emits at most
+one reminder for the current overdue window, so downtime or worker backlog does
+not cause a catch-up storm. A material update resets the anchor. Policy removal
+marks prior state inactive; resolution marks it resolved. Suppressed state may
+retain its internal due window for deterministic resumption, but product read
+models expose no next-reminder timestamp until the state is active again.
+
+Acknowledged incidents suppress reminders for the acknowledged material state.
+A material change clears acknowledgement and remains immediately deliverable.
+Silenced incidents preserve observations and events but suppress update and
+reminder delivery only until their required `silenced_until`; expiry reactivates
+delivery and the next unchanged failure may emit the current overdue reminder.
+Resolution is always deliverable so external issue sinks can close. A recovery
+observation resolves only after the health check's configured consecutive-pass
+threshold and writes one `resolved` event with `resolution_reason = recovered`.
+If monitoring authority makes a check ineligible, a typed reconciliation
+observation resolves it immediately with
+`resolution_reason = monitoring_intent_changed`; this is not endpoint recovery.
 
 TLS certificate observations do not introduce a parallel storage family. They
 reuse `launchplane_public_ingress_observations` with `check_kind = "tls"` and a
@@ -920,17 +1012,23 @@ where Launchplane attempted to notify operators.
 
 Public ingress notification policy records are DB-backed Launchplane records
 under `launchplane_public_ingress_notification_policies`. They select enabled
-destinations for incident events by product, context, and instance. The initial
-destination drivers are GitHub issues, email, and Discord. Policies store
-routing intent and managed secret references only; they must not store Discord
-webhook URLs, SMTP passwords, or production destination values as code defaults.
+destinations for incident events by product, context, and instance and store a
+bounded reminder cadence. The generic default is six hours; accepted policy
+values are 15 minutes through seven days. The initial destination drivers are
+GitHub issues, email, and Discord. Policies store routing intent and managed
+secret references only; they must not store Discord webhook URLs, SMTP
+passwords, or production destination values as code defaults.
 
 Public ingress notification attempt records are append-only evidence under
 `launchplane_public_ingress_notification_attempts`. Each attempt is keyed by the
-incident, event, policy, destination, and observation. Attempts record delivered,
-skipped, or failed status plus provider-safe external ids or URLs. Delivery
-attempts are the idempotency boundary for notifications, while incident records
-remain the source of truth for active public-ingress state.
+incident event, policy, and destination; `observation_id` remains evidence only.
+Attempts record delivered, skipped, or failed status plus provider-safe external
+ids or URLs. GitHub outbox rows use the same material event or reminder-window
+identity and include both an event marker and a stable incident marker. A worker
+can therefore recover the existing issue before commenting or closing even when
+the original opening effect completed before its attempt record committed.
+Delivery attempts are the idempotency boundary for notifications, while incident
+records remain the source of truth for active public-ingress state.
 
 ## Every Code Notification Records
 
@@ -1091,7 +1189,30 @@ state/
   concrete backup evidence such as snapshot or archive identifiers.
 - Odoo prod backup-gate records are created by the Launchplane Odoo driver after
   a real compose-local DB dump and filestore archive capture. They should not be
-  synthesized with generic operator assertions for release drills.
+  synthesized with generic operator assertions for release drills. Passing
+  records include the request nonce, exact backup/database identity, non-empty
+  artifact sizes, and SHA-256 values returned by the exact Dokploy schedule
+  deployment. Dokploy terminal status alone is not backup evidence; a missing,
+  duplicate, malformed, or mismatched bounded completion marker writes a failed
+  gate record.
+- A retained-volume backup import writes the same schema-v1 logical backup
+  manifest and artifact evidence under a distinct backup-gate source. Its record
+  additionally binds the reviewed import plan and operation, retained source
+  volume identities and labels, source and destination database identities,
+  PostgreSQL 17 control/checkpoint evidence, preserved staging-clone volume, and
+  exact schedule deployment. Backup verification and guarded restore accept this
+  source. Routine promotion explicitly rejects it so incident-recovery imports
+  cannot satisfy the ordinary backup-before-promote gate.
+- Odoo backup verification accepts only the exact required, passing
+  `BackupGateRecord` written by the Odoo prod backup-gate source for the same
+  context and prod instance. It recomputes backup paths from DB-backed runtime
+  records and requires the record's path evidence to match before provider
+  inspection. Every verification attempt also writes a separate
+  `BackupGateRecord` from the Odoo backup-verification source. That durable
+  record binds the exact backup record, request nonce, database identity,
+  artifact paths, SHA-256 values, counts, sizes, and bounded per-check status.
+  A passing verification record is evidence for the dedicated restore planner;
+  it does not authorize routine target replacement or promotion.
 - VeriReel prod backup-gate records remain the promotion evidence and replay
   authority, but long-running backup-gate execution is queued separately in
   `launchplane_verireel_prod_backup_gate_operations` for DB-backed storage and
@@ -1148,8 +1269,10 @@ state/
   create/read/poll boundary for the service-backed workflow: they store the
   original request, idempotency key, request fingerprint, active status/phase,
   deployment-record id when available, final driver result, and terminal error.
-  A `pending` or `running` record is the single-flight guard for that
-  product/context/instance.
+  A `pending`, `running`, or `reconciliation_required` record is the
+  single-flight guard for that product/context/instance. Unsafe lease expiry
+  clears the stale lease but keeps the lane blocked until an authorized operator
+  has inspected provider state and records cancellation evidence.
 - Odoo stable target replacement apply writes durable operation records under
   `odoo_stable_target_replacement_operations`. These records mirror the stable
   bootstrap operation boundary for the guarded `recreate-in-place` replacement
@@ -1166,7 +1289,56 @@ state/
   for a concurrent owner id to settle, then give that owner record its own
   bounded settle window before clearing abandoned empty or orphaned reservations
   so an interrupted writer cannot block the lane forever.
-- New records for all three durable driver queues use schema version 2 and
+- Odoo production backup restore apply writes dedicated operation records under
+  `odoo_prod_backup_restore_operations`. The immutable plan binds the exact
+  product/context/prod instance, passing backup and verification record ids and
+  timestamps, current artifact, old and fresh database volumes, unchanged data
+  and log volumes, archive paths, hashes, counts, sizes, staging/quarantine
+  paths, target, domains, and runtime identity. The operation stores the caller
+  idempotency scope, request fingerprint, reviewed plan fingerprint,
+  authorization provenance, lease ownership, monotonic phase checkpoints,
+  terminal result, and bounded error. A partial unique index permits only one
+  pending, running, or reconciliation-required restore for a
+  product/context/instance. Expired work may be recovered only before a
+  provider-effect phase; after any provider effect has started, lease recovery
+  moves the operation to `reconciliation_required` and preserves the lane fence
+  for explicit operator review.
+- Odoo retained-volume backup import plan and apply write dedicated operation
+  records under `odoo_prod_retained_volume_backup_import_operations`. Plan and
+  apply have separate operation kinds, request fingerprints, idempotency scopes,
+  and authorization actions. Apply stores the immutable reviewed plan and exact
+  plan fingerprint. Both kinds retain lease ownership, monotonic checkpoints,
+  terminal evidence, and bounded errors. One partial unique index reserves the
+  product/context/instance lane across plan and apply while work is pending,
+  running, or reconciliation-required. Expired work is recoverable only before a
+  provider-effect checkpoint; later expiry preserves a reconciliation-required
+  lane fence for explicit operator inspection. When the read-only provider
+  inspection terminates unsuccessfully, its checkpoint may contain the exact
+  inspection schedule/deployment ids when known, request nonce, backup-record
+  id, and one allowlisted failure stage/code pair. Provider log or exception
+  text is not persisted in the operation record. Pre-result failures use a
+  `provider_control` stage with distinct target, schedule, trigger, wait, and
+  identity codes; result-read and result-parse failures use bounded `result`
+  codes.
+- Bootstrap, target replacement, production backup restore, and retained-volume
+  backup import creation and worker claim also share one storage-level
+  stable-lane reservation.
+  Filesystem storage serializes the exact product/context/instance with one lock;
+  PostgreSQL uses a transaction-scoped advisory lock and checks all four blocking
+  operation tables before inserting or claiming. Claims choose one deterministic
+  owner across legacy cross-kind queue entries, prioritizing reconciliation and
+  running work before the oldest pending record. Per-table partial indexes remain
+  a second same-kind defense, but no operation kind can race another into the
+  same lane. The schema migration refuses to activate this worker contract when
+  an existing database already contains multiple blocking operation kinds for
+  one lane, so rollout cannot silently inherit an ambiguous queue.
+- Odoo target-replacement plan snapshots include the exact live values for
+  `ODOO_DATA_VOLUME`, `ODOO_LOG_VOLUME`, and `ODOO_DB_VOLUME`. Existing-data
+  plans compare those values with resolved DB-backed desired runtime authority
+  and block on any difference before an apply operation can be created. Volume
+  changes remain explicit rebuild/restore decisions rather than implicit
+  `data_source_mode=existing` behavior.
+- New records for all five durable driver queues use schema version 2 and
   persist authorization provenance in the canonical operation payload: action,
   product, context, exact instances, managed set/rule ids, policy record id,
   revision, schema version, digest, source, authorization time, and normalized
@@ -1182,13 +1354,24 @@ state/
   instances, or caller mismatch terminates the operation with a stable
   `error_code` before provider mutation. Launchplane does not fabricate
   provenance for schema-v1 queued records.
-- Pending Odoo bootstrap, Odoo target-replacement, and VeriReel backup-gate
+- Retained-volume backup import additionally re-evaluates the recorded caller
+  and exact managed rule immediately before its first provider effect. That
+  authorization remains bound for later effects in the same operation so a
+  policy revision cannot stop execution after partial provider mutation; lease
+  loss after the effect boundary instead preserves a reconciliation-required
+  fence.
+- Pending Odoo bootstrap, Odoo target-replacement, Odoo backup-restore, Odoo
+  retained-volume backup-import, and VeriReel backup-gate
   operations expose authenticated `POST .../operations/{operation_id}/cancel`
   endpoints. Cancellation is idempotent after it commits, records the normalized
   caller, reason, timestamp, and trace id, releases the active-lane predicate,
-  and never rewrites `running` or terminal work. A claim that wins the race
-  returns `409 operation_not_pending`; operators must inspect that running
-  operation rather than assume cancellation prevented an effect.
+  and never rewrites `running` or terminal work. Odoo operations in
+  `reconciliation_required` may also be cancelled only with a structured
+  safe-release attestation that records an inspection timestamp between the
+  fence and cancellation request, observed provider state, and an evidence
+  reference. A claim that wins the race returns `409 operation_not_pending`;
+  operators must inspect that running operation rather than assume cancellation
+  prevented an effect.
 - The target execution model for these Odoo long-running operation records is a
   dedicated Launchplane worker process backed by DB leases and heartbeats. The
   HTTP route creates or replays the operation record and returns the poll URL;
@@ -1196,7 +1379,11 @@ state/
   daemon threads. Operation
   records carry execution fields for `attempt`, `lease_owner`,
   `lease_expires_at`, and `heartbeat_at`; terminal writes are guarded by the
-  current lease owner so stale workers cannot overwrite recovered work. Worker
+  current lease owner so stale workers cannot overwrite recovered work.
+  Filesystem mutations and recovery share the exact operation lock, while SQLite
+  starts an immediate write transaction before reading mutable operation state;
+  the recovery fence and stale-worker heartbeat/checkpoint/completion are
+  therefore one atomic order. Worker
   entry points require DB-backed storage: `uv run launchplane service
 odoo-workers run-once` performs one recovery/claim/execution pass, `uv run
 launchplane service odoo-workers reconcile` performs the same expired-lease
@@ -1747,11 +1934,14 @@ preflights.
   including Docker credential isolation and Docker toolchain/version policy;
   they are not product deploy authority and they do not replace route-specific
   authorization, promotion, backup-gate, or provider safety checks.
-- Runner lane registration audit records are the durable record for the first
-  Launchplane-controlled repository-runner registration host adapter. They live
-  in `launchplane_runner_lane_registration_audits`, are written through
-  `POST /v1/evidence/runner-lane-registration/audits`, and preserve dry-run or
-  apply evidence without storing GitHub runner registration tokens.
+- Runner lane lifecycle audit records are the durable record for the narrow
+  Launchplane-controlled repository-runner registration and retirement host
+  adapters. They retain the compatibility name
+  `launchplane_runner_lane_registration_audits`, are written through
+  `POST /v1/evidence/runner-lane-registration/audits`, and distinguish
+  `register` from `retire` through the typed operation field. Records preserve
+  dry-run or apply evidence without storing GitHub runner registration tokens or
+  other credentials.
 - Scoped agent write-intent evaluation is exposed at
   `POST /v1/agent/write-intents/evaluate`. It validates intent shape, maps the
   intent to an exact existing policy action, evaluates authorization, and returns

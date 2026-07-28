@@ -80,6 +80,20 @@ def require_odoo_stable_operation_worker_store(
         "heartbeat_odoo_stable_target_replacement_operation_record",
         "complete_odoo_stable_target_replacement_operation_record",
         "recover_expired_odoo_stable_target_replacement_operation_records",
+        "list_odoo_prod_backup_restore_operation_records",
+        "read_odoo_prod_backup_restore_operation_record",
+        "claim_next_odoo_prod_backup_restore_operation_record",
+        "heartbeat_odoo_prod_backup_restore_operation_record",
+        "checkpoint_odoo_prod_backup_restore_operation_record",
+        "complete_odoo_prod_backup_restore_operation_record",
+        "recover_expired_odoo_prod_backup_restore_operation_records",
+        "list_odoo_prod_retained_volume_backup_import_operation_records",
+        "read_odoo_prod_retained_volume_backup_import_operation_record",
+        "claim_next_odoo_prod_retained_volume_backup_import_operation_record",
+        "heartbeat_odoo_prod_retained_volume_backup_import_operation_record",
+        "checkpoint_odoo_prod_retained_volume_backup_import_operation_record",
+        "complete_odoo_prod_retained_volume_backup_import_operation_record",
+        "recover_expired_odoo_prod_retained_volume_backup_import_operation_records",
     )
     if all(callable(getattr(record_store, method_name, None)) for method_name in required_methods):
         return cast(OdooStableOperationWorkerStore, record_store)

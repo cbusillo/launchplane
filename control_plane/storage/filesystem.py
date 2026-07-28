@@ -19,6 +19,7 @@ from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
@@ -57,11 +58,34 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_prod_backup_restore_operation import (
+    ODOO_PROD_BACKUP_RESTORE_OPERATION_PHASE_SEQUENCE,
+    OdooProdBackupRestoreCheckpoint,
+    OdooProdBackupRestoreOperationPhase,
+    OdooProdBackupRestoreOperationRecord,
+    odoo_prod_backup_restore_operation_is_verification_replay_claim,
+    requeue_odoo_prod_backup_restore_verification_replay,
+)
+from control_plane.contracts.odoo_prod_retained_volume_backup_import_operation import (
+    ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_PHASE_SEQUENCE,
+    OdooProdRetainedVolumeBackupImportCheckpoint,
+    OdooProdRetainedVolumeBackupImportOperationPhase,
+    OdooProdRetainedVolumeBackupImportOperationRecord,
+)
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
+)
+from control_plane.odoo_stable_lane import (
+    ODOO_STABLE_LANE_BLOCKING_STATUSES,
+    OdooStableLaneOperationConflictError,
+    OdooStableLaneOperationKind,
+    OdooStableLaneOperationOwner,
+    OdooStableLaneOperationRecord,
+    odoo_stable_lane_cancellation_is_allowed,
+    odoo_stable_lane_operation_priority,
 )
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -86,8 +110,13 @@ from control_plane.contracts.product_health_monitoring_migration import (
 from control_plane.contracts.product_health_monitoring_migration import (
     migrate_product_profile_health_monitoring_payload,
 )
+from control_plane.contracts.product_monitoring_intent_migration import (
+    migrate_product_profile_monitoring_intent_payload,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentEventRecord,
+    PublicIngressIncidentReminderStateRecord,
     PublicIngressNotificationAttemptRecord,
 )
 from control_plane.contracts.public_ingress_monitoring import (
@@ -2091,6 +2120,7 @@ class FilesystemRecordStore:
         instance_name: str = "",
         check_name: str = "",
         check_kind: str = "",
+        incident_id: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]:
         records = [
@@ -2108,6 +2138,7 @@ class FilesystemRecordStore:
                 == canonical_health_check_record_token(check_name)
             )
             and (not check_kind or record.check_kind == check_kind)
+            and (not incident_id or record.incident_id == incident_id)
         ]
         records.sort(key=lambda record: (record.observed_at, record.record_id), reverse=True)
         if limit is not None:
@@ -2116,6 +2147,66 @@ class FilesystemRecordStore:
 
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> Path:
         return self._write_model("launchplane_public_ingress_incidents", record.incident_id, record)
+
+    def write_public_ingress_incident_event_record(
+        self, record: PublicIngressIncidentEventRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_public_ingress_incident_events", record.event_id, record
+        )
+
+    def list_public_ingress_incident_event_records(
+        self,
+        *,
+        incident_id: str = "",
+        event: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentEventRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PublicIngressIncidentEventRecord,
+                "launchplane_public_ingress_incident_events",
+            )
+            if (not incident_id or record.incident_id == incident_id)
+            and (not event or record.event == event)
+        ]
+        records.sort(key=lambda record: (record.occurred_at, record.event_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_public_ingress_incident_reminder_state_record(
+        self, record: PublicIngressIncidentReminderStateRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_public_ingress_incident_reminders",
+            record.reminder_state_id,
+            record,
+        )
+
+    def list_public_ingress_incident_reminder_state_records(
+        self,
+        *,
+        incident_id: str = "",
+        policy_id: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentReminderStateRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PublicIngressIncidentReminderStateRecord,
+                "launchplane_public_ingress_incident_reminders",
+            )
+            if (not incident_id or record.incident_id == incident_id)
+            and (not policy_id or record.policy_id == policy_id)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.reminder_state_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def list_public_ingress_incident_records(
         self,
@@ -2238,7 +2329,9 @@ class FilesystemRecordStore:
         self, record_path: Path
     ) -> LaunchplaneProductProfileRecord:
         payload = json.loads(record_path.read_text(encoding="utf-8"))
-        migrated_payload = migrate_product_profile_health_monitoring_payload(payload)
+        migrated_payload = migrate_product_profile_monitoring_intent_payload(
+            migrate_product_profile_health_monitoring_payload(payload)
+        )
         record = LaunchplaneProductProfileRecord.model_validate(migrated_payload)
         if migrated_payload != payload:
             record_path.write_text(
@@ -2310,6 +2403,28 @@ class FilesystemRecordStore:
     def create_odoo_stable_bootstrap_operation_record_if_no_active_lane(
         self, record: OdooStableBootstrapOperationRecord
     ) -> tuple[OdooStableBootstrapOperationRecord, bool]:
+        reservation_id = _odoo_stable_lane_reservation_id(
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+        )
+        with self._exclusive_record_lock("odoo_stable_lane_operation_reservations", reservation_id):
+            active_operation = self._active_odoo_stable_lane_operation(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_operation is not None:
+                if isinstance(active_operation, OdooStableBootstrapOperationRecord):
+                    return active_operation, False
+                raise OdooStableLaneOperationConflictError(
+                    _odoo_stable_lane_operation_owner(active_operation)
+                )
+            return self._create_odoo_stable_bootstrap_operation_record(record)
+
+    def _create_odoo_stable_bootstrap_operation_record(
+        self, record: OdooStableBootstrapOperationRecord
+    ) -> tuple[OdooStableBootstrapOperationRecord, bool]:
         reservation_id = _odoo_stable_bootstrap_lane_reservation_id(record)
         reservation_path = self._record_path(
             "odoo_stable_bootstrap_lane_reservations", reservation_id
@@ -2334,13 +2449,13 @@ class FilesystemRecordStore:
                 reserved_operation = self._wait_for_odoo_stable_bootstrap_reserved_operation(
                     reserved_operation_id, owner_record_deadline
                 )
-                if reserved_operation is not None and reserved_operation.status in {
-                    "pending",
-                    "running",
-                }:
+                if (
+                    reserved_operation is not None
+                    and reserved_operation.status in ODOO_STABLE_LANE_BLOCKING_STATUSES
+                ):
                     return reserved_operation, False
             reservation_path.unlink(missing_ok=True)
-            return self.create_odoo_stable_bootstrap_operation_record_if_no_active_lane(record)
+            return self._create_odoo_stable_bootstrap_operation_record(record)
         self.write_odoo_stable_bootstrap_operation_record(record)
         return record, True
 
@@ -2389,7 +2504,11 @@ class FilesystemRecordStore:
             raise ValueError("Odoo stable bootstrap cancellation requires a cancelled record.")
         with self._exclusive_record_lock("odoo_stable_bootstrap_operations", record.operation_id):
             current_record = self.read_odoo_stable_bootstrap_operation_record(record.operation_id)
-            if current_record.status != "pending":
+            if not odoo_stable_lane_cancellation_is_allowed(
+                current_status=current_record.status,
+                reconciliation_required_at=current_record.updated_at,
+                cancellation=record.cancellation,
+            ):
                 return False
             self.write_odoo_stable_bootstrap_operation_record(record)
             return True
@@ -2415,28 +2534,49 @@ class FilesystemRecordStore:
             pending_records,
             key=lambda item: (item.created_at, item.operation_id),
         ):
+            reservation_id = _odoo_stable_lane_reservation_id(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
             with self._exclusive_record_lock(
-                "odoo_stable_bootstrap_operations", record.operation_id
+                "odoo_stable_lane_operation_reservations",
+                reservation_id,
             ):
-                current_record = self.read_odoo_stable_bootstrap_operation_record(
-                    record.operation_id
+                active_operation = self._active_odoo_stable_lane_operation(
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
                 )
-                if current_record.status != "pending":
+                if active_operation is None or _odoo_stable_lane_operation_owner(
+                    active_operation
+                ) != OdooStableLaneOperationOwner(
+                    operation_kind="stable_bootstrap",
+                    operation_id=record.operation_id,
+                ):
                     continue
-                claimed_record = current_record.model_copy(
-                    update={
-                        "status": "running",
-                        "phase": "running",
-                        "started_at": current_record.started_at or claimed_at,
-                        "updated_at": claimed_at,
-                        "lease_owner": normalized_lease_owner,
-                        "lease_expires_at": lease_expires_at.strip(),
-                        "heartbeat_at": claimed_at.strip(),
-                        "attempt": current_record.attempt + 1,
-                    }
-                )
-                self.write_odoo_stable_bootstrap_operation_record(claimed_record)
-                return claimed_record
+                with self._exclusive_record_lock(
+                    "odoo_stable_bootstrap_operations", record.operation_id
+                ):
+                    current_record = self.read_odoo_stable_bootstrap_operation_record(
+                        record.operation_id
+                    )
+                    if current_record.status != "pending":
+                        continue
+                    claimed_record = current_record.model_copy(
+                        update={
+                            "status": "running",
+                            "phase": "running",
+                            "started_at": current_record.started_at or claimed_at,
+                            "updated_at": claimed_at,
+                            "lease_owner": normalized_lease_owner,
+                            "lease_expires_at": lease_expires_at.strip(),
+                            "heartbeat_at": claimed_at.strip(),
+                            "attempt": current_record.attempt + 1,
+                        }
+                    )
+                    self.write_odoo_stable_bootstrap_operation_record(claimed_record)
+                    return claimed_record
         return None
 
     def heartbeat_odoo_stable_bootstrap_operation_record(
@@ -2447,23 +2587,24 @@ class FilesystemRecordStore:
         heartbeat_at: str,
         lease_expires_at: str,
     ) -> bool:
-        record = self.read_odoo_stable_bootstrap_operation_record(operation_id)
-        if (
-            record.status != "running"
-            or record.lease_owner != lease_owner.strip()
-            or not record.lease_expires_at
-            or record.lease_expires_at <= heartbeat_at.strip()
-        ):
-            return False
-        heartbeat_record = record.model_copy(
-            update={
-                "heartbeat_at": heartbeat_at.strip(),
-                "lease_expires_at": lease_expires_at.strip(),
-                "updated_at": heartbeat_at.strip(),
-            }
-        )
-        self.write_odoo_stable_bootstrap_operation_record(heartbeat_record)
-        return True
+        with self._exclusive_record_lock("odoo_stable_bootstrap_operations", operation_id):
+            record = self.read_odoo_stable_bootstrap_operation_record(operation_id)
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= heartbeat_at.strip()
+            ):
+                return False
+            heartbeat_record = record.model_copy(
+                update={
+                    "heartbeat_at": heartbeat_at.strip(),
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "updated_at": heartbeat_at.strip(),
+                }
+            )
+            self.write_odoo_stable_bootstrap_operation_record(heartbeat_record)
+            return True
 
     def complete_odoo_stable_bootstrap_operation_record(
         self,
@@ -2471,17 +2612,18 @@ class FilesystemRecordStore:
         record: OdooStableBootstrapOperationRecord,
         lease_owner: str,
     ) -> bool:
-        current_record = self.read_odoo_stable_bootstrap_operation_record(record.operation_id)
-        completed_at = _utc_now_timestamp()
-        if (
-            current_record.status != "running"
-            or current_record.lease_owner != lease_owner.strip()
-            or not current_record.lease_expires_at
-            or current_record.lease_expires_at <= completed_at
-        ):
-            return False
-        self.write_odoo_stable_bootstrap_operation_record(record)
-        return True
+        with self._exclusive_record_lock("odoo_stable_bootstrap_operations", record.operation_id):
+            current_record = self.read_odoo_stable_bootstrap_operation_record(record.operation_id)
+            completed_at = _utc_now_timestamp()
+            if (
+                current_record.status != "running"
+                or current_record.lease_owner != lease_owner.strip()
+                or not current_record.lease_expires_at
+                or current_record.lease_expires_at <= completed_at
+            ):
+                return False
+            self.write_odoo_stable_bootstrap_operation_record(record)
+            return True
 
     def recover_expired_odoo_stable_bootstrap_operation_records(
         self,
@@ -2491,38 +2633,62 @@ class FilesystemRecordStore:
         max_attempts: int,
     ) -> tuple[str, ...]:
         affected_operation_ids: list[str] = []
-        for record in self.list_odoo_stable_bootstrap_operation_records(statuses=("running",)):
-            if record.lease_expires_at and record.lease_expires_at >= now:
-                continue
-            affected_operation_ids.append(record.operation_id)
-            if record.phase in safe_phases and record.attempt < max_attempts:
-                recovered_record = record.model_copy(
-                    update={
-                        "status": "pending",
-                        "started_at": "",
-                        "updated_at": now,
-                        "lease_owner": "",
-                        "lease_expires_at": "",
-                        "heartbeat_at": "",
-                    }
-                )
-            else:
-                recovered_record = record.model_copy(
-                    update={
-                        "status": "fail",
-                        "phase": "failed",
-                        "updated_at": now,
-                        "finished_at": now,
-                        "lease_owner": "",
-                        "lease_expires_at": "",
-                        "heartbeat_at": "",
-                        "error_message": (
-                            f"Odoo stable bootstrap operation lease expired in "
-                            f"phase {record.phase!r}; unsafe to retry automatically."
-                        ),
-                    }
-                )
-            self.write_odoo_stable_bootstrap_operation_record(recovered_record)
+        candidates = self.list_odoo_stable_bootstrap_operation_records(statuses=("running",))
+        for candidate in candidates:
+            with self._exclusive_record_lock(
+                "odoo_stable_bootstrap_operations", candidate.operation_id
+            ):
+                record = self.read_odoo_stable_bootstrap_operation_record(candidate.operation_id)
+                if record.status != "running" or (
+                    record.lease_expires_at and record.lease_expires_at >= now
+                ):
+                    continue
+                affected_operation_ids.append(record.operation_id)
+                if record.phase in safe_phases and record.attempt < max_attempts:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "pending",
+                            "started_at": "",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                        }
+                    )
+                elif record.phase in safe_phases:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "updated_at": now,
+                            "finished_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_code": "operation_attempts_exhausted",
+                            "error_message": (
+                                "Odoo stable bootstrap operation exhausted automatic attempts in "
+                                f"safe phase {record.phase!r}."
+                            ),
+                        }
+                    )
+                else:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "reconciliation_required",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_code": "operation_reconciliation_required",
+                            "error_message": (
+                                f"Odoo stable bootstrap operation lease expired in "
+                                f"phase {record.phase!r}; provider state requires operator "
+                                "reconciliation before the lane can be released."
+                            ),
+                        }
+                    )
+                self.write_odoo_stable_bootstrap_operation_record(recovered_record)
         return tuple(affected_operation_ids)
 
     def _wait_for_odoo_stable_bootstrap_reservation_owner(
@@ -2610,12 +2776,38 @@ class FilesystemRecordStore:
             current_record = self.read_odoo_stable_target_replacement_operation_record(
                 record.operation_id
             )
-            if current_record.status != "pending":
+            if not odoo_stable_lane_cancellation_is_allowed(
+                current_status=current_record.status,
+                reconciliation_required_at=current_record.updated_at,
+                cancellation=record.cancellation,
+            ):
                 return False
             self.write_odoo_stable_target_replacement_operation_record(record)
             return True
 
     def create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+        self, record: OdooStableTargetReplacementOperationRecord
+    ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]:
+        reservation_id = _odoo_stable_lane_reservation_id(
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+        )
+        with self._exclusive_record_lock("odoo_stable_lane_operation_reservations", reservation_id):
+            active_operation = self._active_odoo_stable_lane_operation(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_operation is not None:
+                if isinstance(active_operation, OdooStableTargetReplacementOperationRecord):
+                    return active_operation, False
+                raise OdooStableLaneOperationConflictError(
+                    _odoo_stable_lane_operation_owner(active_operation)
+                )
+            return self._create_odoo_stable_target_replacement_operation_record(record)
+
+    def _create_odoo_stable_target_replacement_operation_record(
         self, record: OdooStableTargetReplacementOperationRecord
     ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]:
         reservation_id = _odoo_target_replacement_lane_reservation_id(record)
@@ -2645,15 +2837,13 @@ class FilesystemRecordStore:
                         reserved_operation_id, owner_record_deadline
                     )
                 )
-                if reserved_operation is not None and reserved_operation.status in {
-                    "pending",
-                    "running",
-                }:
+                if (
+                    reserved_operation is not None
+                    and reserved_operation.status in ODOO_STABLE_LANE_BLOCKING_STATUSES
+                ):
                     return reserved_operation, False
             reservation_path.unlink(missing_ok=True)
-            return self.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
-                record
-            )
+            return self._create_odoo_stable_target_replacement_operation_record(record)
         self.write_odoo_stable_target_replacement_operation_record(record)
         return record, True
 
@@ -2680,28 +2870,49 @@ class FilesystemRecordStore:
             pending_records,
             key=lambda item: (item.created_at, item.operation_id),
         ):
+            reservation_id = _odoo_stable_lane_reservation_id(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
             with self._exclusive_record_lock(
-                "odoo_stable_target_replacement_operations", record.operation_id
+                "odoo_stable_lane_operation_reservations",
+                reservation_id,
             ):
-                current_record = self.read_odoo_stable_target_replacement_operation_record(
-                    record.operation_id
+                active_operation = self._active_odoo_stable_lane_operation(
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
                 )
-                if current_record.status != "pending":
+                if active_operation is None or _odoo_stable_lane_operation_owner(
+                    active_operation
+                ) != OdooStableLaneOperationOwner(
+                    operation_kind="target_replacement",
+                    operation_id=record.operation_id,
+                ):
                     continue
-                claimed_record = current_record.model_copy(
-                    update={
-                        "status": "running",
-                        "phase": "running",
-                        "started_at": current_record.started_at or claimed_at,
-                        "updated_at": claimed_at,
-                        "lease_owner": normalized_lease_owner,
-                        "lease_expires_at": lease_expires_at.strip(),
-                        "heartbeat_at": claimed_at.strip(),
-                        "attempt": current_record.attempt + 1,
-                    }
-                )
-                self.write_odoo_stable_target_replacement_operation_record(claimed_record)
-                return claimed_record
+                with self._exclusive_record_lock(
+                    "odoo_stable_target_replacement_operations", record.operation_id
+                ):
+                    current_record = self.read_odoo_stable_target_replacement_operation_record(
+                        record.operation_id
+                    )
+                    if current_record.status != "pending":
+                        continue
+                    claimed_record = current_record.model_copy(
+                        update={
+                            "status": "running",
+                            "phase": "running",
+                            "started_at": current_record.started_at or claimed_at,
+                            "updated_at": claimed_at,
+                            "lease_owner": normalized_lease_owner,
+                            "lease_expires_at": lease_expires_at.strip(),
+                            "heartbeat_at": claimed_at.strip(),
+                            "attempt": current_record.attempt + 1,
+                        }
+                    )
+                    self.write_odoo_stable_target_replacement_operation_record(claimed_record)
+                    return claimed_record
         return None
 
     def heartbeat_odoo_stable_target_replacement_operation_record(
@@ -2712,23 +2923,24 @@ class FilesystemRecordStore:
         heartbeat_at: str,
         lease_expires_at: str,
     ) -> bool:
-        record = self.read_odoo_stable_target_replacement_operation_record(operation_id)
-        if (
-            record.status != "running"
-            or record.lease_owner != lease_owner.strip()
-            or not record.lease_expires_at
-            or record.lease_expires_at <= heartbeat_at.strip()
-        ):
-            return False
-        heartbeat_record = record.model_copy(
-            update={
-                "heartbeat_at": heartbeat_at.strip(),
-                "lease_expires_at": lease_expires_at.strip(),
-                "updated_at": heartbeat_at.strip(),
-            }
-        )
-        self.write_odoo_stable_target_replacement_operation_record(heartbeat_record)
-        return True
+        with self._exclusive_record_lock("odoo_stable_target_replacement_operations", operation_id):
+            record = self.read_odoo_stable_target_replacement_operation_record(operation_id)
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= heartbeat_at.strip()
+            ):
+                return False
+            heartbeat_record = record.model_copy(
+                update={
+                    "heartbeat_at": heartbeat_at.strip(),
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "updated_at": heartbeat_at.strip(),
+                }
+            )
+            self.write_odoo_stable_target_replacement_operation_record(heartbeat_record)
+            return True
 
     def complete_odoo_stable_target_replacement_operation_record(
         self,
@@ -2736,19 +2948,22 @@ class FilesystemRecordStore:
         record: OdooStableTargetReplacementOperationRecord,
         lease_owner: str,
     ) -> bool:
-        current_record = self.read_odoo_stable_target_replacement_operation_record(
-            record.operation_id
-        )
-        completed_at = _utc_now_timestamp()
-        if (
-            current_record.status != "running"
-            or current_record.lease_owner != lease_owner.strip()
-            or not current_record.lease_expires_at
-            or current_record.lease_expires_at <= completed_at
+        with self._exclusive_record_lock(
+            "odoo_stable_target_replacement_operations", record.operation_id
         ):
-            return False
-        self.write_odoo_stable_target_replacement_operation_record(record)
-        return True
+            current_record = self.read_odoo_stable_target_replacement_operation_record(
+                record.operation_id
+            )
+            completed_at = _utc_now_timestamp()
+            if (
+                current_record.status != "running"
+                or current_record.lease_owner != lease_owner.strip()
+                or not current_record.lease_expires_at
+                or current_record.lease_expires_at <= completed_at
+            ):
+                return False
+            self.write_odoo_stable_target_replacement_operation_record(record)
+            return True
 
     def recover_expired_odoo_stable_target_replacement_operation_records(
         self,
@@ -2758,40 +2973,819 @@ class FilesystemRecordStore:
         max_attempts: int,
     ) -> tuple[str, ...]:
         affected_operation_ids: list[str] = []
-        for record in self.list_odoo_stable_target_replacement_operation_records(
+        candidates = self.list_odoo_stable_target_replacement_operation_records(
             statuses=("running",)
+        )
+        for candidate in candidates:
+            with self._exclusive_record_lock(
+                "odoo_stable_target_replacement_operations", candidate.operation_id
+            ):
+                record = self.read_odoo_stable_target_replacement_operation_record(
+                    candidate.operation_id
+                )
+                if record.status != "running" or (
+                    record.lease_expires_at and record.lease_expires_at >= now
+                ):
+                    continue
+                affected_operation_ids.append(record.operation_id)
+                if record.phase in safe_phases and record.attempt < max_attempts:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "pending",
+                            "started_at": "",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                        }
+                    )
+                elif record.phase in safe_phases:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "updated_at": now,
+                            "finished_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_code": "operation_attempts_exhausted",
+                            "error_message": (
+                                "Odoo stable target replacement operation exhausted automatic "
+                                f"attempts in safe phase {record.phase!r}."
+                            ),
+                        }
+                    )
+                else:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "reconciliation_required",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_code": "operation_reconciliation_required",
+                            "error_message": (
+                                f"Odoo stable target replacement operation lease expired in "
+                                f"phase {record.phase!r}; provider state requires operator "
+                                "reconciliation before the lane can be released."
+                            ),
+                        }
+                    )
+                self.write_odoo_stable_target_replacement_operation_record(recovered_record)
+        return tuple(affected_operation_ids)
+
+    def write_odoo_prod_backup_restore_operation_record(
+        self, record: OdooProdBackupRestoreOperationRecord
+    ) -> Path:
+        return self._write_model("odoo_prod_backup_restore_operations", record.operation_id, record)
+
+    def read_odoo_prod_backup_restore_operation_record(
+        self, operation_id: str
+    ) -> OdooProdBackupRestoreOperationRecord:
+        return OdooProdBackupRestoreOperationRecord.model_validate(
+            self._read_model(
+                OdooProdBackupRestoreOperationRecord,
+                "odoo_prod_backup_restore_operations",
+                operation_id,
+            ).model_dump(mode="json")
+        )
+
+    def list_odoo_prod_backup_restore_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        idempotency_scope: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooProdBackupRestoreOperationRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                OdooProdBackupRestoreOperationRecord,
+                "odoo_prod_backup_restore_operations",
+            )
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+            and (not idempotency_key or record.idempotency_key == idempotency_key)
+            and (not idempotency_scope or record.idempotency_scope == idempotency_scope)
+            and (not statuses or record.status in statuses)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.operation_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def cancel_pending_odoo_prod_backup_restore_operation_record(
+        self, record: OdooProdBackupRestoreOperationRecord
+    ) -> bool:
+        if record.status != "cancelled" or record.phase != "cancelled":
+            raise ValueError("Odoo backup restore cancellation requires a cancelled record.")
+        with self._exclusive_record_lock(
+            "odoo_prod_backup_restore_operations", record.operation_id
         ):
-            if record.lease_expires_at and record.lease_expires_at >= now:
-                continue
-            affected_operation_ids.append(record.operation_id)
-            if record.phase in safe_phases and record.attempt < max_attempts:
-                recovered_record = record.model_copy(
-                    update={
-                        "status": "pending",
-                        "started_at": "",
-                        "updated_at": now,
-                        "lease_owner": "",
-                        "lease_expires_at": "",
-                        "heartbeat_at": "",
-                    }
+            current_record = self.read_odoo_prod_backup_restore_operation_record(
+                record.operation_id
+            )
+            if not odoo_stable_lane_cancellation_is_allowed(
+                current_status=current_record.status,
+                reconciliation_required_at=current_record.updated_at,
+                cancellation=record.cancellation,
+            ):
+                return False
+            self.write_odoo_prod_backup_restore_operation_record(record)
+            return True
+
+    def create_odoo_prod_backup_restore_operation_record_if_no_active_lane(
+        self, record: OdooProdBackupRestoreOperationRecord
+    ) -> tuple[OdooProdBackupRestoreOperationRecord, bool]:
+        reservation_id = _odoo_stable_lane_reservation_id(
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+        )
+        with self._exclusive_record_lock("odoo_stable_lane_operation_reservations", reservation_id):
+            active_operation = self._active_odoo_stable_lane_operation(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_operation is not None:
+                if isinstance(active_operation, OdooProdBackupRestoreOperationRecord):
+                    return active_operation, False
+                raise OdooStableLaneOperationConflictError(
+                    _odoo_stable_lane_operation_owner(active_operation)
                 )
-            else:
-                recovered_record = record.model_copy(
-                    update={
-                        "status": "fail",
-                        "phase": "failed",
-                        "updated_at": now,
-                        "finished_at": now,
-                        "lease_owner": "",
-                        "lease_expires_at": "",
-                        "heartbeat_at": "",
-                        "error_message": (
-                            f"Odoo stable target replacement operation lease expired in "
-                            f"phase {record.phase!r}; unsafe to retry automatically."
-                        ),
-                    }
+            self.write_odoo_prod_backup_restore_operation_record(record)
+            return record, True
+
+    def requeue_terminal_failed_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        operation_id: str,
+        queued_at: str,
+        authorization: DurableOperationAuthorization,
+    ) -> OdooProdBackupRestoreOperationRecord | None:
+        reservation_id = ""
+        current_record = self.read_odoo_prod_backup_restore_operation_record(operation_id.strip())
+        reservation_id = _odoo_stable_lane_reservation_id(
+            product=current_record.product,
+            context=current_record.context,
+            instance=current_record.instance,
+        )
+        with self._exclusive_record_lock("odoo_stable_lane_operation_reservations", reservation_id):
+            active_operation = self._active_odoo_stable_lane_operation(
+                product=current_record.product,
+                context=current_record.context,
+                instance=current_record.instance,
+            )
+            if active_operation is not None:
+                return None
+            with self._exclusive_record_lock(
+                "odoo_prod_backup_restore_operations", current_record.operation_id
+            ):
+                locked_record = self.read_odoo_prod_backup_restore_operation_record(
+                    current_record.operation_id
                 )
-            self.write_odoo_stable_target_replacement_operation_record(recovered_record)
+                if locked_record.status != "fail":
+                    return None
+                requeued_record = requeue_odoo_prod_backup_restore_verification_replay(
+                    operation=locked_record,
+                    queued_at=queued_at,
+                    authorization=authorization,
+                )
+                self.write_odoo_prod_backup_restore_operation_record(requeued_record)
+                return requeued_record
+
+    def claim_next_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> OdooProdBackupRestoreOperationRecord | None:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner or not lease_expires_at.strip() or not claimed_at.strip():
+            raise ValueError("Odoo backup restore claim requires lease evidence.")
+        pending_records = self.list_odoo_prod_backup_restore_operation_records(
+            statuses=("pending",)
+        )
+        for record in sorted(
+            pending_records,
+            key=lambda item: (item.created_at, item.operation_id),
+        ):
+            reservation_id = _odoo_stable_lane_reservation_id(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            with self._exclusive_record_lock(
+                "odoo_stable_lane_operation_reservations",
+                reservation_id,
+            ):
+                active_operation = self._active_odoo_stable_lane_operation(
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
+                if active_operation is None or _odoo_stable_lane_operation_owner(
+                    active_operation
+                ) != OdooStableLaneOperationOwner(
+                    operation_kind="prod_backup_restore",
+                    operation_id=record.operation_id,
+                ):
+                    continue
+                with self._exclusive_record_lock(
+                    "odoo_prod_backup_restore_operations", record.operation_id
+                ):
+                    current_record = self.read_odoo_prod_backup_restore_operation_record(
+                        record.operation_id
+                    )
+                    if current_record.status != "pending":
+                        continue
+                    claimed_record = current_record.model_copy(
+                        update={
+                            "status": "running",
+                            "phase": current_record.phase
+                            if current_record.checkpoints
+                            else "running",
+                            "started_at": current_record.started_at or claimed_at,
+                            "updated_at": claimed_at,
+                            "lease_owner": normalized_lease_owner,
+                            "lease_expires_at": lease_expires_at.strip(),
+                            "heartbeat_at": claimed_at.strip(),
+                            "attempt": current_record.attempt + 1,
+                        }
+                    )
+                    self.write_odoo_prod_backup_restore_operation_record(claimed_record)
+                    return claimed_record
+        return None
+
+    def heartbeat_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        with self._exclusive_record_lock("odoo_prod_backup_restore_operations", operation_id):
+            record = self.read_odoo_prod_backup_restore_operation_record(operation_id)
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= heartbeat_at.strip()
+            ):
+                return False
+            heartbeat_record = record.model_copy(
+                update={
+                    "heartbeat_at": heartbeat_at.strip(),
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "updated_at": heartbeat_at.strip(),
+                }
+            )
+            self.write_odoo_prod_backup_restore_operation_record(heartbeat_record)
+            return True
+
+    def checkpoint_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        phase: OdooProdBackupRestoreOperationPhase,
+        checkpointed_at: str,
+        evidence: dict[str, str],
+    ) -> OdooProdBackupRestoreOperationRecord | None:
+        with self._exclusive_record_lock("odoo_prod_backup_restore_operations", operation_id):
+            record = self.read_odoo_prod_backup_restore_operation_record(operation_id)
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= checkpointed_at.strip()
+            ):
+                return None
+            phase_indexes = {
+                phase_name: index
+                for index, phase_name in enumerate(
+                    ODOO_PROD_BACKUP_RESTORE_OPERATION_PHASE_SEQUENCE
+                )
+            }
+            replay_restart = (
+                phase == "post_deploy_started"
+                and odoo_prod_backup_restore_operation_is_verification_replay_claim(record)
+            )
+            if not replay_restart and phase_indexes[phase] < phase_indexes[record.phase]:
+                return None
+            checkpoint = OdooProdBackupRestoreCheckpoint(
+                phase=phase,
+                recorded_at=checkpointed_at,
+                evidence=evidence,
+            )
+            checkpointed_record = record.model_copy(
+                update={
+                    "phase": phase,
+                    "checkpoints": (*record.checkpoints, checkpoint),
+                    "updated_at": checkpointed_at,
+                }
+            )
+            self.write_odoo_prod_backup_restore_operation_record(checkpointed_record)
+            return checkpointed_record
+
+    def complete_odoo_prod_backup_restore_operation_record(
+        self,
+        *,
+        record: OdooProdBackupRestoreOperationRecord,
+        lease_owner: str,
+    ) -> bool:
+        with self._exclusive_record_lock(
+            "odoo_prod_backup_restore_operations", record.operation_id
+        ):
+            current_record = self.read_odoo_prod_backup_restore_operation_record(
+                record.operation_id
+            )
+            completed_at = _utc_now_timestamp()
+            if (
+                current_record.status != "running"
+                or current_record.lease_owner != lease_owner.strip()
+                or not current_record.lease_expires_at
+                or current_record.lease_expires_at <= completed_at
+            ):
+                return False
+            self.write_odoo_prod_backup_restore_operation_record(record)
+            return True
+
+    def recover_expired_odoo_prod_backup_restore_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]:
+        affected_operation_ids: list[str] = []
+        candidates = self.list_odoo_prod_backup_restore_operation_records(statuses=("running",))
+        for candidate in candidates:
+            with self._exclusive_record_lock(
+                "odoo_prod_backup_restore_operations", candidate.operation_id
+            ):
+                record = self.read_odoo_prod_backup_restore_operation_record(candidate.operation_id)
+                if record.status != "running" or (
+                    record.lease_expires_at and record.lease_expires_at >= now
+                ):
+                    continue
+                affected_operation_ids.append(record.operation_id)
+                if record.phase in safe_phases and record.attempt < max_attempts:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "pending",
+                            "phase": "created",
+                            "checkpoints": (),
+                            "started_at": "",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                        }
+                    )
+                elif record.phase in safe_phases:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "updated_at": now,
+                            "finished_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_code": "operation_attempts_exhausted",
+                            "error_message": (
+                                "Odoo production backup restore exhausted automatic attempts in "
+                                f"safe phase {record.phase!r}."
+                            ),
+                        }
+                    )
+                else:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "reconciliation_required",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "result": None,
+                            "error_code": "operation_reconciliation_required",
+                            "error_message": (
+                                "Odoo production backup restore lease expired in "
+                                f"phase {record.phase!r}; provider state requires operator "
+                                "reconciliation before the lane can be released."
+                            ),
+                        }
+                    )
+                self.write_odoo_prod_backup_restore_operation_record(recovered_record)
+        return tuple(affected_operation_ids)
+
+    def write_odoo_prod_retained_volume_backup_import_operation_record(
+        self, record: OdooProdRetainedVolumeBackupImportOperationRecord
+    ) -> Path:
+        return self._write_model(
+            "odoo_prod_retained_volume_backup_import_operations",
+            record.operation_id,
+            record,
+        )
+
+    def read_odoo_prod_retained_volume_backup_import_operation_record(
+        self, operation_id: str
+    ) -> OdooProdRetainedVolumeBackupImportOperationRecord:
+        return OdooProdRetainedVolumeBackupImportOperationRecord.model_validate(
+            self._read_model(
+                OdooProdRetainedVolumeBackupImportOperationRecord,
+                "odoo_prod_retained_volume_backup_import_operations",
+                operation_id,
+            ).model_dump(mode="json")
+        )
+
+    def list_odoo_prod_retained_volume_backup_import_operation_records(
+        self,
+        *,
+        operation_kind: str = "",
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        idempotency_scope: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooProdRetainedVolumeBackupImportOperationRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                OdooProdRetainedVolumeBackupImportOperationRecord,
+                "odoo_prod_retained_volume_backup_import_operations",
+            )
+            if (not operation_kind or record.operation_kind == operation_kind)
+            and (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+            and (not idempotency_key or record.idempotency_key == idempotency_key)
+            and (not idempotency_scope or record.idempotency_scope == idempotency_scope)
+            and (not statuses or record.status in statuses)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.operation_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def cancel_pending_odoo_prod_retained_volume_backup_import_operation_record(
+        self, record: OdooProdRetainedVolumeBackupImportOperationRecord
+    ) -> bool:
+        if record.status != "cancelled" or record.phase != "cancelled":
+            raise ValueError(
+                "Odoo retained-volume backup import cancellation requires a cancelled record."
+            )
+        with self._exclusive_record_lock(
+            "odoo_prod_retained_volume_backup_import_operations",
+            record.operation_id,
+        ):
+            current_record = self.read_odoo_prod_retained_volume_backup_import_operation_record(
+                record.operation_id
+            )
+            if not odoo_stable_lane_cancellation_is_allowed(
+                current_status=current_record.status,
+                reconciliation_required_at=current_record.updated_at,
+                cancellation=record.cancellation,
+            ):
+                return False
+            self.write_odoo_prod_retained_volume_backup_import_operation_record(record)
+            return True
+
+    def create_odoo_prod_retained_volume_backup_import_operation_record_if_no_active_lane(
+        self, record: OdooProdRetainedVolumeBackupImportOperationRecord
+    ) -> tuple[OdooProdRetainedVolumeBackupImportOperationRecord, bool]:
+        reservation_id = _odoo_stable_lane_reservation_id(
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+        )
+        with self._exclusive_record_lock(
+            "odoo_stable_lane_operation_reservations",
+            reservation_id,
+        ):
+            active_operation = self._active_odoo_stable_lane_operation(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            if active_operation is not None:
+                if isinstance(
+                    active_operation,
+                    OdooProdRetainedVolumeBackupImportOperationRecord,
+                ):
+                    return active_operation, False
+                raise OdooStableLaneOperationConflictError(
+                    _odoo_stable_lane_operation_owner(active_operation)
+                )
+            self.write_odoo_prod_retained_volume_backup_import_operation_record(record)
+            return record, True
+
+    def _active_odoo_stable_lane_operation(
+        self,
+        *,
+        product: str,
+        context: str,
+        instance: str,
+    ) -> OdooStableLaneOperationRecord | None:
+        active_operations: list[OdooStableLaneOperationRecord] = []
+        active_operations.extend(
+            self.list_odoo_stable_bootstrap_operation_records(
+                product=product,
+                context_name=context,
+                instance_name=instance,
+                statuses=ODOO_STABLE_LANE_BLOCKING_STATUSES,
+            )
+        )
+        active_operations.extend(
+            self.list_odoo_stable_target_replacement_operation_records(
+                product=product,
+                context_name=context,
+                instance_name=instance,
+                statuses=ODOO_STABLE_LANE_BLOCKING_STATUSES,
+            )
+        )
+        active_operations.extend(
+            self.list_odoo_prod_backup_restore_operation_records(
+                product=product,
+                context_name=context,
+                instance_name=instance,
+                statuses=ODOO_STABLE_LANE_BLOCKING_STATUSES,
+            )
+        )
+        active_operations.extend(
+            self.list_odoo_prod_retained_volume_backup_import_operation_records(
+                product=product,
+                context_name=context,
+                instance_name=instance,
+                statuses=ODOO_STABLE_LANE_BLOCKING_STATUSES,
+            )
+        )
+        if not active_operations:
+            return None
+        return min(
+            active_operations,
+            key=lambda operation: odoo_stable_lane_operation_priority(
+                status=operation.status,
+                created_at=operation.created_at,
+                operation_kind=_odoo_stable_lane_operation_owner(operation).operation_kind,
+                operation_id=operation.operation_id,
+            ),
+        )
+
+    def claim_next_odoo_prod_retained_volume_backup_import_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> OdooProdRetainedVolumeBackupImportOperationRecord | None:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner or not lease_expires_at.strip() or not claimed_at.strip():
+            raise ValueError("Odoo retained-volume backup import claim requires lease evidence.")
+        pending_records = self.list_odoo_prod_retained_volume_backup_import_operation_records(
+            statuses=("pending",)
+        )
+        for record in sorted(
+            pending_records,
+            key=lambda item: (item.created_at, item.operation_id),
+        ):
+            reservation_id = _odoo_stable_lane_reservation_id(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+            )
+            with self._exclusive_record_lock(
+                "odoo_stable_lane_operation_reservations",
+                reservation_id,
+            ):
+                active_operation = self._active_odoo_stable_lane_operation(
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
+                if active_operation is None or _odoo_stable_lane_operation_owner(
+                    active_operation
+                ) != OdooStableLaneOperationOwner(
+                    operation_kind="retained_volume_backup_import",
+                    operation_id=record.operation_id,
+                ):
+                    continue
+                with self._exclusive_record_lock(
+                    "odoo_prod_retained_volume_backup_import_operations",
+                    record.operation_id,
+                ):
+                    current_record = (
+                        self.read_odoo_prod_retained_volume_backup_import_operation_record(
+                            record.operation_id
+                        )
+                    )
+                    if current_record.status != "pending":
+                        continue
+                    claimed_record = current_record.model_copy(
+                        update={
+                            "status": "running",
+                            "phase": "running",
+                            "started_at": current_record.started_at or claimed_at,
+                            "updated_at": claimed_at,
+                            "lease_owner": normalized_lease_owner,
+                            "lease_expires_at": lease_expires_at.strip(),
+                            "heartbeat_at": claimed_at.strip(),
+                            "attempt": current_record.attempt + 1,
+                        }
+                    )
+                    self.write_odoo_prod_retained_volume_backup_import_operation_record(
+                        claimed_record
+                    )
+                    return claimed_record
+        return None
+
+    def heartbeat_odoo_prod_retained_volume_backup_import_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        with self._exclusive_record_lock(
+            "odoo_prod_retained_volume_backup_import_operations",
+            operation_id,
+        ):
+            record = self.read_odoo_prod_retained_volume_backup_import_operation_record(
+                operation_id
+            )
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= heartbeat_at.strip()
+            ):
+                return False
+            heartbeat_record = record.model_copy(
+                update={
+                    "heartbeat_at": heartbeat_at.strip(),
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "updated_at": heartbeat_at.strip(),
+                }
+            )
+            self.write_odoo_prod_retained_volume_backup_import_operation_record(heartbeat_record)
+            return True
+
+    def checkpoint_odoo_prod_retained_volume_backup_import_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        phase: OdooProdRetainedVolumeBackupImportOperationPhase,
+        checkpointed_at: str,
+        evidence: dict[str, str],
+    ) -> OdooProdRetainedVolumeBackupImportOperationRecord | None:
+        with self._exclusive_record_lock(
+            "odoo_prod_retained_volume_backup_import_operations",
+            operation_id,
+        ):
+            record = self.read_odoo_prod_retained_volume_backup_import_operation_record(
+                operation_id
+            )
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= checkpointed_at.strip()
+            ):
+                return None
+            phase_indexes = {
+                phase_name: index
+                for index, phase_name in enumerate(
+                    ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_OPERATION_PHASE_SEQUENCE
+                )
+            }
+            if phase_indexes[phase] < phase_indexes[record.phase]:
+                return None
+            checkpoint = OdooProdRetainedVolumeBackupImportCheckpoint(
+                phase=phase,
+                recorded_at=checkpointed_at,
+                evidence=evidence,
+            )
+            checkpointed_record = record.model_copy(
+                update={
+                    "phase": phase,
+                    "checkpoints": (*record.checkpoints, checkpoint),
+                    "updated_at": checkpointed_at,
+                }
+            )
+            self.write_odoo_prod_retained_volume_backup_import_operation_record(checkpointed_record)
+            return checkpointed_record
+
+    def complete_odoo_prod_retained_volume_backup_import_operation_record(
+        self,
+        *,
+        record: OdooProdRetainedVolumeBackupImportOperationRecord,
+        lease_owner: str,
+    ) -> bool:
+        with self._exclusive_record_lock(
+            "odoo_prod_retained_volume_backup_import_operations",
+            record.operation_id,
+        ):
+            current_record = self.read_odoo_prod_retained_volume_backup_import_operation_record(
+                record.operation_id
+            )
+            completed_at = _utc_now_timestamp()
+            if (
+                current_record.status != "running"
+                or current_record.lease_owner != lease_owner.strip()
+                or not current_record.lease_expires_at
+                or current_record.lease_expires_at <= completed_at
+            ):
+                return False
+            self.write_odoo_prod_retained_volume_backup_import_operation_record(record)
+            return True
+
+    def recover_expired_odoo_prod_retained_volume_backup_import_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]:
+        affected_operation_ids: list[str] = []
+        candidates = self.list_odoo_prod_retained_volume_backup_import_operation_records(
+            statuses=("running",)
+        )
+        for candidate in candidates:
+            with self._exclusive_record_lock(
+                "odoo_prod_retained_volume_backup_import_operations",
+                candidate.operation_id,
+            ):
+                record = self.read_odoo_prod_retained_volume_backup_import_operation_record(
+                    candidate.operation_id
+                )
+                if record.status != "running" or (
+                    record.lease_expires_at and record.lease_expires_at >= now
+                ):
+                    continue
+                affected_operation_ids.append(record.operation_id)
+                if record.phase in safe_phases and record.attempt < max_attempts:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "pending",
+                            "phase": "created",
+                            "checkpoints": (),
+                            "started_at": "",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                        }
+                    )
+                elif record.phase in safe_phases:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "updated_at": now,
+                            "finished_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_code": "operation_attempts_exhausted",
+                            "error_message": (
+                                "Odoo retained-volume backup import exhausted automatic attempts "
+                                f"in safe phase {record.phase!r}."
+                            ),
+                        }
+                    )
+                else:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "reconciliation_required",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_code": "operation_reconciliation_required",
+                            "error_message": (
+                                "Odoo retained-volume backup import lease expired in "
+                                f"phase {record.phase!r}; provider state requires operator "
+                                "reconciliation before the lane can be released."
+                            ),
+                        }
+                    )
+                self.write_odoo_prod_retained_volume_backup_import_operation_record(
+                    recovered_record
+                )
         return tuple(affected_operation_ids)
 
     def write_verireel_prod_backup_gate_operation_record(
@@ -3591,6 +4585,30 @@ def _odoo_target_replacement_lane_reservation_id(
     lane_key = "|".join((record.product, record.context, record.instance))
     digest = hashlib.sha256(lane_key.encode()).hexdigest()[:16]
     return f"{record.product}-{record.context}-{record.instance}".replace("/", "-") + f"-{digest}"
+
+
+def _odoo_stable_lane_reservation_id(*, product: str, context: str, instance: str) -> str:
+    lane_key = "|".join((product, context, instance))
+    digest = hashlib.sha256(lane_key.encode()).hexdigest()[:16]
+    return f"{product}-{context}-{instance}".replace("/", "-") + f"-{digest}"
+
+
+def _odoo_stable_lane_operation_owner(
+    operation: OdooStableLaneOperationRecord,
+) -> OdooStableLaneOperationOwner:
+    operation_kind: OdooStableLaneOperationKind
+    if isinstance(operation, OdooStableBootstrapOperationRecord):
+        operation_kind = "stable_bootstrap"
+    elif isinstance(operation, OdooStableTargetReplacementOperationRecord):
+        operation_kind = "target_replacement"
+    elif isinstance(operation, OdooProdBackupRestoreOperationRecord):
+        operation_kind = "prod_backup_restore"
+    else:
+        operation_kind = "retained_volume_backup_import"
+    return OdooStableLaneOperationOwner(
+        operation_kind=operation_kind,
+        operation_id=operation.operation_id,
+    )
 
 
 def _odoo_stable_bootstrap_lane_reservation_id(

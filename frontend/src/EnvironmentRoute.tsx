@@ -501,6 +501,15 @@ function EnvironmentPage({
 function EnvironmentOverview({ detail }: { detail: ProductEnvironmentDetail }) {
   const tlsDomains = detail.topology.observed.tls_domains;
   const observedPlacement = detail.topology.observed.placement;
+  const effectiveChecks = detail.health_monitoring.checks.filter(
+    (check) => check.probe_effective,
+  );
+  const actionableMonitoringFailure = effectiveChecks.some(
+    (check) => check.incident_eligible && check.status === "fail",
+  );
+  const readinessMonitoringFailure = effectiveChecks.some(
+    (check) => check.status === "fail",
+  );
   const primaryTls =
     tlsDomains.find((domain) => domain.role === "primary") ?? tlsDomains[0] ?? null;
   const warningItems = collectWarnings(detail);
@@ -510,15 +519,24 @@ function EnvironmentOverview({ detail }: { detail: ProductEnvironmentDetail }) {
     <div className="environment-overview">
       <section className="environment-condition-strip" aria-label="Environment condition">
         <ConditionTile
-          detail={detail.public_ingress.summary || trustLabel(detail.public_ingress.trust_state)}
-          label="Public ingress"
+          detail={
+            detail.public_ingress.summary ||
+            `${effectiveChecks.length} effective health check${effectiveChecks.length === 1 ? "" : "s"}`
+          }
+          label="Monitoring"
           timestamp={evidenceTimestamp(detail.public_ingress.provenance)}
-          tone={conditionTone(
-            statusTone(detail.public_ingress.status),
-            detail.public_ingress.trust_state,
-          )}
-          trustState={detail.public_ingress.trust_state}
-          value={detail.public_ingress.status ? humanize(detail.public_ingress.status) : "No observation"}
+          tone={
+            actionableMonitoringFailure
+              ? "danger"
+              : readinessMonitoringFailure
+                ? "warning"
+                : conditionTone(
+                    statusTone(detail.public_ingress.status),
+                    detail.health_monitoring.trust_state,
+                  )
+          }
+          trustState={detail.health_monitoring.trust_state}
+          value={humanize(detail.health_monitoring.monitoring_intent)}
         />
         <ConditionTile
           detail={primaryTls?.summary || trustLabel(primaryTls?.trust_state ?? "missing")}
@@ -621,6 +639,12 @@ function DiagnosisCallout({ diagnosis }: { diagnosis: Diagnosis }) {
 
 function IngressEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
   const ingress = detail.topology.provider_recorded.ingress;
+  const effectiveChecks = detail.health_monitoring.checks.filter(
+    (check) => check.probe_effective,
+  );
+  const checkSummary = effectiveChecks
+    .map((check) => `${humanize(check.name)} · ${humanize(check.status)}`)
+    .join(", ");
   return (
     <section className="environment-evidence-panel" id="ingress-evidence">
       <div className="evidence-panel-head">
@@ -629,14 +653,29 @@ function IngressEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
         </span>
         <div>
           <p className="eyebrow">Ingress and health</p>
-          <h2>Public path</h2>
+          <h2>
+            {detail.health_monitoring.monitoring_intent === "private"
+              ? "Private monitoring"
+              : detail.health_monitoring.monitoring_intent === "prelaunch"
+                ? "Prelaunch readiness"
+                : "Public path"}
+          </h2>
         </div>
         <EvidenceBadge
-          state={detail.public_ingress.trust_state}
-          timestamp={detail.public_ingress.observed_at}
+          state={detail.health_monitoring.trust_state}
+          timestamp={evidenceTimestamp(detail.health_monitoring.provenance)}
         />
       </div>
       <dl className="evidence-fact-list">
+        <EvidenceFact
+          label="Monitoring intent"
+          value={humanize(detail.health_monitoring.monitoring_intent)}
+        />
+        <EvidenceFact
+          label="Public incident eligibility"
+          value={detail.health_monitoring.public_incident_eligible ? "Eligible" : "Not eligible"}
+        />
+        <EvidenceFact label="Effective checks" value={checkSummary || "No effective checks"} />
         <EvidenceFact label="Current observation" value={detail.public_ingress.status ? humanize(detail.public_ingress.status) : "No observation"} />
         <EvidenceFact label="Summary" value={detail.public_ingress.summary || "No public ingress summary was returned."} />
         <EvidenceFact label="Desired endpoint" value={detail.topology.desired.base_url || "Not recorded"} />

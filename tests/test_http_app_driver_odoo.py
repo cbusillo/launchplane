@@ -43,12 +43,16 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsResult,
     OdooPreviewDokployApplyResult,
 )
-from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
+from control_plane.workflows.odoo_prod_backup_gate import (
+    OdooProdBackupGateResult,
+    OdooProdBackupVerificationResult,
+)
 from control_plane.workflows.odoo_prod_promotion import OdooProdPromotionResult
 from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
 from control_plane.workflows.odoo_prod_promotion_run import OdooProdPromotionRunResult
 from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
 from control_plane.workflows.odoo_stable_target_replacement import (
+    OdooStableTargetRuntimeSnapshot,
     OdooStableTargetReplacementPlan,
 )
 from tests.http_app_test_support import (
@@ -62,6 +66,7 @@ from tests.http_app_test_support import (
     _post_odoo_preview_apply,
     _post_odoo_preview_apply_inputs,
     _post_odoo_prod_backup_gate,
+    _post_odoo_prod_backup_verification,
     _post_odoo_prod_promotion,
     _post_odoo_prod_promotion_inputs,
     _post_odoo_prod_promotion_run,
@@ -4172,6 +4177,16 @@ class FastApiOdooTargetReplacementPlanTests(unittest.IsolatedAsyncioTestCase):
             target_record_found=True,
             target_id_record_found=True,
             inventory_found=True,
+            current_target=OdooStableTargetRuntimeSnapshot(
+                target_type="compose",
+                target_id="compose-cm-testing",
+                target_name="cm-testing",
+                live_volume_values={
+                    "ODOO_DATA_VOLUME": "cm_testing_odoo_data",
+                    "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
+                    "ODOO_DB_VOLUME": "cm_testing_odoo_db",
+                },
+            ),
             expected_next_target_name=expected_next_target_name,
         )
 
@@ -4198,6 +4213,14 @@ class FastApiOdooTargetReplacementPlanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["records"], {})
         self.assertEqual(payload["result"]["plan_status"], "ready")
         self.assertEqual(payload["result"]["context"], "cm")
+        self.assertEqual(
+            payload["result"]["current_target"]["live_volume_values"],
+            {
+                "ODOO_DATA_VOLUME": "cm_testing_odoo_data",
+                "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
+                "ODOO_DB_VOLUME": "cm_testing_odoo_db",
+            },
+        )
         plan_mock.assert_called_once()
         request = plan_mock.call_args.kwargs["request"]
         self.assertTrue(request.allow_empty_data)
@@ -5575,6 +5598,178 @@ class FastApiOdooProdBackupGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             operation["requestBody"]["content"]["application/json"]["schema"]["title"],
             "OdooProdBackupGateEnvelope",
+        )
+        self.assertEqual(
+            operation["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403", "404", "409", "503"):
+            self.assertIn(status_code, operation["responses"])
+
+
+class FastApiOdooProdBackupVerificationTests(unittest.IsolatedAsyncioTestCase):
+    def _identity(self) -> GitHubActionsIdentity:
+        return _identity(
+            repository="every/tenant-cm",
+            workflow_ref=(
+                "every/tenant-cm/.github/workflows/backup-verification.yml@refs/heads/main"
+            ),
+            event_name="workflow_dispatch",
+        )
+
+    def _policy(
+        self, *, action: str = "odoo_prod_backup_verification.execute"
+    ) -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/tenant-cm",
+                        "workflow_refs": [
+                            "every/tenant-cm/.github/workflows/backup-verification.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["odoo-tenant-cm"],
+                        "contexts": ["cm"],
+                        "actions": [action],
+                    }
+                ]
+            }
+        )
+
+    def _store(self, state_dir: Path) -> FilesystemRecordStore:
+        store = FilesystemRecordStore(state_dir=state_dir)
+        profile_payload = _odoo_preview_profile_payload()
+        lanes = list(cast(tuple[dict[str, object], ...], profile_payload["lanes"]))
+        lanes.append(
+            {
+                "instance": "prod",
+                "context": "cm",
+                "base_url": "https://cm.example.com",
+                "health_url": "https://cm.example.com/web/health",
+            }
+        )
+        profile_payload["lanes"] = tuple(lanes)
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        )
+        return store
+
+    @staticmethod
+    def _payload() -> dict[str, object]:
+        return {
+            "product": "odoo-tenant-cm",
+            "backup_verification": {
+                "context": "cm",
+                "instance": "prod",
+                "backup_record_id": "backup-gate-cm-prod-run-1",
+            },
+        }
+
+    @staticmethod
+    def _result() -> OdooProdBackupVerificationResult:
+        return OdooProdBackupVerificationResult(
+            context="cm",
+            instance="prod",
+            backup_record_id="backup-gate-cm-prod-run-1",
+            verification_record_id="odoo-backup-verification-cm-prod-run-1",
+            verification_status="pass",
+            manifest_status="pass",
+            sha256_status="pass",
+            pg_restore_status="pass",
+            tar_status="pass",
+            staging_space_status="pass",
+            database_dump_sha256="a" * 64,
+            filestore_archive_sha256="b" * 64,
+            database_dump_size=4096,
+            filestore_archive_size=8192,
+            pg_restore_entry_count=42,
+            filestore_member_count=128,
+            filestore_unpacked_size=16384,
+            data_volume_free_bytes=32768,
+            staging_required_bytes=16384,
+        )
+
+    async def test_odoo_prod_backup_verification_returns_bounded_evidence(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._store(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_backup_gate_http.execute_odoo_prod_backup_verification",
+                return_value=self._result(),
+            ) as execute_mock:
+                response = await _post_odoo_prod_backup_verification(
+                    app,
+                    self._payload(),
+                    idempotency_key="odoo-prod-backup-verification-run-1",
+                )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(
+            payload["records"],
+            {
+                "backup_record_id": "backup-gate-cm-prod-run-1",
+                "backup_verification_record_id": ("odoo-backup-verification-cm-prod-run-1"),
+            },
+        )
+        self.assertEqual(payload["result"]["verification_status"], "pass")
+        self.assertEqual(payload["result"]["database_dump_sha256"], "a" * 64)
+        for private_field in (
+            "backup_root",
+            "backup_dir",
+            "database_dump_path",
+            "filestore_archive_path",
+            "manifest_path",
+            "error_message",
+        ):
+            self.assertNotIn(private_field, payload["result"])
+        execute_mock.assert_called_once()
+
+    async def test_odoo_prod_backup_verification_rejects_wrong_authz_action(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(action="odoo_prod_backup_gate.execute"),
+                record_store_factory=lambda: self._store(root / "state"),
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.odoo_prod_backup_gate_http.execute_odoo_prod_backup_verification"
+            ) as execute_mock:
+                response = await _post_odoo_prod_backup_verification(app, self._payload())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        execute_mock.assert_not_called()
+
+    async def test_openapi_includes_odoo_prod_backup_verification_contract(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+                control_plane_root_path=root,
+            )
+
+            response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        operation = response.json()["paths"]["/v1/drivers/odoo/prod-backup-verification"]["post"]
+        self.assertEqual(operation["operationId"], "write_odoo_prod_backup_verification")
+        self.assertEqual(
+            operation["requestBody"]["content"]["application/json"]["schema"]["title"],
+            "OdooProdBackupVerificationEnvelope",
         )
         self.assertEqual(
             operation["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
