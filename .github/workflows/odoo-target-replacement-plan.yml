@@ -59,7 +59,7 @@ concurrency:
 
 jobs:
   plan:
-    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-plan.yml@480c9280b1ae3610f05547192783da2230dc7ff5 # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-plan.yml@0670f543396472f9de5b7c43283b0c924492ec4e # ops/1801-cm-production
     permissions:
       contents: read
       id-token: write
