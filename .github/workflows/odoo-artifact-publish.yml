@@ -1,0 +1,55 @@
+---
+name: Odoo Artifact Publish
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Launchplane product profile key.
+        required: true
+        type: string
+      context:
+        description: Launchplane Odoo context.
+        required: true
+        type: string
+      instance:
+        description: Odoo instance whose artifact should be published.
+        required: true
+        type: string
+      source_git_ref:
+        description: Source ref or commit SHA attached to the artifact.
+        required: true
+        type: string
+      confirmation:
+        description: Type PUBLISH LAUNCHPLANE ODOO ARTIFACT to confirm.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+concurrency:
+  group: >-
+    odoo-artifact-publish-${{ inputs.product }}-${{ inputs.instance }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-artifact-publish.yml@e605d8ab9ec26950247233c4237d65ea8b44a6d6 # main
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: ${{ inputs.instance }}
+      source_git_ref: ${{ inputs.source_git_ref }}
+      confirmation: ${{ inputs.confirmation }}
+      launchplane_url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      launchplane_audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+    secrets:
+      ODOO_GHCR_PUBLISH_TOKEN: ${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}
+      ODOO_SOURCE_GITHUB_TOKEN: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
