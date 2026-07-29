@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from tests.support.workflows import load_workflow
+from tests.support.workflows import SELF_HOSTED_RUNNER, load_workflow
 
 
 class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = load_workflow(".github/workflows/tracked-target-logs.yml")
+        self.worker = load_workflow(".github/workflows/reusable-tracked-target-logs.yml")
 
     def test_dispatch_contract_includes_exact_compose_service_selector(self) -> None:
         trigger = self.workflow.data["on"]
@@ -26,8 +27,8 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         self.assertEqual(self.workflow.permissions, {"contents": "read", "id-token": "write"})
 
     def test_service_selector_is_validated_and_forwarded(self) -> None:
-        validation_step = self.workflow.step_named("read", "Validate inputs")
-        route_step = self.workflow.step_named("read", "Build logs route")
+        validation_step = self.worker.step_named("read", "Validate inputs")
+        route_step = self.worker.step_named("read", "Build logs route")
         self.assertIsNotNone(validation_step)
         self.assertIsNotNone(route_step)
         assert validation_step is not None
@@ -36,6 +37,73 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         self.assertIn("exact lowercase Compose service name", validation_step.run)
         self.assertIn('--arg service "$SERVICE"', route_step.run)
         self.assertIn('"&service=\\(.service | @uri)"', route_step.run)
+
+    def test_reusable_worker_preserves_redacted_log_read_contract(self) -> None:
+        trigger = self.worker.data["on"]
+        assert isinstance(trigger, dict)
+        workflow_call = trigger["workflow_call"]
+        assert isinstance(workflow_call, dict)
+        inputs = workflow_call["inputs"]
+        assert isinstance(inputs, dict)
+        self.assertEqual(
+            set(inputs),
+            {
+                "context",
+                "instance",
+                "lines",
+                "source",
+                "since",
+                "search",
+                "service",
+                "launchplane_url",
+                "launchplane_audience",
+            },
+        )
+        runs_on = self.worker.job("read")["runs-on"]
+        assert isinstance(runs_on, list)
+        self.assertEqual(tuple(runs_on), SELF_HOSTED_RUNNER)
+        self.assertEqual(
+            self.worker.job_permissions("read"),
+            {"contents": "read", "id-token": "write"},
+        )
+        request_step = self.worker.step_named("read", "Read tracked target logs")
+        summary_step = self.worker.step_named("read", "Show redacted log summary")
+        upload_step = self.worker.step_named("read", "Upload tracked target logs")
+        self.assertIsNotNone(request_step)
+        self.assertIsNotNone(summary_step)
+        self.assertIsNotNone(upload_step)
+        assert request_step is not None
+        assert summary_step is not None
+        assert upload_step is not None
+        self.assertEqual(
+            request_step.uses,
+            "cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850",
+        )
+        self.assertEqual(request_step.with_values["method"], "GET")
+        self.assertEqual(request_step.with_values["log-response-body"], False)
+        self.assertFalse(
+            any(step.uses.startswith("actions/checkout@") for step in self.worker.steps("read"))
+        )
+        self.assertIn("line_count", summary_step.run)
+        self.assertIn("redacted", summary_step.run)
+        upload_path = str(upload_step.with_values["path"])
+        self.assertIn("tracked-target-logs-request.json", upload_path)
+        self.assertIn("tracked-target-logs.json", upload_path)
+
+    def test_reusable_worker_preserves_failure_evidence_before_failing(self) -> None:
+        request_step = self.worker.step_named("read", "Read tracked target logs")
+        upload_step = self.worker.step_named("read", "Upload tracked target logs")
+        fail_step = self.worker.step_named("read", "Fail when tracked target log read failed")
+        self.assertIsNotNone(request_step)
+        self.assertIsNotNone(upload_step)
+        self.assertIsNotNone(fail_step)
+        assert request_step is not None
+        assert upload_step is not None
+        assert fail_step is not None
+        self.assertEqual(request_step.data["continue-on-error"], True)
+        self.assertEqual(upload_step.data["if"], "${{ always() }}")
+        self.assertEqual(upload_step.with_values["if-no-files-found"], "error")
+        self.assertEqual(fail_step.data["if"], "${{ steps.request.outcome == 'failure' }}")
 
 
 if __name__ == "__main__":
