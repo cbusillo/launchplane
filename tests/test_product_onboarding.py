@@ -532,23 +532,32 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("runs-on:\n      - self-hosted", preview_workflow)
 
     def test_odoo_website_bootstrap_override_requires_explicit_target_inputs(self) -> None:
-        workflow_text = Path(".github/workflows/odoo-website-bootstrap-override.yml").read_text(
+        dispatcher_text = Path(".github/workflows/odoo-website-bootstrap-override.yml").read_text(
             encoding="utf-8"
         )
+        worker_text = Path(
+            ".github/workflows/reusable-odoo-website-bootstrap-override.yml"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("PRODUCT: ${{ inputs.product }}", workflow_text)
-        self.assertIn("CONTEXT_NAME: ${{ inputs.context }}", workflow_text)
-        self.assertIn("INSTANCE: ${{ inputs.instance }}", workflow_text)
-        self.assertIn("          - prod", workflow_text)
-        self.assertNotIn("allowed_targets=", workflow_text)
-        self.assertNotIn("odoo-tenant-opw:opw:testing", workflow_text)
-        self.assertNotIn("odoo-tenant-opw:opw:prod", workflow_text)
-        self.assertNotIn("writes only cm/testing", workflow_text)
+        self.assertIn("product: ${{ inputs.product }}", dispatcher_text)
+        self.assertIn("context: ${{ inputs.context }}", dispatcher_text)
+        self.assertIn("instance: ${{ inputs.instance }}", dispatcher_text)
+        self.assertIn(
+            "website_bootstrap_payload: ${{ inputs.website_bootstrap_payload }}", dispatcher_text
+        )
+        self.assertIn("PRODUCT: ${{ inputs.product }}", worker_text)
+        self.assertIn("CONTEXT_NAME: ${{ inputs.context }}", worker_text)
+        self.assertIn("INSTANCE: ${{ inputs.instance }}", worker_text)
+        self.assertIn("          - prod", dispatcher_text)
+        self.assertNotIn("allowed_targets=", worker_text)
+        self.assertNotIn("odoo-tenant-opw:opw:testing", worker_text)
+        self.assertNotIn("odoo-tenant-opw:opw:prod", worker_text)
+        self.assertNotIn("writes only cm/testing", worker_text)
 
     def test_odoo_website_bootstrap_override_prevalidates_route_paths(self) -> None:
-        workflow_text = Path(".github/workflows/odoo-website-bootstrap-override.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow_text = Path(
+            ".github/workflows/reusable-odoo-website-bootstrap-override.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("website_bootstrap_payload must be a JSON object", workflow_text)
         self.assertIn("homepage_url must be empty or a local Odoo route path", workflow_text)
@@ -569,12 +578,6 @@ class ProductOnboardingTests(unittest.TestCase):
                 ".launchplane/odoo-target-replacement-plan-payload.json",
                 "odoo-target-replacement-plan.json",
                 'if [ "$PLAN_STATUS_CODE" != "202" ]; then',
-            ),
-            "odoo-website-bootstrap-override.yml": (
-                "/v1/drivers/odoo/website-bootstrap-override",
-                ".launchplane/odoo-website-bootstrap-override-payload.json",
-                "odoo-website-bootstrap-override.json",
-                'steps.launchplane.outputs.status-code }}" != "202"',
             ),
         }
 
@@ -606,6 +609,41 @@ class ProductOnboardingTests(unittest.TestCase):
                 self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
                 self.assertNotIn("Authorization: Bearer", workflow_text)
                 self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
+
+        website_bootstrap_workflow = Path(
+            ".github/workflows/reusable-odoo-website-bootstrap-override.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("runs-on: ubuntu-latest", website_bootstrap_workflow)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
+            website_bootstrap_workflow,
+        )
+        self.assertIn(
+            "route-path: /v1/drivers/odoo/website-bootstrap-override",
+            website_bootstrap_workflow,
+        )
+        self.assertIn(
+            "payload-file: .launchplane/odoo-website-bootstrap-override-payload.json",
+            website_bootstrap_workflow,
+        )
+        self.assertIn(
+            "response-output-file: odoo-website-bootstrap-override.json",
+            website_bootstrap_workflow,
+        )
+        self.assertIn(
+            "idempotency-key: ${{ steps.payload.outputs.idempotency_key }}",
+            website_bootstrap_workflow,
+        )
+        self.assertIn('if [ "$STATUS_CODE" != "202" ]; then', website_bootstrap_workflow)
+        self.assertIn('!= "accepted"', website_bootstrap_workflow)
+        self.assertIn("result.website_bootstrap // false", website_bootstrap_workflow)
+        self.assertIn(
+            "if: ${{ always() && steps.evidence.outcome == 'success' }}",
+            website_bootstrap_workflow,
+        )
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", website_bootstrap_workflow)
+        self.assertNotIn("Authorization: Bearer", website_bootstrap_workflow)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", website_bootstrap_workflow)
 
         config_parameter_workflow = Path(
             ".github/workflows/odoo-config-parameter-override.yml"
