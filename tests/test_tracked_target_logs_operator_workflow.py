@@ -27,8 +27,8 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         self.assertEqual(self.workflow.permissions, {"contents": "read", "id-token": "write"})
 
     def test_service_selector_is_validated_and_forwarded(self) -> None:
-        validation_step = self.workflow.step_named("read", "Validate inputs")
-        route_step = self.workflow.step_named("read", "Build logs route")
+        validation_step = self.worker.step_named("read", "Validate inputs")
+        route_step = self.worker.step_named("read", "Build logs route")
         self.assertIsNotNone(validation_step)
         self.assertIsNotNone(route_step)
         assert validation_step is not None
@@ -89,6 +89,21 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         upload_path = str(upload_step.with_values["path"])
         self.assertIn("tracked-target-logs-request.json", upload_path)
         self.assertIn("tracked-target-logs.json", upload_path)
+
+    def test_reusable_worker_preserves_failure_evidence_before_failing(self) -> None:
+        request_step = self.worker.step_named("read", "Read tracked target logs")
+        upload_step = self.worker.step_named("read", "Upload tracked target logs")
+        fail_step = self.worker.step_named("read", "Fail when tracked target log read failed")
+        self.assertIsNotNone(request_step)
+        self.assertIsNotNone(upload_step)
+        self.assertIsNotNone(fail_step)
+        assert request_step is not None
+        assert upload_step is not None
+        assert fail_step is not None
+        self.assertEqual(request_step.data["continue-on-error"], True)
+        self.assertEqual(upload_step.data["if"], "${{ always() }}")
+        self.assertEqual(upload_step.with_values["if-no-files-found"], "error")
+        self.assertEqual(fail_step.data["if"], "${{ steps.request.outcome == 'failure' }}")
 
 
 if __name__ == "__main__":

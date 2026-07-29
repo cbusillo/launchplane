@@ -51,6 +51,7 @@ class OdooWebsiteBootstrapOverrideWorkflowTests(unittest.TestCase):
         assert request_step is not None
         assert upload_step is not None
         self.assertIn("website_bootstrap_payload must be a JSON object", validation_step.run)
+        self.assertIn("instance must be 'testing' or 'prod'", validation_step.run)
         self.assertIn("homepage_url must be empty or a local Odoo route path", validation_step.run)
         self.assertIn(
             "routes[].url values must be empty or local Odoo route paths", validation_step.run
@@ -65,6 +66,17 @@ class OdooWebsiteBootstrapOverrideWorkflowTests(unittest.TestCase):
             request_step.with_values["route-path"],
             "/v1/drivers/odoo/website-bootstrap-override",
         )
+        self.assertEqual(request_step.with_values["log-response-body"], False)
+        verify_step = self.worker.step_named("write", "Verify website bootstrap override response")
+        self.assertIsNotNone(verify_step)
+        assert verify_step is not None
+        self.assertIn('if [ "$STATUS_CODE" != "202" ]', verify_step.run)
+        self.assertNotIn('steps.launchplane.outputs.status-code }}" !=', verify_step.run)
+        self.assertIn("website_bootstrap: (.result.website_bootstrap // false)", verify_step.run)
+        self.assertIn("GITHUB_RUN_ID", payload_step.run)
+        self.assertIn("GITHUB_RUN_ATTEMPT", payload_step.run)
+        self.assertEqual(upload_step.data["if"], "always()")
+        self.assertEqual(upload_step.with_values["if-no-files-found"], "error")
         self.assertIn("odoo-website-bootstrap-override.json", str(upload_step.with_values["path"]))
 
 

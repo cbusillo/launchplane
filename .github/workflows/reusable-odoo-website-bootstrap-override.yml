@@ -66,6 +66,14 @@ jobs:
                 ;;
             esac
           done
+          case "$INSTANCE" in
+            testing | prod)
+              ;;
+            *)
+              echo "instance must be 'testing' or 'prod'." >&2
+              exit 1
+              ;;
+          esac
           if ! jq -e 'type == "object"' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null; then
             echo 'website_bootstrap_payload must be a JSON object.' >&2
             exit 1
@@ -132,15 +140,31 @@ jobs:
           payload-file: .launchplane/odoo-website-bootstrap-override-payload.json
           idempotency-key: ${{ steps.request.outputs.idempotency_key }}
           response-output-file: odoo-website-bootstrap-override.json
+          log-response-body: false
 
       - name: Verify website bootstrap override response
+        env:
+          STATUS_CODE: ${{ steps.launchplane.outputs.status-code }}
         shell: bash
         run: |
           set -euo pipefail
-          jq . odoo-website-bootstrap-override.json
-          if [ "${{ steps.launchplane.outputs.status-code }}" != "202" ]; then
+          jq '{
+            status,
+            trace_id,
+            result: {
+              website_bootstrap: (.result.website_bootstrap // false)
+            },
+            error: (
+              if .error then
+                {code: .error.code, message: .error.message}
+              else
+                null
+              end
+            )
+          }' odoo-website-bootstrap-override.json
+          if [ "$STATUS_CODE" != "202" ]; then
             echo \
-              "Launchplane Odoo website-bootstrap override failed with HTTP ${{ steps.launchplane.outputs.status-code }}." \
+              "Launchplane Odoo website-bootstrap override failed with HTTP ${STATUS_CODE}." \
               >&2
             exit 1
           fi
@@ -155,3 +179,4 @@ jobs:
         with:
           name: odoo-website-bootstrap-override-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}
           path: odoo-website-bootstrap-override.json
+          if-no-files-found: error
