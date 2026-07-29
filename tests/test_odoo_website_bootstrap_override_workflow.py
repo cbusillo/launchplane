@@ -65,7 +65,7 @@ class OdooWebsiteBootstrapOverrideWorkflowTests(unittest.TestCase):
             request_step.with_values["route-path"],
             "/v1/drivers/odoo/website-bootstrap-override",
         )
-        self.assertIn("odoo-website-bootstrap-override.json", upload_step.with_values["path"])
+        self.assertIn("odoo-website-bootstrap-override.json", str(upload_step.with_values["path"]))
 
 
 if __name__ == "__main__":

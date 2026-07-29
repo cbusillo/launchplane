@@ -59,7 +59,9 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
                 "launchplane_audience",
             },
         )
-        self.assertEqual(tuple(self.worker.job("read")["runs-on"]), SELF_HOSTED_RUNNER)
+        runs_on = self.worker.job("read")["runs-on"]
+        assert isinstance(runs_on, list)
+        self.assertEqual(tuple(runs_on), SELF_HOSTED_RUNNER)
         self.assertEqual(
             self.worker.job_permissions("read"),
             {"contents": "read", "id-token": "write"},
@@ -84,8 +86,9 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         )
         self.assertIn("line_count", summary_step.run)
         self.assertIn("redacted", summary_step.run)
-        self.assertIn("tracked-target-logs-request.json", upload_step.with_values["path"])
-        self.assertIn("tracked-target-logs.json", upload_step.with_values["path"])
+        upload_path = str(upload_step.with_values["path"])
+        self.assertIn("tracked-target-logs-request.json", upload_path)
+        self.assertIn("tracked-target-logs.json", upload_path)
 
 
 if __name__ == "__main__":
