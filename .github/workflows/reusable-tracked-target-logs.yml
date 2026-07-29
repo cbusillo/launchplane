@@ -34,16 +34,6 @@ name: Reusable Tracked Target Logs
         required: false
         default: ""
         type: string
-      launchplane_url:
-        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
-        required: false
-        default: ""
-        type: string
-      launchplane_audience:
-        description: Optional GitHub OIDC audience.
-        required: false
-        default: ""
-        type: string
 
 permissions:
   contents: read
@@ -57,10 +47,8 @@ jobs:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
     env:
-      LAUNCHPLANE_SERVICE_URL: >-
-        ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
-      LAUNCHPLANE_SERVICE_AUDIENCE: >-
-        ${{ inputs.launchplane_audience || vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
       CONTEXT: ${{ inputs.context }}
       INSTANCE: ${{ inputs.instance }}
       LINES: ${{ inputs.lines }}
@@ -107,6 +95,30 @@ jobs:
             echo 'service must be an exact lowercase Compose service name.' >&2
             exit 1
           fi
+
+      - name: Build artifact name
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_slug() {
+            local value="$1"
+            local slug
+            slug="$(
+              printf '%s' "$value" |
+                LC_ALL=C sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//' |
+                cut -c1-80
+            )"
+            if [ -z "$slug" ]; then
+              slug="target"
+            fi
+            printf '%s' "$slug"
+          }
+          printf 'name=tracked-target-logs-%s-%s-%s\n' \
+            "$(artifact_slug "$CONTEXT")" \
+            "$(artifact_slug "$INSTANCE")" \
+            "$(artifact_slug "$SOURCE")" \
+            >>"$GITHUB_OUTPUT"
 
       - name: Build logs route
         id: route
@@ -191,16 +203,17 @@ jobs:
           ' tracked-target-logs.json
 
       - name: Upload tracked target logs
-        if: ${{ always() }}
+        if: ${{ always() && steps.route.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: >-
-            tracked-target-logs-${{ inputs.context }}-${{
-            inputs.instance }}-${{ inputs.source }}
+            ${{ steps.artifact.outputs.name }}-${{ github.run_id }}-${{
+            github.run_attempt }}
           path: |
             tracked-target-logs-request.json
             tracked-target-logs.json
           if-no-files-found: error
+          retention-days: 30
 
       - name: Fail when tracked target log read failed
         if: ${{ steps.request.outcome == 'failure' }}

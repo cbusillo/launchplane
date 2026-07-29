@@ -1050,6 +1050,17 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
         "payload-file": frozenset((".launchplane/odoo-website-bootstrap-override-payload.json",)),
     },
+    ".github/workflows/reusable-odoo-website-bootstrap-override.yml": {
+        "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
+        "idempotency-key": frozenset(("${{ steps.payload.outputs.idempotency_key }}",)),
+        "path": frozenset(
+            (
+                ".launchplane/odoo-website-bootstrap-override-evidence.json "
+                "odoo-website-bootstrap-override.json",
+            )
+        ),
+        "payload-file": frozenset((".launchplane/odoo-website-bootstrap-override-payload.json",)),
+    },
     ".github/workflows/product-context-cutover.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
         "payload-file": frozenset(("launchplane-product-context-cutover-payload.json",)),

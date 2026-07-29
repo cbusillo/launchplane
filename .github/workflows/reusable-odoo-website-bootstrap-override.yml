@@ -20,16 +20,6 @@ name: Reusable Odoo Website Bootstrap Override
         description: Website bootstrap JSON object with local Odoo route paths.
         required: true
         type: string
-      launchplane_url:
-        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
-        required: false
-        default: ""
-        type: string
-      launchplane_audience:
-        description: Optional GitHub OIDC audience.
-        required: false
-        default: ""
-        type: string
 
 permissions:
   contents: read
@@ -45,6 +35,8 @@ jobs:
       id-token: write
     runs-on: ubuntu-latest
     env:
+      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
       PRODUCT: ${{ inputs.product }}
       CONTEXT_NAME: ${{ inputs.context }}
       INSTANCE: ${{ inputs.instance }}
@@ -65,6 +57,12 @@ jobs:
                 exit 1
                 ;;
             esac
+          done
+          for scalar in PRODUCT CONTEXT_NAME; do
+            if ! [[ "${!scalar}" =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]]; then
+              echo "${scalar} must be a canonical lowercase identifier." >&2
+              exit 1
+            fi
           done
           case "$INSTANCE" in
             testing | prod)
@@ -97,8 +95,32 @@ jobs:
             exit 1
           fi
 
+      - name: Build artifact name
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_slug() {
+            local value="$1"
+            local slug
+            slug="$(
+              printf '%s' "$value" |
+                LC_ALL=C sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//' |
+                cut -c1-80
+            )"
+            if [ -z "$slug" ]; then
+              slug="target"
+            fi
+            printf '%s' "$slug"
+          }
+          printf 'name=odoo-website-bootstrap-override-%s-%s-%s\n' \
+            "$(artifact_slug "$PRODUCT")" \
+            "$(artifact_slug "$CONTEXT_NAME")" \
+            "$(artifact_slug "$INSTANCE")" \
+            >>"$GITHUB_OUTPUT"
+
       - name: Write website bootstrap override payload
-        id: request
+        id: payload
         shell: bash
         run: |
           set -euo pipefail
@@ -128,21 +150,51 @@ jobs:
             "odoo-website-bootstrap-override:${PRODUCT}:${CONTEXT_NAME}:${INSTANCE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
             >>"$GITHUB_OUTPUT"
 
+      - name: Write redacted request evidence
+        id: evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq '{
+            schema_version,
+            product_configured: (
+              (.product | type) == "string" and (.product | length) > 0
+            ),
+            override: {
+              schema_version: .override.schema_version,
+              context_configured: (
+                (.override.context | type) == "string" and
+                (.override.context | length) > 0
+              ),
+              instance: .override.instance,
+              website_bootstrap: {
+                key_count: (.override.website_bootstrap | keys | length),
+                route_count: (.override.website_bootstrap.routes // [] | length),
+                homepage_configured: (
+                  (.override.website_bootstrap.homepage_url // "") != ""
+                )
+              },
+              source_label: .override.source_label
+            }
+          }' \
+            .launchplane/odoo-website-bootstrap-override-payload.json \
+            > .launchplane/odoo-website-bootstrap-override-evidence.json
+
       - name: Write website bootstrap override
         id: launchplane
+        continue-on-error: true
         uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
-          launchplane-url: >-
-            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
-          audience: >-
-            ${{ inputs.launchplane_audience || vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          launchplane-url: ${{ env.LAUNCHPLANE_SERVICE_URL }}
+          audience: ${{ env.LAUNCHPLANE_SERVICE_AUDIENCE }}
           route-path: /v1/drivers/odoo/website-bootstrap-override
           payload-file: .launchplane/odoo-website-bootstrap-override-payload.json
-          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          idempotency-key: ${{ steps.payload.outputs.idempotency_key }}
           response-output-file: odoo-website-bootstrap-override.json
           log-response-body: false
 
       - name: Verify website bootstrap override response
+        if: ${{ steps.launchplane.outcome == 'success' }}
         env:
           STATUS_CODE: ${{ steps.launchplane.outputs.status-code }}
         shell: bash
@@ -172,11 +224,29 @@ jobs:
             echo 'Launchplane Odoo website-bootstrap override was not accepted.' >&2
             exit 1
           fi
+          if [ "$(jq -r '.result.website_bootstrap // false' \
+            odoo-website-bootstrap-override.json)" != "true" ]; then
+            echo 'Launchplane did not persist website-bootstrap intent.' >&2
+            exit 1
+          fi
 
       - name: Upload override result
-        if: always()
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: odoo-website-bootstrap-override-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}
-          path: odoo-website-bootstrap-override.json
+          name: >-
+            ${{ steps.artifact.outputs.name }}-${{ github.run_id }}-${{
+            github.run_attempt }}
+          path: |
+            .launchplane/odoo-website-bootstrap-override-evidence.json
+            odoo-website-bootstrap-override.json
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Fail when website bootstrap override request failed
+        if: ${{ steps.launchplane.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo 'Website bootstrap override request failed;' \
+            'inspect the uploaded redacted evidence and response.' >&2
+          exit 1

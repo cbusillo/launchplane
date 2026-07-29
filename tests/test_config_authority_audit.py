@@ -3439,6 +3439,32 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             with self.subTest(key=key, value=value):
                 self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
 
+    def test_odoo_website_bootstrap_worker_mechanics_are_thin_inputs(self) -> None:
+        path = ".github/workflows/reusable-odoo-website-bootstrap-override.yml"
+        for key, value in (
+            ("CONTEXT_NAME", "${{ inputs.context }}"),
+            ("idempotency-key", "${{ steps.payload.outputs.idempotency_key }}"),
+            (
+                "path",
+                ".launchplane/odoo-website-bootstrap-override-evidence.json "
+                "odoo-website-bootstrap-override.json",
+            ),
+            ("payload-file", ".launchplane/odoo-website-bootstrap-override-payload.json"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("CONTEXT_NAME", "prod"),
+            ("idempotency-key", "operator-key"),
+            ("payload-file", "tenant-runtime.json"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
+
     def test_product_driver_prod_rollback_workflow_mechanics_are_thin_inputs(
         self,
     ) -> None:

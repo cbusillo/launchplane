@@ -55,8 +55,6 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
                 "since",
                 "search",
                 "service",
-                "launchplane_url",
-                "launchplane_audience",
             },
         )
         runs_on = self.worker.job("read")["runs-on"]
@@ -69,18 +67,29 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         request_step = self.worker.step_named("read", "Read tracked target logs")
         summary_step = self.worker.step_named("read", "Show redacted log summary")
         upload_step = self.worker.step_named("read", "Upload tracked target logs")
+        artifact_step = self.worker.step_named("read", "Build artifact name")
         self.assertIsNotNone(request_step)
         self.assertIsNotNone(summary_step)
         self.assertIsNotNone(upload_step)
+        self.assertIsNotNone(artifact_step)
         assert request_step is not None
         assert summary_step is not None
         assert upload_step is not None
+        assert artifact_step is not None
         self.assertEqual(
             request_step.uses,
             "cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850",
         )
         self.assertEqual(request_step.with_values["method"], "GET")
         self.assertEqual(request_step.with_values["log-response-body"], False)
+        self.assertEqual(
+            request_step.with_values["launchplane-url"],
+            "${{ env.LAUNCHPLANE_SERVICE_URL }}",
+        )
+        self.assertEqual(
+            request_step.with_values["audience"],
+            "${{ env.LAUNCHPLANE_SERVICE_AUDIENCE }}",
+        )
         self.assertFalse(
             any(step.uses.startswith("actions/checkout@") for step in self.worker.steps("read"))
         )
@@ -89,6 +98,13 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         upload_path = str(upload_step.with_values["path"])
         self.assertIn("tracked-target-logs-request.json", upload_path)
         self.assertIn("tracked-target-logs.json", upload_path)
+        self.assertIn("sed -E", artifact_step.run)
+        artifact_name = str(upload_step.with_values["name"])
+        self.assertIn("steps.artifact.outputs.name", artifact_name)
+        self.assertIn("github.run_id", artifact_name)
+        self.assertIn("github.run_attempt", artifact_name)
+        self.assertNotIn("inputs.context", str(upload_step.with_values["name"]))
+        self.assertEqual(upload_step.with_values["retention-days"], 30)
 
     def test_reusable_worker_preserves_failure_evidence_before_failing(self) -> None:
         request_step = self.worker.step_named("read", "Read tracked target logs")
@@ -101,7 +117,10 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         assert upload_step is not None
         assert fail_step is not None
         self.assertEqual(request_step.data["continue-on-error"], True)
-        self.assertEqual(upload_step.data["if"], "${{ always() }}")
+        self.assertEqual(
+            upload_step.data["if"],
+            "${{ always() && steps.route.outcome == 'success' }}",
+        )
         self.assertEqual(upload_step.with_values["if-no-files-found"], "error")
         self.assertEqual(fail_step.data["if"], "${{ steps.request.outcome == 'failure' }}")
 
