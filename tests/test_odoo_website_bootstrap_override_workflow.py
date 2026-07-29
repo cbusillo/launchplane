@@ -7,8 +7,44 @@ from tests.support.workflows import load_workflow
 
 class OdooWebsiteBootstrapOverrideWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.workflow = load_workflow(".github/workflows/odoo-website-bootstrap-override.yml")
         self.worker = load_workflow(
             ".github/workflows/reusable-odoo-website-bootstrap-override.yml"
+        )
+
+    def test_dispatcher_pins_reviewed_reusable_worker(self) -> None:
+        trigger = self.workflow.data["on"]
+        assert isinstance(trigger, dict)
+        workflow_dispatch = trigger["workflow_dispatch"]
+        assert isinstance(workflow_dispatch, dict)
+        inputs = workflow_dispatch["inputs"]
+        assert isinstance(inputs, dict)
+        self.assertEqual(
+            set(inputs),
+            {"product", "context", "instance", "website_bootstrap_payload"},
+        )
+        instance_input = inputs["instance"]
+        assert isinstance(instance_input, dict)
+        self.assertEqual(instance_input["options"], ["testing", "prod"])
+        self.assertEqual(self.workflow.permissions, {"contents": "read", "id-token": "write"})
+        self.assertNotIn("concurrency", self.workflow.data)
+        job = self.workflow.job("write")
+        self.assertEqual(
+            job["uses"],
+            "cbusillo/launchplane/.github/workflows/reusable-odoo-website-bootstrap-override.yml@b62941a9219f69a2575c1bce1a8d7fcb8c605f3c",
+        )
+        self.assertEqual(
+            self.workflow.job_permissions("write"),
+            {"contents": "read", "id-token": "write"},
+        )
+        self.assertEqual(
+            job["with"],
+            {
+                "product": "${{ inputs.product }}",
+                "context": "${{ inputs.context }}",
+                "instance": "${{ inputs.instance }}",
+                "website_bootstrap_payload": "${{ inputs.website_bootstrap_payload }}",
+            },
         )
 
     def test_reusable_worker_preserves_typed_override_contract(self) -> None:

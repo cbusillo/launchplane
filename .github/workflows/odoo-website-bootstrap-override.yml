@@ -28,119 +28,14 @@ permissions:
   contents: read
   id-token: write
 
-concurrency:
-  group: odoo-website-bootstrap-override-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}
-  cancel-in-progress: false
-
 jobs:
   write:
-    runs-on: ubuntu-latest
-    env:
-      PRODUCT: ${{ inputs.product }}
-      CONTEXT_NAME: ${{ inputs.context }}
-      INSTANCE: ${{ inputs.instance }}
-      WEBSITE_BOOTSTRAP_PAYLOAD: ${{ inputs.website_bootstrap_payload }}
-    steps:
-      - name: Validate runtime inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${PRODUCT:?Missing product input}"
-          : "${CONTEXT_NAME:?Missing context input}"
-          : "${INSTANCE:?Missing instance input}"
-          : "${WEBSITE_BOOTSTRAP_PAYLOAD:?Missing website bootstrap payload input}"
-          for scalar in PRODUCT CONTEXT_NAME INSTANCE; do
-            case "${!scalar}" in
-              *$'\n'*)
-                echo "${scalar} must be a single-line value." >&2
-                exit 1
-                ;;
-            esac
-          done
-          if ! jq -e 'type == "object"' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null; then
-            echo 'website_bootstrap_payload must be a JSON object.' >&2
-            exit 1
-          fi
-          if ! jq -e '
-            def local_route_path:
-              type == "string" and
-              (. == "" or (startswith("/") and (startswith("//") | not)));
-            (.homepage_url // "") | local_route_path
-          ' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null; then
-            echo 'website_bootstrap.homepage_url must be empty or a local Odoo route path.' >&2
-            exit 1
-          fi
-          if ! jq -e '
-            def local_route_path:
-              type == "string" and
-              (. == "" or (startswith("/") and (startswith("//") | not)));
-            all((.routes // [])[]?; (.url // "") | local_route_path)
-          ' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null; then
-            echo 'website_bootstrap.routes[].url values must be empty or local Odoo route paths.' >&2
-            exit 1
-          fi
-
-      - name: Write website bootstrap override payload
-        id: request
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .launchplane
-          website_bootstrap="$({
-            jq -c . <<< "$WEBSITE_BOOTSTRAP_PAYLOAD"
-          })"
-          jq -n \
-            --arg product "$PRODUCT" \
-            --arg context "$CONTEXT_NAME" \
-            --arg instance "$INSTANCE" \
-            --argjson website_bootstrap "$website_bootstrap" \
-            '{
-              schema_version: 1,
-              product: $product,
-              override: {
-                schema_version: 1,
-                product: $product,
-                context: $context,
-                instance: $instance,
-                website_bootstrap: $website_bootstrap,
-                source_label: "github-actions:odoo-website-bootstrap-override"
-              }
-            }' > .launchplane/odoo-website-bootstrap-override-payload.json
-
-          printf 'idempotency_key=%s\n' \
-            "odoo-website-bootstrap-override:${PRODUCT}:${CONTEXT_NAME}:${INSTANCE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
-            >>"$GITHUB_OUTPUT"
-
-      - name: Write website bootstrap override
-        id: launchplane
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
-        with:
-          launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
-          route-path: /v1/drivers/odoo/website-bootstrap-override
-          payload-file: .launchplane/odoo-website-bootstrap-override-payload.json
-          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
-          response-output-file: odoo-website-bootstrap-override.json
-
-      - name: Verify website bootstrap override response
-        shell: bash
-        run: |
-          set -euo pipefail
-          jq . odoo-website-bootstrap-override.json
-          if [ "${{ steps.launchplane.outputs.status-code }}" != "202" ]; then
-            echo \
-              "Launchplane Odoo website-bootstrap override failed with HTTP ${{ steps.launchplane.outputs.status-code }}." \
-              >&2
-            exit 1
-          fi
-          if [ "$(jq -r '.status' odoo-website-bootstrap-override.json)" != "accepted" ]; then
-            echo 'Launchplane Odoo website-bootstrap override was not accepted.' >&2
-            exit 1
-          fi
-
-      - name: Upload override result
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: odoo-website-bootstrap-override-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}
-          path: odoo-website-bootstrap-override.json
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-website-bootstrap-override.yml@b62941a9219f69a2575c1bce1a8d7fcb8c605f3c # main
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: ${{ inputs.instance }}
+      website_bootstrap_payload: ${{ inputs.website_bootstrap_payload }}
