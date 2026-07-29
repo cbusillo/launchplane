@@ -396,6 +396,10 @@ an ORM column/table or remains only in the evidence payload.
   authorization, but it reports `job_workflow_refs_not_singleton`. Readiness-safe
   expansion uses two separately identified exact rules, one immutable worker SHA
   per rule, followed by reviewed contraction of the old rule.
+  Production tracked-log reads and website-bootstrap writes use separate exact
+  caller/worker rule identities. Their workflow artifacts are scoped by run and
+  attempt so retries preserve distinct evidence without turning observation or
+  payload churn into new runtime authority.
   During a future OpenFGA migration, these DB-backed policy records remain the
   source evidence for dry-run tuple proposals and parity checks.
   After a proven cutover, records should store import/audit/model-version
@@ -1627,6 +1631,10 @@ run` is the foreground loop intended for an external process supervisor, and
   repair writes only. Persisted record reads remain tolerant so older records
   can be inspected and repaired instead of becoming unreadable after validation
   hardening.
+- The supported operator write path is a thin dispatch workflow pinned to an
+  immutable reusable worker. The worker persists through the service route,
+  records only redacted request-shape evidence, and treats the write as complete
+  only when the response confirms `result.website_bootstrap=true`.
 - Stable bootstrap normalizes the persisted `website_bootstrap.canonical_url`
   to the Launchplane-resolved stable target base URL before post-deploy renders
   the payload, so local tenant bootstrap defaults do not become stable lane URL

@@ -25,6 +25,27 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         assert isinstance(service_input, dict)
         self.assertEqual(service_input["default"], "")
         self.assertEqual(self.workflow.permissions, {"contents": "read", "id-token": "write"})
+        job = self.workflow.job("read")
+        self.assertEqual(
+            job["uses"],
+            "cbusillo/launchplane/.github/workflows/reusable-tracked-target-logs.yml@b62941a9219f69a2575c1bce1a8d7fcb8c605f3c",
+        )
+        self.assertEqual(
+            self.workflow.job_permissions("read"),
+            {"contents": "read", "id-token": "write"},
+        )
+        self.assertEqual(
+            job["with"],
+            {
+                "context": "${{ inputs.context }}",
+                "instance": "${{ inputs.instance }}",
+                "lines": "${{ inputs.lines }}",
+                "source": "${{ inputs.source }}",
+                "since": "${{ inputs.since }}",
+                "search": "${{ inputs.search }}",
+                "service": "${{ inputs.service }}",
+            },
+        )
 
     def test_service_selector_is_validated_and_forwarded(self) -> None:
         validation_step = self.worker.step_named("read", "Validate inputs")

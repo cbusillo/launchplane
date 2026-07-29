@@ -675,6 +675,14 @@ mutable reusable ref may appear only in a reviewed overlap plan when the active
 policy already authorizes that exact ref; narrowing removes it from the same
 stable managed rule after canary evidence.
 
+Production diagnostic and repair workers do not accept a service URL or OIDC
+audience from their callers. Thin dispatch workflows may forward only the typed
+operation inputs declared by the reusable worker; the worker resolves its
+Launchplane destination and audience from protected repository configuration.
+Tracked-target log reads and Odoo website-bootstrap writes therefore require an
+exact default-branch caller ref plus the reviewed full-SHA reusable-worker ref
+before the service authorizes the request.
+
 Reviewed exact-instance external-route and product-health-monitoring workflow
 rules require the same immutable reusable-workflow identity even for non-prod
 instances, and those actions cannot be authorized by schema-v1 policy.
