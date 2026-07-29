@@ -320,6 +320,28 @@ class ProductOnboardingTests(unittest.TestCase):
             "public",
         )
 
+    def test_existing_onboarding_preserves_prelaunch_rebuild_authority(self) -> None:
+        existing_manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+        existing_profile = build_product_profile_record(
+            manifest=existing_manifest,
+            updated_at="2026-07-28T18:00:00Z",
+        )
+        replacement_payload = _manifest_payload()
+        replacement_lanes = cast(list[dict[str, object]], replacement_payload["lanes"])
+        replacement_lanes[1]["odoo_prelaunch_rebuild"] = {"enabled": False}
+        replacement_manifest = ProductOnboardingManifest.model_validate(replacement_payload)
+
+        replacement_profile = build_product_profile_record(
+            manifest=replacement_manifest,
+            updated_at="2026-07-28T18:01:00Z",
+            existing_profile=existing_profile,
+        )
+
+        self.assertEqual(
+            replacement_profile.lanes[1].odoo_prelaunch_rebuild,
+            existing_profile.lanes[1].odoo_prelaunch_rebuild,
+        )
+
     def test_reusable_odoo_artifact_publish_standardizes_request_shape(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-artifact-publish.yml").read_text(
             encoding="utf-8"
@@ -346,7 +368,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("${{ steps.product.outputs.publish_idempotency_key }}", workflow_text)
         self.assertIn("fail-result-paths: result.input_status", workflow_text)
         self.assertIn("fail-result-paths: result.status,result.publish_status", workflow_text)
-        self.assertIn("repository: ${{ steps.source.outputs.repository }}", workflow_text)
+        self.assertIn("repository: ${{ steps.publish_inputs.outputs.repository }}", workflow_text)
         self.assertIn("ref: ${{ steps.source.outputs.source_git_ref }}", workflow_text)
         self.assertIn(
             "token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",
@@ -382,8 +404,13 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
         self.assertIn("devkit_repository=result.devkit_repository", workflow_text)
+        self.assertIn("repository=result.repository", workflow_text)
         self.assertIn(
             "shared_addons_repository=result.shared_addons_repository",
+            workflow_text,
+        )
+        self.assertIn(
+            "product_repository does not match Launchplane product authority.",
             workflow_text,
         )
         self.assertIn(

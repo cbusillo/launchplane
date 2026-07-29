@@ -1,0 +1,101 @@
+---
+name: Product Prelaunch Rebuild Policy
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Plan the change or apply a reviewed plan.
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+      product:
+        description: Existing Launchplane product profile key.
+        required: true
+        type: string
+      context:
+        description: Exact DB-backed stable lane context.
+        required: true
+        type: string
+      instance:
+        description: Exact DB-backed stable lane instance.
+        required: true
+        type: string
+      enabled:
+        description: Whether the lane prelaunch rebuild policy is enabled.
+        required: true
+        default: false
+        type: boolean
+      approval_issue_url:
+        description: Issue-backed approval URL required when enabled.
+        required: false
+        default: ""
+        type: string
+      data_source_mode:
+        description: Rebuild source authorized by the existing lane data policy.
+        required: true
+        default: empty
+        type: choice
+        options:
+          - empty
+          - upstream_restore
+      policy_confirmation:
+        description: Confirmation phrase required by target replacement.
+        required: false
+        default: ""
+        type: string
+      expected_target_name:
+        description: Exact DB-backed target name proof required when enabled.
+        required: false
+        default: ""
+        type: string
+      expected_domains_json:
+        description: JSON array of expected domain proofs required when enabled.
+        required: false
+        default: "[]"
+        type: string
+      reviewed_plan_sha256:
+        description: Plan SHA-256 from the reviewed dry run; required for apply.
+        required: false
+        default: ""
+        type: string
+      reason:
+        description: Operator reason recorded with the request.
+        required: true
+        type: string
+      idempotency_key:
+        description: Unique idempotency key required for apply mode.
+        required: false
+        default: ""
+        type: string
+      confirmation:
+        description: Type APPLY PRODUCT PRELAUNCH REBUILD POLICY to confirm apply.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  apply:
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-prelaunch-rebuild-policy.yml@f63623c4228b227d2baa3325de3d0a576fc8af9f # main
+    with:
+      mode: ${{ inputs.mode }}
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      instance: ${{ inputs.instance }}
+      enabled: ${{ inputs.enabled }}
+      approval_issue_url: ${{ inputs.approval_issue_url }}
+      data_source_mode: ${{ inputs.data_source_mode }}
+      policy_confirmation: ${{ inputs.policy_confirmation }}
+      expected_target_name: ${{ inputs.expected_target_name }}
+      expected_domains_json: ${{ inputs.expected_domains_json }}
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+      idempotency_key: ${{ inputs.idempotency_key }}
+      confirmation: ${{ inputs.confirmation }}

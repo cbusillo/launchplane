@@ -4,6 +4,9 @@ from pydantic import model_validator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.artifact_identity import artifact_manifest_matches_image_repository
+from control_plane.contracts.artifact_dependency_provenance import (
+    normalize_artifact_repository_identity,
+)
 from control_plane.drivers.dispatch import (
     _ProductRouteEnvelope,
     _validate_driver_envelope_product,
@@ -80,6 +83,24 @@ def validate_odoo_artifact_publish_product_evidence(
         raise ValueError(
             "Odoo artifact publish evidence image repository does not match product profile."
         )
+    manifest = request.publish.manifest
+    if manifest.schema_version == 2:
+        dependency_provenance = manifest.dependency_provenance
+        if dependency_provenance is None:
+            raise ValueError(
+                "Odoo artifact publish schema-v2 evidence requires dependency provenance."
+            )
+        tenant_lock = next(
+            lock for lock in dependency_provenance.uv_locks if lock.scope == "tenant"
+        )
+        expected_source_repository = normalize_artifact_repository_identity(
+            product_profile.repository,
+            label="Odoo artifact publish product repository",
+        )
+        if tenant_lock.source_repository != expected_source_repository:
+            raise ValueError(
+                "Odoo artifact publish evidence source repository does not match product profile."
+            )
 
 
 def ingest_odoo_artifact_publish_evidence_result(

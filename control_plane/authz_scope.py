@@ -10,6 +10,8 @@ _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
         "inventory.read",
         "product_profile.health_monitoring.apply",
         "product_profile.health_monitoring.plan",
+        "product_profile.prelaunch_rebuild.apply",
+        "product_profile.prelaunch_rebuild.plan",
         "promotion.write",
         "promotion.read",
         "route_binding.external.apply",
@@ -21,6 +23,8 @@ _EXACT_INSTANCE_WORKFLOW_AUTHZ_ACTIONS = frozenset(
     {
         "product_profile.health_monitoring.apply",
         "product_profile.health_monitoring.plan",
+        "product_profile.prelaunch_rebuild.apply",
+        "product_profile.prelaunch_rebuild.plan",
         "route_binding.external.apply",
         "route_binding.external.plan",
     }

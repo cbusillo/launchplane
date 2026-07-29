@@ -164,6 +164,65 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             ),
         )
 
+    def test_prelaunch_rebuild_managed_rule_requires_pinned_reusable_workflow(
+        self,
+    ) -> None:
+        current_record = _active_record_for_policy(LaunchplaneAuthzPolicy(schema_version=2))
+        desired_rule = {
+            "managed_set_id": "operator.odoo.prelaunch-rebuild",
+            "managed_rule_id": "cm.prod.prelaunch-rebuild",
+            "repository": "every/verireel",
+            "repository_id": "1001",
+            "repository_owner_id": "2001",
+            "workflow_refs": [
+                "every/verireel/.github/workflows/"
+                "product-prelaunch-rebuild-policy.yml@refs/heads/main"
+            ],
+            "event_names": ["workflow_dispatch"],
+            "products": ["odoo-product"],
+            "contexts": ["cm"],
+            "instances": ["prod"],
+            "actions": [
+                "product_profile.prelaunch_rebuild.plan",
+                "product_profile.prelaunch_rebuild.apply",
+            ],
+        }
+        request_payload = {
+            "schema_version": 2,
+            "product": "launchplane",
+            "managed_set_id": "operator.odoo.prelaunch-rebuild",
+            "desired_policy": {
+                "schema_version": 2,
+                "github_actions": [desired_rule],
+            },
+        }
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(request_payload)
+
+        with self.assertRaisesRegex(AuthzPolicyRequestError, "reviewed reusable workflow"):
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=request,
+            )
+
+        desired_rule["job_workflow_refs"] = [
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-product-prelaunch-rebuild-policy.yml@" + "a" * 40
+        ]
+        pinned_request = AuthzManagedPolicyReconcileEnvelope.model_validate(request_payload)
+
+        _, _, updated_policy, _ = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=pinned_request,
+        )
+
+        self.assertEqual(
+            updated_policy.github_actions[0].job_workflow_refs,
+            (
+                "cbusillo/launchplane/.github/workflows/"
+                "reusable-product-prelaunch-rebuild-policy.yml@" + "a" * 40,
+            ),
+        )
+
     def test_instance_ingress_managed_rule_requires_pinned_reusable_workflow(self) -> None:
         current_record = _active_record_for_policy(LaunchplaneAuthzPolicy(schema_version=2))
         desired_rule = {

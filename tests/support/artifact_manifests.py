@@ -17,7 +17,9 @@ from control_plane.contracts.artifact_identity import (
 )
 
 
-def artifact_dependency_provenance_v2() -> ArtifactDependencyProvenance:
+def artifact_dependency_provenance_v2(
+    *, tenant_source_repository: str = "cbusillo/odoo-tenant-cm"
+) -> ArtifactDependencyProvenance:
     packages = (
         ArtifactPythonPackage(
             name="httpx",
@@ -53,7 +55,7 @@ def artifact_dependency_provenance_v2() -> ArtifactDependencyProvenance:
             ),
             ArtifactUvLockProvenance(
                 scope="tenant",
-                source_repository="cbusillo/odoo-tenant-cm",
+                source_repository=tenant_source_repository,
                 source_ref="0" * 40,
                 path="uv.lock",
                 sha256="b" * 64,
@@ -80,12 +82,15 @@ def artifact_manifest_v2(
     *,
     artifact_id: str = "artifact-cm-v2",
     image_repository: str = "ghcr.io/cbusillo/odoo-tenant-cm",
+    odoo_install_modules: tuple[str, ...] = (),
+    tenant_source_repository: str = "cbusillo/odoo-tenant-cm",
 ) -> ArtifactIdentityManifest:
     return ArtifactIdentityManifest(
         schema_version=2,
         artifact_id=artifact_id,
         source_commit="0" * 40,
         enterprise_base_digest=f"sha256:{'c' * 64}",
+        odoo_install_modules=odoo_install_modules,
         addon_sources=(
             ArtifactAddonSource(
                 repository="cbusillo/odoo-shared-addons",
@@ -121,7 +126,9 @@ def artifact_manifest_v2(
                 ),
             ),
         ),
-        dependency_provenance=artifact_dependency_provenance_v2(),
+        dependency_provenance=artifact_dependency_provenance_v2(
+            tenant_source_repository=tenant_source_repository
+        ),
         image=ArtifactImageReference(
             repository=image_repository,
             digest=f"sha256:{'f' * 64}",

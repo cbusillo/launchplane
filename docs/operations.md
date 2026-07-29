@@ -916,6 +916,29 @@ owns only the generic wrapper's exact immutable reusable-worker grant; real
 product, context, instance, check, and endpoint values remain explicit operator
 input and DB-backed Launchplane records.
 
+Use the manual Product Prelaunch Rebuild Policy workflow when an Odoo lane must
+authorize a reviewed destructive rebuild before stable target replacement. Run
+`mode=dry-run` first with the exact product/context/instance, enabled state,
+issue-backed approval URL, typed data source, target-replacement confirmation
+phrase, expected target proof, expected-domain JSON array, and operator reason.
+The workflow has no checked-in product, lane, target, domain, volume, or
+notification defaults. Review the current/requested policies, data authority,
+allowed rebuild sources, monitoring intent, complete-profile digest, and plan
+SHA-256. Apply from a second run with identical desired policy fields, the
+reviewed digest, a unique idempotency key, and confirmation
+`APPLY PRODUCT PRELAUNCH REBUILD POLICY`.
+
+Authority uses separate exact-instance
+`product_profile.prelaunch_rebuild.plan` and `.apply` actions tied to the exact
+immutable reusable worker. The service fails closed unless the lane remains
+`prelaunch`, its existing `odoo_data_policy` permits the requested source, and
+`empty` rebuilds are explicitly `resettable`. This workflow changes no data
+policy, health intent, route, provider target, runtime setting, secret, or
+volume identity. After apply, rerun Odoo Target Replacement Plan; add target-
+replacement apply authority only after that plan returns `ready`. Disable the
+policy through the same dry-run/apply workflow after recovery if no further
+prelaunch rebuild should remain authorized.
+
 The manual Product Context Cutover workflow plans or applies the same
 current-authority record move through the Launchplane service. The workflow
 does not carry product/context defaults; operators must provide the product,
@@ -1617,11 +1640,15 @@ uv run launchplane odoo-artifacts publish \
 The Odoo artifact publish driver is the control-plane-owned handoff. It
 resolves the DB-backed runtime environment and managed secrets in Launchplane,
 derives product-profile publish metadata such as preview slug, image repository,
-and image tag, passes the runtime payload to `odoo-devkit` as a one-shot runtime
-payload for the publish subprocess, validates the returned artifact belongs to
-the requested context, and writes the artifact manifest back to Launchplane
-records. Do not point a local devkit checkout directly at the live Launchplane
-database or recreate runtime env files to publish artifacts.
+image tag, and product source repository. The DB-backed product profile remains
+authoritative for the tenant checkout; an optional caller repository value is
+only an equality assertion and cannot redirect the build. Launchplane passes the
+runtime payload to `odoo-devkit` as a one-shot runtime payload for the publish
+subprocess, validates the returned artifact belongs to the requested context,
+and writes the artifact manifest back to Launchplane records. Schema-v2 evidence
+must also identify the product-profile repository as the tenant uv-lock source.
+Do not point a local devkit checkout directly at the live Launchplane database
+or recreate runtime env files to publish artifacts.
 
 Launchplane accepts historical schema-v1 artifact manifests and strict
 schema-v2 manifests. V2 records carry typed uv-lock, per-platform Python package,
@@ -1730,7 +1757,13 @@ select the typed `readiness` member for the bounded evidence artifact and exact
 gate check. Plan payload generation and apply operation creation occur only
 after an exact `ready` result. Apply uses a
 complete explicit `artifact_id`/`source_git_ref` pair when supplied; otherwise it
-pins both values from the current environment record before enqueue. Both
+pins both values from the current environment record before enqueue. The plan
+request and reusable plan worker accept the same pair so a newly published
+immutable recovery artifact can be reviewed before apply once a caller advances
+to the landed worker contract. Plan and apply both read the selected manifest,
+require its source commit and image repository to match, and reject artifacts
+whose `odoo_install_modules` omit Launchplane's required safety modules. Apply
+repeats those checks before creating a durable operation. Both
 workers also carry the environment's current artifact as a separate expected
 snapshot; the plan route, apply enqueue path, and operation worker fail closed
 if that lane artifact changes. Candidate artifacts must use the product
