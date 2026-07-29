@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from tests.support.workflows import load_workflow
+from tests.support.workflows import SELF_HOSTED_RUNNER, load_workflow
 
 
 class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = load_workflow(".github/workflows/tracked-target-logs.yml")
+        self.worker = load_workflow(".github/workflows/reusable-tracked-target-logs.yml")
 
     def test_dispatch_contract_includes_exact_compose_service_selector(self) -> None:
         trigger = self.workflow.data["on"]
@@ -36,6 +37,55 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         self.assertIn("exact lowercase Compose service name", validation_step.run)
         self.assertIn('--arg service "$SERVICE"', route_step.run)
         self.assertIn('"&service=\\(.service | @uri)"', route_step.run)
+
+    def test_reusable_worker_preserves_redacted_log_read_contract(self) -> None:
+        trigger = self.worker.data["on"]
+        assert isinstance(trigger, dict)
+        workflow_call = trigger["workflow_call"]
+        assert isinstance(workflow_call, dict)
+        inputs = workflow_call["inputs"]
+        assert isinstance(inputs, dict)
+        self.assertEqual(
+            set(inputs),
+            {
+                "context",
+                "instance",
+                "lines",
+                "source",
+                "since",
+                "search",
+                "service",
+                "launchplane_url",
+                "launchplane_audience",
+            },
+        )
+        self.assertEqual(tuple(self.worker.job("read")["runs-on"]), SELF_HOSTED_RUNNER)
+        self.assertEqual(
+            self.worker.job_permissions("read"),
+            {"contents": "read", "id-token": "write"},
+        )
+        request_step = self.worker.step_named("read", "Read tracked target logs")
+        summary_step = self.worker.step_named("read", "Show redacted log summary")
+        upload_step = self.worker.step_named("read", "Upload tracked target logs")
+        self.assertIsNotNone(request_step)
+        self.assertIsNotNone(summary_step)
+        self.assertIsNotNone(upload_step)
+        assert request_step is not None
+        assert summary_step is not None
+        assert upload_step is not None
+        self.assertEqual(
+            request_step.uses,
+            "cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850",
+        )
+        self.assertEqual(request_step.with_values["method"], "GET")
+        self.assertEqual(request_step.with_values["log-response-body"], False)
+        self.assertFalse(
+            any(step.uses.startswith("actions/checkout@") for step in self.worker.steps("read"))
+        )
+        self.assertIn("line_count", summary_step.run)
+        self.assertIn("redacted", summary_step.run)
+        self.assertIn("tracked-target-logs-request.json", upload_step.with_values["path"])
+        self.assertIn("tracked-target-logs.json", upload_step.with_values["path"])
 
 
 if __name__ == "__main__":
