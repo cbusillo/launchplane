@@ -69,12 +69,15 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         request_step = self.worker.step_named("read", "Read tracked target logs")
         summary_step = self.worker.step_named("read", "Show redacted log summary")
         upload_step = self.worker.step_named("read", "Upload tracked target logs")
+        artifact_step = self.worker.step_named("read", "Build artifact name")
         self.assertIsNotNone(request_step)
         self.assertIsNotNone(summary_step)
         self.assertIsNotNone(upload_step)
+        self.assertIsNotNone(artifact_step)
         assert request_step is not None
         assert summary_step is not None
         assert upload_step is not None
+        assert artifact_step is not None
         self.assertEqual(
             request_step.uses,
             "cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850",
@@ -89,6 +92,9 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         upload_path = str(upload_step.with_values["path"])
         self.assertIn("tracked-target-logs-request.json", upload_path)
         self.assertIn("tracked-target-logs.json", upload_path)
+        self.assertIn("sed -E", artifact_step.run)
+        self.assertEqual(upload_step.with_values["name"], "${{ steps.artifact.outputs.name }}")
+        self.assertNotIn("inputs.context", str(upload_step.with_values["name"]))
 
     def test_reusable_worker_preserves_failure_evidence_before_failing(self) -> None:
         request_step = self.worker.step_named("read", "Read tracked target logs")
@@ -101,7 +107,10 @@ class TrackedTargetLogsOperatorWorkflowTests(unittest.TestCase):
         assert upload_step is not None
         assert fail_step is not None
         self.assertEqual(request_step.data["continue-on-error"], True)
-        self.assertEqual(upload_step.data["if"], "${{ always() }}")
+        self.assertEqual(
+            upload_step.data["if"],
+            "${{ always() && steps.route.outcome == 'success' }}",
+        )
         self.assertEqual(upload_step.with_values["if-no-files-found"], "error")
         self.assertEqual(fail_step.data["if"], "${{ steps.request.outcome == 'failure' }}")
 
