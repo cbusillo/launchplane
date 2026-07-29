@@ -68,6 +68,9 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/odoo-target-replacement-apply.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-apply.yml"}
     ),
+    Path(".github/workflows/odoo-website-bootstrap-override.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-odoo-website-bootstrap-override.yml"}
+    ),
     Path(".github/workflows/odoo-prod-backup-verification.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-verification.yml"}
     ),
@@ -88,6 +91,9 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
             "cbusillo/launchplane/.github/workflows/"
             "reusable-odoo-prod-retained-volume-backup-import-apply.yml"
         }
+    ),
+    Path(".github/workflows/tracked-target-logs.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-tracked-target-logs.yml"}
     ),
 }
 
@@ -164,6 +170,12 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
             "exact-instance Odoo target replacement apply",
         )
     ),
+    "cbusillo/launchplane/.github/workflows/reusable-odoo-website-bootstrap-override.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "exact-instance Odoo website-bootstrap repair",
+        )
+    ),
     "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-verification.yml": (
         ActionClassification(
             "First-party same-repository",
@@ -224,6 +236,12 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
         ActionClassification(
             "First-party same-repository",
             "exact-instance immutable Odoo artifact publication",
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-tracked-target-logs.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "exact-instance redacted target-log diagnostics",
         )
     ),
     "docker/build-push-action": ActionClassification(
