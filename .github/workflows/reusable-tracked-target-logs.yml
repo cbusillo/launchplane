@@ -34,16 +34,6 @@ name: Reusable Tracked Target Logs
         required: false
         default: ""
         type: string
-      launchplane_url:
-        description: Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
-        required: false
-        default: ""
-        type: string
-      launchplane_audience:
-        description: Optional GitHub OIDC audience.
-        required: false
-        default: ""
-        type: string
 
 permissions:
   contents: read
@@ -57,10 +47,8 @@ jobs:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
     env:
-      LAUNCHPLANE_SERVICE_URL: >-
-        ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
-      LAUNCHPLANE_SERVICE_AUDIENCE: >-
-        ${{ inputs.launchplane_audience || vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
       CONTEXT: ${{ inputs.context }}
       INSTANCE: ${{ inputs.instance }}
       LINES: ${{ inputs.lines }}
@@ -218,11 +206,14 @@ jobs:
         if: ${{ always() && steps.route.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ steps.artifact.outputs.name }}
+          name: >-
+            ${{ steps.artifact.outputs.name }}-${{ github.run_id }}-${{
+            github.run_attempt }}
           path: |
             tracked-target-logs-request.json
             tracked-target-logs.json
           if-no-files-found: error
+          retention-days: 30
 
       - name: Fail when tracked target log read failed
         if: ${{ steps.request.outcome == 'failure' }}

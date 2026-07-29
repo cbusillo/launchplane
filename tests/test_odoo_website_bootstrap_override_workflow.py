@@ -25,8 +25,6 @@ class OdooWebsiteBootstrapOverrideWorkflowTests(unittest.TestCase):
                 "context",
                 "instance",
                 "website_bootstrap_payload",
-                "launchplane_url",
-                "launchplane_audience",
             },
         )
         self.assertEqual(self.worker.job("write")["runs-on"], "ubuntu-latest")
@@ -62,6 +60,7 @@ class OdooWebsiteBootstrapOverrideWorkflowTests(unittest.TestCase):
         assert fail_step is not None
         assert artifact_step is not None
         self.assertIn("website_bootstrap_payload must be a JSON object", validation_step.run)
+        self.assertIn("must be a canonical lowercase identifier", validation_step.run)
         self.assertIn("instance must be 'testing' or 'prod'", validation_step.run)
         self.assertIn("homepage_url must be empty or a local Odoo route path", validation_step.run)
         self.assertIn(
@@ -78,6 +77,14 @@ class OdooWebsiteBootstrapOverrideWorkflowTests(unittest.TestCase):
             "/v1/drivers/odoo/website-bootstrap-override",
         )
         self.assertEqual(request_step.with_values["log-response-body"], False)
+        self.assertEqual(
+            request_step.with_values["launchplane-url"],
+            "${{ env.LAUNCHPLANE_SERVICE_URL }}",
+        )
+        self.assertEqual(
+            request_step.with_values["audience"],
+            "${{ env.LAUNCHPLANE_SERVICE_AUDIENCE }}",
+        )
         self.assertEqual(request_step.data["continue-on-error"], True)
         self.assertEqual(
             request_step.with_values["idempotency-key"],
@@ -89,6 +96,7 @@ class OdooWebsiteBootstrapOverrideWorkflowTests(unittest.TestCase):
         self.assertIn('if [ "$STATUS_CODE" != "202" ]', verify_step.run)
         self.assertNotIn('steps.launchplane.outputs.status-code }}" !=', verify_step.run)
         self.assertIn("website_bootstrap: (.result.website_bootstrap // false)", verify_step.run)
+        self.assertIn("did not persist website-bootstrap intent", verify_step.run)
         self.assertIn("GITHUB_RUN_ID", payload_step.run)
         self.assertIn("GITHUB_RUN_ATTEMPT", payload_step.run)
         self.assertIn("product_configured", evidence_step.run)
@@ -99,8 +107,12 @@ class OdooWebsiteBootstrapOverrideWorkflowTests(unittest.TestCase):
             "${{ always() && steps.evidence.outcome == 'success' }}",
         )
         self.assertEqual(upload_step.with_values["if-no-files-found"], "error")
-        self.assertEqual(upload_step.with_values["name"], "${{ steps.artifact.outputs.name }}")
+        artifact_name = str(upload_step.with_values["name"])
+        self.assertIn("steps.artifact.outputs.name", artifact_name)
+        self.assertIn("github.run_id", artifact_name)
+        self.assertIn("github.run_attempt", artifact_name)
         self.assertNotIn("inputs.product", str(upload_step.with_values["name"]))
+        self.assertEqual(upload_step.with_values["retention-days"], 30)
         self.assertIn("sed -E", artifact_step.run)
         upload_path = str(upload_step.with_values["path"])
         self.assertIn("odoo-website-bootstrap-override-evidence.json", upload_path)
