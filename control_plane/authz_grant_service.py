@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from control_plane.authz_scope import (
     exact_instance_workflow_authz_actions,
     instance_pinned_workflow_authz_actions,
+    operational_readiness_authz_actions,
 )
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -264,6 +265,31 @@ class AuthzManagedCompatibilityRetirement(BaseModel):
     )
 
 
+AuthzOperationalReadinessBlockerCode = Literal[
+    "repository_not_exact",
+    "workflow_refs_not_singleton",
+    "workflow_ref_not_exact",
+    "job_workflow_refs_not_singleton",
+    "job_workflow_ref_not_immutable",
+    "actions_not_singleton",
+    "action_not_exact",
+    "products_not_singleton",
+    "product_not_exact",
+    "contexts_not_singleton",
+    "context_not_exact",
+    "instances_not_singleton",
+    "instance_not_exact",
+]
+
+
+class AuthzManagedOperationalReadinessBlocker(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    managed_rule_id: str
+    actions: tuple[str, ...]
+    reason_codes: tuple[AuthzOperationalReadinessBlockerCode, ...]
+
+
 class AuthzManagedPolicyDiff(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -286,6 +312,8 @@ class AuthzManagedPolicyDiff(BaseModel):
     unmanaged_compatibility_candidate_count: int = 0
     retired_unmanaged_compatibility_rule_count: int = 0
     retired_unmanaged_compatibility_rules: tuple[AuthzManagedCompatibilityRetirement, ...] = ()
+    operational_readiness_blocked_rule_count: int = 0
+    operational_readiness_blockers: tuple[AuthzManagedOperationalReadinessBlocker, ...] = ()
     changes: tuple[AuthzManagedRuleChange, ...] = ()
 
 
@@ -425,14 +453,77 @@ def _github_rule_requires_immutable_workflow(
     ) or any(instance in {"*", "prod"} for instance in rule.instances)
 
 
-def _contains_workflow_ref_glob(value: str) -> bool:
+def _contains_selector_glob(value: str) -> bool:
     return any(character in value for character in _WORKFLOW_REF_GLOB_CHARACTERS)
 
 
 def is_immutable_job_workflow_ref(value: str) -> bool:
     return _IMMUTABLE_JOB_WORKFLOW_REF_PATTERN.fullmatch(
         value
-    ) is not None and not _contains_workflow_ref_glob(value)
+    ) is not None and not _contains_selector_glob(value)
+
+
+def operational_readiness_rule_selector_blockers(
+    rule: GitHubActionsPolicyRule,
+) -> tuple[AuthzOperationalReadinessBlockerCode, ...]:
+    blockers: list[AuthzOperationalReadinessBlockerCode] = []
+    if _contains_selector_glob(rule.repository):
+        blockers.append("repository_not_exact")
+    if len(rule.workflow_refs) != 1:
+        blockers.append("workflow_refs_not_singleton")
+    elif _contains_selector_glob(rule.workflow_refs[0]):
+        blockers.append("workflow_ref_not_exact")
+    if len(rule.job_workflow_refs) != 1:
+        blockers.append("job_workflow_refs_not_singleton")
+    elif not is_immutable_job_workflow_ref(rule.job_workflow_refs[0]):
+        blockers.append("job_workflow_ref_not_immutable")
+    if len(rule.actions) != 1:
+        blockers.append("actions_not_singleton")
+    elif _contains_selector_glob(rule.actions[0]):
+        blockers.append("action_not_exact")
+    if len(rule.products) != 1:
+        blockers.append("products_not_singleton")
+    elif _contains_selector_glob(rule.products[0]):
+        blockers.append("product_not_exact")
+    if len(rule.contexts) != 1:
+        blockers.append("contexts_not_singleton")
+    elif _contains_selector_glob(rule.contexts[0]):
+        blockers.append("context_not_exact")
+    if len(rule.instances) != 1:
+        blockers.append("instances_not_singleton")
+    elif _contains_selector_glob(rule.instances[0]):
+        blockers.append("instance_not_exact")
+    return tuple(blockers)
+
+
+def _managed_operational_readiness_blockers(
+    *,
+    desired_policy: LaunchplaneAuthzPolicy,
+    managed_set_id: str,
+) -> tuple[AuthzManagedOperationalReadinessBlocker, ...]:
+    readiness_actions = operational_readiness_authz_actions()
+    blockers: list[AuthzManagedOperationalReadinessBlocker] = []
+    for rule in desired_policy.github_actions:
+        if rule.managed_set_id != managed_set_id:
+            continue
+        matching_actions = tuple(
+            action
+            for action in readiness_actions
+            if any(fnmatchcase(action, selector) for selector in rule.actions)
+        )
+        if not matching_actions:
+            continue
+        reason_codes = operational_readiness_rule_selector_blockers(rule)
+        if not reason_codes:
+            continue
+        blockers.append(
+            AuthzManagedOperationalReadinessBlocker(
+                managed_rule_id=str(rule.managed_rule_id),
+                actions=matching_actions,
+                reason_codes=reason_codes,
+            )
+        )
+    return tuple(blockers)
 
 
 def _github_transition_selector_payload(rule: GitHubActionsPolicyRule) -> dict[str, Any]:
@@ -520,7 +611,7 @@ def _validate_github_managed_workflow_transition(
         if not _github_rule_requires_immutable_workflow(desired_rule):
             continue
         if not desired_rule.workflow_refs or any(
-            _contains_workflow_ref_glob(workflow_ref) for workflow_ref in desired_rule.workflow_refs
+            _contains_selector_glob(workflow_ref) for workflow_ref in desired_rule.workflow_refs
         ):
             raise AuthzPolicyRequestError(
                 "High-privilege managed GitHub Actions rules require exact caller workflow_refs "
@@ -543,7 +634,7 @@ def _validate_github_managed_workflow_transition(
         for job_workflow_ref in desired_rule.job_workflow_refs:
             if is_immutable_job_workflow_ref(job_workflow_ref):
                 continue
-            if _contains_workflow_ref_glob(job_workflow_ref) or not any(
+            if _contains_selector_glob(job_workflow_ref) or not any(
                 _github_rule_preserves_existing_mutable_ref(
                     current_rule=current_rule,
                     desired_rule=desired_rule,
@@ -596,7 +687,7 @@ def _glob_selectors_cover(
     return all(
         (
             managed_value in compatibility_values
-            if _contains_workflow_ref_glob(managed_value)
+            if _contains_selector_glob(managed_value)
             else any(
                 fnmatchcase(managed_value, compatibility_value)
                 for compatibility_value in compatibility_values
@@ -1069,6 +1160,10 @@ def plan_managed_authz_policy_reconcile(
             "Managed authz policy reviewed_plan_sha256 no longer matches the active policy "
             "and desired managed rule set."
         )
+    operational_readiness_blockers = _managed_operational_readiness_blockers(
+        desired_policy=request.desired_policy,
+        managed_set_id=request.managed_set_id,
+    )
     diff = AuthzManagedPolicyDiff(
         managed_set_id=request.managed_set_id,
         previous_record_id=current_record.record_id,
@@ -1092,6 +1187,8 @@ def plan_managed_authz_policy_reconcile(
         unmanaged_compatibility_candidate_count=unmanaged_compatibility_candidate_count,
         retired_unmanaged_compatibility_rule_count=len(compatibility_retirements),
         retired_unmanaged_compatibility_rules=compatibility_retirements,
+        operational_readiness_blocked_rule_count=len(operational_readiness_blockers),
+        operational_readiness_blockers=operational_readiness_blockers,
         changes=changes,
     )
     return current_policy, current_record, updated_policy, diff

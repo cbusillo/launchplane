@@ -430,6 +430,32 @@ secret instead. The JSON owns desired state only: `schema_version`, `product`,
 Dispatch-time mode, reason, issue reference, and reviewed plan digest are
 deliberately excluded from that secret.
 
+### Reusable workflow SHA rollout for readiness-gated actions
+
+Operational-readiness actions require one exact managed rule for the current
+caller, reusable worker, action, product, context, and instance. Roll a pinned
+worker without creating an authorization gap by using two separate exact rules:
+
+1. Add a new rule with a distinct `managed_rule_id` and the new immutable worker
+   SHA while retaining the old exact rule unchanged. Each rule must keep a
+   singleton `job_workflow_refs` selector and the same exact lane/action scope.
+2. Run `Manage Launchplane Authorization` in `dry_run` mode and require
+   `operational_readiness_blocked_rule_count=0` in the recorded diff before
+   approving the protected `launchplane-authz-admin` job. Apply the reviewed
+   expansion, then deploy the wrapper that calls the new worker SHA.
+3. Run the read-only operational-readiness preflight from the new worker. It must
+   select only the new exact rule and report authorization ready.
+4. Remove the old rule through a second dry-run/review/apply cycle, then repeat
+   the readiness preflight.
+
+Do not place old and new worker SHAs together in one readiness-sensitive rule.
+That overlap can be valid transitional authorization, but it is intentionally
+not final operational-readiness shape and will report
+`job_workflow_refs_not_singleton`. The managed-authz dry-run records bounded
+rule IDs, affected readiness actions, and reason codes without exposing selector
+values. Every expansion and contraction still requires the protected human
+approval; diagnostics do not bypass or weaken that control.
+
 `Ingress Route Dry Run` and `Ingress Route Apply` accept an optional exact
 instance. When present, the service authorizes `ingress_route.plan` or
 `ingress_route.apply` against that instance and verifies every requested domain

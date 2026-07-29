@@ -5,7 +5,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from control_plane.authz_grant_service import is_immutable_job_workflow_ref
+from control_plane.authz_grant_service import (
+    is_immutable_job_workflow_ref,
+    operational_readiness_rule_selector_blockers,
+)
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
     artifact_manifest_matches_image_repository,
@@ -345,9 +348,32 @@ def _authorization_dimension(
         if rule.managed_set_id == captured.managed_set_id
         and rule.managed_rule_id == captured.managed_rule_id
     )
-    if len(matching_rules) != 1 or not _exact_managed_workflow_rule_ready(
+    if len(matching_rules) != 1:
+        return _authorization_not_ready(
+            state="blocked",
+            summary=(
+                "The captured managed authorization does not resolve to exactly one active rule."
+            ),
+            record=record,
+            details=("managed_rule_match_not_singleton",),
+        )
+    matching_rule = matching_rules[0]
+    selector_blockers = operational_readiness_rule_selector_blockers(matching_rule)
+    if selector_blockers:
+        return _authorization_not_ready(
+            state="blocked",
+            summary=(
+                "The matching managed rule is authorized for transition but is not in final "
+                "operational-readiness shape. During a reusable-workflow SHA rollout, authorize "
+                "old and new workers as separate singleton exact rules before removing the old "
+                "rule."
+            ),
+            record=record,
+            details=selector_blockers,
+        )
+    if not _exact_managed_workflow_rule_ready(
         identity=identity,
-        rule=matching_rules[0],
+        rule=matching_rule,
         requested_action=inputs.requested_action,
         product=inputs.profile.product,
         context=inputs.lane.context,
@@ -360,6 +386,7 @@ def _authorization_dimension(
                 "caller, reusable workflow, action, product, context, and instance."
             ),
             record=record,
+            details=("managed_rule_selector_mismatch",),
         )
     return ProductOperationalReadinessDimension(
         dimension="authorization",
@@ -378,6 +405,7 @@ def _authorization_not_ready(
     state: ProductOperationalReadinessState,
     summary: str,
     record: LaunchplaneAuthzPolicyRecord | None = None,
+    details: tuple[str, ...] = (),
 ) -> ProductOperationalReadinessDimension:
     return ProductOperationalReadinessDimension(
         dimension="authorization",
@@ -385,6 +413,7 @@ def _authorization_not_ready(
         summary=summary,
         owner_record_type="authz_policy_record",
         evidence=(_authz_policy_evidence(record),) if record is not None else (),
+        details=details,
         remediation=ProductOperationalReadinessRemediation(
             action="authz_policy.manage",
             method="POST",
@@ -415,7 +444,8 @@ def _exact_managed_workflow_rule_ready(
     instance: str,
 ) -> bool:
     return bool(
-        identity.repository_id
+        not operational_readiness_rule_selector_blockers(rule)
+        and identity.repository_id
         and identity.repository_owner_id
         and rule.repository == identity.repository
         and rule.repository_id == identity.repository_id

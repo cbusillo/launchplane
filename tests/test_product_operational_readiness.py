@@ -50,6 +50,10 @@ _JOB_WORKFLOW_REF = (
     "example/launchplane/.github/workflows/reusable-target-replacement.yml@"
     "0123456789abcdef0123456789abcdef01234567"
 )
+_NEW_JOB_WORKFLOW_REF = (
+    "example/launchplane/.github/workflows/reusable-target-replacement.yml@"
+    "89abcdef0123456789abcdef0123456789abcdef"
+)
 
 
 def _profile() -> LaunchplaneProductProfileRecord:
@@ -139,6 +143,29 @@ def _policy_record(
                 "schema_version": 2,
                 "github_actions": [rule],
             }
+        ),
+    )
+
+
+def _split_worker_policy_record() -> LaunchplaneAuthzPolicyRecord:
+    base_rule = _policy_record().policy.github_actions[0]
+    old_rule = base_rule.model_copy(
+        update={"managed_rule_id": "example-odoo.testing.replacement-plan.old"}
+    )
+    new_rule = base_rule.model_copy(
+        update={
+            "managed_rule_id": "example-odoo.testing.replacement-plan.new",
+            "job_workflow_refs": (_NEW_JOB_WORKFLOW_REF,),
+        }
+    )
+    return LaunchplaneAuthzPolicyRecord(
+        record_id="launchplane-authz-policy-ready-split-rollout",
+        revision=12,
+        source="test",
+        updated_at="2026-07-23T09:01:00Z",
+        policy=LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(old_rule, new_rule),
         ),
     )
 
@@ -691,6 +718,51 @@ class ProductOperationalReadinessTests(unittest.TestCase):
                 }
                 self.assertEqual(states["authorization"], "blocked")
                 self.assertFalse(readiness.ready)
+
+    def test_worker_overlap_rule_reports_readiness_rollout_remediation(self) -> None:
+        inputs = replace(
+            _inputs(),
+            active_policy_records=(
+                _policy_record(
+                    rule_overrides={
+                        "job_workflow_refs": [
+                            _JOB_WORKFLOW_REF,
+                            _NEW_JOB_WORKFLOW_REF,
+                        ]
+                    }
+                ),
+            ),
+        )
+
+        readiness = build_product_operational_readiness(inputs)
+
+        authorization = next(
+            dimension
+            for dimension in readiness.dimensions
+            if dimension.dimension == "authorization"
+        )
+        self.assertEqual(authorization.state, "blocked")
+        self.assertEqual(
+            authorization.details,
+            ("job_workflow_refs_not_singleton",),
+        )
+        self.assertIn("separate singleton exact rules", authorization.summary)
+
+    def test_split_exact_worker_rollout_keeps_current_worker_ready(self) -> None:
+        readiness = build_product_operational_readiness(
+            replace(
+                _inputs(),
+                active_policy_records=(_split_worker_policy_record(),),
+            )
+        )
+
+        authorization = next(
+            dimension
+            for dimension in readiness.dimensions
+            if dimension.dimension == "authorization"
+        )
+        self.assertEqual(authorization.state, "ready")
+        self.assertTrue(readiness.ready)
 
     def test_missing_route_and_config_fail_closed(self) -> None:
         inputs = _inputs()

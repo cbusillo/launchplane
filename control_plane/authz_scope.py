@@ -76,3 +76,10 @@ def exact_instance_workflow_authz_actions() -> frozenset[str]:
 @lru_cache(maxsize=1)
 def instance_pinned_workflow_authz_actions() -> frozenset[str]:
     return _INSTANCE_PINNED_WORKFLOW_AUTHZ_ACTIONS
+
+
+@lru_cache(maxsize=1)
+def operational_readiness_authz_actions() -> frozenset[str]:
+    from control_plane.drivers.registry import operational_readiness_driver_authz_actions
+
+    return operational_readiness_driver_authz_actions()
