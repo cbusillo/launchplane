@@ -2324,7 +2324,12 @@ workflow ref pinned to a full commit SHA. The captured managed rule must contain
 singleton exact product, context, instance, action, caller-workflow, and
 reusable-workflow selectors; wildcard or multi-lane rules remain blocked even if
 normal policy matching would allow the current call. Caller-supplied identity
-selectors are not accepted.
+selectors are not accepted. Non-final selector shape is returned as bounded
+authorization dimension details such as `job_workflow_refs_not_singleton`,
+without returning selector values. During an immutable worker rollout, old and
+new workers must therefore use separate exact managed rules with distinct rule
+IDs; combining both SHAs in one rule remains blocked even when normal policy
+matching authorizes the caller.
 
 The typed response reports overall and per-dimension `ready`, `blocked`,
 `stale`, `missing`, or `unsupported` state for product/lane ownership, action

@@ -388,7 +388,14 @@ an ORM column/table or remains only in the evidence payload.
   completed replay evidence commit in one transaction; a no-op apply creates no
   policy-history row. Managed reconciliation can adopt matching unmanaged rules
   and retire covered name-only compatibility rules in the same reviewed policy
-  transaction.
+  transaction. Its diff also reports bounded operational-readiness blockers for
+  desired managed GitHub Actions rules: the managed rule ID, affected readiness
+  actions, and selector-shape reason codes, but never repository IDs, workflow
+  refs, products, contexts, or instances. A rule containing old and new worker
+  SHAs in one `job_workflow_refs` selector may remain valid transitional
+  authorization, but it reports `job_workflow_refs_not_singleton`. Readiness-safe
+  expansion uses two separately identified exact rules, one immutable worker SHA
+  per rule, followed by reviewed contraction of the old rule.
   During a future OpenFGA migration, these DB-backed policy records remain the
   source evidence for dry-run tuple proposals and parity checks.
   After a proven cutover, records should store import/audit/model-version

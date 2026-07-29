@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
+from pathlib import Path
 import unittest
 from typing import cast
 
@@ -102,6 +104,13 @@ def _active_record_for_policy(policy: LaunchplaneAuthzPolicy) -> LaunchplaneAuth
         updated_at="2026-07-18T06:45:00Z",
         policy_sha256=policy_sha256,
         policy=policy,
+    )
+
+
+def _authz_rollout_fixture(filename: str) -> LaunchplaneAuthzPolicy:
+    fixture_path = Path(__file__).parent / "fixtures" / "authz" / filename
+    return LaunchplaneAuthzPolicy.model_validate(
+        json.loads(fixture_path.read_text(encoding="utf-8"))
     )
 
 
@@ -1226,6 +1235,84 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         self.assertEqual(
             apply_request.desired_policy.local_operators[0].token_labels,
             ("primary", "secondary"),
+        )
+
+    def test_managed_reconcile_reports_single_rule_worker_overlap_as_not_readiness_final(
+        self,
+    ) -> None:
+        current_record = _active_record_for_policy(LaunchplaneAuthzPolicy(schema_version=2))
+        request = AuthzManagedPolicyReconcileEnvelope(
+            schema_version=2,
+            product="launchplane",
+            managed_set_id="test.operational-readiness-rollout",
+            desired_policy=_authz_rollout_fixture("operational-readiness-overlap.json"),
+        )
+
+        _, _, _, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=request,
+        )
+
+        self.assertEqual(diff.operational_readiness_blocked_rule_count, 1)
+        self.assertEqual(len(diff.operational_readiness_blockers), 1)
+        self.assertEqual(
+            diff.operational_readiness_blockers[0].reason_codes,
+            ("job_workflow_refs_not_singleton",),
+        )
+
+    def test_managed_reconcile_accepts_split_exact_worker_rollout_as_readiness_final(
+        self,
+    ) -> None:
+        current_record = _active_record_for_policy(LaunchplaneAuthzPolicy(schema_version=2))
+        request = AuthzManagedPolicyReconcileEnvelope(
+            schema_version=2,
+            product="launchplane",
+            managed_set_id="test.operational-readiness-rollout",
+            desired_policy=_authz_rollout_fixture("operational-readiness-split.json"),
+        )
+
+        _, _, _, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=request,
+        )
+
+        self.assertEqual(diff.added_rule_count, 2)
+        self.assertEqual(diff.operational_readiness_blocked_rule_count, 0)
+        self.assertEqual(diff.operational_readiness_blockers, ())
+
+    def test_managed_reconcile_reports_singleton_wildcards_as_not_readiness_final(
+        self,
+    ) -> None:
+        current_record = _active_record_for_policy(LaunchplaneAuthzPolicy(schema_version=2))
+        request = AuthzManagedPolicyReconcileEnvelope(
+            schema_version=2,
+            product="launchplane",
+            managed_set_id="test.operational-readiness-rollout",
+            desired_policy=_authz_rollout_fixture("operational-readiness-wildcards.json"),
+        )
+
+        _, _, _, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=request,
+        )
+
+        self.assertEqual(diff.operational_readiness_blocked_rule_count, 2)
+        blockers_by_rule = {
+            blocker.managed_rule_id: blocker for blocker in diff.operational_readiness_blockers
+        }
+        self.assertEqual(
+            blockers_by_rule["example.replacement-plan.wildcards"].reason_codes,
+            (
+                "workflow_ref_not_exact",
+                "action_not_exact",
+                "product_not_exact",
+                "context_not_exact",
+                "instances_not_singleton",
+            ),
+        )
+        self.assertEqual(
+            blockers_by_rule["example.replacement-plan.instance-wildcard"].reason_codes,
+            ("instance_not_exact",),
         )
 
     def test_managed_reconcile_allows_only_preexisting_mutable_privileged_overlap(self) -> None:

@@ -1,0 +1,37 @@
+{
+  "schema_version": 2,
+  "github_actions": [
+    {
+      "managed_set_id": "test.operational-readiness-rollout",
+      "managed_rule_id": "example.replacement-plan",
+      "repository": "example/example-odoo",
+      "repository_id": "1001",
+      "repository_owner_id": "1000",
+      "workflow_refs": [
+        "example/example-odoo/.github/workflows/replace.yml@refs/heads/main"
+      ],
+      "job_workflow_refs": [
+        "example/launchplane/.github/workflows/reusable-target-replacement.yml@1111111111111111111111111111111111111111",
+        "example/launchplane/.github/workflows/reusable-target-replacement.yml@2222222222222222222222222222222222222222"
+      ],
+      "event_names": [
+        "workflow_dispatch"
+      ],
+      "refs": [
+        "refs/heads/main"
+      ],
+      "products": [
+        "example-product"
+      ],
+      "contexts": [
+        "example-context"
+      ],
+      "instances": [
+        "example-instance"
+      ],
+      "actions": [
+        "odoo_target_replacement_plan.read"
+      ]
+    }
+  ]
+}
