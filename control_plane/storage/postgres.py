@@ -284,6 +284,15 @@ MutationReconciliationRetryStatus = Literal[
     "not_reconcile_required",
     "reservation_mismatch",
 ]
+MutationReconciliationSupersessionStatus = Literal[
+    "acquired",
+    "retry",
+    "missing",
+    "not_reconcile_required",
+    "reservation_mismatch",
+    "lease_active",
+    "grace_active",
+]
 
 
 class ProductProfileCompareWriteResult(NamedTuple):
@@ -307,6 +316,11 @@ class MutationReservationUpdateResult(NamedTuple):
 
 class MutationReservationCompletionResult(NamedTuple):
     status: MutationReservationCompletionStatus
+    record: LaunchplaneIdempotencyRecord | None = None
+
+
+class MutationReconciliationSupersessionResult(NamedTuple):
+    status: MutationReconciliationSupersessionStatus
     record: LaunchplaneIdempotencyRecord | None = None
 
 
@@ -4049,6 +4063,128 @@ class PostgresRecordStore(HumanSessionStore):
                 status="adopted",
                 record=adopted_record,
             )
+
+    def supersede_expired_reconciled_mutation_and_reserve(
+        self,
+        *,
+        reservation: LaunchplaneIdempotencyRecord,
+        response_status_code: int,
+        response_trace_id: str,
+        response_payload: dict[str, Any],
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        lease_owner: str,
+        lease_seconds: int,
+        minimum_expired_seconds: int,
+        reconciliation_key: str,
+        provider_target_key: str,
+    ) -> MutationReconciliationSupersessionResult:
+        normalized_response_trace_id = response_trace_id.strip()
+        normalized_reconciliation_key = reconciliation_key.strip()
+        normalized_provider_target_key = provider_target_key.strip()
+        if minimum_expired_seconds < 0:
+            raise ValueError("Reconciled mutation supersession delays cannot be negative.")
+        if reservation.state != "reconcile_required" or not normalized_response_trace_id:
+            raise ValueError(
+                "Reconciled mutation supersession requires reservation evidence and trace."
+            )
+        if (
+            not normalized_reconciliation_key
+            or not normalized_provider_target_key
+            or normalized_reconciliation_key != reservation.reconciliation_key
+            or normalized_provider_target_key != reservation.provider_target_key
+        ):
+            raise ValueError(
+                "Reconciled mutation supersession requires the same provider target identity."
+            )
+        try:
+            with self._session_factory() as session:
+                self._begin_serialized_write(session)
+                row = session.scalar(
+                    self._idempotency_statement(
+                        scope=reservation.scope,
+                        route_path=reservation.route_path,
+                        idempotency_key=reservation.idempotency_key,
+                        for_update=True,
+                    )
+                )
+                if row is None:
+                    return MutationReconciliationSupersessionResult(status="missing")
+                current_record = self._read_payload(
+                    model_type=LaunchplaneIdempotencyRecord,
+                    payload=row.payload,
+                )
+                if current_record.state == "completed":
+                    return MutationReconciliationSupersessionResult(status="retry")
+                if current_record.state != "reconcile_required":
+                    return MutationReconciliationSupersessionResult(
+                        status="not_reconcile_required",
+                        record=current_record,
+                    )
+                if not self._mutation_reservation_matches(current_record, reservation):
+                    return MutationReconciliationSupersessionResult(
+                        status="reservation_mismatch",
+                        record=current_record,
+                    )
+                observed_at = self._database_mutation_timestamp(session)
+                if not current_record.lease_expires_at or parse_launchplane_mutation_timestamp(
+                    current_record.lease_expires_at,
+                    field_name="lease_expires_at",
+                ) > parse_launchplane_mutation_timestamp(
+                    observed_at,
+                    field_name="observed_at",
+                ):
+                    return MutationReconciliationSupersessionResult(
+                        status="lease_active",
+                        record=current_record,
+                    )
+                if parse_launchplane_mutation_timestamp(
+                    current_record.lease_expires_at,
+                    field_name="lease_expires_at",
+                ) + timedelta(
+                    seconds=minimum_expired_seconds
+                ) > parse_launchplane_mutation_timestamp(
+                    observed_at,
+                    field_name="observed_at",
+                ):
+                    return MutationReconciliationSupersessionResult(
+                        status="grace_active",
+                        record=current_record,
+                    )
+                superseded_record = self._updated_idempotency_record(
+                    current_record,
+                    state="completed",
+                    updated_at=observed_at,
+                    response_status_code=response_status_code,
+                    response_trace_id=normalized_response_trace_id,
+                    recorded_at=observed_at,
+                    response_payload=response_payload,
+                )
+                replacement = build_launchplane_mutation_reservation(
+                    scope=scope,
+                    route_path=route_path,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    lease_owner=lease_owner,
+                    lease_expires_at=self._mutation_lease_expiry(
+                        observed_at=observed_at,
+                        lease_seconds=lease_seconds,
+                    ),
+                    reserved_at=observed_at,
+                    reconciliation_key=normalized_reconciliation_key,
+                    provider_target_key=normalized_provider_target_key,
+                )
+                self._sync_idempotency_row(row, superseded_record)
+                session.add(self._idempotency_row(replacement))
+                session.commit()
+                return MutationReconciliationSupersessionResult(
+                    status="acquired",
+                    record=replacement,
+                )
+        except IntegrityError:
+            return MutationReconciliationSupersessionResult(status="retry")
 
     def release_reserved_mutation(
         self,

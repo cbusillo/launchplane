@@ -40,6 +40,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     build_odoo_preview_artifact_publish_inputs_workflow_request,
     execute_odoo_preview_dokploy_apply,
     observe_odoo_preview_dokploy_apply,
+    odoo_preview_destroy_target_is_quiescent,
     _preview_runtime_bindings,
     _rollback_created_runtime,
     _wait_for_smoke_check,
@@ -350,6 +351,22 @@ def _patched_apply_inputs_runtime(*, dokploy_side_effect: object) -> Iterator[No
 
 
 class OdooPreviewDokployDryRunTests(unittest.TestCase):
+    def test_apply_rejects_timeout_beyond_destroy_supersession_bound(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+
+        with self.assertRaises(ValueError):
+            OdooPreviewDokployApplyRequest(
+                dry_run_plan=dry_run,
+                image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                environment_values=_environment_values(),
+                timeout_seconds=601,
+            )
+
     def test_rollback_rechecks_fence_before_each_delete(self) -> None:
         phases: list[str] = []
 
@@ -1990,6 +2007,100 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(observation.outcome, "present")
         assert observation.result is not None
         self.assertEqual(observation.result.status, "pass")
+
+    def test_destroy_supersession_requires_quiescent_compose_deployment(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        request = OdooPreviewDokployApplyRequest(dry_run_plan=dry_run)
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._compose_exists_by_id",
+                return_value=True,
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.list_deployments_for_target",
+                return_value=[{"status": "running"}],
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_post_deploy.compose_data_workflow_is_quiescent"
+            ) as schedule_quiescence,
+        ):
+            quiescent = odoo_preview_destroy_target_is_quiescent(
+                control_plane_root=Path("."),
+                request=request,
+                database_url=None,
+            )
+
+        self.assertFalse(quiescent)
+        schedule_quiescence.assert_not_called()
+
+    def test_destroy_supersession_requires_quiescent_data_workflow(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        request = OdooPreviewDokployApplyRequest(dry_run_plan=dry_run)
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._compose_exists_by_id",
+                return_value=True,
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.list_deployments_for_target",
+                return_value=[{"status": "completed"}],
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_post_deploy.compose_data_workflow_is_quiescent",
+                return_value=False,
+            ),
+        ):
+            quiescent = odoo_preview_destroy_target_is_quiescent(
+                control_plane_root=Path("."),
+                request=request,
+                database_url=None,
+            )
+
+        self.assertFalse(quiescent)
+
+    def test_destroy_supersession_allows_missing_compose(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        request = OdooPreviewDokployApplyRequest(dry_run_plan=dry_run)
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._compose_exists_by_id",
+                return_value=False,
+            ),
+        ):
+            quiescent = odoo_preview_destroy_target_is_quiescent(
+                control_plane_root=Path("."),
+                request=request,
+                database_url=None,
+            )
+
+        self.assertTrue(quiescent)
 
     def test_observe_refresh_does_not_retry_missing_marker_after_trigger_checkpoint(
         self,

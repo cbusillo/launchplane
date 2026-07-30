@@ -2570,6 +2570,178 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(blocked.status, "target_busy")
         self.assertEqual(blocked.record.state, "reconcile_required")
 
+    def test_expired_reconcile_required_target_can_be_superseded(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            clock = {"now": "2026-07-30T15:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                first = store.reserve_mutation(
+                    scope="github-actions:mutation-test",
+                    route_path="/v1/test/mutation",
+                    idempotency_key="mutation:target:stale",
+                    request_fingerprint="mutation-fingerprint-a",
+                    lease_owner="worker-a",
+                    lease_seconds=60,
+                    reconciliation_key="dokploy:compose:target-stale",
+                )
+                marked = store.mark_mutation_reconcile_required(
+                    reservation=first.record,
+                    reconciliation_key="dokploy:compose:target-stale",
+                )
+                assert marked.record is not None
+                clock["now"] = "2026-07-30T15:17:00Z"
+                replacement = store.supersede_expired_reconciled_mutation_and_reserve(
+                    reservation=marked.record,
+                    response_status_code=409,
+                    response_trace_id="destroy-trace",
+                    response_payload={"status": "superseded"},
+                    scope="github-actions:mutation-test",
+                    route_path="/v1/test/mutation",
+                    idempotency_key="mutation:target:replacement",
+                    request_fingerprint="mutation-fingerprint-b",
+                    lease_owner="worker-b",
+                    lease_seconds=300,
+                    minimum_expired_seconds=900,
+                    reconciliation_key="dokploy:compose:target-stale",
+                    provider_target_key="dokploy:compose:target-stale",
+                )
+                replay = store.reserve_mutation(
+                    scope="github-actions:mutation-test",
+                    route_path="/v1/test/mutation",
+                    idempotency_key="mutation:target:stale",
+                    request_fingerprint="mutation-fingerprint-a",
+                    lease_owner="worker-c",
+                    lease_seconds=300,
+                    reconciliation_key="dokploy:compose:target-stale",
+                )
+                stored_stale = store.read_idempotency_record(
+                    scope="github-actions:mutation-test",
+                    route_path="/v1/test/mutation",
+                    idempotency_key="mutation:target:stale",
+                )
+            assert replacement.record is not None
+            assert stored_stale is not None
+            store.close()
+
+        self.assertEqual(marked.status, "updated")
+        self.assertEqual(replacement.status, "acquired")
+        self.assertEqual(replacement.record.state, "running")
+        self.assertEqual(stored_stale.state, "completed")
+        self.assertEqual(stored_stale.response_status_code, 409)
+        self.assertEqual(replacement.status, "acquired")
+        self.assertEqual(replay.status, "replayed")
+        self.assertEqual(replay.record.response_payload, {"status": "superseded"})
+
+    def test_reconcile_required_target_cannot_be_superseded_before_lease_expiry(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            clock = {"now": "2026-07-30T15:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                first = store.reserve_mutation(
+                    scope="github-actions:mutation-test",
+                    route_path="/v1/test/mutation",
+                    idempotency_key="mutation:target:settling",
+                    request_fingerprint="mutation-fingerprint-a",
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    reconciliation_key="dokploy:compose:target-settling",
+                )
+                marked = store.mark_mutation_reconcile_required(
+                    reservation=first.record,
+                    reconciliation_key="dokploy:compose:target-settling",
+                )
+                assert marked.record is not None
+                superseded = store.supersede_expired_reconciled_mutation_and_reserve(
+                    reservation=marked.record,
+                    response_status_code=409,
+                    response_trace_id="destroy-trace",
+                    response_payload={"status": "superseded"},
+                    scope="github-actions:mutation-test",
+                    route_path="/v1/test/mutation",
+                    idempotency_key="mutation:target:replacement",
+                    request_fingerprint="mutation-fingerprint-b",
+                    lease_owner="worker-b",
+                    lease_seconds=300,
+                    minimum_expired_seconds=0,
+                    reconciliation_key="dokploy:compose:target-settling",
+                    provider_target_key="dokploy:compose:target-settling",
+                )
+            assert superseded.record is not None
+            store.close()
+
+        self.assertEqual(superseded.status, "lease_active")
+        self.assertEqual(superseded.record.state, "reconcile_required")
+
+    def test_expired_reconcile_required_target_waits_for_supersession_grace(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            clock = {"now": "2026-07-30T15:00:00Z"}
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                first = store.reserve_mutation(
+                    scope="github-actions:mutation-test",
+                    route_path="/v1/test/mutation",
+                    idempotency_key="mutation:target:grace",
+                    request_fingerprint="mutation-fingerprint-a",
+                    lease_owner="worker-a",
+                    lease_seconds=60,
+                    reconciliation_key="dokploy:compose:target-grace",
+                )
+                marked = store.mark_mutation_reconcile_required(
+                    reservation=first.record,
+                    reconciliation_key="dokploy:compose:target-grace",
+                )
+                assert marked.record is not None
+                clock["now"] = "2026-07-30T15:02:00Z"
+                superseded = store.supersede_expired_reconciled_mutation_and_reserve(
+                    reservation=marked.record,
+                    response_status_code=409,
+                    response_trace_id="destroy-trace",
+                    response_payload={"status": "superseded"},
+                    scope="github-actions:mutation-test",
+                    route_path="/v1/test/mutation",
+                    idempotency_key="mutation:target:replacement",
+                    request_fingerprint="mutation-fingerprint-b",
+                    lease_owner="worker-b",
+                    lease_seconds=300,
+                    minimum_expired_seconds=900,
+                    reconciliation_key="dokploy:compose:target-grace",
+                    provider_target_key="dokploy:compose:target-grace",
+                )
+            assert superseded.record is not None
+            store.close()
+
+        self.assertEqual(superseded.status, "grace_active")
+        self.assertEqual(superseded.record.state, "reconcile_required")
+
     def test_db_only_mutation_preflight_releases_expired_unbound_reservation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

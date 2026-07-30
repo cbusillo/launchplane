@@ -155,6 +155,7 @@ from control_plane.provider_operations import (
     ProviderObservation,
     ProviderObservationOutcome,
     ProviderOperationLease,
+    ProviderTargetSupersession,
     provider_operation_title,
     run_durable_provider_operation,
 )
@@ -328,6 +329,7 @@ from control_plane.odoo_preview_apply_http import (
     execute_odoo_preview_apply_result,
     issue_odoo_preview_apply_plan,
     observe_odoo_preview_apply_result,
+    odoo_preview_destroy_supersession_is_quiescent,
     resolve_odoo_preview_apply_profile,
     validate_odoo_preview_issued_plan,
 )
@@ -464,7 +466,10 @@ from control_plane.workflows.odoo_prod_backup_restore import (
     OdooProdBackupRestoreStore,
     build_odoo_prod_backup_restore_plan,
 )
-from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
+from control_plane.workflows.odoo_preview_runtime import (
+    ODOO_PREVIEW_DESTROY_SUPERSESSION_GRACE_SECONDS,
+    OdooPreviewApplyInputsResult,
+)
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
 )
@@ -5562,6 +5567,30 @@ def create_launchplane_fastapi_app(
             database_url=getattr(record_store, "database_url", None),
             trace_id=trace_id,
         )
+        target_supersession = None
+        if service_apply_request.apply.dry_run_plan.operation == "destroy":
+            target_supersession = ProviderTargetSupersession(
+                response_status_code=409,
+                response_payload=_provider_operation_response_payload(
+                    trace_id=trace_id,
+                    records={},
+                    result={
+                        "status": "fail",
+                        "error_message": (
+                            "The earlier Odoo preview apply was superseded by an "
+                            "authoritative destroy after its recovery lease expired."
+                        ),
+                    },
+                ),
+                minimum_expired_seconds=ODOO_PREVIEW_DESTROY_SUPERSESSION_GRACE_SECONDS,
+                quiescence_check=lambda _reservation: (
+                    odoo_preview_destroy_supersession_is_quiescent(
+                        control_plane_root_path=resolved_control_plane_root,
+                        request=service_apply_request,
+                        database_url=getattr(record_store, "database_url", None),
+                    )
+                ),
+            )
         try:
             return await run_provider_mutation(
                 record_store=record_store,
@@ -5576,6 +5605,7 @@ def create_launchplane_fastapi_app(
                     "Retry with the same Idempotency-Key."
                 ),
                 reconcile_message=("The Odoo preview apply requires reconciliation before retry."),
+                target_supersession=target_supersession,
             )
         except OdooPreviewPlanProvenanceError as error:
             raise _launchplane_http_error(
@@ -11629,6 +11659,7 @@ def create_launchplane_fastapi_app(
         in_progress_message: str,
         reconcile_message: str,
         reservation_scope: str = "",
+        target_supersession: ProviderTargetSupersession | None = None,
     ) -> AcceptedEvidenceResponse:
         reservation_store = require_provider_operation_store(
             record_store=record_store,
@@ -11645,6 +11676,7 @@ def create_launchplane_fastapi_app(
                 lease_owner=trace_id,
                 response_trace_id=trace_id,
                 adapter=adapter,
+                target_supersession=target_supersession,
             )
 
         operation_task = asyncio.create_task(

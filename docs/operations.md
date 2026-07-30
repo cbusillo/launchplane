@@ -291,6 +291,18 @@ former replaces the previous process-local apply lock. Both require an
   failure. Incomplete terminal observations remain unknown.
 - Blocked plans and other non-durable results release the reservation instead of
   storing replay evidence, so a corrected retry with the same key can proceed.
+- Odoo preview destroy is the only current lifecycle operation allowed to
+  supersede a different-key target fence. When the blocking preview apply is
+  already `reconcile_required`, Launchplane waits until its recovery lease has
+  been expired for 15 minutes and verifies that Dokploy has no running compose
+  deployment or Odoo data-workflow schedule. It then atomically records that
+  earlier apply as a terminal superseded failure while reserving the destroy.
+  Odoo preview apply timeouts are capped at 10 minutes, so the additional grace
+  outlives a supported in-flight provider request before cleanup can take over.
+  Active leases remain fenced, stale reservation snapshots cannot supersede a
+  newer attempt, and the original request keeps durable replay evidence
+  explaining that cleanup won. Provider read failures remain fail-closed. Do not
+  reproduce this transition with direct SQL or provider-side deletion.
 
 ## Target Launchplane Ingress
 

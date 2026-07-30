@@ -19,13 +19,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 from threading import Event, Lock, Thread
-from typing import Literal, NamedTuple, Protocol, runtime_checkable
+from typing import Callable, Literal, NamedTuple, Protocol, runtime_checkable
 
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     complete_launchplane_mutation_reservation,
 )
 from control_plane.storage.postgres import (
+    MutationReconciliationSupersessionResult,
     MutationReservationAdoptionResult,
     MutationReservationCompletionResult,
     MutationReconciliationRetryResult,
@@ -86,6 +87,16 @@ class ProviderObservation:
     response_status_code: int = 202
     response_payload: dict[str, object] = field(default_factory=dict)
     retry_safe: bool = False
+
+
+@dataclass(frozen=True)
+class ProviderTargetSupersession:
+    response_status_code: int
+    response_payload: dict[str, object] = field(default_factory=dict)
+    minimum_expired_seconds: int = 0
+    quiescence_check: Callable[[LaunchplaneIdempotencyRecord], bool] = field(
+        default=lambda _reservation: False
+    )
 
 
 class ProviderOperationLease(Protocol):
@@ -168,6 +179,24 @@ class DurableProviderOperationStore(Protocol):
         response_trace_id: str,
         response_payload: dict[str, object],
     ) -> MutationReservationAdoptionResult: ...
+
+    def supersede_expired_reconciled_mutation_and_reserve(
+        self,
+        *,
+        reservation: LaunchplaneIdempotencyRecord,
+        response_status_code: int,
+        response_trace_id: str,
+        response_payload: dict[str, object],
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        lease_owner: str,
+        lease_seconds: int,
+        minimum_expired_seconds: int,
+        reconciliation_key: str,
+        provider_target_key: str,
+    ) -> MutationReconciliationSupersessionResult: ...
 
     def release_reserved_mutation(
         self,
@@ -328,6 +357,7 @@ def run_durable_provider_operation(
     adapter: DurableProviderMutationAdapter,
     lease_seconds: int = 300,
     heartbeat_interval_seconds: float | None = None,
+    target_supersession: ProviderTargetSupersession | None = None,
 ) -> DurableProviderOperationResult:
     if lease_seconds < 1:
         raise ValueError("Durable provider operation leases must be positive.")
@@ -338,6 +368,8 @@ def run_durable_provider_operation(
         raise ValueError("Durable provider operation heartbeat intervals must be positive.")
     if resolved_heartbeat_interval >= lease_seconds:
         raise ValueError("Durable provider operation heartbeats must run before lease expiry.")
+    if target_supersession is not None and target_supersession.minimum_expired_seconds < 0:
+        raise ValueError("Provider target supersession delays cannot be negative.")
     provider_target_key = adapter.target_key().strip()
     if not provider_target_key:
         raise ValueError("Durable provider operations require a provider target key.")
@@ -348,18 +380,50 @@ def run_durable_provider_operation(
     if not normalized_response_trace_id:
         raise ValueError("Durable provider operations require a response trace id.")
 
-    reservation_result = store.reserve_mutation(
-        scope=scope,
-        route_path=route_path,
-        idempotency_key=idempotency_key,
-        request_fingerprint=request_fingerprint,
-        lease_owner=lease_owner,
-        lease_seconds=lease_seconds,
-        reconciliation_key=reconciliation_key,
-        provider_target_key=provider_target_key,
-    )
+    def reserve() -> MutationReservationResult:
+        return store.reserve_mutation(
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+            reconciliation_key=reconciliation_key,
+            provider_target_key=provider_target_key,
+        )
+
+    reservation_result = reserve()
     decision = reservation_result.status
     reservation = reservation_result.record
+
+    if (
+        decision == "target_busy"
+        and reservation.state == "reconcile_required"
+        and target_supersession is not None
+        and target_supersession.quiescence_check(reservation)
+    ):
+        supersession = store.supersede_expired_reconciled_mutation_and_reserve(
+            reservation=reservation,
+            response_status_code=target_supersession.response_status_code,
+            response_trace_id=normalized_response_trace_id,
+            response_payload=target_supersession.response_payload,
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+            minimum_expired_seconds=target_supersession.minimum_expired_seconds,
+            reconciliation_key=reconciliation_key,
+            provider_target_key=provider_target_key,
+        )
+        if supersession.status == "acquired" and supersession.record is not None:
+            decision = "acquired"
+            reservation = supersession.record
+        elif supersession.status == "retry":
+            reservation_result = reserve()
+            decision = reservation_result.status
+            reservation = reservation_result.record
 
     if decision == "replayed":
         return _replayed_result(reservation)
