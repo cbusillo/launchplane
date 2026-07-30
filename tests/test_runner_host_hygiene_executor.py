@@ -1366,20 +1366,26 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertEqual(snapshot.volume_inventory[0].size_bytes, 45_500_000_000)
         self.assertEqual(snapshot.reclaimable_breakdown.local_volumes_bytes, 45_500_000_000)
 
-    def test_docker_disk_usage_uses_engine_class_totals(self) -> None:
+    def test_docker_disk_usage_uses_legacy_api_class_semantics(self) -> None:
         snapshot = _parse_docker_disk_usage(
             _docker_disk_usage_json(
-                images=[{"Containers": 0, "SharedSize": 100, "Size": 100}],
-                build_cache=[{"InUse": False, "Shared": True, "Size": 100}],
-                layers_size=100,
-                builder_size=100,
+                images=[
+                    {"Containers": 0, "SharedSize": 90, "Size": 100},
+                    {"Containers": 1, "SharedSize": 90, "Size": 100},
+                ],
+                build_cache=[
+                    {"InUse": False, "Shared": False, "Size": 100},
+                    {"InUse": False, "Shared": True, "Size": 200},
+                    {"InUse": True, "Shared": False, "Size": 40},
+                ],
+                layers_size=110,
             )
         )
         measurements = {item.cache_class: item for item in snapshot.cache_class_measurements}
 
-        self.assertEqual(measurements["docker_images"].logical_bytes, 100)
-        self.assertEqual(measurements["docker_images"].reclaimable_bytes, 100)
-        self.assertEqual(measurements["docker_build_cache"].logical_bytes, 100)
+        self.assertEqual(measurements["docker_images"].logical_bytes, 110)
+        self.assertEqual(measurements["docker_images"].reclaimable_bytes, 10)
+        self.assertEqual(measurements["docker_build_cache"].logical_bytes, 140)
         self.assertEqual(measurements["docker_build_cache"].reclaimable_bytes, 100)
 
     def test_docker_disk_usage_marks_unknown_values_partial(self) -> None:
@@ -1399,7 +1405,6 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                         }
                     ],
                     "BuildCache": [{"Size": 100}],
-                    "BuilderSize": 100,
                 }
             )
         )
@@ -1498,6 +1503,43 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
 
         self.assertEqual(image_telemetry.availability, "partial")
         self.assertEqual(image_telemetry.unavailable_reason, "inventory_probe_failed")
+
+    def test_report_merges_partial_image_and_inventory_reasons(self) -> None:
+        command_runner = _CommandRunner(
+            docker_disk_usage=_docker_disk_usage_json(
+                images=[{"Containers": 0, "SharedSize": -1, "Size": 100}],
+                layers_size=100,
+            )
+        )
+
+        def fail_image_inventory(
+            command: Sequence[str], timeout_seconds: int
+        ) -> RemoteCommandResult:
+            if tuple(command) == (
+                "docker",
+                "image",
+                "ls",
+                "--all",
+                "--no-trunc",
+                "--format",
+                "{{json .}}",
+            ):
+                return RemoteCommandResult(returncode=1, stderr="inventory unavailable")
+            return command_runner(command, timeout_seconds)
+
+        report = collect_runner_host_hygiene_report(
+            request=_request(mutate=False),
+            remote_runner=fail_image_inventory,
+        )
+        image_telemetry = next(
+            item for item in report.cache_class_telemetry if item.cache_class == "docker_images"
+        )
+
+        self.assertEqual(image_telemetry.availability, "partial")
+        self.assertEqual(
+            image_telemetry.unavailable_reason,
+            "measurement_partial,inventory_probe_failed",
+        )
 
     def test_executor_blocks_before_prune_without_mutate_intent(self) -> None:
         command_runner = _CommandRunner()
@@ -2279,19 +2321,11 @@ def _docker_disk_usage_json(
     volumes: list[dict[str, object]] | None = None,
     build_cache: list[dict[str, object]] | None = None,
     layers_size: int | None = None,
-    builder_size: int | None = None,
 ) -> str:
     image_rows = images or []
     build_cache_rows = build_cache or []
     return json.dumps(
         {
-            "BuilderSize": (
-                builder_size
-                if builder_size is not None
-                else sum(
-                    size for row in build_cache_rows if isinstance((size := row.get("Size")), int)
-                )
-            ),
             "BuildCache": build_cache_rows,
             "Containers": containers or [],
             "Images": image_rows,

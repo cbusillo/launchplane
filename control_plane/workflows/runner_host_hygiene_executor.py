@@ -1640,13 +1640,23 @@ def _mark_docker_cache_class_measurement_partial(
             cache_key=measurement.cache_key,
             cache_class=measurement.cache_class,
             availability="partial",
-            reason_code=reason_code,
+            reason_code=_merge_reason_codes(measurement.reason_code, reason_code),
             logical_bytes=measurement.logical_bytes,
             reclaimable_bytes=measurement.reclaimable_bytes,
             entry_count=measurement.entry_count,
         )
         for measurement in measurements
     )
+
+
+def _merge_reason_codes(*values: str) -> str:
+    reasons: list[str] = []
+    for value in values:
+        for reason in value.split(","):
+            normalized_reason = reason.strip()
+            if normalized_reason and normalized_reason not in reasons:
+                reasons.append(normalized_reason)
+    return ",".join(reasons)
 
 
 def _collect_container_inventory(
@@ -2225,7 +2235,7 @@ def _parse_docker_disk_usage(output: str) -> _DockerDiskUsageSnapshot:
     image_rows = _docker_disk_usage_rows(payload, "Images")
     images_present = "Images" in payload
     image_partial = False
-    image_used = 0
+    image_reclaimable_total = 0
     image_reclaimable_known = True
     for row in image_rows:
         containers = _optional_non_negative_int(row.get("Containers"))
@@ -2235,17 +2245,12 @@ def _parse_docker_disk_usage(output: str) -> _DockerDiskUsageSnapshot:
             image_partial = True
             image_reclaimable_known = False
             continue
-        if containers != 0:
-            image_used += max(size - shared_size, 0)
+        if containers == 0:
+            image_reclaimable_total += max(size - shared_size, 0)
     image_logical = _optional_non_negative_int(payload.get("LayersSize"))
     if images_present and image_logical is None:
         image_partial = True
-        image_reclaimable_known = False
-    image_reclaimable = (
-        max(image_logical - image_used, 0)
-        if image_logical is not None and image_reclaimable_known
-        else None
-    )
+    image_reclaimable = image_reclaimable_total if image_reclaimable_known else None
 
     container_rows = _docker_disk_usage_rows(payload, "Containers")
     containers_present = "Containers" in payload
@@ -2311,21 +2316,21 @@ def _parse_docker_disk_usage(output: str) -> _DockerDiskUsageSnapshot:
     build_cache_rows = _docker_disk_usage_rows(payload, "BuildCache")
     build_cache_present = "BuildCache" in payload
     build_cache_partial = False
-    build_cache_total = _optional_non_negative_int(payload.get("BuilderSize"))
-    build_cache_reclaimable_known = build_cache_total is not None
-    if build_cache_present and build_cache_total is None:
-        build_cache_partial = True
+    build_cache_total = 0
     build_cache_used = 0
+    build_cache_measurements_known = True
     for row in build_cache_rows:
         in_use = row.get("InUse")
         shared = row.get("Shared")
         raw_size = _optional_non_negative_int(row.get("Size"))
         if not isinstance(in_use, bool) or not isinstance(shared, bool) or raw_size is None:
             build_cache_partial = True
-            build_cache_reclaimable_known = False
+            build_cache_measurements_known = False
             continue
-        if in_use and not shared:
-            build_cache_used += raw_size
+        if not shared:
+            build_cache_total += raw_size
+            if in_use:
+                build_cache_used += raw_size
 
     container_logical = container_total if container_logical_known else None
     container_reclaimable = (
@@ -2333,10 +2338,9 @@ def _parse_docker_disk_usage(output: str) -> _DockerDiskUsageSnapshot:
     )
     volume_logical = volume_total if volume_logical_known else None
     volume_reclaimable = max(volume_total - volume_used, 0) if volume_reclaimable_known else None
+    build_cache_logical = build_cache_total if build_cache_measurements_known else None
     build_cache_reclaimable = (
-        max(build_cache_total - build_cache_used, 0)
-        if build_cache_total is not None and build_cache_reclaimable_known
-        else None
+        max(build_cache_total - build_cache_used, 0) if build_cache_measurements_known else None
     )
 
     return _DockerDiskUsageSnapshot(
@@ -2380,7 +2384,7 @@ def _parse_docker_disk_usage(output: str) -> _DockerDiskUsageSnapshot:
                 cache_class="docker_build_cache",
                 present=build_cache_present,
                 partial=build_cache_partial,
-                logical_bytes=build_cache_total,
+                logical_bytes=build_cache_logical,
                 reclaimable_bytes=build_cache_reclaimable,
                 entry_count=len(build_cache_rows),
             ),

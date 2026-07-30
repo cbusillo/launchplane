@@ -214,17 +214,20 @@ def _read_observed_at(
 
 
 def _audit_summary(record: RunnerHostHygieneApplyAuditRecord) -> RunnerHostHygieneAuditSummary:
+    pre_apply_observed_at = _read_observed_at(record.pre_apply_report.observed_at)[0]
+    post_apply_observed_at = (
+        _read_observed_at(record.post_apply_report.observed_at)[0]
+        if record.post_apply_report is not None
+        else None
+    )
     return RunnerHostHygieneAuditSummary(
         audit_record_key=record.audit_record_key,
         audit_status=record.status,
         action=record.request.action,
         host_name=record.request.host_name,
         mutate=record.request.mutate,
-        pre_apply_observed_at=record.pre_apply_report.observed_at or None,
-        post_apply_observed_at=(
-            record.post_apply_report.observed_at if record.post_apply_report else None
-        )
-        or None,
+        pre_apply_observed_at=pre_apply_observed_at,
+        post_apply_observed_at=post_apply_observed_at,
         pre_apply_status=record.pre_apply_report.status,
         post_apply_status=(record.post_apply_report.status if record.post_apply_report else None),
     )

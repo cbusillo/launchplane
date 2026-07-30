@@ -2285,6 +2285,40 @@ class FastApiPreviewDestroyedEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiRunnerHostHygieneAuditReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runner_host_hygiene_audit_list_normalizes_invalid_observed_at(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record = RunnerHostHygieneApplyAuditRecord.model_validate(
+                _runner_host_hygiene_audit_payload(
+                    audit_record_key="runner-host-hygiene/2026-07-30/invalid-timestamp"
+                )["audit"]
+            )
+            record = record.model_copy(
+                update={
+                    "pre_apply_report": record.pre_apply_report.model_copy(
+                        update={"observed_at": "not-a-timestamp"}
+                    )
+                }
+            )
+            store.write_runner_host_hygiene_audit_record(record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_read_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await http_request(
+                app,
+                "GET",
+                "/v1/evidence/runner-host-hygiene/audits?host_name=chris-testing",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["records"][0]["pre_apply_observed_at"])
+
     async def test_runner_host_hygiene_audit_list_and_detail_return_durable_history(
         self,
     ) -> None:
