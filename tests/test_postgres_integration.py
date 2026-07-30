@@ -71,6 +71,7 @@ from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderObservation,
     ProviderOperationLease,
+    ProviderTargetSupersession,
     run_durable_provider_operation,
 )
 from control_plane.workflows.public_ingress_monitor import (
@@ -2980,6 +2981,7 @@ def _run_integration_provider_operation(
     heartbeat_interval_seconds: float | None = None,
     idempotency_key: str = _PROVIDER_OPERATION_KEY,
     request_fingerprint: str = _PROVIDER_OPERATION_FINGERPRINT,
+    target_supersession: ProviderTargetSupersession | None = None,
 ) -> DurableProviderOperationResult:
     return run_durable_provider_operation(
         store=store,
@@ -2992,6 +2994,7 @@ def _run_integration_provider_operation(
         adapter=adapter,
         lease_seconds=lease_seconds,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
+        target_supersession=target_supersession,
     )
 
 
@@ -3065,6 +3068,51 @@ class RealPostgresProviderOperationTests(unittest.TestCase):
 
         self.assertEqual(first.status, "acquired")
         self.assertEqual(second.status, "target_busy")
+
+    def test_destroy_supersedes_expired_reconcile_required_target_fence(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            stale = store.reserve_mutation(
+                scope=_PROVIDER_OPERATION_SCOPE,
+                route_path=_PROVIDER_OPERATION_ROUTE,
+                idempotency_key="provider-operation:integration:stale-refresh",
+                request_fingerprint="provider-operation-integration-stale-refresh",
+                lease_owner="instance-a",
+                lease_seconds=1,
+                reconciliation_key=_PROVIDER_OPERATION_RECONCILIATION_KEY,
+                provider_target_key=_PROVIDER_OPERATION_TARGET_KEY,
+            )
+            reconciled = store.mark_mutation_reconcile_required(
+                reservation=stale.record,
+                reconciliation_key=_PROVIDER_OPERATION_RECONCILIATION_KEY,
+            )
+            time.sleep(1.2)
+            destroy_adapter = _IntegrationProviderAdapter()
+            result = _run_integration_provider_operation(
+                store,
+                destroy_adapter,
+                lease_owner="instance-b",
+                response_trace_id="integration-destroy-trace",
+                idempotency_key="provider-operation:integration:destroy",
+                request_fingerprint="provider-operation-integration-destroy",
+                target_supersession=ProviderTargetSupersession(
+                    response_status_code=409,
+                    response_payload={"status": "superseded"},
+                    quiescence_check=lambda _reservation: True,
+                ),
+            )
+            stored_stale = store.read_idempotency_record(
+                scope=_PROVIDER_OPERATION_SCOPE,
+                route_path=_PROVIDER_OPERATION_ROUTE,
+                idempotency_key="provider-operation:integration:stale-refresh",
+            )
+
+        self.assertEqual(reconciled.status, "updated")
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(destroy_adapter.apply_calls, 1)
+        assert stored_stale is not None
+        self.assertEqual(stored_stale.state, "completed")
+        self.assertEqual(stored_stale.response_status_code, 409)
+        self.assertEqual(stored_stale.response_payload, {"status": "superseded"})
 
     def test_heartbeats_hold_target_fence_past_original_lease(self) -> None:
         with _store_for_fresh_head_database() as store:

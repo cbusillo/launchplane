@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy import JsonValue
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
@@ -2298,6 +2299,64 @@ domains = ["cm-testing.shinycomputers.com"]
                     "odoo_module_update_modules_configured": "true",
                 }
             )
+
+    def test_compose_data_workflow_quiescence_rejects_running_schedule(self) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="odoo-tenant-cm",
+            instance="pr-45",
+            target_id="compose-cm-pr-45",
+            target_name="cm-pr-45",
+        )
+        with (
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": "cm-pr-45", "serverId": "server-one"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.find_matching_dokploy_schedule",
+                return_value={"deployments": [{"status": "running"}]},
+            ) as find_schedule,
+        ):
+            quiescent = dokploy_post_deploy.compose_data_workflow_is_quiescent(
+                host="https://dokploy.example",
+                token="token",
+                target_definition=target_definition,
+            )
+
+        self.assertFalse(quiescent)
+        find_schedule.assert_called_once_with(
+            host="https://dokploy.example",
+            token="token",
+            target_id="server-one",
+            schedule_type="server",
+            schedule_name="platform-data-workflow",
+            app_name="platform-odoo-tenant-cm-pr-45-data-workflow",
+        )
+
+    def test_compose_data_workflow_quiescence_allows_missing_schedule(self) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="odoo-tenant-cm",
+            instance="pr-45",
+            target_id="compose-cm-pr-45",
+            target_name="cm-pr-45",
+        )
+        with (
+            patch(
+                "control_plane.dokploy.post_deploy.api.fetch_dokploy_target_payload",
+                return_value={"appName": "cm-pr-45", "serverId": "server-one"},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy.api.find_matching_dokploy_schedule",
+                return_value=None,
+            ),
+        ):
+            quiescent = dokploy_post_deploy.compose_data_workflow_is_quiescent(
+                host="https://dokploy.example",
+                token="token",
+                target_definition=target_definition,
+            )
+
+        self.assertTrue(quiescent)
 
     def test_run_compose_post_deploy_update_applies_explicit_env_file_without_control_plane_secrets(
         self,
