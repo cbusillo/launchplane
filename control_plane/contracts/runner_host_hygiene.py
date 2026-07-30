@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from control_plane.contracts.runner_host_hygiene_idle import (
+    RunnerHostHygieneIdleConvergence,
+    RunnerHostHygieneIdleScope,
+    RunnerHostHygieneIdleSource,
+)
 
 
 RunnerHostHygieneStatus = Literal["healthy", "attention"]
@@ -62,6 +69,10 @@ RunnerHostHygieneApplyBlockerCode = Literal[
     "approved_host_mismatch",
     "audit_record_required",
     "host_needs_attention",
+    "idle_evidence_missing",
+    "idle_evidence_not_converged",
+    "idle_evidence_scope_mismatch",
+    "idle_evidence_stale",
     "mutate_not_requested",
     "report_host_mismatch",
     "target_volume_active",
@@ -94,6 +105,9 @@ RunnerHostHygieneFindingCode = Literal[
     "generated_cache_above_limit",
     "generated_cache_measurement_partial",
     "generated_cache_safety_failed",
+    "idle_evidence_active",
+    "idle_evidence_conflicting",
+    "idle_evidence_incomplete",
     "orphan_buildkit_present",
     "required_warm_builder_missing",
     "runner_workdir_above_limit",
@@ -227,7 +241,7 @@ class RunnerHostHygieneGeneratedCacheEntry(BaseModel):
     allocated_bytes: int = Field(default=0, ge=0)
     age_seconds: int = Field(default=0, ge=0)
     open_handle_observations: tuple[int, ...] = ()
-    github_run_state: Literal["completed", "active", "unknown"] = "unknown"
+    github_run_state: Literal["completed", "active", "unknown", "unauthorized"] = "unknown"
 
     @model_validator(mode="after")
     def _normalize_entry(self) -> "RunnerHostHygieneGeneratedCacheEntry":
@@ -258,6 +272,7 @@ class RunnerHostHygieneGeneratedCacheUsage(BaseModel):
     last_removed_run_ids: tuple[int, ...] = ()
     estimated_daily_growth_bytes: int = Field(default=0, ge=0)
     cooldown_remaining_seconds: int = Field(default=0, ge=0)
+    idle_convergence: RunnerHostHygieneIdleConvergence | None = None
 
     @model_validator(mode="after")
     def _normalize_usage(self) -> "RunnerHostHygieneGeneratedCacheUsage":
@@ -287,6 +302,9 @@ class RunnerHostHygieneGeneratedCacheUsage(BaseModel):
             raise ValueError("generated cache cleanup history run ids must be positive")
         if self.entry_count < len(self.entries):
             raise ValueError("generated cache entry_count cannot be smaller than entries")
+        if self.idle_convergence is not None:
+            if self.idle_convergence.scope == "full_host":
+                raise ValueError("generated cache idle convergence must use an isolated scope")
         return self
 
 
@@ -382,6 +400,7 @@ class RunnerHostHygieneObservation(BaseModel):
     generated_cache_allocated_bytes: int = Field(default=0, ge=0)
     generated_cache_usage: tuple[RunnerHostHygieneGeneratedCacheUsage, ...] = ()
     cache_class_telemetry: tuple[RunnerHostHygieneCacheClassTelemetry, ...] = ()
+    idle_convergences: tuple[RunnerHostHygieneIdleConvergence, ...] = ()
     docker_toolchain: "RunnerHostDockerToolchainObservation | None" = None
     warm_builders: tuple[str, ...] = ()
     image_inventory: tuple["RunnerHostHygieneImageInventoryItem", ...] = ()
@@ -410,6 +429,7 @@ class RunnerHostHygieneObservation(BaseModel):
             sorted(self.generated_cache_usage, key=lambda item: item.cache_key)
         )
         self.cache_class_telemetry = _sorted_cache_class_telemetry(self.cache_class_telemetry)
+        self.idle_convergences = _sorted_idle_convergences(self.idle_convergences)
         self.image_inventory = _sorted_image_inventory(self.image_inventory)
         self.volume_inventory = _sorted_volume_inventory(self.volume_inventory)
         if not self.image_inventory_total_count:
@@ -546,6 +566,7 @@ class RunnerHostHygieneReport(BaseModel):
     generated_cache_allocated_bytes: int = Field(default=0, ge=0)
     generated_cache_usage: tuple[RunnerHostHygieneGeneratedCacheUsage, ...] = ()
     cache_class_telemetry: tuple[RunnerHostHygieneCacheClassTelemetry, ...] = ()
+    idle_convergences: tuple[RunnerHostHygieneIdleConvergence, ...] = ()
     docker_toolchain: RunnerHostDockerToolchainObservation | None = None
     warm_builders: tuple[str, ...] = ()
     image_inventory: tuple[RunnerHostHygieneImageInventoryItem, ...] = ()
@@ -574,6 +595,7 @@ class RunnerHostHygieneReport(BaseModel):
             sorted(self.generated_cache_usage, key=lambda item: item.cache_key)
         )
         self.cache_class_telemetry = _sorted_cache_class_telemetry(self.cache_class_telemetry)
+        self.idle_convergences = _sorted_idle_convergences(self.idle_convergences)
         self.image_inventory = _sorted_image_inventory(self.image_inventory)
         self.volume_inventory = _sorted_volume_inventory(self.volume_inventory)
         if not self.image_inventory_total_count:
@@ -610,6 +632,7 @@ class RunnerHostHygieneApplyPolicy(BaseModel):
     required_retained_warm_builders: tuple[str, ...] = ()
     require_healthy_report: bool = True
     require_audit_record: bool = True
+    require_idle_convergence: bool = False
     allow_docker_cache_prune: bool = False
     allow_dangling_image_prune: bool = False
     allow_generated_run_cache_prune: bool = False
@@ -663,6 +686,12 @@ class RunnerHostHygieneApplyRequest(BaseModel):
     generated_cache_high_water_bytes: int = Field(default=0, ge=0)
     generated_cache_low_water_bytes: int = Field(default=0, ge=0)
     generated_cache_cooldown_hours: int = Field(default=0, ge=0)
+    idle_scope: RunnerHostHygieneIdleScope = "full_host"
+    idle_scope_key: str = "host"
+    idle_observation_count: int = Field(default=2, ge=2, le=10)
+    idle_observation_interval_seconds: int = Field(default=5, ge=1, le=3600)
+    idle_max_age_seconds: int = Field(default=300, ge=1, le=86_400)
+    idle_decision_at: str = ""
     audit_record_key: str = ""
 
     @model_validator(mode="after")
@@ -683,6 +712,11 @@ class RunnerHostHygieneApplyRequest(BaseModel):
         )
         if any(run_id <= 0 for run_id in self.target_generated_cache_run_ids):
             raise ValueError("generated cache run ids must be positive")
+        self.idle_scope_key = _required_public_token(
+            self.idle_scope_key,
+            "runner host hygiene apply requires idle_scope_key",
+        )
+        self.idle_decision_at = _normalized_optional_timestamp(self.idle_decision_at)
         self.audit_record_key = self.audit_record_key.strip()
         return self
 
@@ -786,8 +820,16 @@ class RunnerHostHygieneApplyAuditRecord(BaseModel):
             raise ValueError(
                 "failed runner host hygiene audit record without post report requires a message"
             )
-        if self.status in {"completed", "failed"} and self.plan.status != "ready":
-            raise ValueError("terminal runner host hygiene audit record requires a ready plan")
+        if self.status == "completed" and self.plan.status != "ready":
+            raise ValueError("completed runner host hygiene audit record requires a ready plan")
+        if (
+            self.status == "failed"
+            and self.post_apply_report is not None
+            and self.plan.status != "ready"
+        ):
+            raise ValueError(
+                "failed runner host hygiene audit record with post report requires a ready plan"
+            )
         return self
 
 
@@ -869,6 +911,8 @@ class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
     planned_audit: RunnerHostHygieneApplyAuditRecord
     planned_idempotency_key: str
     planned_delivery_state: RunnerHostHygieneAuditDeliveryState = "pending"
+    executor_intent_sha256: str = ""
+    action_authorization: RunnerHostHygieneApplyAuditRecord | None = None
     terminal_audit: RunnerHostHygieneApplyAuditRecord | None = None
     terminal_idempotency_key: str = ""
     terminal_delivery_state: RunnerHostHygieneAuditDeliveryState | None = None
@@ -892,6 +936,11 @@ class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
             self.planned_idempotency_key,
             "runner host hygiene audit delivery envelope requires planned idempotency key",
         )
+        self.executor_intent_sha256 = self.executor_intent_sha256.strip().lower()
+        if self.schema_version >= 2 and not re.fullmatch(
+            r"[0-9a-f]{64}", self.executor_intent_sha256
+        ):
+            raise ValueError("runner host hygiene audit delivery requires executor intent sha256")
         self.created_at = _required_text(
             self.created_at,
             "runner host hygiene audit delivery envelope requires created_at",
@@ -909,6 +958,40 @@ class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
             raise ValueError("runner host hygiene audit delivery action must match planned audit")
         if self.planned_audit.status != "planned":
             raise ValueError("runner host hygiene audit delivery planned audit must be planned")
+        if self.action_authorization is not None:
+            if self.action_authorization.status != "planned":
+                raise ValueError("runner host hygiene action authorization audit must be planned")
+            if self.action_authorization.audit_record_key != self.audit_record_key:
+                raise ValueError("runner host hygiene action authorization key must match envelope")
+            if _normalized_host_name(self.action_authorization.request.host_name) != self.host_name:
+                raise ValueError(
+                    "runner host hygiene action authorization host must match envelope"
+                )
+            if self.action_authorization.request.action != self.action:
+                raise ValueError(
+                    "runner host hygiene action authorization action must match envelope"
+                )
+            if (
+                not self.action_authorization.request.mutate
+                or self.action_authorization.plan.status != "ready"
+            ):
+                raise ValueError("runner host hygiene action authorization must be ready to mutate")
+            planned_request = self.planned_audit.request.model_dump(mode="python")
+            authorized_request = self.action_authorization.request.model_dump(mode="python")
+            planned_request.pop("idle_decision_at", None)
+            authorized_request.pop("idle_decision_at", None)
+            if planned_request != authorized_request:
+                raise ValueError(
+                    "runner host hygiene action authorization must match planned targets"
+                )
+        if (
+            self.schema_version >= 2
+            and self.execution_state == "action_started"
+            and self.action_authorization is None
+        ):
+            raise ValueError(
+                "runner host hygiene action_started delivery requires action authorization"
+            )
         if self.terminal_audit is None:
             if self.terminal_idempotency_key or self.terminal_delivery_state is not None:
                 raise ValueError(
@@ -1169,6 +1252,27 @@ def evaluate_runner_host_hygiene(
                 + ", ".join(unsafe_generated_caches),
             )
         )
+    idle_convergence_groups = (
+        ("active", "idle_evidence_active"),
+        ("conflicting", "idle_evidence_conflicting"),
+        ("incomplete", "idle_evidence_incomplete"),
+    )
+    for convergence_status, finding_code in idle_convergence_groups:
+        affected_scopes = tuple(
+            f"{item.scope}/{item.scope_key}"
+            for item in observation.idle_convergences
+            if item.status == convergence_status
+        )
+        if affected_scopes:
+            findings.append(
+                _finding(
+                    cast(RunnerHostHygieneFindingCode, finding_code),
+                    (
+                        "runner host idle evidence did not converge for scopes: "
+                        + ", ".join(affected_scopes)
+                    ),
+                )
+            )
     missing_builders = tuple(
         builder
         for builder in policy.required_warm_builders
@@ -1214,6 +1318,7 @@ def evaluate_runner_host_hygiene(
         generated_cache_allocated_bytes=observation.generated_cache_allocated_bytes,
         generated_cache_usage=observation.generated_cache_usage,
         cache_class_telemetry=cache_class_telemetry,
+        idle_convergences=observation.idle_convergences,
         docker_toolchain=observation.docker_toolchain,
         warm_builders=observation.warm_builders,
         image_inventory=observation.image_inventory,
@@ -1485,6 +1590,7 @@ def plan_runner_host_hygiene_apply(
                 ),
             )
         )
+    blockers.extend(_idle_convergence_blockers(policy=policy, request=request, report=report))
     blockers.extend(_target_volume_blockers(policy=policy, request=request, report=report))
     blockers.extend(_target_builder_blockers(policy=policy, request=request))
     blockers.extend(_target_generated_cache_blockers(policy=policy, request=request, report=report))
@@ -1502,6 +1608,108 @@ def plan_runner_host_hygiene_apply(
             "runner host hygiene apply plan is ready"
             if status == "ready"
             else "runner host hygiene apply plan is blocked"
+        ),
+    )
+
+
+def _idle_convergence_blockers(
+    *,
+    policy: RunnerHostHygieneApplyPolicy,
+    request: RunnerHostHygieneApplyRequest,
+    report: RunnerHostHygieneReport,
+) -> tuple[RunnerHostHygieneApplyBlocker, ...]:
+    if not policy.require_idle_convergence:
+        return ()
+    matching = tuple(
+        convergence
+        for convergence in report.idle_convergences
+        if convergence.scope == request.idle_scope
+        and convergence.scope_key == request.idle_scope_key
+    )
+    if not matching:
+        code: RunnerHostHygieneApplyBlockerCode = (
+            "idle_evidence_scope_mismatch" if report.idle_convergences else "idle_evidence_missing"
+        )
+        return (
+            _apply_blocker(
+                code,
+                (
+                    "runner host hygiene apply lacks idle evidence for scope: "
+                    f"{request.idle_scope}/{request.idle_scope_key}"
+                ),
+            ),
+        )
+    if len(matching) != 1:
+        return (
+            _apply_blocker(
+                "idle_evidence_scope_mismatch",
+                "runner host hygiene apply found duplicate idle evidence for its scope",
+            ),
+        )
+    convergence = matching[0]
+    expected_sources: set[RunnerHostHygieneIdleSource] = (
+        {"github_jobs", "github_runners", "local_processes", "runner_services"}
+        if request.idle_scope == "full_host"
+        else {"github_jobs", "local_user_processes", "open_handles"}
+    )
+    requirements_by_source = {
+        source: tuple(
+            requirement for requirement in convergence.requirements if requirement.source == source
+        )
+        for source in expected_sources
+    }
+    temporal_sources = (
+        expected_sources
+        if request.idle_scope == "full_host"
+        else expected_sources - {"github_jobs", "github_runners"}
+    )
+    if (
+        convergence.minimum_observation_interval_seconds < request.idle_observation_interval_seconds
+        or convergence.maximum_evidence_age_seconds > request.idle_max_age_seconds
+        or any(not requirements_by_source[source] for source in expected_sources)
+        or any(
+            requirement.minimum_observation_count < request.idle_observation_count
+            for source in temporal_sources
+            for requirement in requirements_by_source[source]
+        )
+    ):
+        return (
+            _apply_blocker(
+                "idle_evidence_not_converged",
+                "runner host hygiene idle evidence does not meet the requested policy window",
+            ),
+        )
+    if not request.idle_decision_at:
+        return (
+            _apply_blocker(
+                "idle_evidence_stale",
+                "runner host hygiene apply requires an idle evidence decision timestamp",
+            ),
+        )
+    decision_at = _parse_timestamp(request.idle_decision_at)
+    convergence_evaluated_at = _parse_timestamp(convergence.evaluated_at)
+    evidence_age_seconds = (decision_at - convergence_evaluated_at).total_seconds()
+    if evidence_age_seconds < 0 or evidence_age_seconds > request.idle_max_age_seconds:
+        return (
+            _apply_blocker(
+                "idle_evidence_stale",
+                "runner host hygiene idle evidence is stale at the apply decision",
+            ),
+        )
+    if convergence.status == "idle":
+        return ()
+    blocker_code: RunnerHostHygieneApplyBlockerCode = (
+        "idle_evidence_stale"
+        if "source_stale" in convergence.blocker_codes
+        else "idle_evidence_not_converged"
+    )
+    return (
+        _apply_blocker(
+            blocker_code,
+            (
+                "runner host hygiene idle evidence did not converge: "
+                f"{request.idle_scope}/{request.idle_scope_key} status={convergence.status}"
+            ),
         ),
     )
 
@@ -2079,6 +2287,16 @@ def _sorted_volume_inventory(
     return tuple(sorted(values, key=lambda item: (item.name, item.driver)))
 
 
+def _sorted_idle_convergences(
+    values: tuple[RunnerHostHygieneIdleConvergence, ...],
+) -> tuple[RunnerHostHygieneIdleConvergence, ...]:
+    sorted_values = tuple(sorted(values, key=lambda item: (item.scope, item.scope_key)))
+    keys = tuple((item.scope, item.scope_key) for item in sorted_values)
+    if len(set(keys)) != len(keys):
+        raise ValueError("runner host hygiene idle convergences must be unique")
+    return sorted_values
+
+
 def _sorted_cache_class_telemetry(
     values: tuple[RunnerHostHygieneCacheClassTelemetry, ...],
 ) -> tuple[RunnerHostHygieneCacheClassTelemetry, ...]:
@@ -2137,6 +2355,23 @@ def _normalized_public_token(value: str) -> str:
 
 def _required_public_token(value: str, message: str) -> str:
     return _required_text(_normalized_public_token(value), message)
+
+
+def _normalized_optional_timestamp(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("value must be a timezone-aware timestamp") from error
+    if parsed.tzinfo is None:
+        raise ValueError("value must be a timezone-aware timestamp")
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _sanitized_unavailable_reason(value: str) -> str:

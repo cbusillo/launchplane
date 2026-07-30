@@ -18508,6 +18508,10 @@
               "approved_host_mismatch",
               "audit_record_required",
               "host_needs_attention",
+              "idle_evidence_missing",
+              "idle_evidence_not_converged",
+              "idle_evidence_scope_mismatch",
+              "idle_evidence_stale",
               "mutate_not_requested",
               "report_host_mismatch",
               "target_volume_active",
@@ -18668,6 +18672,47 @@
           },
           "host_name": {
             "title": "Host Name",
+            "type": "string"
+          },
+          "idle_decision_at": {
+            "default": "",
+            "title": "Idle Decision At",
+            "type": "string"
+          },
+          "idle_max_age_seconds": {
+            "default": 300,
+            "maximum": 86400.0,
+            "minimum": 1.0,
+            "title": "Idle Max Age Seconds",
+            "type": "integer"
+          },
+          "idle_observation_count": {
+            "default": 2,
+            "maximum": 10.0,
+            "minimum": 2.0,
+            "title": "Idle Observation Count",
+            "type": "integer"
+          },
+          "idle_observation_interval_seconds": {
+            "default": 5,
+            "maximum": 3600.0,
+            "minimum": 1.0,
+            "title": "Idle Observation Interval Seconds",
+            "type": "integer"
+          },
+          "idle_scope": {
+            "default": "full_host",
+            "enum": [
+              "full_host",
+              "isolated_user",
+              "isolated_lane"
+            ],
+            "title": "Idle Scope",
+            "type": "string"
+          },
+          "idle_scope_key": {
+            "default": "host",
+            "title": "Idle Scope Key",
             "type": "string"
           },
           "max_used_space_bytes": {
@@ -19203,6 +19248,9 @@
               "generated_cache_above_limit",
               "generated_cache_measurement_partial",
               "generated_cache_safety_failed",
+              "idle_evidence_active",
+              "idle_evidence_conflicting",
+              "idle_evidence_incomplete",
               "orphan_buildkit_present",
               "required_warm_builder_missing",
               "runner_workdir_above_limit",
@@ -19288,7 +19336,8 @@
             "enum": [
               "completed",
               "active",
-              "unknown"
+              "unknown",
+              "unauthorized"
             ],
             "title": "Github Run State",
             "type": "string"
@@ -19370,6 +19419,16 @@
             "minimum": 0.0,
             "title": "Estimated Daily Growth Bytes",
             "type": "integer"
+          },
+          "idle_convergence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunnerHostHygieneIdleConvergence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "last_cleanup_epoch_seconds": {
             "default": 0,
@@ -19566,6 +19625,246 @@
         "title": "RunnerHostHygieneHistoryResponse",
         "type": "object"
       },
+      "RunnerHostHygieneIdleConvergence": {
+        "additionalProperties": false,
+        "properties": {
+          "blocker_codes": {
+            "default": [],
+            "items": {
+              "enum": [
+                "observation_count_insufficient",
+                "observation_time_invalid",
+                "observation_window_too_short",
+                "source_active",
+                "source_conflicting",
+                "source_missing",
+                "source_stale",
+                "source_truncated",
+                "source_unauthorized",
+                "source_unavailable"
+              ],
+              "type": "string"
+            },
+            "title": "Blocker Codes",
+            "type": "array"
+          },
+          "evaluated_at": {
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "maximum_evidence_age_seconds": {
+            "default": 300,
+            "maximum": 86400.0,
+            "minimum": 1.0,
+            "title": "Maximum Evidence Age Seconds",
+            "type": "integer"
+          },
+          "minimum_observation_interval_seconds": {
+            "maximum": 3600.0,
+            "minimum": 1.0,
+            "title": "Minimum Observation Interval Seconds",
+            "type": "integer"
+          },
+          "observations": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneIdleObservation"
+            },
+            "title": "Observations",
+            "type": "array"
+          },
+          "requirements": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneIdleSourceRequirement"
+            },
+            "title": "Requirements",
+            "type": "array"
+          },
+          "scope": {
+            "enum": [
+              "full_host",
+              "isolated_user",
+              "isolated_lane"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "scope_key": {
+            "title": "Scope Key",
+            "type": "string"
+          },
+          "status": {
+            "default": "incomplete",
+            "enum": [
+              "idle",
+              "active",
+              "incomplete",
+              "conflicting"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "scope_key",
+          "evaluated_at",
+          "minimum_observation_interval_seconds",
+          "requirements",
+          "observations"
+        ],
+        "title": "RunnerHostHygieneIdleConvergence",
+        "type": "object"
+      },
+      "RunnerHostHygieneIdleObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "active_count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Count"
+          },
+          "availability": {
+            "enum": [
+              "available",
+              "partial",
+              "unavailable",
+              "stale"
+            ],
+            "title": "Availability",
+            "type": "string"
+          },
+          "observation_window_seconds": {
+            "default": 0,
+            "maximum": 36000.0,
+            "minimum": 0.0,
+            "title": "Observation Window Seconds",
+            "type": "integer"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "reason_code": {
+            "default": "",
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "sample_count": {
+            "default": 1,
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Sample Count",
+            "type": "integer"
+          },
+          "scope": {
+            "enum": [
+              "full_host",
+              "isolated_user",
+              "isolated_lane"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "scope_key": {
+            "title": "Scope Key",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "github_jobs",
+              "github_runners",
+              "local_processes",
+              "local_user_processes",
+              "runner_services",
+              "open_handles"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "idle",
+              "active",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "subject_key": {
+            "title": "Subject Key",
+            "type": "string"
+          },
+          "total_count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Count"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "source",
+          "scope",
+          "scope_key",
+          "subject_key",
+          "observed_at",
+          "availability",
+          "state"
+        ],
+        "title": "RunnerHostHygieneIdleObservation",
+        "type": "object"
+      },
+      "RunnerHostHygieneIdleSourceRequirement": {
+        "additionalProperties": false,
+        "properties": {
+          "minimum_observation_count": {
+            "default": 2,
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Minimum Observation Count",
+            "type": "integer"
+          },
+          "source": {
+            "enum": [
+              "github_jobs",
+              "github_runners",
+              "local_processes",
+              "local_user_processes",
+              "runner_services",
+              "open_handles"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "subject_key": {
+            "title": "Subject Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "subject_key"
+        ],
+        "title": "RunnerHostHygieneIdleSourceRequirement",
+        "type": "object"
+      },
       "RunnerHostHygieneImageInventoryItem": {
         "additionalProperties": false,
         "properties": {
@@ -19689,6 +19988,14 @@
           "host_name": {
             "title": "Host Name",
             "type": "string"
+          },
+          "idle_convergences": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneIdleConvergence"
+            },
+            "title": "Idle Convergences",
+            "type": "array"
           },
           "image_inventory": {
             "default": [],
@@ -19854,6 +20161,13 @@
             "title": "Host Name",
             "type": "string"
           },
+          "idle_convergences": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneIdleConvergence"
+            },
+            "title": "Idle Convergences",
+            "type": "array"
+          },
           "image_inventory_total_count": {
             "title": "Image Inventory Total Count",
             "type": "integer"
@@ -19914,6 +20228,7 @@
           "generated_cache_apparent_bytes",
           "generated_cache_allocated_bytes",
           "cache_class_telemetry",
+          "idle_convergences",
           "image_inventory_total_count",
           "image_inventory_truncated",
           "volume_inventory_total_count",

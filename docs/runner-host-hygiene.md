@@ -145,19 +145,21 @@ under `runner_host_hygiene_audit.write`, preserves the `Idempotency-Key`
 replay/conflict contract, and returns the accepted record key plus audit result
 details. The local planner only prints the planned record; the approved executor
 calls the service route after it captures the required pre/post host evidence.
-The executor also keeps a host-persistent delivery envelope outside the Actions
-workspace. It atomically records planned intent before mutation, records
-`action_started` immediately before the privileged command, and records terminal
-evidence before remote delivery. Transient delivery failures retain the exact
+Every mutation requires a host-persistent delivery envelope outside the Actions
+workspace. It atomically records planned intent, then stores the fresh
+pre-action request, ready plan, and sanitized source evidence together with
+`action_started` immediately before the privileged command. Terminal evidence
+is durable before remote delivery. Transient delivery failures retain the exact
 idempotency key and block another mutation for the same host/action until the
-pending envelope is reconciled. The current-run envelope is copied to a redacted
-workflow artifact; bearer tokens and raw authorization headers are never part of
-the envelope. A permanently rejected planned audit (for example, authorization,
-route, or idempotency conflict) blocks mutation; a retryable transport/service
-failure may proceed only because the planned intent is already durable locally.
-Generated run-cache mutation is stricter: it requires both the durable host
-spool and accepted service delivery of the planned audit before the privileged
-helper can run. A pending or rejected planned record leaves that action blocked.
+pending envelope is reconciled. The envelope also stores a SHA-256 integrity
+digest over runtime-only executor inputs so recovery cannot collect post
+evidence under changed roots, repositories, lanes, or targets. The current-run
+envelope is copied to a redacted workflow artifact; bearer tokens, raw runtime
+topology, and authorization headers are never part of persisted evidence. A
+permanently rejected planned audit blocks mutation. Generated run-cache
+mutation is stricter still: accepted service delivery of the planned audit is
+required before the privileged helper can run. A pending or rejected planned
+record leaves that action blocked.
 
 Authorized operators and workflows can read the durable evidence through:
 
@@ -254,6 +256,28 @@ limit, and its cooldown has expired. The helper deletes only selected
 completed-run directories and records the lower post-cleanup size; it never
 touches sibling Cargo, Bazel disk, package, credential, or configuration roots.
 
+Idle safety is persisted as typed, source-attributed convergence rather than
+anonymous process-count tuples. Shared Docker actions use one `full_host`
+convergence containing consecutive GitHub job, GitHub runner, local process,
+and runner-service observations. A runtime-only host binding manifest names
+every expected repository, lane, runner, and systemd service unit. The executor
+builds GitHub source requirements from that manifest and requires its service
+units to match the complete local `systemctl` inventory; an omitted or extra
+lane therefore blocks rather than disappearing from `full_host` evidence. Only
+public hashes and counts enter persisted evidence. The executor excludes only
+its own GitHub job, identified by `GITHUB_RUN_ID` and `RUNNER_NAME`, across the
+current repository/lane bindings, and excludes only its own runner
+registration. Sibling jobs and runner registrations remain visible. Missing
+identity, unauthorized APIs, incomplete pagination, manifest disagreement,
+stale timestamps, or a short or zero observation window blocks the apply plan.
+Generated run-cache actions do not use full-host evidence. Each policy-owned
+root instead records one `isolated_user` convergence with owner-process,
+per-entry open-handle, and GitHub run-state evidence. `isolated_lane` remains a
+reserved contract value and is rejected by this executor until lane-scoped
+process evidence exists. Successful and blocking convergence is preserved in
+planned and terminal audit reports and is exposed through the sanitized
+runner-host hygiene read model.
+
 Launchplane's PostgreSQL integration job mounts `/var/lib/postgresql/data` as a
 bounded tmpfs. The official PostgreSQL image declares that path as a volume;
 overriding it keeps ephemeral test data out of durable anonymous Docker volumes
@@ -285,6 +309,12 @@ The workflow requires these repository variables:
   evidence; the absolute path and repository identity remain executor-local
   runtime authority. High water must be positive, low water must be smaller,
   and minimum age must be at least one hour.
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_IDLE_BINDINGS`, as comma-separated
+  `owner/repository|lane|runner-name|systemd-service-unit` entries covering
+  every runner service on the host. This is runtime topology, not a checked-in
+  catalog. Shared Docker mutation is rejected unless the manifest includes the
+  current `GITHUB_REPOSITORY`, execution lane, and `RUNNER_NAME`, and its exact
+  service-unit set matches local discovery.
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_ALLOWED_BUILDKIT_STATE_VOLUMES` for any
   approved BuildKit state-volume retirement target. Leave it empty when no
   named volume cleanup has been reviewed.
@@ -299,24 +329,36 @@ The workflow requires these repository variables:
   executor rejects values below 8 GiB. Capacity remains runtime authority;
   production code contains no host-specific cache budget.
 
-Public source repositories need no GitHub credential for generated-cache run
-state. Private source repositories require the optional
-`LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_READ_TOKEN` secret, scoped only to
-Actions-read access for the exact source repositories. Do not reuse runner
-registration or administration credentials for this evidence path.
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_READ_TOKEN` is required for shared-host
+idle convergence. Scope it to every repository named by the runtime host
+binding manifest with read-only Actions and Administration permissions: Actions
+reads provide active workflow and job state, while Administration read is
+needed to list self-hosted runner registrations. A repository-level runner API
+that cannot see the named runner fails closed as `source_missing`; organization
+or enterprise registrations require an equivalent reader before they can be
+listed in the manifest. Generated-cache run-state reads use only Actions read.
+The credential grants no runner-registration write or repository-content write
+authority.
 
 The executor fails closed unless the process user matches the requested service
 user, the GitHub repository matches the requested repository scope, retained
-warm builders are present in pre-apply evidence, the apply plan is ready, no
-active Docker build client or another Actions `Runner.Worker` process is observed
-in two consecutive local samples. Manual mutations additionally require
-`mutate=true`. Monday-through-Saturday scheduled runs stop at the
+warm builders are present in pre-apply evidence, the apply plan is ready, and
+the action's required idle scope converges over at least two samples separated
+by a nonzero interval. Every mutation requires a durable host-local audit spool.
+After planned-audit delivery, the executor recollects every required source,
+replans against a new decision timestamp, and atomically stores that sanitized
+authorization with `action_started` before invoking the mutation. Manual
+mutations additionally require `mutate=true`.
+Monday-through-Saturday scheduled runs stop at the
 `mutate_not_requested` blocker, while the Sunday maintenance schedule supplies
 explicit mutation intent for bounded Docker, dangling-image, named-builder, and
 generated completed-run cache actions. Shared Docker actions require full-host
-idle. Generated run-cache actions instead require two idle observations for the
-configured owning user plus two zero-handle observations for every exact target;
-unrelated users and lanes do not block that isolated cache class.
+idle from every required GitHub and local source. Generated run-cache actions
+instead require two idle observations for the configured owning user plus two
+zero-handle observations for every exact target; unrelated users and lanes do
+not block that isolated cache class. The default evidence age limit is five
+minutes and is configurable through `--idle-max-age-seconds` without permitting
+zero-second observation intervals.
 Cache and image maintenance may proceed when the report has unrelated attention
 findings so cleanup can remediate pressure; host identity, warm-image retention,
 audit durability, exact builder allowlists, and the idle gate remain mandatory.
@@ -412,8 +454,8 @@ install -o root -g root -m 0600 <prepared-generated-cache-bindings> \
 ```
 
 ```sudoers
-Cmnd_Alias LAUNCHPLANE_GENERATED_CACHE_OBSERVE = /usr/local/sbin/launchplane-generated-run-cache ^observe [a-z0-9][a-z0-9._-]{0,63}=/[^[:space:]]+ ([2-9]|10) ([0-9]|[1-5][0-9]|60)$
-Cmnd_Alias LAUNCHPLANE_GENERATED_CACHE_PRUNE = /usr/local/sbin/launchplane-generated-run-cache ^prune [a-z0-9][a-z0-9._-]{0,63}=/[^[:space:]]+ ([2-9]|10) ([0-9]|[1-5][0-9]|60) [1-9][0-9]*(,[1-9][0-9]*)*$
+Cmnd_Alias LAUNCHPLANE_GENERATED_CACHE_OBSERVE = /usr/local/sbin/launchplane-generated-run-cache ^observe [a-z0-9][a-z0-9._-]{0,63}=/[^[:space:]]+ ([2-9]|10) ([1-9]|[1-5][0-9]|60)$
+Cmnd_Alias LAUNCHPLANE_GENERATED_CACHE_PRUNE = /usr/local/sbin/launchplane-generated-run-cache ^prune [a-z0-9][a-z0-9._-]{0,63}=/[^[:space:]]+ ([2-9]|10) ([1-9]|[1-5][0-9]|60) [1-9][0-9]*(,[1-9][0-9]*)*$
 <service-user> ALL=(root) NOPASSWD: NOSETENV: LAUNCHPLANE_GENERATED_CACHE_OBSERVE, LAUNCHPLANE_GENERATED_CACHE_PRUNE
 ```
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from decimal import InvalidOperation
+import hashlib
 import json
 import os
 import posixpath
@@ -53,6 +55,14 @@ from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import (
     sanitize_runner_host_hygiene_audit_record_for_persistence,
 )
+from control_plane.contracts.runner_host_hygiene_idle import (
+    RunnerHostHygieneIdleConvergence,
+    RunnerHostHygieneIdleObservation,
+    RunnerHostHygieneIdleScope,
+    RunnerHostHygieneIdleSource,
+    RunnerHostHygieneIdleSourceRequirement,
+    build_runner_host_hygiene_idle_convergence,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.runner_host_hygiene_audit_spool import (
     RunnerHostHygieneAuditSpool,
@@ -65,6 +75,16 @@ MINIMUM_PRUNE_UNTIL_HOURS = 168
 MINIMUM_DEFAULT_CACHE_KEEP_STORAGE_BYTES = 8 * 1024**3
 MAX_DOCKER_IMAGE_INVENTORY_ITEMS = RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS
 MAX_DOCKER_VOLUME_INVENTORY_ITEMS = RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS
+MAX_GITHUB_IDLE_ACTIVE_RUNS = 32
+_GITHUB_ACTIVE_WORKFLOW_RUN_STATUSES = (
+    "queued",
+    "in_progress",
+    "waiting",
+    "pending",
+    "requested",
+)
+_GITHUB_ACTIVE_JOB_STATUSES = frozenset(("queued", "in_progress", "waiting", "pending"))
+_GITHUB_KNOWN_JOB_STATUSES = _GITHUB_ACTIVE_JOB_STATUSES | {"completed"}
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
 _BUILDCTL_STORAGE_MB_BYTES = 1_000_000
 _RUNNER_WORKDIR_USAGE_HELPER = "/usr/local/sbin/launchplane-runner-workdir-usage"
@@ -90,6 +110,12 @@ _ACTIVE_WORK_COMMAND = (
     "'[d]ocker buildx|[d]ocker build|[b]uildctl|[R]unner.Worker') || status=$?; "
     'if [ "$status" -gt 1 ]; then exit "$status"; fi; '
     "printf '%s\\n' \"$output\""
+)
+_RUNNER_SERVICE_STATE_COMMAND = (
+    "command -v systemctl >/dev/null 2>&1 || exit 127; "
+    "systemctl list-units --type=service --all --no-legend --plain "
+    "'launchplane-runner@*.service' 'actions.runner.*.service' | "
+    'awk \'{print $1 " " $3 " " $4}\''
 )
 _DOCKER_SIZE_UNITS = {
     "b": Decimal(1),
@@ -156,12 +182,24 @@ AuditPoster = Callable[[RunnerHostHygieneApplyAuditRecord, str], dict[str, objec
 BearerTokenProvider = Callable[[], str]
 AuditDeliverySleeper = Callable[[float], None]
 GitHubRunStateReader = Callable[[str, tuple[int, ...]], Mapping[int, str]]
+GitHubIdleEvidenceReader = Callable[
+    [str, str, str, bool],
+    tuple[RunnerHostHygieneIdleObservation, ...],
+]
 
 
 @dataclass(frozen=True)
 class RunnerWorkdirRoot:
     key: str
     path: str
+
+
+@dataclass(frozen=True)
+class RunnerHostGitHubBinding:
+    repository_scope: str
+    execution_lane: str
+    runner_name: str
+    service_unit: str
 
 
 @dataclass(frozen=True)
@@ -173,6 +211,8 @@ class GeneratedRunCacheRoot:
     low_water_bytes: int
     minimum_age_hours: int
     cooldown_hours: int
+    idle_scope: RunnerHostHygieneIdleScope = "isolated_user"
+    idle_scope_key: str = ""
 
 
 class AuditDeliveryError(click.ClickException):
@@ -192,6 +232,8 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
     repository_scope: str
     audit_record_key: str
     retained_warm_builders: tuple[str, ...]
+    current_runner_name: str = ""
+    github_idle_bindings: tuple[RunnerHostGitHubBinding, ...] = ()
     mutate: bool = False
     minimum_free_disk_bytes: int = Field(default=0, ge=0)
     timeout_seconds: int = Field(default=120, ge=1)
@@ -201,7 +243,8 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
     target_generated_cache_key: str = ""
     target_generated_cache_run_ids: tuple[int, ...] = ()
     idle_observation_count: int = Field(default=2, ge=2, le=10)
-    idle_observation_interval_seconds: int = Field(default=5, ge=0, le=60)
+    idle_observation_interval_seconds: int = Field(default=5, ge=1, le=60)
+    idle_max_age_seconds: int = Field(default=300, ge=1, le=86_400)
     resolve_action_started: bool = False
     target_buildkit_builder: str = ""
     allowed_buildkit_builders: tuple[str, ...] = ()
@@ -237,6 +280,54 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
             self.audit_record_key,
             self.prune_until,
         )
+        self.current_runner_name = self.current_runner_name.strip()
+        normalized_bindings: list[RunnerHostGitHubBinding] = []
+        seen_binding_keys: set[tuple[str, str, str]] = set()
+        seen_service_units: set[str] = set()
+        for binding in self.github_idle_bindings:
+            repository_scope = binding.repository_scope.strip().lower()
+            execution_lane = binding.execution_lane.strip().lower()
+            runner_name = binding.runner_name.strip()
+            service_unit = binding.service_unit.strip()
+            if not re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", repository_scope):
+                raise ValueError("runner host GitHub binding repository must use owner/name")
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", execution_lane):
+                raise ValueError("runner host GitHub binding execution lane must be public-safe")
+            if (
+                not runner_name
+                or len(runner_name) > 255
+                or any(ord(character) < 32 for character in runner_name)
+            ):
+                raise ValueError("runner host GitHub binding requires a valid runner name")
+            if (
+                not service_unit.endswith(".service")
+                or len(service_unit) > 255
+                or re.search(r"[^A-Za-z0-9_.@-]", service_unit)
+            ):
+                raise ValueError("runner host GitHub binding requires a valid systemd service unit")
+            binding_key = (repository_scope, execution_lane, runner_name)
+            if binding_key in seen_binding_keys or service_unit in seen_service_units:
+                raise ValueError("runner host GitHub bindings must be unique")
+            seen_binding_keys.add(binding_key)
+            seen_service_units.add(service_unit)
+            normalized_bindings.append(
+                RunnerHostGitHubBinding(
+                    repository_scope=repository_scope,
+                    execution_lane=execution_lane,
+                    runner_name=runner_name,
+                    service_unit=service_unit,
+                )
+            )
+        self.github_idle_bindings = tuple(
+            sorted(
+                normalized_bindings,
+                key=lambda item: (
+                    item.repository_scope,
+                    item.execution_lane,
+                    item.runner_name,
+                ),
+            )
+        )
         self.retained_warm_builders = tuple(
             token.strip().lower() for token in self.retained_warm_builders if token.strip()
         )
@@ -269,6 +360,7 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
             key = generated_root.key.strip().lower()
             path = generated_root.path.strip().rstrip("/")
             source_repository = generated_root.source_repository.strip().lower()
+            idle_scope_key = (generated_root.idle_scope_key or key).strip().lower()
             if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", key):
                 raise ValueError("generated run cache key must be a public-safe token")
             if (
@@ -281,6 +373,13 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
                 raise ValueError("generated run cache path must be a scoped absolute path")
             if not re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", source_repository):
                 raise ValueError("generated run cache repository must use owner/name")
+            if generated_root.idle_scope != "isolated_user":
+                raise ValueError(
+                    "generated run cache idle scope must be isolated_user until "
+                    "lane-scoped process evidence is implemented"
+                )
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", idle_scope_key):
+                raise ValueError("generated run cache idle scope key must be public-safe")
             if (
                 generated_root.high_water_bytes <= 0
                 or generated_root.low_water_bytes >= generated_root.high_water_bytes
@@ -303,6 +402,8 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
                     low_water_bytes=generated_root.low_water_bytes,
                     minimum_age_hours=generated_root.minimum_age_hours,
                     cooldown_hours=generated_root.cooldown_hours,
+                    idle_scope=generated_root.idle_scope,
+                    idle_scope_key=idle_scope_key,
                 )
             )
         self.generated_run_cache_roots = tuple(
@@ -406,6 +507,26 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
             raise ValueError("runner host hygiene executor requires service_user")
         if "/" not in self.repository_scope:
             raise ValueError("runner host hygiene executor requires repository_scope as owner/name")
+        current_bindings = tuple(
+            binding
+            for binding in self.github_idle_bindings
+            if binding.repository_scope == self.repository_scope.lower()
+            and binding.execution_lane == self.execution_lane.lower()
+            and binding.runner_name == self.current_runner_name
+        )
+        if self.github_idle_bindings and self.current_runner_name and len(current_bindings) != 1:
+            raise ValueError(
+                "runner host GitHub bindings must identify the current repository, lane, and runner"
+            )
+        if self.mutate and self.action != "prune_generated_run_cache":
+            if not self.github_idle_bindings:
+                raise ValueError(
+                    "shared Docker mutation requires a complete runner host GitHub binding manifest"
+                )
+            if not self.current_runner_name or len(current_bindings) != 1:
+                raise ValueError(
+                    "shared Docker mutation requires the current runner in the host binding manifest"
+                )
         if not self.audit_record_key:
             raise ValueError("runner host hygiene executor requires audit_record_key")
         if not self.retained_warm_builders:
@@ -442,6 +563,14 @@ def _strip_text_fields(*values: str) -> tuple[str, ...]:
     return tuple(value.strip() for value in values)
 
 
+def _executor_intent_sha256(request: RunnerHostHygieneExecutorRequest) -> str:
+    payload = request.model_dump(mode="json")
+    payload["resolve_action_started"] = False
+    payload["target_generated_cache_run_ids"] = []
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def execute_runner_host_hygiene_executor(
     *,
     request: RunnerHostHygieneExecutorRequest,
@@ -450,10 +579,11 @@ def execute_runner_host_hygiene_executor(
     audit_spool: RunnerHostHygieneAuditSpool | None = None,
     audit_delivery_sleeper: AuditDeliverySleeper = time.sleep,
     github_run_state_reader: GitHubRunStateReader | None = None,
+    github_idle_evidence_reader: GitHubIdleEvidenceReader | None = None,
 ) -> RunnerHostHygieneExecutorResult:
-    if request.action == "prune_generated_run_cache" and request.mutate and audit_spool is None:
+    if request.mutate and audit_spool is None:
         raise click.ClickException(
-            "generated run cache mutation requires durable host-local audit delivery state"
+            "runner host hygiene mutation requires durable host-local audit delivery state"
         )
     if audit_spool is not None:
         reconciliation_result = _reconcile_audit_spool(
@@ -463,6 +593,7 @@ def execute_runner_host_hygiene_executor(
             audit_poster=audit_poster,
             audit_delivery_sleeper=audit_delivery_sleeper,
             github_run_state_reader=github_run_state_reader,
+            github_idle_evidence_reader=github_idle_evidence_reader,
         )
         if reconciliation_result is not None:
             return reconciliation_result
@@ -471,6 +602,8 @@ def execute_runner_host_hygiene_executor(
         request=request,
         remote_runner=remote_runner,
         github_run_state_reader=github_run_state_reader,
+        github_idle_evidence_reader=github_idle_evidence_reader,
+        idle_observation_sleeper=audit_delivery_sleeper,
     )
     if request.mutate:
         _assert_required_docker_telemetry_available(request=request, report=pre_report)
@@ -504,25 +637,35 @@ def execute_runner_host_hygiene_executor(
         generated_cache_cooldown_hours=(
             target_generated_cache.cooldown_hours if target_generated_cache else 0
         ),
+        idle_scope=(target_generated_cache.idle_scope if target_generated_cache else "full_host"),
+        idle_scope_key=(
+            target_generated_cache.idle_scope_key if target_generated_cache else "host"
+        ),
+        idle_observation_count=action_request.idle_observation_count,
+        idle_observation_interval_seconds=(action_request.idle_observation_interval_seconds),
+        idle_max_age_seconds=action_request.idle_max_age_seconds,
+        idle_decision_at=utc_now_timestamp(),
         audit_record_key=action_request.audit_record_key,
     )
-    apply_plan = plan_runner_host_hygiene_apply(
-        policy=RunnerHostHygieneApplyPolicy(
-            approved_hosts=(action_request.host_name,),
-            required_retained_warm_builders=action_request.retained_warm_builders,
-            require_healthy_report=False,
-            allow_docker_cache_prune=action_request.action == "prune_docker_cache",
-            allow_dangling_image_prune=action_request.action == "prune_dangling_images",
-            allow_generated_run_cache_prune=(action_request.action == "prune_generated_run_cache"),
-            allowed_generated_cache_keys=tuple(
-                root.key for root in action_request.generated_run_cache_roots
-            ),
-            allowed_buildkit_builders=action_request.allowed_buildkit_builders,
-            allow_buildkit_state_volume_remove=(
-                action_request.action == "remove_buildkit_state_volumes"
-            ),
-            allowed_buildkit_state_volumes=action_request.allowed_buildkit_state_volumes,
+    apply_policy = RunnerHostHygieneApplyPolicy(
+        approved_hosts=(action_request.host_name,),
+        required_retained_warm_builders=action_request.retained_warm_builders,
+        require_healthy_report=False,
+        require_idle_convergence=True,
+        allow_docker_cache_prune=action_request.action == "prune_docker_cache",
+        allow_dangling_image_prune=action_request.action == "prune_dangling_images",
+        allow_generated_run_cache_prune=(action_request.action == "prune_generated_run_cache"),
+        allowed_generated_cache_keys=tuple(
+            root.key for root in action_request.generated_run_cache_roots
         ),
+        allowed_buildkit_builders=action_request.allowed_buildkit_builders,
+        allow_buildkit_state_volume_remove=(
+            action_request.action == "remove_buildkit_state_volumes"
+        ),
+        allowed_buildkit_state_volumes=action_request.allowed_buildkit_state_volumes,
+    )
+    apply_plan = plan_runner_host_hygiene_apply(
+        policy=apply_policy,
         request=apply_request,
         report=pre_report,
     )
@@ -545,6 +688,7 @@ def execute_runner_host_hygiene_executor(
         audit_envelope = audit_spool.create(
             planned_audit=planned_audit,
             planned_idempotency_key=planned_idempotency_key,
+            executor_intent_sha256=_executor_intent_sha256(request),
         )
         audit_envelope, delivery_responses = _deliver_audit_envelope(
             envelope=audit_envelope,
@@ -614,29 +758,64 @@ def execute_runner_host_hygiene_executor(
             ),
         )
 
-    idle_result = None
-    if action_request.action != "prune_generated_run_cache":
-        idle_result = _check_host_idle(
-            request=action_request,
-            remote_runner=remote_runner,
-            sleeper=audit_delivery_sleeper,
-        )
-    if idle_result is not None:
-        post_report = _collect_terminal_report(
-            request=action_request,
-            remote_runner=remote_runner,
-            github_run_state_reader=github_run_state_reader,
-        )
+    pre_action_report = _collect_terminal_report(
+        request=action_request,
+        remote_runner=remote_runner,
+        github_run_state_reader=github_run_state_reader,
+        github_idle_evidence_reader=github_idle_evidence_reader,
+        idle_observation_sleeper=audit_delivery_sleeper,
+    )
+    if pre_action_report is None:
         terminal_message = (
-            f"runner host hygiene apply blocked by active runner or build processes: {idle_result}"
+            "runner host hygiene pre-action evidence collection failed; "
+            "host mutation was not executed"
         )
-        if post_report is None:
-            terminal_message += "; terminal evidence collection failed"
         terminal_audit = _terminal_audit(
             request=apply_request,
             apply_plan=apply_plan,
             pre_report=pre_report,
-            post_report=post_report,
+            post_report=None,
+            status="failed",
+            message=terminal_message,
+        )
+        _assert_generated_cache_audit_redacted(audit=terminal_audit, request=action_request)
+        terminal_response, audit_delivery_pending = _deliver_terminal_audit(
+            terminal_audit=terminal_audit,
+            audit_envelope=audit_envelope,
+            audit_spool=audit_spool,
+            audit_poster=audit_poster,
+            audit_delivery_sleeper=audit_delivery_sleeper,
+        )
+        return RunnerHostHygieneExecutorResult(
+            status="audit_delivery_pending" if audit_delivery_pending else "failed",
+            audit_record_key=request.audit_record_key,
+            planned_response=planned_response,
+            terminal_response=terminal_response,
+            audit_delivery_pending=audit_delivery_pending,
+            message=terminal_message,
+        )
+    final_apply_request = RunnerHostHygieneApplyRequest.model_validate(
+        {
+            **apply_request.model_dump(mode="python"),
+            "idle_decision_at": utc_now_timestamp(),
+        }
+    )
+    final_apply_plan = plan_runner_host_hygiene_apply(
+        policy=apply_policy,
+        request=final_apply_request,
+        report=pre_action_report,
+    )
+    if final_apply_plan.status != "ready":
+        blocker_codes = ",".join(blocker.code for blocker in final_apply_plan.blockers)
+        terminal_message = (
+            "runner host hygiene pre-action evidence no longer authorizes mutation: "
+            f"{blocker_codes}"
+        )
+        terminal_audit = _terminal_audit(
+            request=final_apply_request,
+            apply_plan=final_apply_plan,
+            pre_report=pre_action_report,
+            post_report=None,
             status="failed",
             message=terminal_message,
         )
@@ -657,15 +836,43 @@ def execute_runner_host_hygiene_executor(
             message=terminal_message,
         )
 
+    apply_request = final_apply_request
+    apply_plan = final_apply_plan
+    pre_report = pre_action_report
+
     if audit_envelope is not None and audit_spool is not None:
+        action_authorization = sanitize_runner_host_hygiene_audit_record_for_persistence(
+            RunnerHostHygieneApplyAuditRecord(
+                audit_record_key=request.audit_record_key,
+                status="planned",
+                request=apply_request,
+                plan=apply_plan,
+                pre_apply_report=pre_report,
+                message=(
+                    "fresh runner host hygiene pre-action authorization; "
+                    "no host mutation was executed yet"
+                ),
+            )
+        )
+        _assert_generated_cache_audit_redacted(
+            audit=action_authorization,
+            request=action_request,
+        )
         audit_envelope = audit_spool.write(
-            audit_envelope.model_copy(update={"execution_state": "action_started"})
+            audit_envelope.model_copy(
+                update={
+                    "execution_state": "action_started",
+                    "action_authorization": action_authorization,
+                }
+            )
         )
     action_result = _execute_apply_action(request=action_request, remote_runner=remote_runner)
     post_report = _collect_terminal_report(
         request=action_request,
         remote_runner=remote_runner,
         github_run_state_reader=github_run_state_reader,
+        github_idle_evidence_reader=github_idle_evidence_reader,
+        idle_observation_sleeper=audit_delivery_sleeper,
     )
     if post_report is None:
         terminal_status: RunnerHostHygieneApplyAuditStatus = "failed"
@@ -722,6 +929,7 @@ def _reconcile_audit_spool(
     audit_poster: AuditPoster,
     audit_delivery_sleeper: AuditDeliverySleeper,
     github_run_state_reader: GitHubRunStateReader | None,
+    github_idle_evidence_reader: GitHubIdleEvidenceReader | None,
 ) -> RunnerHostHygieneExecutorResult | None:
     for original_envelope in audit_spool.list_for(
         host_name=request.host_name,
@@ -751,15 +959,61 @@ def _reconcile_audit_spool(
                     else "runner host hygiene terminal audit delivery reconciled; action not repeated"
                 ),
             )
+        if is_current_request and envelope.execution_state == "planned":
+            terminal_message = (
+                "runner host hygiene previous execution stopped before action_started; "
+                "host mutation was not executed"
+            )
+            terminal_audit = _terminal_audit(
+                request=envelope.planned_audit.request,
+                apply_plan=envelope.planned_audit.plan,
+                pre_report=envelope.planned_audit.pre_apply_report,
+                post_report=None,
+                status="failed",
+                message=terminal_message,
+            )
+            _assert_generated_cache_audit_redacted(audit=terminal_audit, request=request)
+            terminal_response, delivery_pending = _deliver_terminal_audit(
+                terminal_audit=terminal_audit,
+                audit_envelope=envelope,
+                audit_spool=audit_spool,
+                audit_poster=audit_poster,
+                audit_delivery_sleeper=audit_delivery_sleeper,
+            )
+            return RunnerHostHygieneExecutorResult(
+                status="audit_delivery_pending" if delivery_pending else "failed",
+                audit_record_key=request.audit_record_key,
+                planned_response=delivery_responses.get("planned", {}),
+                terminal_response=terminal_response,
+                audit_delivery_pending=delivery_pending,
+                reconciled=not delivery_pending,
+                message=terminal_message,
+            )
         if (
             is_current_request
             and envelope.execution_state == "action_started"
             and request.resolve_action_started
         ):
+            if (
+                envelope.schema_version >= 2
+                and envelope.executor_intent_sha256 != _executor_intent_sha256(request)
+            ):
+                return RunnerHostHygieneExecutorResult(
+                    status="blocked",
+                    audit_record_key=request.audit_record_key,
+                    planned_response=delivery_responses.get("planned", {}),
+                    reconciled=False,
+                    message=(
+                        "runner host hygiene action_started recovery inputs do not match "
+                        "the durable executor intent; action was not repeated"
+                    ),
+                )
             post_report = _collect_terminal_report(
                 request=request,
                 remote_runner=remote_runner,
                 github_run_state_reader=github_run_state_reader,
+                github_idle_evidence_reader=github_idle_evidence_reader,
+                idle_observation_sleeper=audit_delivery_sleeper,
             )
             if post_report is None:
                 terminal_message = (
@@ -771,10 +1025,11 @@ def _reconcile_audit_spool(
                     "runner host hygiene previous execution stopped after action_started; "
                     "current post evidence was captured and the action was not repeated"
                 )
+            action_authorization = envelope.action_authorization or envelope.planned_audit
             terminal_audit = _terminal_audit(
-                request=envelope.planned_audit.request,
-                apply_plan=envelope.planned_audit.plan,
-                pre_report=envelope.planned_audit.pre_apply_report,
+                request=action_authorization.request,
+                apply_plan=action_authorization.plan,
+                pre_report=action_authorization.pre_apply_report,
                 post_report=post_report,
                 status="failed",
                 message=terminal_message,
@@ -1061,8 +1316,9 @@ def collect_runner_host_hygiene_report(
     request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
     github_run_state_reader: GitHubRunStateReader | None = None,
+    github_idle_evidence_reader: GitHubIdleEvidenceReader | None = None,
+    idle_observation_sleeper: AuditDeliverySleeper = time.sleep,
 ) -> RunnerHostHygieneReport:
-    observed_at = utc_now_timestamp()
     df_result = _require_remote_success(
         remote_runner(("df", "-B1", "-P", "/"), request.timeout_seconds),
         evidence_name="df",
@@ -1118,6 +1374,25 @@ def collect_runner_host_hygiene_report(
         remote_runner=remote_runner,
         github_run_state_reader=github_run_state_reader,
     )
+    full_host_idle_convergence = (
+        _collect_full_host_idle_convergence(
+            request=request,
+            remote_runner=remote_runner,
+            github_idle_evidence_reader=github_idle_evidence_reader,
+            sleeper=idle_observation_sleeper,
+        )
+        if request.action != "prune_generated_run_cache"
+        else None
+    )
+    observed_at = utc_now_timestamp()
+    idle_convergences = (
+        *((full_host_idle_convergence,) if full_host_idle_convergence is not None else ()),
+        *(
+            usage.idle_convergence
+            for usage in generated_cache_usage
+            if usage.idle_convergence is not None
+        ),
+    )
     docker_cache_class_measurements = docker_disk_usage.cache_class_measurements
     if not image_inventory_available:
         docker_cache_class_measurements = _mark_docker_cache_class_measurement_partial(
@@ -1143,6 +1418,7 @@ def collect_runner_host_hygiene_report(
         generated_cache_apparent_bytes=sum(item.apparent_bytes for item in generated_cache_usage),
         generated_cache_allocated_bytes=sum(item.allocated_bytes for item in generated_cache_usage),
         generated_cache_usage=generated_cache_usage,
+        idle_convergences=idle_convergences,
         cache_class_telemetry=_docker_cache_class_telemetry(
             docker_cache_class_measurements,
             observed_at=observed_at,
@@ -1181,6 +1457,474 @@ def collect_runner_host_hygiene_report(
         ),
         observation=observation,
     )
+
+
+def _collect_full_host_idle_convergence(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+    github_idle_evidence_reader: GitHubIdleEvidenceReader | None,
+    sleeper: AuditDeliverySleeper,
+) -> RunnerHostHygieneIdleConvergence:
+    process_results: list[RemoteCommandResult] = []
+    service_results: list[RemoteCommandResult] = []
+    github_samples: list[tuple[RunnerHostHygieneIdleObservation, ...]] = []
+    for sample_index in range(request.idle_observation_count):
+        process_results.append(
+            remote_runner(("bash", "-lc", _ACTIVE_WORK_COMMAND), request.timeout_seconds)
+        )
+        service_results.append(
+            remote_runner(
+                ("bash", "-lc", _RUNNER_SERVICE_STATE_COMMAND),
+                request.timeout_seconds,
+            )
+        )
+        github_samples.append(
+            _read_github_idle_sample(
+                request=request,
+                github_idle_evidence_reader=github_idle_evidence_reader,
+            )
+        )
+        if sample_index + 1 < request.idle_observation_count:
+            sleeper(float(request.idle_observation_interval_seconds))
+    observed_at = utc_now_timestamp()
+    required_window_seconds = (
+        request.idle_observation_count - 1
+    ) * request.idle_observation_interval_seconds
+    observations: list[RunnerHostHygieneIdleObservation] = [
+        _local_process_idle_observation(
+            results=tuple(process_results),
+            observed_at=observed_at,
+            observation_window_seconds=required_window_seconds,
+        ),
+        _runner_service_idle_observation(
+            results=tuple(service_results),
+            observed_at=observed_at,
+            observation_window_seconds=required_window_seconds,
+            expected_service_units=tuple(
+                binding.service_unit for binding in request.github_idle_bindings
+            ),
+        ),
+    ]
+    observations.extend(
+        _aggregate_github_idle_samples(
+            samples=tuple(github_samples),
+            observed_at=observed_at,
+            observation_window_seconds=required_window_seconds,
+        )
+    )
+    requirements = tuple(
+        RunnerHostHygieneIdleSourceRequirement(
+            source=observation.source,
+            subject_key=observation.subject_key,
+            minimum_observation_count=request.idle_observation_count,
+        )
+        for observation in observations
+    )
+    return build_runner_host_hygiene_idle_convergence(
+        scope="full_host",
+        scope_key="host",
+        evaluated_at=utc_now_timestamp(),
+        minimum_observation_interval_seconds=(request.idle_observation_interval_seconds),
+        maximum_evidence_age_seconds=request.idle_max_age_seconds,
+        requirements=requirements,
+        observations=tuple(observations),
+    )
+
+
+def _read_github_idle_sample(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    github_idle_evidence_reader: GitHubIdleEvidenceReader | None,
+) -> tuple[RunnerHostHygieneIdleObservation, ...]:
+    observed_at = utc_now_timestamp()
+    if not request.github_idle_bindings:
+        subject_key = _public_identity_key("host-bindings", "missing")
+        return tuple(
+            _unavailable_idle_observation(
+                source=source,
+                scope="full_host",
+                scope_key="host",
+                subject_key=subject_key,
+                observed_at=observed_at,
+                reason_code="source_missing",
+            )
+            for source in ("github_jobs", "github_runners")
+        )
+    observations: list[RunnerHostHygieneIdleObservation] = []
+    for binding in request.github_idle_bindings:
+        subject_key = _github_binding_subject_key(binding)
+        is_current_repository_lane = (
+            binding.repository_scope == request.repository_scope.lower()
+            and binding.execution_lane == request.execution_lane.lower()
+        )
+        if github_idle_evidence_reader is None:
+            returned: tuple[RunnerHostHygieneIdleObservation, ...] = ()
+            unavailable_reason = "source_unavailable"
+        else:
+            try:
+                returned = github_idle_evidence_reader(
+                    binding.repository_scope,
+                    binding.execution_lane,
+                    binding.runner_name,
+                    is_current_repository_lane,
+                )
+                unavailable_reason = "source_missing"
+            except (OSError, ValueError):
+                returned = ()
+                unavailable_reason = "source_unavailable"
+        for source in ("github_jobs", "github_runners"):
+            matching = tuple(item for item in returned if item.source == source)
+            if len(matching) != 1:
+                observations.append(
+                    _unavailable_idle_observation(
+                        source=source,
+                        scope="full_host",
+                        scope_key="host",
+                        subject_key=subject_key,
+                        observed_at=observed_at,
+                        reason_code=(
+                            unavailable_reason if not matching else "source_contradictory"
+                        ),
+                    )
+                )
+                continue
+            observation = matching[0]
+            if (
+                observation.scope != "full_host"
+                or observation.scope_key != "host"
+                or observation.subject_key != subject_key
+                or observation.sample_count != 1
+                or observation.observation_window_seconds != 0
+            ):
+                observations.append(
+                    _unavailable_idle_observation(
+                        source=source,
+                        scope="full_host",
+                        scope_key="host",
+                        subject_key=subject_key,
+                        observed_at=observed_at,
+                        reason_code="source_contradictory",
+                    )
+                )
+                continue
+            observations.append(observation)
+    return tuple(observations)
+
+
+def _github_binding_subject_key(binding: RunnerHostGitHubBinding) -> str:
+    return _public_identity_key(
+        "runner",
+        "|".join(
+            (
+                binding.repository_scope,
+                binding.execution_lane,
+                binding.runner_name,
+            )
+        ),
+    )
+
+
+def _aggregate_github_idle_samples(
+    *,
+    samples: tuple[tuple[RunnerHostHygieneIdleObservation, ...], ...],
+    observed_at: str,
+    observation_window_seconds: int,
+) -> tuple[RunnerHostHygieneIdleObservation, ...]:
+    observations: list[RunnerHostHygieneIdleObservation] = []
+    observation_keys = tuple(
+        sorted(
+            {
+                (observation.source, observation.subject_key)
+                for sample in samples
+                for observation in sample
+            }
+        )
+    )
+    for source, subject_key in observation_keys:
+        source_samples = tuple(
+            observation
+            for sample in samples
+            for observation in sample
+            if observation.source == source and observation.subject_key == subject_key
+        )
+        source_observed_at = max(
+            (observation.observed_at for observation in source_samples),
+            default=observed_at,
+        )
+        if len(source_samples) != len(samples):
+            observations.append(
+                _unavailable_idle_observation(
+                    source=source,
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key=subject_key,
+                    observed_at=source_observed_at,
+                    reason_code="source_contradictory",
+                    sample_count=max(len(source_samples), 1),
+                    observation_window_seconds=(
+                        observation_window_seconds if len(source_samples) > 1 else 0
+                    ),
+                )
+            )
+            continue
+        if any(observation.availability != "available" for observation in source_samples):
+            reason_codes = {
+                observation.reason_code for observation in source_samples if observation.reason_code
+            }
+            if len(reason_codes) > 1 or any(
+                observation.availability == "available" for observation in source_samples
+            ):
+                reason_code = "source_contradictory"
+            elif "source_unauthorized" in reason_codes:
+                reason_code = "source_unauthorized"
+            elif "source_stale" in reason_codes:
+                reason_code = "source_stale"
+            elif any(observation.truncated for observation in source_samples):
+                reason_code = "source_truncated"
+            else:
+                reason_code = next(iter(reason_codes), "source_unavailable")
+            if reason_code == "source_truncated":
+                observations.append(
+                    _partial_idle_observation(
+                        source=source,
+                        scope="full_host",
+                        scope_key="host",
+                        subject_key=subject_key,
+                        observed_at=source_observed_at,
+                        sample_count=len(source_samples),
+                        observation_window_seconds=observation_window_seconds,
+                        reason_code=reason_code,
+                        truncated=True,
+                    )
+                )
+            else:
+                observations.append(
+                    _unavailable_idle_observation(
+                        source=source,
+                        scope="full_host",
+                        scope_key="host",
+                        subject_key=subject_key,
+                        observed_at=source_observed_at,
+                        reason_code=reason_code,
+                        sample_count=len(source_samples),
+                        observation_window_seconds=observation_window_seconds,
+                    )
+                )
+            continue
+        active_count = max(
+            (observation.active_count or 0 for observation in source_samples),
+            default=0,
+        )
+        total_count = max(
+            (observation.total_count or 0 for observation in source_samples),
+            default=0,
+        )
+        observations.append(
+            RunnerHostHygieneIdleObservation(
+                source=source,
+                scope="full_host",
+                scope_key="host",
+                subject_key=subject_key,
+                observed_at=source_observed_at,
+                availability="available",
+                state="active" if active_count else "idle",
+                sample_count=len(source_samples),
+                observation_window_seconds=observation_window_seconds,
+                active_count=active_count,
+                total_count=total_count,
+            )
+        )
+    return tuple(observations)
+
+
+def _local_process_idle_observation(
+    *,
+    results: tuple[RemoteCommandResult, ...],
+    observed_at: str,
+    observation_window_seconds: int,
+) -> RunnerHostHygieneIdleObservation:
+    if any(result.returncode != 0 for result in results):
+        return _unavailable_idle_observation(
+            source="local_processes",
+            scope="full_host",
+            scope_key="host",
+            subject_key="host-processes",
+            observed_at=observed_at,
+            reason_code="probe_failed",
+            sample_count=len(results),
+            observation_window_seconds=observation_window_seconds,
+        )
+    active_counts = tuple(len(_active_work_evidence_lines(result.stdout)) for result in results)
+    active_count = max(active_counts, default=0)
+    return RunnerHostHygieneIdleObservation(
+        source="local_processes",
+        scope="full_host",
+        scope_key="host",
+        subject_key="host-processes",
+        observed_at=observed_at,
+        availability="available",
+        state="active" if active_count else "idle",
+        sample_count=len(results),
+        observation_window_seconds=observation_window_seconds,
+        active_count=active_count,
+        total_count=active_count,
+    )
+
+
+def _runner_service_idle_observation(
+    *,
+    results: tuple[RemoteCommandResult, ...],
+    observed_at: str,
+    observation_window_seconds: int,
+    expected_service_units: tuple[str, ...],
+) -> RunnerHostHygieneIdleObservation:
+    if any(result.returncode != 0 for result in results):
+        return _unavailable_idle_observation(
+            source="runner_services",
+            scope="full_host",
+            scope_key="host",
+            subject_key="runner-services",
+            observed_at=observed_at,
+            reason_code="probe_failed",
+            sample_count=len(results),
+            observation_window_seconds=observation_window_seconds,
+        )
+    parsed_samples = tuple(_runner_service_states(result.stdout) for result in results)
+    if not expected_service_units or any(not sample for sample in parsed_samples):
+        return _unavailable_idle_observation(
+            source="runner_services",
+            scope="full_host",
+            scope_key="host",
+            subject_key="runner-services",
+            observed_at=observed_at,
+            reason_code="source_missing",
+            sample_count=len(results),
+            observation_window_seconds=observation_window_seconds,
+        )
+    expected_units = tuple(sorted(expected_service_units))
+    if any(
+        tuple(unit_name for unit_name, _, _ in sample) != expected_units
+        for sample in parsed_samples
+    ):
+        return _partial_idle_observation(
+            source="runner_services",
+            scope="full_host",
+            scope_key="host",
+            subject_key="runner-services",
+            observed_at=observed_at,
+            sample_count=len(results),
+            observation_window_seconds=observation_window_seconds,
+            reason_code="source_contradictory",
+        )
+    if len({tuple(unit_name for unit_name, _, _ in sample) for sample in parsed_samples}) != 1:
+        return _partial_idle_observation(
+            source="runner_services",
+            scope="full_host",
+            scope_key="host",
+            subject_key="runner-services",
+            observed_at=observed_at,
+            sample_count=len(results),
+            observation_window_seconds=observation_window_seconds,
+            reason_code="source_contradictory",
+        )
+    if any(
+        active_state != "active" or sub_state != "running"
+        for sample in parsed_samples
+        for _, active_state, sub_state in sample
+    ):
+        return _partial_idle_observation(
+            source="runner_services",
+            scope="full_host",
+            scope_key="host",
+            subject_key="runner-services",
+            observed_at=observed_at,
+            sample_count=len(results),
+            observation_window_seconds=observation_window_seconds,
+            reason_code="source_contradictory",
+        )
+    return RunnerHostHygieneIdleObservation(
+        source="runner_services",
+        scope="full_host",
+        scope_key="host",
+        subject_key="runner-services",
+        observed_at=observed_at,
+        availability="available",
+        state="idle",
+        sample_count=len(results),
+        observation_window_seconds=observation_window_seconds,
+        active_count=0,
+        total_count=len(expected_units),
+    )
+
+
+def _runner_service_states(output: str) -> tuple[tuple[str, str, str], ...]:
+    states: list[tuple[str, str, str]] = []
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            return ()
+        states.append((parts[0].lower(), parts[1].lower(), parts[2].lower()))
+    return tuple(states)
+
+
+def _partial_idle_observation(
+    *,
+    source: RunnerHostHygieneIdleSource,
+    scope: RunnerHostHygieneIdleScope,
+    scope_key: str,
+    subject_key: str,
+    observed_at: str,
+    sample_count: int,
+    observation_window_seconds: int,
+    reason_code: str,
+    truncated: bool = False,
+) -> RunnerHostHygieneIdleObservation:
+    return RunnerHostHygieneIdleObservation(
+        source=source,
+        scope=scope,
+        scope_key=scope_key,
+        subject_key=subject_key,
+        observed_at=observed_at,
+        availability="partial",
+        state="unknown",
+        sample_count=sample_count,
+        observation_window_seconds=observation_window_seconds,
+        truncated=truncated,
+        reason_code=reason_code,
+    )
+
+
+def _unavailable_idle_observation(
+    *,
+    source: RunnerHostHygieneIdleSource,
+    scope: RunnerHostHygieneIdleScope,
+    scope_key: str,
+    subject_key: str,
+    observed_at: str,
+    reason_code: str,
+    sample_count: int = 1,
+    observation_window_seconds: int = 0,
+) -> RunnerHostHygieneIdleObservation:
+    return RunnerHostHygieneIdleObservation(
+        source=source,
+        scope=scope,
+        scope_key=scope_key,
+        subject_key=subject_key,
+        observed_at=observed_at,
+        availability="unavailable",
+        state="unknown",
+        sample_count=sample_count,
+        observation_window_seconds=observation_window_seconds,
+        reason_code=reason_code,
+    )
+
+
+def _public_identity_key(prefix: str, value: str) -> str:
+    normalized_prefix = prefix.strip().lower()
+    normalized_value = value.strip().lower()
+    digest = hashlib.sha256(normalized_value.encode("utf-8")).hexdigest()[:12]
+    return f"{normalized_prefix}-{digest}"
 
 
 def build_local_command_runner() -> RemoteCommandRunner:
@@ -1293,7 +2037,10 @@ def build_github_run_state_reader(
             try:
                 with urlopen(request, timeout=30) as response:
                     payload = json.loads(response.read().decode("utf-8"))
-            except (HTTPError, URLError, TimeoutError, socket.timeout, json.JSONDecodeError):
+            except HTTPError as error:
+                states[run_id] = "unauthorized" if error.code in {401, 403} else "unknown"
+                continue
+            except (URLError, TimeoutError, socket.timeout, json.JSONDecodeError):
                 states[run_id] = "unknown"
                 continue
             if not isinstance(payload, dict):
@@ -1303,6 +2050,424 @@ def build_github_run_state_reader(
         return states
 
     return read
+
+
+def build_github_idle_evidence_reader(
+    *,
+    bearer_token: str,
+    api_base_url: str = "https://api.github.com",
+    current_run_id: int | None = None,
+    current_runner_name: str = "",
+) -> GitHubIdleEvidenceReader:
+    normalized_token = bearer_token.strip()
+    normalized_api_base_url = api_base_url.strip().rstrip("/")
+    normalized_runner_name = current_runner_name.strip()
+    if not normalized_api_base_url:
+        raise click.ClickException("runner idle GitHub evidence requires API base URL")
+
+    def read(
+        repository: str,
+        execution_lane: str,
+        runner_name: str = "",
+        exclude_current_job: bool = False,
+    ) -> tuple[RunnerHostHygieneIdleObservation, ...]:
+        owner, name = repository.split("/", maxsplit=1)
+        observed_at = utc_now_timestamp()
+        effective_runner_name = runner_name.strip() or normalized_runner_name
+        effective_exclude_current_job = exclude_current_job or not runner_name.strip()
+        exclude_current_runner = (
+            effective_exclude_current_job and effective_runner_name == normalized_runner_name
+        )
+        subject_key = _public_identity_key(
+            "runner",
+            "|".join(
+                (
+                    repository.strip().lower(),
+                    execution_lane.strip().lower(),
+                    effective_runner_name,
+                )
+            ),
+        )
+        repository_url = (
+            f"{normalized_api_base_url}/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
+        )
+        jobs_observation = _github_jobs_idle_observation(
+            repository_url=repository_url,
+            execution_lane=execution_lane,
+            bearer_token=normalized_token,
+            current_run_id=current_run_id,
+            current_runner_name=normalized_runner_name,
+            exclude_current_job=effective_exclude_current_job,
+            subject_key=subject_key,
+            observed_at=observed_at,
+        )
+        runners_observation = _github_runners_idle_observation(
+            repository_url=repository_url,
+            execution_lane=execution_lane,
+            bearer_token=normalized_token,
+            runner_name=effective_runner_name,
+            exclude_current_runner=exclude_current_runner,
+            subject_key=subject_key,
+            observed_at=observed_at,
+        )
+        return jobs_observation, runners_observation
+
+    return read
+
+
+def _github_jobs_idle_observation(
+    *,
+    repository_url: str,
+    execution_lane: str,
+    bearer_token: str,
+    current_run_id: int | None,
+    current_runner_name: str,
+    exclude_current_job: bool,
+    subject_key: str,
+    observed_at: str,
+) -> RunnerHostHygieneIdleObservation:
+    if exclude_current_job and (current_run_id is None or not current_runner_name):
+        return _unavailable_idle_observation(
+            source="github_jobs",
+            scope="full_host",
+            scope_key="host",
+            subject_key=subject_key,
+            observed_at=observed_at,
+            reason_code="source_missing",
+        )
+    active_run_ids: set[int] = set()
+    for status in _GITHUB_ACTIVE_WORKFLOW_RUN_STATUSES:
+        payload, reason_code = _github_api_object(
+            url=f"{repository_url}/actions/runs?status={status}&per_page=100",
+            bearer_token=bearer_token,
+        )
+        if payload is None:
+            return _unavailable_idle_observation(
+                source="github_jobs",
+                scope="full_host",
+                scope_key="host",
+                subject_key=subject_key,
+                observed_at=observed_at,
+                reason_code=reason_code,
+            )
+        workflow_runs = payload.get("workflow_runs")
+        total_count = payload.get("total_count")
+        if not isinstance(workflow_runs, list) or not isinstance(total_count, int):
+            return _unavailable_idle_observation(
+                source="github_jobs",
+                scope="full_host",
+                scope_key="host",
+                subject_key=subject_key,
+                observed_at=observed_at,
+                reason_code="source_contradictory",
+            )
+        if total_count > len(workflow_runs):
+            return _partial_idle_observation(
+                source="github_jobs",
+                scope="full_host",
+                scope_key="host",
+                subject_key=subject_key,
+                observed_at=observed_at,
+                sample_count=1,
+                observation_window_seconds=0,
+                reason_code="source_truncated",
+                truncated=True,
+            )
+        for workflow_run in workflow_runs:
+            if not isinstance(workflow_run, dict):
+                return _unavailable_idle_observation(
+                    source="github_jobs",
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key=subject_key,
+                    observed_at=observed_at,
+                    reason_code="source_contradictory",
+                )
+            run_id = workflow_run.get("id")
+            workflow_run_status = workflow_run.get("status")
+            if not isinstance(run_id, int) or run_id <= 0 or workflow_run_status != status:
+                return _unavailable_idle_observation(
+                    source="github_jobs",
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key=subject_key,
+                    observed_at=observed_at,
+                    reason_code="source_contradictory",
+                )
+            active_run_ids.add(run_id)
+    if len(active_run_ids) > MAX_GITHUB_IDLE_ACTIVE_RUNS:
+        return _partial_idle_observation(
+            source="github_jobs",
+            scope="full_host",
+            scope_key="host",
+            subject_key=subject_key,
+            observed_at=observed_at,
+            sample_count=1,
+            observation_window_seconds=0,
+            reason_code="source_truncated",
+            truncated=True,
+        )
+    normalized_lane = execution_lane.strip().lower()
+    active_jobs = 0
+    observed_jobs = 0
+    current_job_observed = False
+    for run_id in sorted(active_run_ids):
+        payload, reason_code = _github_api_object(
+            url=f"{repository_url}/actions/runs/{run_id}/jobs?filter=latest&per_page=100",
+            bearer_token=bearer_token,
+        )
+        if payload is None:
+            return _unavailable_idle_observation(
+                source="github_jobs",
+                scope="full_host",
+                scope_key="host",
+                subject_key=subject_key,
+                observed_at=observed_at,
+                reason_code=reason_code,
+            )
+        jobs = payload.get("jobs")
+        total_count = payload.get("total_count")
+        if not isinstance(jobs, list) or not isinstance(total_count, int):
+            return _unavailable_idle_observation(
+                source="github_jobs",
+                scope="full_host",
+                scope_key="host",
+                subject_key=subject_key,
+                observed_at=observed_at,
+                reason_code="source_contradictory",
+            )
+        if total_count > len(jobs):
+            return _partial_idle_observation(
+                source="github_jobs",
+                scope="full_host",
+                scope_key="host",
+                subject_key=subject_key,
+                observed_at=observed_at,
+                sample_count=1,
+                observation_window_seconds=0,
+                reason_code="source_truncated",
+                truncated=True,
+            )
+        for job in jobs:
+            if not isinstance(job, dict):
+                return _unavailable_idle_observation(
+                    source="github_jobs",
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key=subject_key,
+                    observed_at=observed_at,
+                    reason_code="source_contradictory",
+                )
+            job_status = job.get("status")
+            if not isinstance(job_status, str) or job_status not in _GITHUB_KNOWN_JOB_STATUSES:
+                return _unavailable_idle_observation(
+                    source="github_jobs",
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key=subject_key,
+                    observed_at=observed_at,
+                    reason_code="source_contradictory",
+                )
+            job_runner_name = job.get("runner_name")
+            if job_runner_name is not None and not isinstance(job_runner_name, str):
+                return _unavailable_idle_observation(
+                    source="github_jobs",
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key=subject_key,
+                    observed_at=observed_at,
+                    reason_code="source_contradictory",
+                )
+            if (
+                exclude_current_job
+                and run_id == current_run_id
+                and job_runner_name == current_runner_name
+            ):
+                current_job_observed = True
+                continue
+            labels = job.get("labels")
+            if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
+                return _unavailable_idle_observation(
+                    source="github_jobs",
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key=subject_key,
+                    observed_at=observed_at,
+                    reason_code="source_contradictory",
+                )
+            normalized_labels = {label.strip().lower() for label in labels}
+            if "self-hosted" not in normalized_labels or normalized_lane not in normalized_labels:
+                continue
+            observed_jobs += 1
+            if job_status in _GITHUB_ACTIVE_JOB_STATUSES:
+                active_jobs += 1
+    if exclude_current_job and not current_job_observed:
+        return _unavailable_idle_observation(
+            source="github_jobs",
+            scope="full_host",
+            scope_key="host",
+            subject_key=subject_key,
+            observed_at=observed_at,
+            reason_code="source_missing",
+        )
+    return RunnerHostHygieneIdleObservation(
+        source="github_jobs",
+        scope="full_host",
+        scope_key="host",
+        subject_key=subject_key,
+        observed_at=observed_at,
+        availability="available",
+        state="active" if active_jobs else "idle",
+        active_count=active_jobs,
+        total_count=observed_jobs,
+    )
+
+
+def _github_runners_idle_observation(
+    *,
+    repository_url: str,
+    execution_lane: str,
+    bearer_token: str,
+    runner_name: str,
+    exclude_current_runner: bool,
+    subject_key: str,
+    observed_at: str,
+) -> RunnerHostHygieneIdleObservation:
+    if not runner_name:
+        return _unavailable_idle_observation(
+            source="github_runners",
+            scope="full_host",
+            scope_key="host",
+            subject_key=subject_key,
+            observed_at=observed_at,
+            reason_code="source_missing",
+        )
+    payload, reason_code = _github_api_object(
+        url=f"{repository_url}/actions/runners?per_page=100",
+        bearer_token=bearer_token,
+    )
+    if payload is None:
+        return _unavailable_idle_observation(
+            source="github_runners",
+            scope="full_host",
+            scope_key="host",
+            subject_key=subject_key,
+            observed_at=observed_at,
+            reason_code=reason_code,
+        )
+    runners = payload.get("runners")
+    total_count = payload.get("total_count")
+    if not isinstance(runners, list) or not isinstance(total_count, int):
+        return _unavailable_idle_observation(
+            source="github_runners",
+            scope="full_host",
+            scope_key="host",
+            subject_key=subject_key,
+            observed_at=observed_at,
+            reason_code="source_contradictory",
+        )
+    if total_count > len(runners):
+        return _partial_idle_observation(
+            source="github_runners",
+            scope="full_host",
+            scope_key="host",
+            subject_key=subject_key,
+            observed_at=observed_at,
+            sample_count=1,
+            observation_window_seconds=0,
+            reason_code="source_truncated",
+            truncated=True,
+        )
+    normalized_lane = execution_lane.strip().lower()
+    matching_runners: list[dict[str, object]] = []
+    for runner in runners:
+        if not isinstance(runner, dict):
+            return _unavailable_idle_observation(
+                source="github_runners",
+                scope="full_host",
+                scope_key="host",
+                subject_key=subject_key,
+                observed_at=observed_at,
+                reason_code="source_contradictory",
+            )
+        labels = runner.get("labels")
+        if not isinstance(labels, list):
+            return _unavailable_idle_observation(
+                source="github_runners",
+                scope="full_host",
+                scope_key="host",
+                subject_key=subject_key,
+                observed_at=observed_at,
+                reason_code="source_contradictory",
+            )
+        label_names = {
+            label.get("name", "").strip().lower()
+            for label in labels
+            if isinstance(label, dict) and isinstance(label.get("name"), str)
+        }
+        if normalized_lane in label_names and runner.get("name") == runner_name:
+            matching_runners.append(runner)
+    if len(matching_runners) != 1:
+        return _unavailable_idle_observation(
+            source="github_runners",
+            scope="full_host",
+            scope_key="host",
+            subject_key=subject_key,
+            observed_at=observed_at,
+            reason_code=("source_missing" if not matching_runners else "source_contradictory"),
+        )
+    if any(runner.get("status") != "online" for runner in matching_runners):
+        return _unavailable_idle_observation(
+            source="github_runners",
+            scope="full_host",
+            scope_key="host",
+            subject_key=subject_key,
+            observed_at=observed_at,
+            reason_code="source_contradictory",
+        )
+    busy_runners = sum(
+        1
+        for runner in matching_runners
+        if runner.get("busy") is True and not exclude_current_runner
+    )
+    return RunnerHostHygieneIdleObservation(
+        source="github_runners",
+        scope="full_host",
+        scope_key="host",
+        subject_key=subject_key,
+        observed_at=observed_at,
+        availability="available",
+        state="active" if busy_runners else "idle",
+        active_count=busy_runners,
+        total_count=len(matching_runners),
+    )
+
+
+def _github_api_object(
+    *,
+    url: str,
+    bearer_token: str,
+) -> tuple[dict[str, object] | None, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "launchplane-runner-host-hygiene",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    request = Request(url, headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        return None, ("source_unauthorized" if error.code in {401, 403} else "source_unavailable")
+    except (URLError, TimeoutError, socket.timeout):
+        return None, "source_unavailable"
+    except json.JSONDecodeError:
+        return None, "source_contradictory"
+    if not isinstance(payload, dict):
+        return None, "source_contradictory"
+    return cast(dict[str, object], payload), ""
 
 
 def build_refreshing_service_audit_poster(
@@ -1345,14 +2510,43 @@ def build_refreshing_service_audit_poster(
                 _redact_sensitive_text(str(error) or "Launchplane service request failed"),
                 retryable=True,
             ) from error
-        if not isinstance(response_payload, dict):
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise AuditDeliveryError(
-                "Launchplane service returned a non-object response.",
+                "Launchplane service returned an invalid audit acceptance response.",
                 retryable=False,
-            )
-        return response_payload
+            ) from error
+        return _validated_audit_acceptance_response(response_payload, audit=audit)
 
     return post
+
+
+def _validated_audit_acceptance_response(
+    response_payload: object,
+    *,
+    audit: RunnerHostHygieneApplyAuditRecord,
+) -> dict[str, object]:
+    if not isinstance(response_payload, dict):
+        raise AuditDeliveryError(
+            "Launchplane service returned a non-object audit acceptance response.",
+            retryable=False,
+        )
+    records = response_payload.get("records")
+    result = response_payload.get("result")
+    expected_key = audit.audit_record_key
+    if (
+        response_payload.get("status") != "accepted"
+        or not isinstance(records, dict)
+        or records.get("runner_host_hygiene_audit_record_key") != expected_key
+        or not isinstance(result, dict)
+        or result.get("runner_host_hygiene_audit_record_key") != expected_key
+        or result.get("audit_status") != audit.status
+        or result.get("mutate") is not audit.request.mutate
+    ):
+        raise AuditDeliveryError(
+            "Launchplane service returned a mismatched audit acceptance response.",
+            retryable=False,
+        )
+    return response_payload
 
 
 def _audit_route_payload(audit: RunnerHostHygieneApplyAuditRecord) -> dict[str, object]:
@@ -1840,6 +3034,14 @@ def _collect_generated_run_cache_usage(
                     cache_key=root.key,
                     measurement_status="unavailable",
                     reason_code="probe_failed",
+                    idle_convergence=_unavailable_generated_cache_idle_convergence(
+                        root=root,
+                        observed_at=utc_now_timestamp(),
+                        observation_count=request.idle_observation_count,
+                        observation_interval_seconds=(request.idle_observation_interval_seconds),
+                        maximum_evidence_age_seconds=request.idle_max_age_seconds,
+                        reason_code="probe_failed",
+                    ),
                 )
             )
             continue
@@ -1849,6 +3051,9 @@ def _collect_generated_run_cache_usage(
                     output=result.stdout,
                     root=root,
                     github_run_state_reader=effective_github_run_state_reader,
+                    observation_count=request.idle_observation_count,
+                    observation_interval_seconds=(request.idle_observation_interval_seconds),
+                    maximum_evidence_age_seconds=request.idle_max_age_seconds,
                 )
             )
         except (click.ClickException, ValueError):
@@ -1857,6 +3062,14 @@ def _collect_generated_run_cache_usage(
                     cache_key=root.key,
                     measurement_status="unavailable",
                     reason_code="invalid_evidence",
+                    idle_convergence=_unavailable_generated_cache_idle_convergence(
+                        root=root,
+                        observed_at=utc_now_timestamp(),
+                        observation_count=request.idle_observation_count,
+                        observation_interval_seconds=(request.idle_observation_interval_seconds),
+                        maximum_evidence_age_seconds=request.idle_max_age_seconds,
+                        reason_code="source_contradictory",
+                    ),
                 )
             )
     return tuple(usage)
@@ -1867,6 +3080,9 @@ def _parse_generated_run_cache_usage(
     output: str,
     root: GeneratedRunCacheRoot,
     github_run_state_reader: GitHubRunStateReader | None,
+    observation_count: int,
+    observation_interval_seconds: int,
+    maximum_evidence_age_seconds: int,
 ) -> RunnerHostHygieneGeneratedCacheUsage:
     rows = _parse_json_lines(output, evidence_name=f"generated_cache:{root.key}")
     summary_rows = tuple(row for row in rows if row.get("record_type") == "summary")
@@ -1901,11 +3117,18 @@ def _parse_generated_run_cache_usage(
             }
         )
     )
-    github_states = (
-        github_run_state_reader(root.source_repository, run_ids)
-        if github_run_state_reader is not None and run_ids
-        else {}
-    )
+    github_state_available = not run_ids
+    github_state_reason_code = ""
+    github_states: Mapping[int, str] = {}
+    if github_run_state_reader is not None and run_ids:
+        try:
+            github_states = github_run_state_reader(root.source_repository, run_ids)
+            github_state_available = True
+        except (OSError, ValueError):
+            github_states = {}
+    if "unauthorized" in github_states.values():
+        github_state_available = False
+        github_state_reason_code = "source_unauthorized"
     entries = tuple(
         RunnerHostHygieneGeneratedCacheEntry(
             run_id=_strict_positive_int(row.get("run_id"), evidence_name="generated cache run id"),
@@ -1960,6 +3183,18 @@ def _parse_generated_run_cache_usage(
             (allocated_bytes - last_post_cleanup_allocated_bytes) * 86_400 // elapsed_since_cleanup
         )
     measurement_status = _generated_cache_measurement_status(summary.get("measurement_status"))
+    owner_worker_observations = _strict_non_negative_int_tuple(
+        summary.get("owner_worker_observations"),
+        evidence_name="generated cache owner-worker observations",
+    )
+    observed_at = (
+        datetime.fromtimestamp(
+            observed_epoch_seconds,
+            tz=timezone.utc,
+        )
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
     return RunnerHostHygieneGeneratedCacheUsage(
         cache_key=root.key,
         apparent_bytes=_strict_non_negative_int(
@@ -1975,10 +3210,7 @@ def _parse_generated_run_cache_usage(
         owner_valid=_strict_bool(summary.get("owner_valid"), evidence_name="owner_valid"),
         mode_valid=_strict_bool(summary.get("mode_valid"), evidence_name="mode_valid"),
         symlink_safe=_strict_bool(summary.get("symlink_safe"), evidence_name="symlink_safe"),
-        owner_worker_observations=_strict_non_negative_int_tuple(
-            summary.get("owner_worker_observations"),
-            evidence_name="generated cache owner-worker observations",
-        ),
+        owner_worker_observations=owner_worker_observations,
         age_buckets=_generated_cache_age_buckets(entries),
         entries=entries,
         entries_truncated=_strict_bool(
@@ -1996,6 +3228,210 @@ def _parse_generated_run_cache_usage(
         ),
         estimated_daily_growth_bytes=estimated_daily_growth_bytes,
         cooldown_remaining_seconds=cooldown_remaining_seconds,
+        idle_convergence=_build_generated_cache_idle_convergence(
+            root=root,
+            observed_at=observed_at,
+            owner_worker_observations=owner_worker_observations,
+            entries=entries,
+            entries_truncated=_strict_bool(
+                summary.get("entries_truncated"), evidence_name="entries_truncated"
+            ),
+            github_state_available=github_state_available,
+            github_state_reason_code=github_state_reason_code,
+            observation_count=observation_count,
+            observation_interval_seconds=observation_interval_seconds,
+            maximum_evidence_age_seconds=maximum_evidence_age_seconds,
+        ),
+    )
+
+
+def _build_generated_cache_idle_convergence(
+    *,
+    root: GeneratedRunCacheRoot,
+    observed_at: str,
+    owner_worker_observations: tuple[int, ...],
+    entries: tuple[RunnerHostHygieneGeneratedCacheEntry, ...],
+    entries_truncated: bool,
+    github_state_available: bool,
+    github_state_reason_code: str,
+    observation_count: int,
+    observation_interval_seconds: int,
+    maximum_evidence_age_seconds: int,
+) -> RunnerHostHygieneIdleConvergence:
+    owner_sample_count = max(len(owner_worker_observations), 1)
+    owner_window_seconds = max(owner_sample_count - 1, 0) * observation_interval_seconds
+    if owner_worker_observations:
+        owner_active_count = max(owner_worker_observations)
+        owner_observation = RunnerHostHygieneIdleObservation(
+            source="local_user_processes",
+            scope=root.idle_scope,
+            scope_key=root.idle_scope_key,
+            subject_key="owner-workers",
+            observed_at=observed_at,
+            availability="available",
+            state="active" if owner_active_count else "idle",
+            sample_count=len(owner_worker_observations),
+            observation_window_seconds=owner_window_seconds,
+            active_count=owner_active_count,
+        )
+    else:
+        owner_observation = _unavailable_idle_observation(
+            source="local_user_processes",
+            scope=root.idle_scope,
+            scope_key=root.idle_scope_key,
+            subject_key="owner-workers",
+            observed_at=observed_at,
+            reason_code="source_missing",
+        )
+
+    handle_sample_counts = {len(entry.open_handle_observations) for entry in entries}
+    if entries_truncated:
+        handles_observation = _partial_idle_observation(
+            source="open_handles",
+            scope=root.idle_scope,
+            scope_key=root.idle_scope_key,
+            subject_key="cache-entries",
+            observed_at=observed_at,
+            sample_count=observation_count,
+            observation_window_seconds=((observation_count - 1) * observation_interval_seconds),
+            reason_code="source_truncated",
+            truncated=True,
+        )
+    elif len(handle_sample_counts) > 1 or 0 in handle_sample_counts:
+        handles_observation = _unavailable_idle_observation(
+            source="open_handles",
+            scope=root.idle_scope,
+            scope_key=root.idle_scope_key,
+            subject_key="cache-entries",
+            observed_at=observed_at,
+            reason_code="source_contradictory",
+        )
+    else:
+        handle_sample_count = next(iter(handle_sample_counts), observation_count)
+        active_handles = max(
+            (
+                sum(entry.open_handle_observations[sample_index] for entry in entries)
+                for sample_index in range(handle_sample_count)
+            ),
+            default=0,
+        )
+        handles_observation = RunnerHostHygieneIdleObservation(
+            source="open_handles",
+            scope=root.idle_scope,
+            scope_key=root.idle_scope_key,
+            subject_key="cache-entries",
+            observed_at=observed_at,
+            availability="available",
+            state="active" if active_handles else "idle",
+            sample_count=handle_sample_count,
+            observation_window_seconds=(
+                max(handle_sample_count - 1, 0) * observation_interval_seconds
+            ),
+            active_count=active_handles,
+        )
+
+    github_states = tuple(entry.github_run_state for entry in entries)
+    if entries_truncated:
+        github_observation = _partial_idle_observation(
+            source="github_jobs",
+            scope=root.idle_scope,
+            scope_key=root.idle_scope_key,
+            subject_key="cache-runs",
+            observed_at=observed_at,
+            sample_count=1,
+            observation_window_seconds=0,
+            reason_code="source_truncated",
+            truncated=True,
+        )
+    elif not github_state_available or "unknown" in github_states:
+        github_observation = _unavailable_idle_observation(
+            source="github_jobs",
+            scope=root.idle_scope,
+            scope_key=root.idle_scope_key,
+            subject_key="cache-runs",
+            observed_at=observed_at,
+            reason_code=github_state_reason_code or "source_unavailable",
+        )
+    else:
+        active_runs = sum(state == "active" for state in github_states)
+        github_observation = RunnerHostHygieneIdleObservation(
+            source="github_jobs",
+            scope=root.idle_scope,
+            scope_key=root.idle_scope_key,
+            subject_key="cache-runs",
+            observed_at=observed_at,
+            availability="available",
+            state="active" if active_runs else "idle",
+            active_count=active_runs,
+            total_count=len(github_states),
+        )
+    observations = (owner_observation, handles_observation, github_observation)
+    requirements = tuple(
+        RunnerHostHygieneIdleSourceRequirement(
+            source=observation.source,
+            subject_key=observation.subject_key,
+            minimum_observation_count=(
+                1 if observation.source == "github_jobs" else observation_count
+            ),
+        )
+        for observation in observations
+    )
+    return build_runner_host_hygiene_idle_convergence(
+        scope=root.idle_scope,
+        scope_key=root.idle_scope_key,
+        evaluated_at=observed_at,
+        minimum_observation_interval_seconds=observation_interval_seconds,
+        maximum_evidence_age_seconds=maximum_evidence_age_seconds,
+        requirements=requirements,
+        observations=observations,
+    )
+
+
+def _unavailable_generated_cache_idle_convergence(
+    *,
+    root: GeneratedRunCacheRoot,
+    observed_at: str,
+    observation_count: int,
+    observation_interval_seconds: int,
+    maximum_evidence_age_seconds: int,
+    reason_code: str,
+) -> RunnerHostHygieneIdleConvergence:
+    observations = tuple(
+        _unavailable_idle_observation(
+            source=source,
+            scope=root.idle_scope,
+            scope_key=root.idle_scope_key,
+            subject_key=subject_key,
+            observed_at=observed_at,
+            reason_code=reason_code,
+        )
+        for source, subject_key in cast(
+            tuple[tuple[RunnerHostHygieneIdleSource, str], ...],
+            (
+                ("local_user_processes", "owner-workers"),
+                ("open_handles", "cache-entries"),
+                ("github_jobs", "cache-runs"),
+            ),
+        )
+    )
+    requirements = tuple(
+        RunnerHostHygieneIdleSourceRequirement(
+            source=observation.source,
+            subject_key=observation.subject_key,
+            minimum_observation_count=(
+                1 if observation.source == "github_jobs" else observation_count
+            ),
+        )
+        for observation in observations
+    )
+    return build_runner_host_hygiene_idle_convergence(
+        scope=root.idle_scope,
+        scope_key=root.idle_scope_key,
+        evaluated_at=observed_at,
+        minimum_observation_interval_seconds=observation_interval_seconds,
+        maximum_evidence_age_seconds=maximum_evidence_age_seconds,
+        requirements=requirements,
+        observations=observations,
     )
 
 
@@ -2118,11 +3554,15 @@ def _generated_cache_measurement_status(value: object) -> Literal["complete", "p
     raise click.ClickException("runner host generated cache measurement status was invalid")
 
 
-def _github_run_state(value: object) -> Literal["completed", "active", "unknown"]:
+def _github_run_state(
+    value: object,
+) -> Literal["completed", "active", "unknown", "unauthorized"]:
     if value == "completed":
         return "completed"
     if value == "active":
         return "active"
+    if value == "unauthorized":
+        return "unauthorized"
     return "unknown"
 
 
@@ -2550,44 +3990,20 @@ def _parse_docker_size_bytes(value: str) -> int:
     return int(numeric_value * multiplier)
 
 
-def _compact_evidence(output: str) -> str:
-    compact = " | ".join(line.strip() for line in output.splitlines() if line.strip())
-    return compact[:500]
-
-
-def _check_host_idle(
-    *,
-    request: RunnerHostHygieneExecutorRequest,
-    remote_runner: RemoteCommandRunner,
-    sleeper: AuditDeliverySleeper,
-) -> str | None:
-    for sample_index in range(request.idle_observation_count):
-        active_processes = _require_remote_success(
-            remote_runner(
-                ("bash", "-lc", _ACTIVE_WORK_COMMAND),
-                request.timeout_seconds,
-            ),
-            evidence_name="active_runner_or_build_processes",
-        )
-        raw_lines = tuple(
-            line.strip() for line in active_processes.stdout.splitlines() if line.strip()
-        )
-        ancestor_pids: set[str] = set()
-        lines: list[str] = []
-        for line in raw_lines:
-            if line.startswith("ancestor_pids="):
-                ancestor_pids.update(line.partition("=")[2].split())
-                continue
-            process_id = line.split(maxsplit=1)[0]
-            if "Runner.Worker" in line and process_id in ancestor_pids:
-                continue
-            if "runner-host-hygiene" not in line:
-                lines.append(line)
-        if lines:
-            return _compact_evidence(_redact_sensitive_text("\n".join(lines)))
-        if sample_index + 1 < request.idle_observation_count:
-            sleeper(float(request.idle_observation_interval_seconds))
-    return None
+def _active_work_evidence_lines(output: str) -> tuple[str, ...]:
+    raw_lines = tuple(line.strip() for line in output.splitlines() if line.strip())
+    ancestor_pids: set[str] = set()
+    lines: list[str] = []
+    for line in raw_lines:
+        if line.startswith("ancestor_pids="):
+            ancestor_pids.update(line.partition("=")[2].split())
+            continue
+        process_id = line.split(maxsplit=1)[0]
+        if "Runner.Worker" in line and process_id in ancestor_pids:
+            continue
+        if "runner-host-hygiene" not in line:
+            lines.append(line)
+    return tuple(lines)
 
 
 def _terminal_audit(
@@ -2617,12 +4033,16 @@ def _collect_terminal_report(
     request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
     github_run_state_reader: GitHubRunStateReader | None,
+    github_idle_evidence_reader: GitHubIdleEvidenceReader | None,
+    idle_observation_sleeper: AuditDeliverySleeper,
 ) -> RunnerHostHygieneReport | None:
     try:
         return collect_runner_host_hygiene_report(
             request=request,
             remote_runner=remote_runner,
             github_run_state_reader=github_run_state_reader,
+            github_idle_evidence_reader=github_idle_evidence_reader,
+            idle_observation_sleeper=idle_observation_sleeper,
         )
     except click.ClickException:
         return None
