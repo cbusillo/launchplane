@@ -1265,6 +1265,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                            "ODOO_ADDONS_PATH=/opt/project/addons,/opt/launchplane/addons,/odoo/addons",
                             "ODOO_INSTALL_MODULES=stale_module,disable_odoo_online",
                             f"{ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY}={stale_payload_b64}",
                             f"{LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY}=true",
@@ -1517,6 +1518,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(
             persisted_env_map["ODOO_INSTALL_MODULES"],
             "launchplane_settings,disable_odoo_online,cm_website",
+        )
+        self.assertEqual(
+            persisted_env_map["ODOO_ADDONS_PATH"],
+            "/opt/project/addons,/opt/launchplane/addons,/odoo/addons,/opt/enterprise",
         )
         self.assertEqual(persisted_env_map[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY], "true")
         self.assertNotIn(
