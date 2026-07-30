@@ -672,9 +672,14 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             store.write_runner_host_hygiene_audit_record(failed_record)
             planned_records = store.list_runner_host_hygiene_audit_records(
                 host_name="Chris-Testing",
+                action="prune_docker_cache",
                 status="planned",
             )
+            nonmatching_action_records = store.list_runner_host_hygiene_audit_records(
+                action="prune_dangling_images"
+            )
             limited_records = store.list_runner_host_hygiene_audit_records(limit=1)
+            read_record = store.read_runner_host_hygiene_audit_record(newer_record.audit_record_key)
 
         self.assertEqual(
             written_path.parent.relative_to(state_dir).as_posix(),
@@ -689,6 +694,20 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             [record.audit_record_key for record in limited_records],
             [failed_record.audit_record_key],
         )
+        self.assertEqual(nonmatching_action_records, ())
+        self.assertEqual(read_record, newer_record)
+
+    def test_runner_host_hygiene_audit_record_with_overlong_key_round_trips(self) -> None:
+        audit_record_key = "runner-host-hygiene/" + ("a" * 300)
+        record = _runner_host_hygiene_audit_record(audit_record_key=audit_record_key)
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+
+            written_path = store.write_runner_host_hygiene_audit_record(record)
+            read_record = store.read_runner_host_hygiene_audit_record(audit_record_key)
+
+        self.assertLessEqual(len(written_path.name.encode("utf-8")), 255)
+        self.assertEqual(read_record, record)
 
     def test_write_and_list_runner_lane_registration_audit_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -143,6 +143,9 @@ from control_plane.contracts.secret_record import (
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
+from control_plane.contracts.runner_host_hygiene import (
+    sanitize_runner_host_hygiene_audit_record_for_persistence,
+)
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -753,10 +756,11 @@ class FilesystemRecordStore:
     def write_runner_host_hygiene_audit_record(
         self, record: RunnerHostHygieneApplyAuditRecord
     ) -> Path:
+        persisted_record = sanitize_runner_host_hygiene_audit_record_for_persistence(record)
         return self._write_model(
             "launchplane_runner_host_hygiene_audits",
-            _runner_host_hygiene_audit_record_id(record.audit_record_key),
-            record,
+            _runner_host_hygiene_audit_record_id(persisted_record.audit_record_key),
+            persisted_record,
         )
 
     def write_runner_lane_registration_audit_record(
@@ -1198,6 +1202,7 @@ class FilesystemRecordStore:
         self,
         *,
         host_name: str = "",
+        action: str = "",
         status: str = "",
         limit: int | None = None,
     ) -> tuple[RunnerHostHygieneApplyAuditRecord, ...]:
@@ -1212,12 +1217,22 @@ class FilesystemRecordStore:
                 not normalized_host_name
                 or record.request.host_name.strip().lower() == normalized_host_name
             )
+            and (not action or record.request.action == action)
             and (not status or record.status == status)
         ]
         records.sort(key=lambda record: record.audit_record_key, reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def read_runner_host_hygiene_audit_record(
+        self, audit_record_key: str
+    ) -> RunnerHostHygieneApplyAuditRecord:
+        return self._read_model(
+            RunnerHostHygieneApplyAuditRecord,
+            "launchplane_runner_host_hygiene_audits",
+            _runner_host_hygiene_audit_record_id(audit_record_key),
+        )
 
     def list_runner_lane_registration_audit_records(
         self,
@@ -4653,7 +4668,12 @@ def _odoo_stable_bootstrap_lane_reservation_id(
 
 def _runner_host_hygiene_audit_record_id(audit_record_key: str) -> str:
     digest = hashlib.sha256(audit_record_key.encode()).hexdigest()[:16]
-    return audit_record_key.strip().replace("/", "-") + f"-{digest}"
+    normalized_key = audit_record_key.strip()
+    filename_prefix = "".join(
+        character if character.isascii() and (character.isalnum() or character in "._-") else "-"
+        for character in normalized_key
+    )[:200]
+    return f"{filename_prefix or 'audit'}-{digest}"
 
 
 def _runner_lane_registration_audit_record_id(audit_record_key: str) -> str:

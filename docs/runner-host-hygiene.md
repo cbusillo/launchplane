@@ -39,6 +39,24 @@ policy from observation:
 - `evaluate_runner_host_hygiene(...)` returns a structured report with
   `healthy` or `attention` status, findings, and non-mutating next steps.
 
+Reports preserve the observation timestamp and expose a generic
+`cache_class_telemetry` read surface alongside the existing action-planning
+fields. Each cache-class row carries a public key, class, scope, source,
+measurement basis, availability, and the measurements that the source can
+honestly provide:
+
+- filesystem roots use apparent and allocated bytes
+- Docker Engine classes use logical and reclaimable bytes
+- measured zero is distinct from unavailable, partial, or stale evidence
+- unavailable or partial evidence carries a bounded reason instead of silently
+  becoming zero
+- generated-cache rows may also carry bounded age buckets, estimated growth,
+  and the latest cleanup snapshot
+
+The generic rows do not grant cleanup authority. Existing action-specific
+fields and apply-plan gates remain authoritative for the already approved
+mutation lanes; new cache classes stay report-only.
+
 The report is intentionally conservative. Missing required warm builders, low
 free disk, Docker reclaimable bytes over budget, runner work-directory bytes over
 budget, and orphan BuildKit artifacts all produce `attention` unless policy
@@ -47,14 +65,13 @@ Reports also carry the typed observation counters used for evaluation, so audit
 records preserve free disk, Docker reclaimable bytes, runner work-directory
 bytes, Docker toolchain evidence, warm builders, and orphan BuildKit counts
 instead of relying only on raw operator notes. Executor-written reports also
-include read-only resource
-inventory for Docker images and volumes. Image rows preserve repository, tag,
-image ID, size, creation timestamp, dangling status, in-use hints, and whether
-the image is one of the retained warm builders. Volume rows preserve name,
-driver, mountpoint, labels, size when Docker exposes it, reference count when
-Docker exposes it, and dangling status. These inventory fields are evidence for
-operator review only; aggregate reclaimable totals are not enough to approve
-destructive volume or image pruning.
+include read-only resource inventory for Docker images and volumes. The
+executor sorts each inventory deterministically, retains at most 128 rows, and
+records the total count plus a truncation flag. Image and volume sizes are
+nullable when Docker does not expose them; absence is not converted into
+measured zero. These inventory fields are evidence for operator review only;
+aggregate reclaimable totals are not enough to approve destructive volume or
+image pruning.
 
 Docker toolchain evidence is preserved for operator review and runner-readiness
 follow-up. The hygiene report records Docker Engine version, Docker CLI version,
@@ -141,6 +158,25 @@ failure may proceed only because the planned intent is already durable locally.
 Generated run-cache mutation is stricter: it requires both the durable host
 spool and accepted service delivery of the planned audit before the privileged
 helper can run. A pending or rejected planned record leaves that action blocked.
+
+Authorized operators and workflows can read the durable evidence through:
+
+- `GET /v1/evidence/runner-host-hygiene/audits` for a bounded summary list,
+  filtered by optional host, action, and audit status
+- `GET /v1/evidence/runner-host-hygiene/audits/record` with an
+  `audit_record_key` query parameter for one sanitized detail projection
+- `GET /v1/evidence/runner-host-hygiene/history` with a required `host_name`
+  and optional `cache_key` for bounded pre/post observation chronology
+
+The read routes require `runner_host_hygiene_audit.read` for
+`launchplane/launchplane`. List and history limits default to 25 and cannot
+exceed 100. Detail and history projections omit raw image and volume inventory
+rows; they expose bounded counts, truncation state, finding codes, and generic
+cache-class telemetry. Legacy audit reports that predate timestamp persistence
+remain readable with `chronology_state: legacy_missing`; Launchplane does not
+infer observation time from the audit key. History responses expose separate
+`scan_truncated` and `result_truncated` flags so callers can distinguish the
+fixed 100-audit scan ceiling from the requested result limit.
 
 ## Approved Ops-Lane Executor
 

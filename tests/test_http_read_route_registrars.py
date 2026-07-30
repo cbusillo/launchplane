@@ -85,6 +85,27 @@ class FastApiReadRouteRegistrarTests(unittest.TestCase):
                 "control_plane.http_routes.drivers",
             ),
             (
+                "/v1/evidence/runner-host-hygiene/audits",
+                "list_runner_host_hygiene_audit_records",
+                "list_runner_host_hygiene_audit_records",
+                "RunnerHostHygieneAuditRecordsResponse",
+                "control_plane.http_routes.runner_host_hygiene",
+            ),
+            (
+                "/v1/evidence/runner-host-hygiene/history",
+                "read_runner_host_hygiene_history",
+                "read_runner_host_hygiene_history",
+                "RunnerHostHygieneHistoryResponse",
+                "control_plane.http_routes.runner_host_hygiene",
+            ),
+            (
+                "/v1/evidence/runner-host-hygiene/audits/record",
+                "read_runner_host_hygiene_audit_record",
+                "read_runner_host_hygiene_audit_record",
+                "RunnerHostHygieneAuditRecordResponse",
+                "control_plane.http_routes.runner_host_hygiene",
+            ),
+            (
                 "/v1/deployments/{record_id}",
                 "read_deployment_record",
                 "read_deployment_record",
@@ -381,6 +402,9 @@ class FastApiReadRouteRegistrarTests(unittest.TestCase):
             ("GET", "/v1/ingress/route-audits/records/{record_id}"),
             [
                 ("GET", "/v1/ingress/route-audits/records/{record_id}"),
+                ("GET", "/v1/evidence/runner-host-hygiene/audits"),
+                ("GET", "/v1/evidence/runner-host-hygiene/history"),
+                ("GET", "/v1/evidence/runner-host-hygiene/audits/record"),
                 ("GET", "/v1/deployments/{record_id}"),
                 ("GET", "/v1/promotions/{record_id}"),
                 ("POST", "/v1/every-code/github-webhook"),

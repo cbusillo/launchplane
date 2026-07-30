@@ -19,6 +19,9 @@ from control_plane.contracts.preview_evidence import (
 )
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
+from control_plane.contracts.runner_host_hygiene import (
+    sanitize_runner_host_hygiene_audit_record_for_persistence,
+)
 from control_plane.contracts.runner_host_hygiene_evidence import (
     RunnerHostHygieneAuditEvidenceEnvelope,
 )
@@ -846,20 +849,19 @@ def register_evidence_write_routes(
                 message=str(error),
             ) from error
 
-        evidence_store.write_runner_host_hygiene_audit_record(runner_host_hygiene_request.audit)
+        persisted_audit = sanitize_runner_host_hygiene_audit_record_for_persistence(
+            runner_host_hygiene_request.audit
+        )
+        evidence_store.write_runner_host_hygiene_audit_record(persisted_audit)
         records = {
-            "runner_host_hygiene_audit_record_key": (
-                runner_host_hygiene_request.audit.audit_record_key
-            ),
+            "runner_host_hygiene_audit_record_key": persisted_audit.audit_record_key,
         }
         result: dict[str, object] = {
-            "runner_host_hygiene_audit_record_key": (
-                runner_host_hygiene_request.audit.audit_record_key
-            ),
-            "host_name": runner_host_hygiene_request.audit.request.host_name,
-            "audit_status": runner_host_hygiene_request.audit.status,
-            "mutate": runner_host_hygiene_request.audit.request.mutate,
-            "audit": runner_host_hygiene_request.audit.model_dump(mode="json"),
+            "runner_host_hygiene_audit_record_key": persisted_audit.audit_record_key,
+            "host_name": persisted_audit.request.host_name,
+            "audit_status": persisted_audit.status,
+            "mutate": persisted_audit.request.mutate,
+            "audit": persisted_audit.model_dump(mode="json"),
         }
         response = accepted_evidence_response(
             trace_id=trace_id,
