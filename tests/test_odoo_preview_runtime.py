@@ -9,6 +9,7 @@ from urllib.error import HTTPError, URLError
 import click
 
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
+from control_plane.dokploy import api as dokploy_api
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -43,6 +44,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     _rollback_created_runtime,
     _wait_for_smoke_check,
 )
+from tests.support.artifact_manifests import artifact_manifest_v2
 
 
 def _capabilities() -> OdooPreviewProviderCapabilities:
@@ -118,6 +120,15 @@ def _environment_values() -> dict[str, str]:
         "ODOO_DB_VOLUME": "cm_pr_45_db",
         "ODOO_MASTER_PASSWORD": "safe-master",
         "ODOO_ADMIN_PASSWORD": "safe-admin",
+    }
+
+
+def _module_update_evidence() -> dict[str, str]:
+    return {
+        "log_available": "true",
+        "odoo_module_update_completed": "true",
+        "odoo_module_update_image_match": "true",
+        "odoo_module_update_modules_configured": "true",
     }
 
 
@@ -1434,6 +1445,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 "domain_lookup",
                 "domain_create_or_update",
                 "compose_deploy",
+                "module_install_update",
                 "smoke_check",
             ],
         )
@@ -1623,6 +1635,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(deploy_operations[0].path, "/api/compose.redeploy")
 
     def test_apply_refresh_creates_updates_deploys_and_smokes_compose(self) -> None:
+        manifest = artifact_manifest_v2(odoo_install_modules=("cm_website",))
         dry_run = build_odoo_preview_dokploy_dry_run(
             request=OdooPreviewDokployDryRunRequest(
                 runtime_plan=_runtime_plan(),
@@ -1687,6 +1700,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 "control_plane.workflows.odoo_preview_runtime.dokploy_api.wait_for_target_deployment",
             ) as wait_deploy,
             patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_post_deploy."
+                "run_compose_post_deploy_update",
+                return_value=_module_update_evidence(),
+            ) as module_update,
+            patch(
                 "control_plane.workflows.odoo_preview_runtime._wait_for_smoke_check",
             ) as smoke_check,
         ):
@@ -1694,7 +1712,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 control_plane_root=ANY,
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,
-                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    manifest=manifest,
                     environment_values=_environment_values(),
                 ),
             )
@@ -1720,6 +1738,15 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertIn("traefik.enable=true", sync_kwargs["compose_file"])
         self.assertIn(".tls.certresolver=letsencrypt", sync_kwargs["compose_file"])
         update_env.assert_called_once()
+        env_map = dokploy_api.parse_dokploy_env_text(update_env.call_args.kwargs["env_text"])
+        self.assertEqual(
+            env_map["ODOO_INSTALL_MODULES"],
+            "launchplane_settings,disable_odoo_online,cm_website",
+        )
+        self.assertEqual(
+            env_map["ODOO_UPDATE_MODULES"],
+            "launchplane_settings,disable_odoo_online,cm_website",
+        )
         trigger_deployment.assert_called_once_with(
             host="https://dokploy.example",
             token="token",
@@ -1736,9 +1763,13 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             certificate_type="letsencrypt",
         )
         wait_deploy.assert_called_once()
+        module_update.assert_called_once()
+        self.assertEqual(result.module_install_update_status, "pass")
+        self.assertEqual(result.module_install_update_evidence, _module_update_evidence())
+        self.assertIn("module_install_update", [step.name for step in result.steps])
         smoke_check.assert_called_once()
 
-    def test_observe_refresh_adopts_exact_terminal_deployment_marker(self) -> None:
+    def test_observe_refresh_requires_module_update_evidence_after_terminal_deploy(self) -> None:
         dry_run = build_odoo_preview_dokploy_dry_run(
             request=OdooPreviewDokployDryRunRequest(
                 runtime_plan=_runtime_plan(target=_target()),
@@ -1778,10 +1809,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 provider_operation_title="Launchplane operation abc",
             )
 
-        self.assertEqual(observation.outcome, "present")
-        assert observation.result is not None
-        self.assertEqual(observation.result.status, "pass")
-        self.assertEqual(observation.result.compose_id, "compose-cm-pr-45")
+        self.assertEqual(observation.outcome, "unknown")
+        self.assertIsNone(observation.result)
         observe_deployment.assert_called_once_with(
             host="https://dokploy.example",
             token="token",
@@ -1858,6 +1887,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ) as trigger_deployment,
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_api.wait_for_target_deployment",
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_post_deploy."
+                "run_compose_post_deploy_update",
+                return_value=_module_update_evidence(),
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime._wait_for_smoke_check",
@@ -2086,6 +2120,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_api.wait_for_target_deployment",
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_post_deploy."
+                "run_compose_post_deploy_update",
+                return_value=_module_update_evidence(),
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime._wait_for_smoke_check",

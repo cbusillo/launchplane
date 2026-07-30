@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -9,6 +10,21 @@ from control_plane.workflows.odoo_verification import OdooVerificationEvidence
 
 
 LAUNCHPLANE_REQUIRED_ODOO_MODULES = ("launchplane_settings", "disable_odoo_online")
+
+
+def merge_odoo_install_modules(*module_groups: str | Iterable[str]) -> str:
+    merged_modules: list[str] = []
+    for module_group in module_groups:
+        if isinstance(module_group, str):
+            raw_module_names: Iterable[str] = module_group.split(",")
+        else:
+            raw_module_names = module_group
+        for module_name in raw_module_names:
+            normalized_module_name = str(module_name).strip()
+            if not normalized_module_name or normalized_module_name in merged_modules:
+                continue
+            merged_modules.append(normalized_module_name)
+    return ",".join(merged_modules)
 
 
 def missing_required_odoo_modules_from_artifact(

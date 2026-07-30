@@ -29526,6 +29526,7 @@
                           "domain_lookup",
                           "domain_create_or_update",
                           "compose_deploy",
+                          "module_install_update",
                           "smoke_check",
                           "domain_delete",
                           "compose_delete"

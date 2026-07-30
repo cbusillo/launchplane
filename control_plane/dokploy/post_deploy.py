@@ -73,6 +73,9 @@ DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
 ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
     {
         "log_available",
+        "odoo_module_update_completed",
+        "odoo_module_update_image_match",
+        "odoo_module_update_modules_configured",
         "odoo_instance_overrides_payload_present",
         "website_bootstrap_domain_set",
         "website_bootstrap_domain_matches_canonical",
@@ -88,6 +91,11 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
 ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset({"website_bootstrap_website_id"})
 ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
+)
+ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
+    "odoo_module_update_completed",
+    "odoo_module_update_image_match",
+    "odoo_module_update_modules_configured",
 )
 ODOO_BACKUP_GATE_RESULT_MARKER = "LAUNCHPLANE_ODOO_BACKUP_GATE_RESULT_B64"
 ODOO_BACKUP_GATE_RESULT_FIELDS = frozenset(
@@ -339,6 +347,17 @@ def run_compose_post_deploy_update(
                 }
             )
         )
+    required_update_modules = desired_env_map.get("ODOO_INSTALL_MODULES", "").strip()
+    if required_update_modules:
+        resolved_workflow_environment_overrides["ODOO_UPDATE_MODULES"] = required_update_modules
+        resolved_required_workflow_environment_keys = tuple(
+            sorted(
+                {
+                    *resolved_required_workflow_environment_keys,
+                    "ODOO_UPDATE_MODULES",
+                }
+            )
+        )
     schedule_timeout_seconds = (
         target_definition.deploy_timeout_seconds or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
     )
@@ -458,6 +477,7 @@ def run_compose_post_deploy_update(
         clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
         data_workflow_lock_path=data_workflow_lock_path,
         workflow_mode="restore" if run_destructive_restore else "maintenance",
+        required_update_modules=required_update_modules,
         workflow_environment_overrides=resolved_workflow_environment_overrides,
         required_workflow_environment_keys=resolved_required_workflow_environment_keys,
         protected_shopify_store_keys=protected_shopify_store_keys,
@@ -570,6 +590,17 @@ def run_compose_odoo_stable_bootstrap(
         current_env_map=current_env_map,
         env_file=env_file,
     )
+    resolved_workflow_environment_overrides = dict(workflow_environment_overrides or {})
+    resolved_required_workflow_environment_keys = tuple(required_workflow_environment_keys)
+    required_update_modules = desired_env_map.get("ODOO_INSTALL_MODULES", "").strip()
+    if not required_update_modules:
+        raise click.ClickException(
+            "Odoo stable bootstrap requires an explicit ODOO_INSTALL_MODULES artifact module list."
+        )
+    resolved_workflow_environment_overrides["ODOO_UPDATE_MODULES"] = required_update_modules
+    resolved_required_workflow_environment_keys = tuple(
+        sorted({*resolved_required_workflow_environment_keys, "ODOO_UPDATE_MODULES"})
+    )
     schedule_timeout_seconds = (
         timeout_seconds
         or target_definition.deploy_timeout_seconds
@@ -649,8 +680,9 @@ def run_compose_odoo_stable_bootstrap(
         clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
         data_workflow_lock_path=data_workflow_lock_path,
         workflow_mode="bootstrap",
-        workflow_environment_overrides=workflow_environment_overrides or {},
-        required_workflow_environment_keys=required_workflow_environment_keys,
+        required_update_modules=required_update_modules,
+        workflow_environment_overrides=resolved_workflow_environment_overrides,
+        required_workflow_environment_keys=resolved_required_workflow_environment_keys,
     )
     schedule_payload: api.JsonObject = {
         "name": DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME,
@@ -692,13 +724,35 @@ def run_compose_odoo_stable_bootstrap(
         payload={"scheduleId": schedule_id},
         timeout_seconds=schedule_timeout_seconds,
     )
-    api.wait_for_dokploy_schedule_deployment(
+    completed_schedule_deployment_key = api.deployment_key_from_wait_result(
+        api.wait_for_dokploy_schedule_deployment(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            before_key=api.deployment_key(latest_schedule_deployment),
+            timeout_seconds=schedule_timeout_seconds,
+        )
+    )
+    if not completed_schedule_deployment_key:
+        raise click.ClickException(
+            "Dokploy Odoo bootstrap schedule completed without a deployment id."
+        )
+    completed_schedule_deployment = api.latest_deployment_for_schedule(
         host=host,
         token=token,
         schedule_id=schedule_id,
-        before_key=api.deployment_key(latest_schedule_deployment),
-        timeout_seconds=schedule_timeout_seconds,
     )
+    if api.deployment_key(completed_schedule_deployment) != completed_schedule_deployment_key:
+        completed_schedule_deployment = None
+    readback_evidence = _read_odoo_post_deploy_log_markers(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+        schedule_deployment_key=completed_schedule_deployment_key,
+        deployment_id=completed_schedule_deployment_key,
+        deployment=completed_schedule_deployment,
+    )
+    require_odoo_module_update_readback_evidence(readback_evidence)
 
 
 def run_compose_odoo_backup_gate(
@@ -1940,6 +1994,23 @@ def extract_odoo_post_deploy_readback_markers(deployment: api.JsonObject | None)
     return markers
 
 
+def require_odoo_module_update_readback_evidence(evidence: Mapping[str, str]) -> None:
+    if evidence.get("log_available") != "true":
+        raise click.ClickException(
+            "Odoo module install/update evidence is unavailable from the provider schedule logs."
+        )
+    missing_markers = tuple(
+        marker
+        for marker in ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS
+        if evidence.get(marker) != "true"
+    )
+    if missing_markers:
+        raise click.ClickException(
+            "Odoo module install/update evidence did not prove the current runtime update: "
+            + ", ".join(missing_markers)
+        )
+
+
 def _read_odoo_post_deploy_log_markers(
     *,
     host: str,
@@ -2009,6 +2080,7 @@ def _build_dokploy_data_workflow_script(
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
     workflow_mode: Literal["maintenance", "bootstrap", "restore"] = "maintenance",
+    required_update_modules: str = "",
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
     protected_shopify_store_keys: tuple[str, ...] = (),
@@ -2052,6 +2124,7 @@ def _build_dokploy_data_workflow_script(
     }
     workflow_arguments = workflow_arguments_by_mode[workflow_mode]
     workflow_label = workflow_label_by_mode[workflow_mode]
+    module_update_modules_configured = "1" if required_update_modules.strip() else "0"
     readback_marker_patterns = "|".join(sorted(ODOO_POST_DEPLOY_READBACK_MARKERS))
     return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -2070,18 +2143,32 @@ protected_shopify_store_keys=()
 clear_stale_lock={"1" if clear_stale_lock else "0"}
 data_workflow_lock_path={quoted_lock_path}
 web_was_running=0
+module_update_modules_configured={module_update_modules_configured}
 
-resolve_container_id() {{
+resolve_single_running_container() {{
     local service_name="$1"
-    local container_id
-    container_id=$(docker ps -aq \
+    local container_ids
+    container_ids=$(docker ps -q \
         --filter "label=com.docker.compose.project=${{compose_project}}" \
-        --filter "label=com.docker.compose.service=${{service_name}}" | head -n 1)
-    if [ -z "${{container_id}}" ]; then
-        echo "Missing container for service '${{service_name}}' in project '${{compose_project}}'." >&2
+        --filter "label=com.docker.compose.service=${{service_name}}")
+    if [ "$(printf '%s\n' "${{container_ids}}" | sed '/^$/d' | wc -l | tr -d ' ')" != "1" ]; then
+        echo "Expected exactly one running container for service '${{service_name}}' in project '${{compose_project}}'." >&2
         exit 1
     fi
-    printf '%s' "${{container_id}}"
+    printf '%s' "${{container_ids}}"
+}}
+
+resolve_single_container_any_state() {{
+    local service_name="$1"
+    local container_ids
+    container_ids=$(docker ps -aq \
+        --filter "label=com.docker.compose.project=${{compose_project}}" \
+        --filter "label=com.docker.compose.service=${{service_name}}")
+    if [ "$(printf '%s\n' "${{container_ids}}" | sed '/^$/d' | wc -l | tr -d ' ')" != "1" ]; then
+        echo "Expected exactly one container for service '${{service_name}}' in project '${{compose_project}}'." >&2
+        exit 1
+    fi
+    printf '%s' "${{container_ids}}"
 }}
 
 ensure_running() {{
@@ -2113,12 +2200,25 @@ exit_trap() {{
     exit "${{exit_status}}"
 }}
 
-database_container_id=$(resolve_container_id "database")
-script_runner_container_id=$(resolve_container_id "script-runner")
-web_container_id=$(resolve_container_id "web")
+database_container_id=$(resolve_single_container_any_state "database")
+script_runner_container_id=$(resolve_single_running_container "script-runner")
+web_container_id=$(resolve_single_running_container "web")
 
 ensure_running "${{database_container_id}}" "database"
-ensure_running "${{script_runner_container_id}}" "script-runner"
+web_image_id=$(docker inspect -f '{{{{.Image}}}}' "${{web_container_id}}")
+script_runner_image_id=$(docker inspect -f '{{{{.Image}}}}' "${{script_runner_container_id}}")
+if [ "${{web_image_id}}" != "${{script_runner_image_id}}" ]; then
+    echo "odoo_module_update_image_match=false"
+    echo "Odoo web and script-runner containers do not use the same artifact image." >&2
+    exit 1
+fi
+echo "odoo_module_update_image_match=true"
+if [ "${{module_update_modules_configured}}" != "1" ]; then
+    echo "odoo_module_update_modules_configured=false"
+    echo "Odoo module install/update requires an explicit artifact module list." >&2
+    exit 1
+fi
+echo "odoo_module_update_modules_configured=true"
 workflow_uid=$(docker exec "${{script_runner_container_id}}" id -u)
 workflow_gid=$(docker exec "${{script_runner_container_id}}" id -g)
 
@@ -2212,6 +2312,7 @@ docker exec \
     python3 -u /volumes/scripts/run_odoo_data_workflows.py "${{workflow_arguments[@]}}" \
     2>&1 | tee "$workflow_output_file"
 workflow_exit_status=${{PIPESTATUS[0]}}
+workflow_output_status=${{PIPESTATUS[1]}}
 set -e
 
 echo "Odoo {workflow_label} readback markers:"
@@ -2222,6 +2323,12 @@ rm -f "$workflow_output_file"
 if [ "$workflow_exit_status" -ne 0 ]; then
     exit "$workflow_exit_status"
 fi
+if [ "$workflow_output_status" -ne 0 ]; then
+    exit "$workflow_output_status"
+fi
+echo "odoo_module_update_image_match=true"
+echo "odoo_module_update_modules_configured=true"
+echo "odoo_module_update_completed=true"
 
 if [ "${{#protected_shopify_store_keys[@]}}" -gt 0 ]; then
     echo "Checking protected Shopify store keys for ${{database_name}}"
