@@ -2434,6 +2434,10 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertIn("--post-deploy-maintenance", schedule_script)
         self.assertNotIn("--update-only", schedule_script)
         self.assertIn("ONE_OFF_WORKFLOW_ONLY", schedule_script)
+        self.assertIn(
+            "workflow_environment+=(-e ODOO_FILESTORE_PATH=/volumes/data/custom-filestore)",
+            schedule_script,
+        )
         self.assertIn("workflow_environment+=(-e ODOO_UPDATE_MODULES=opw_custom)", schedule_script)
         self.assertIn("resolve_single_running_container", schedule_script)
         self.assertIn('echo "odoo_module_update_image_match=true"', schedule_script)
@@ -3655,6 +3659,10 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertNotIn("workflow_arguments=(--update-only)", script)
         self.assertIn(
             "workflow_environment+=(-e ODOO_UPDATE_MODULES=launchplane_settings,disable_odoo_online,cm_website)",
+            script,
+        )
+        self.assertIn(
+            "workflow_environment+=(-e ODOO_FILESTORE_PATH=/volumes/data/filestore)",
             script,
         )
         self.assertIn("/api/schedule.runManually", request_paths)
