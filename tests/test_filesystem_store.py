@@ -697,6 +697,18 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self.assertEqual(nonmatching_action_records, ())
         self.assertEqual(read_record, newer_record)
 
+    def test_runner_host_hygiene_audit_record_with_overlong_key_round_trips(self) -> None:
+        audit_record_key = "runner-host-hygiene/" + ("a" * 300)
+        record = _runner_host_hygiene_audit_record(audit_record_key=audit_record_key)
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+
+            written_path = store.write_runner_host_hygiene_audit_record(record)
+            read_record = store.read_runner_host_hygiene_audit_record(audit_record_key)
+
+        self.assertLessEqual(len(written_path.name.encode("utf-8")), 255)
+        self.assertEqual(read_record, record)
+
     def test_write_and_list_runner_lane_registration_audit_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)

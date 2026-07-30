@@ -4925,6 +4925,23 @@ env_var = "GH_TOKEN"
         self.assertEqual(read_record, newer_record)
         self.assertEqual(limited_records[0].message, "post-apply evidence reported low disk")
 
+    def test_runner_host_hygiene_audit_record_with_overlong_key_round_trips(self) -> None:
+        audit_record_key = "runner-host-hygiene/" + ("a" * 300)
+        record = _runner_host_hygiene_audit_record(audit_record_key=audit_record_key)
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+
+            store.write_runner_host_hygiene_audit_record(record)
+            read_record = store.read_runner_host_hygiene_audit_record(audit_record_key)
+            store.close()
+
+        self.assertEqual(read_record, record)
+
     def test_runner_lane_registration_audit_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

@@ -4668,7 +4668,12 @@ def _odoo_stable_bootstrap_lane_reservation_id(
 
 def _runner_host_hygiene_audit_record_id(audit_record_key: str) -> str:
     digest = hashlib.sha256(audit_record_key.encode()).hexdigest()[:16]
-    return audit_record_key.strip().replace("/", "-") + f"-{digest}"
+    normalized_key = audit_record_key.strip()
+    filename_prefix = "".join(
+        character if character.isascii() and (character.isalnum() or character in "._-") else "-"
+        for character in normalized_key
+    )[:200]
+    return f"{filename_prefix or 'audit'}-{digest}"
 
 
 def _runner_lane_registration_audit_record_id(audit_record_key: str) -> str:

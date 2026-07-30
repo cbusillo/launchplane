@@ -2567,6 +2567,29 @@ class FastApiRunnerHostHygieneAuditReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["error"]["code"], "not_found")
 
+    async def test_runner_host_hygiene_audit_detail_handles_overlong_missing_key(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_read_policy(),
+                record_store_factory=lambda: store,
+            )
+            audit_record_key = "runner-host-hygiene/" + ("a" * 300)
+
+            response = await http_request(
+                app,
+                "GET",
+                (
+                    "/v1/evidence/runner-host-hygiene/audits/record?audit_record_key="
+                    + quote(audit_record_key, safe="")
+                ),
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
     async def test_runner_host_hygiene_audit_list_rejects_invalid_limit(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
