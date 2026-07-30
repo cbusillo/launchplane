@@ -1986,6 +1986,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 root=temporary_path / "spool",
                 artifact_file=temporary_path / "artifact.json",
             )
+            current_service_unit = "launchplane-runner@ops-gate.service"
             sibling_runner_name = "sibling-runner"
             sibling_service_unit = "launchplane-runner@secondary.service"
             request = _request(
@@ -1995,7 +1996,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                         repository_scope="cbusillo/launchplane",
                         execution_lane="chris-testing-ops-gate",
                         runner_name="test-runner",
-                        service_unit="launchplane-runner@ops-gate.service",
+                        service_unit=current_service_unit,
                     ),
                     RunnerHostGitHubBinding(
                         repository_scope="cbusillo/launchplane",
@@ -2010,7 +2011,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 request=request,
                 remote_runner=_CommandRunner(
                     runner_service_output=(
-                        "launchplane-runner@ops-gate.service active running\n"
+                        f"{current_service_unit} active running\n"
                         f"{sibling_service_unit} active running\n"
                     )
                 ),
@@ -2044,6 +2045,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 self.assertNotIn(request.service_user, persisted_text)
                 self.assertNotIn(request.repository_scope, persisted_text)
                 self.assertNotIn(request.current_runner_name, persisted_text)
+                self.assertNotIn(current_service_unit, persisted_text)
                 self.assertNotIn(sibling_runner_name, persisted_text)
                 self.assertNotIn(sibling_service_unit, persisted_text)
 
