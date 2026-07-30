@@ -247,14 +247,17 @@ workflows should treat the Odoo refresh route's `refresh_status="pass"` as the
 ready-to-comment signal instead of independently deciding readiness from raw
 health checks. Refresh merges the artifact manifest's declared Odoo modules
 with Launchplane-required modules into both `ODOO_INSTALL_MODULES` and the
-explicit maintenance-only `ODOO_UPDATE_MODULES` input, deploys the compose, and
-then runs the managed Odoo post-deploy maintenance schedule before any smoke
-check can pass. The schedule must prove that exactly one current web container
-and script-runner container use the same artifact image, that an explicit module
-list was configured, and that the install/update workflow completed. Missing,
-false, or unavailable schedule-log evidence fails the refresh. A terminal
-provider deployment alone remains an unknown recovery outcome because it does
-not prove that database-backed views were upgraded.
+explicit maintenance-only `ODOO_UPDATE_MODULES` input. It also merges the
+managed Launchplane and Enterprise addon roots into `ODOO_ADDONS_PATH` so a
+stale explicit runtime-environment value cannot override the compose default
+and make required module dependencies unavailable. Refresh then deploys the
+compose and runs the managed Odoo post-deploy maintenance schedule before any
+smoke check can pass. The schedule must prove that exactly one current web
+container and script-runner container use the same artifact image, that an
+explicit module list was configured, and that the install/update workflow
+completed. Missing, false, or unavailable schedule-log evidence fails the
+refresh. A terminal provider deployment alone remains an unknown recovery
+outcome because it does not prove that database-backed views were upgraded.
 
 Ready Odoo apply-inputs responses also include the normalized `plan_request`
 and `plan_provenance`: a service-derived plan id, canonical SHA-256 fingerprint,

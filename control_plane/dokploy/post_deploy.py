@@ -13,6 +13,9 @@ from control_plane.contracts.odoo_prod_retained_volume_backup_import import (
     ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_FAILURE_STAGE_BY_CODE,
     OdooProdRetainedVolumeBackupImportInspectionEvidence,
 )
+from control_plane.contracts.odoo_runtime_environment import (
+    merge_required_odoo_addons_path,
+)
 from control_plane.dokploy import api
 from control_plane.dokploy.source import (
     DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS,
@@ -324,6 +327,11 @@ def run_compose_post_deploy_update(
         current_env_map=current_env_map,
         env_file=env_file,
     )
+    addons_path = merge_required_odoo_addons_path(desired_env_map.get("ODOO_ADDONS_PATH", ""))
+    if addons_path:
+        desired_env_map["ODOO_ADDONS_PATH"] = addons_path
+    else:
+        desired_env_map.pop("ODOO_ADDONS_PATH", None)
     resolved_workflow_environment_overrides = dict(workflow_environment_overrides or {})
     resolved_required_workflow_environment_keys = tuple(required_workflow_environment_keys)
     runtime_override_target_environment = {
@@ -590,6 +598,11 @@ def run_compose_odoo_stable_bootstrap(
         current_env_map=current_env_map,
         env_file=env_file,
     )
+    addons_path = merge_required_odoo_addons_path(desired_env_map.get("ODOO_ADDONS_PATH", ""))
+    if addons_path:
+        desired_env_map["ODOO_ADDONS_PATH"] = addons_path
+    else:
+        desired_env_map.pop("ODOO_ADDONS_PATH", None)
     resolved_workflow_environment_overrides = dict(workflow_environment_overrides or {})
     resolved_required_workflow_environment_keys = tuple(required_workflow_environment_keys)
     required_update_modules = desired_env_map.get("ODOO_INSTALL_MODULES", "").strip()
@@ -2311,8 +2324,9 @@ docker exec \
     "${{script_runner_container_id}}" \
     python3 -u /volumes/scripts/run_odoo_data_workflows.py "${{workflow_arguments[@]}}" \
     2>&1 | tee "$workflow_output_file"
-workflow_exit_status=${{PIPESTATUS[0]}}
-workflow_output_status=${{PIPESTATUS[1]}}
+workflow_pipeline_status=("${{PIPESTATUS[@]}}")
+workflow_exit_status=${{workflow_pipeline_status[0]}}
+workflow_output_status=${{workflow_pipeline_status[1]}}
 set -e
 
 echo "Odoo {workflow_label} readback markers:"

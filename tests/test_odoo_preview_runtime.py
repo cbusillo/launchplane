@@ -1713,7 +1713,12 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,
                     manifest=manifest,
-                    environment_values=_environment_values(),
+                    environment_values={
+                        **_environment_values(),
+                        "ODOO_ADDONS_PATH": (
+                            "/opt/project/addons,/opt/launchplane/addons,/odoo/addons"
+                        ),
+                    },
                 ),
             )
 
@@ -1746,6 +1751,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(
             env_map["ODOO_UPDATE_MODULES"],
             "launchplane_settings,disable_odoo_online,cm_website",
+        )
+        self.assertEqual(
+            env_map["ODOO_ADDONS_PATH"],
+            "/opt/project/addons,/opt/launchplane/addons,/odoo/addons,/opt/enterprise",
         )
         trigger_deployment.assert_called_once_with(
             host="https://dokploy.example",
