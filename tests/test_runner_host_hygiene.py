@@ -735,6 +735,41 @@ class RunnerHostHygieneCliTests(unittest.TestCase):
 
         self.assertEqual(token, "env-token")
 
+    def test_executor_requires_github_token_env_for_idle_bindings(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-host-hygiene-executor",
+                    "--host-name",
+                    "runner-host",
+                    "--execution-lane",
+                    "ops-gate",
+                    "--service-user",
+                    "runner-hygiene",
+                    "--repository-scope",
+                    "example/launchplane",
+                    "--audit-record-key",
+                    "runner-host-hygiene/test",
+                    "--retained-warm-builder",
+                    "warm-builder",
+                    "--runner-workdir-root",
+                    "runner=/srv/runner",
+                    "--github-idle-binding",
+                    "example/launchplane|ops-gate|runner-1|runner@ops-gate.service",
+                    "--service-url",
+                    "https://launchplane.example",
+                    "--github-token-env",
+                    "",
+                    "--audit-spool-root",
+                    temporary_directory,
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("GitHub evidence requires --github-token-env", result.output)
+
     def test_executor_bearer_token_mints_actions_oidc_token_on_demand(self) -> None:
         class _Response:
             def __enter__(self) -> "_Response":
@@ -1593,6 +1628,31 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
                 pre_apply_report=healthy_report,
                 post_apply_report=healthy_report,
             )
+
+    def test_failed_apply_audit_can_record_blocked_pre_action_plan(self) -> None:
+        request = RunnerHostHygieneApplyRequest(
+            action="prune_docker_cache",
+            host_name="chris-testing",
+            mutate=True,
+            audit_record_key="runner-host-hygiene/2026-05-23/chris-testing",
+        )
+        blocked_plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(approved_hosts=("chris-testing",)),
+            request=request,
+            report=_attention_report(),
+        )
+
+        audit = RunnerHostHygieneApplyAuditRecord(
+            audit_record_key=request.audit_record_key,
+            status="failed",
+            request=request,
+            plan=blocked_plan,
+            pre_apply_report=_attention_report(),
+            message="fresh pre-action evidence blocked mutation",
+        )
+
+        self.assertEqual(audit.plan.status, "blocked")
+        self.assertEqual(audit.status, "failed")
 
 
 class RunnerHostHygieneAdapterBoundaryTests(unittest.TestCase):

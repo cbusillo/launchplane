@@ -437,7 +437,7 @@ readonly prune_observation_count="$3"
 readonly prune_observation_interval_seconds="$4"
 readonly requested_run_ids_csv="$5"
 [[ "$prune_observation_count" =~ ^([2-9]|10)$ ]]
-[[ "$prune_observation_interval_seconds" =~ ^([0-9]|[1-5][0-9]|60)$ ]]
+[[ "$prune_observation_interval_seconds" =~ ^([1-9]|[1-5][0-9]|60)$ ]]
 [[ "$requested_run_ids_csv" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]
 
 collect_inventory "$prune_observation_count" "$prune_observation_interval_seconds"

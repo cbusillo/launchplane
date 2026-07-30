@@ -1409,6 +1409,10 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             '[[ "$observation_interval_seconds" =~ ^([1-9]|[1-5][0-9]|60)$ ]]',
             helper_text,
         )
+        self.assertIn(
+            '[[ "$prune_observation_interval_seconds" =~ ^([1-9]|[1-5][0-9]|60)$ ]]',
+            helper_text,
+        )
         self.assertIn("--one-file-system", helper_text)
         self.assertIn("candidate_low_water < candidate_high_water", helper_text)
         self.assertIn("entry_identity_by_name", helper_text)
@@ -1979,6 +1983,67 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             self.assertEqual(envelope.execution_state, "terminal_recorded")
             self.assertEqual(envelope.terminal_delivery_state, "delivered")
 
+    def test_executor_records_fresh_pre_action_block_without_mutation(self) -> None:
+        class _ActivityAppearsCommandRunner(_CommandRunner):
+            def __init__(self) -> None:
+                super().__init__()
+                self._idle_probe_count = 0
+
+            def __call__(self, command: Sequence[str], timeout_seconds: int) -> RemoteCommandResult:
+                command_tuple = tuple(command)
+                if command_tuple[:2] == ("bash", "-lc") and "pgrep -af" in command_tuple[2]:
+                    self.commands.append(command_tuple)
+                    self._idle_probe_count += 1
+                    return RemoteCommandResult(
+                        returncode=0,
+                        stdout=(
+                            ""
+                            if self._idle_probe_count <= 2
+                            else "789 /opt/actions-runner/bin/Runner.Worker spawnclient 456\n"
+                        ),
+                    )
+                return super().__call__(command_tuple, timeout_seconds)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
+            request = _request(mutate=True)
+            command_runner = _ActivityAppearsCommandRunner()
+
+            result = execute_runner_host_hygiene_executor(
+                request=request,
+                remote_runner=command_runner,
+                audit_poster=_AuditPoster(),
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertFalse(
+                any(command[:5] == _ENGINE_PRUNE_PREFIX for command in command_runner.commands)
+            )
+            envelope = spool.read(
+                host_name=request.host_name,
+                action=request.action,
+                audit_record_key=request.audit_record_key,
+            )
+            assert envelope is not None
+            self.assertEqual(envelope.execution_state, "terminal_recorded")
+            terminal_audit = envelope.terminal_audit
+            assert terminal_audit is not None
+            self.assertEqual(terminal_audit.status, "failed")
+            self.assertEqual(terminal_audit.plan.status, "blocked")
+
+            reconciled = execute_runner_host_hygiene_executor(
+                request=request,
+                remote_runner=_CommandRunner(),
+                audit_poster=_AuditPoster(),
+                audit_spool=spool,
+                audit_delivery_sleeper=lambda _seconds: None,
+            )
+
+            self.assertEqual(reconciled.status, "failed")
+            self.assertTrue(reconciled.reconciled)
+
     def test_executor_retries_terminal_audit_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
@@ -2464,29 +2529,42 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
 
     def test_service_audit_poster_refreshes_token_per_post(self) -> None:
         class _Response:
+            def __init__(self, payload: Mapping[str, object]) -> None:
+                self._payload = payload
+
             def __enter__(self) -> "_Response":
                 return self
 
             def __exit__(self, *_args: object) -> None:
                 return None
 
-            @staticmethod
-            def read() -> bytes:
-                return b'{"status":"accepted"}'
+            def read(self) -> bytes:
+                return json.dumps(self._payload).encode()
 
         observed_authorization_headers: list[str | None] = []
         tokens = iter(("first-token", "second-token"))
+        audit = _planned_audit()
+        response_payload = {
+            "status": "accepted",
+            "records": {
+                "runner_host_hygiene_audit_record_key": audit.audit_record_key,
+            },
+            "result": {
+                "runner_host_hygiene_audit_record_key": audit.audit_record_key,
+                "audit_status": audit.status,
+                "mutate": audit.request.mutate,
+            },
+        }
 
         def fake_urlopen(request: Request, timeout: int) -> _Response:
             self.assertEqual(timeout, 30)
             observed_authorization_headers.append(request.get_header("Authorization"))
-            return _Response()
+            return _Response(response_payload)
 
         poster = build_refreshing_service_audit_poster(
             service_url="https://launchplane.example",
             bearer_token_provider=lambda: next(tokens),
         )
-        audit = _planned_audit()
         with patch(
             "control_plane.workflows.runner_host_hygiene_executor.urlopen",
             side_effect=fake_urlopen,
@@ -2498,6 +2576,31 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             observed_authorization_headers,
             ["Bearer first-token", "Bearer second-token"],
         )
+
+    def test_service_audit_poster_rejects_mismatched_acceptance(self) -> None:
+        class _Response:
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b'{"status":"accepted","records":{},"result":{}}'
+
+        poster = build_refreshing_service_audit_poster(
+            service_url="https://launchplane.example",
+            bearer_token_provider=lambda: "token",
+        )
+        with (
+            patch(
+                "control_plane.workflows.runner_host_hygiene_executor.urlopen",
+                return_value=_Response(),
+            ),
+            self.assertRaisesRegex(AuditDeliveryError, "mismatched audit acceptance"),
+        ):
+            poster(_planned_audit(), "idempotency-key")
 
     def test_github_run_state_reader_supports_public_repository_without_token(self) -> None:
         class _Response:
@@ -2556,6 +2659,12 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 "total_count": 2,
                 "workflow_runs": [{"id": 102}, {"id": 999}],
             },
+            "status=waiting": {
+                "total_count": 1,
+                "workflow_runs": [{"id": 103}],
+            },
+            "status=pending": {"total_count": 0, "workflow_runs": []},
+            "status=requested": {"total_count": 0, "workflow_runs": []},
             "/actions/runs/101/jobs": {
                 "total_count": 1,
                 "jobs": [
@@ -2571,6 +2680,15 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                     {
                         "status": "in_progress",
                         "labels": ["self-hosted", "other-lane"],
+                    }
+                ],
+            },
+            "/actions/runs/103/jobs": {
+                "total_count": 1,
+                "jobs": [
+                    {
+                        "status": "waiting",
+                        "labels": ["self-hosted", "ops-gate"],
                     }
                 ],
             },
@@ -2632,7 +2750,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
 
         by_source = {observation.source: observation for observation in observations}
         self.assertEqual(by_source["github_jobs"].state, "active")
-        self.assertEqual(by_source["github_jobs"].active_count, 1)
+        self.assertEqual(by_source["github_jobs"].active_count, 2)
         self.assertEqual(by_source["github_runners"].state, "idle")
         self.assertEqual(by_source["github_runners"].active_count, 0)
         self.assertNotEqual(by_source["github_jobs"].subject_key, "ops-gate")

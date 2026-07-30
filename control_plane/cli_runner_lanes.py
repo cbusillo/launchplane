@@ -1793,10 +1793,13 @@ def runner_host_hygiene_executor(
         parsed_generated_run_cache_roots = _parse_generated_run_cache_roots(
             generated_run_cache_roots
         )
+        parsed_github_idle_bindings = _parse_runner_host_github_bindings(github_idle_bindings)
         github_token_env_name = github_token_env.strip()
-        if parsed_generated_run_cache_roots and not github_token_env_name:
+        if (
+            parsed_generated_run_cache_roots or parsed_github_idle_bindings
+        ) and not github_token_env_name:
             raise click.ClickException(
-                "runner host hygiene generated cache evidence requires --github-token-env."
+                "runner host hygiene GitHub evidence requires --github-token-env."
             )
         github_token = os.environ.get(github_token_env_name, "").strip()
         request = RunnerHostHygieneExecutorRequest(
@@ -1806,7 +1809,7 @@ def runner_host_hygiene_executor(
             service_user=service_user,
             repository_scope=repository_scope,
             current_runner_name=os.environ.get("RUNNER_NAME", ""),
-            github_idle_bindings=_parse_runner_host_github_bindings(github_idle_bindings),
+            github_idle_bindings=parsed_github_idle_bindings,
             audit_record_key=audit_record_key,
             retained_warm_builders=retained_warm_builders,
             target_buildkit_builder=target_buildkit_builder,

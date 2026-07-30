@@ -820,8 +820,16 @@ class RunnerHostHygieneApplyAuditRecord(BaseModel):
             raise ValueError(
                 "failed runner host hygiene audit record without post report requires a message"
             )
-        if self.status in {"completed", "failed"} and self.plan.status != "ready":
-            raise ValueError("terminal runner host hygiene audit record requires a ready plan")
+        if self.status == "completed" and self.plan.status != "ready":
+            raise ValueError("completed runner host hygiene audit record requires a ready plan")
+        if (
+            self.status == "failed"
+            and self.post_apply_report is not None
+            and self.plan.status != "ready"
+        ):
+            raise ValueError(
+                "failed runner host hygiene audit record with post report requires a ready plan"
+            )
         return self
 
 

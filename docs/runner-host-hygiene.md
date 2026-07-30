@@ -453,8 +453,8 @@ install -o root -g root -m 0600 <prepared-generated-cache-bindings> \
 ```
 
 ```sudoers
-Cmnd_Alias LAUNCHPLANE_GENERATED_CACHE_OBSERVE = /usr/local/sbin/launchplane-generated-run-cache ^observe [a-z0-9][a-z0-9._-]{0,63}=/[^[:space:]]+ ([2-9]|10) ([0-9]|[1-5][0-9]|60)$
-Cmnd_Alias LAUNCHPLANE_GENERATED_CACHE_PRUNE = /usr/local/sbin/launchplane-generated-run-cache ^prune [a-z0-9][a-z0-9._-]{0,63}=/[^[:space:]]+ ([2-9]|10) ([0-9]|[1-5][0-9]|60) [1-9][0-9]*(,[1-9][0-9]*)*$
+Cmnd_Alias LAUNCHPLANE_GENERATED_CACHE_OBSERVE = /usr/local/sbin/launchplane-generated-run-cache ^observe [a-z0-9][a-z0-9._-]{0,63}=/[^[:space:]]+ ([2-9]|10) ([1-9]|[1-5][0-9]|60)$
+Cmnd_Alias LAUNCHPLANE_GENERATED_CACHE_PRUNE = /usr/local/sbin/launchplane-generated-run-cache ^prune [a-z0-9][a-z0-9._-]{0,63}=/[^[:space:]]+ ([2-9]|10) ([1-9]|[1-5][0-9]|60) [1-9][0-9]*(,[1-9][0-9]*)*$
 <service-user> ALL=(root) NOPASSWD: NOSETENV: LAUNCHPLANE_GENERATED_CACHE_OBSERVE, LAUNCHPLANE_GENERATED_CACHE_PRUNE
 ```
 

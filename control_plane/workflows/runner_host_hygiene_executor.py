@@ -76,6 +76,13 @@ MINIMUM_DEFAULT_CACHE_KEEP_STORAGE_BYTES = 8 * 1024**3
 MAX_DOCKER_IMAGE_INVENTORY_ITEMS = RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS
 MAX_DOCKER_VOLUME_INVENTORY_ITEMS = RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS
 MAX_GITHUB_IDLE_ACTIVE_RUNS = 32
+_GITHUB_ACTIVE_WORKFLOW_RUN_STATUSES = (
+    "queued",
+    "in_progress",
+    "waiting",
+    "pending",
+    "requested",
+)
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
 _BUILDCTL_STORAGE_MB_BYTES = 1_000_000
 _RUNNER_WORKDIR_USAGE_HELPER = "/usr/local/sbin/launchplane-runner-workdir-usage"
@@ -2123,7 +2130,7 @@ def _github_jobs_idle_observation(
             reason_code="source_missing",
         )
     active_run_ids: set[int] = set()
-    for status in ("queued", "in_progress"):
+    for status in _GITHUB_ACTIVE_WORKFLOW_RUN_STATUSES:
         payload, reason_code = _github_api_object(
             url=f"{repository_url}/actions/runs?status={status}&per_page=100",
             bearer_token=bearer_token,
@@ -2451,14 +2458,43 @@ def build_refreshing_service_audit_poster(
                 _redact_sensitive_text(str(error) or "Launchplane service request failed"),
                 retryable=True,
             ) from error
-        if not isinstance(response_payload, dict):
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise AuditDeliveryError(
-                "Launchplane service returned a non-object response.",
+                "Launchplane service returned an invalid audit acceptance response.",
                 retryable=False,
-            )
-        return response_payload
+            ) from error
+        return _validated_audit_acceptance_response(response_payload, audit=audit)
 
     return post
+
+
+def _validated_audit_acceptance_response(
+    response_payload: object,
+    *,
+    audit: RunnerHostHygieneApplyAuditRecord,
+) -> dict[str, object]:
+    if not isinstance(response_payload, dict):
+        raise AuditDeliveryError(
+            "Launchplane service returned a non-object audit acceptance response.",
+            retryable=False,
+        )
+    records = response_payload.get("records")
+    result = response_payload.get("result")
+    expected_key = audit.audit_record_key
+    if (
+        response_payload.get("status") != "accepted"
+        or not isinstance(records, dict)
+        or records.get("runner_host_hygiene_audit_record_key") != expected_key
+        or not isinstance(result, dict)
+        or result.get("runner_host_hygiene_audit_record_key") != expected_key
+        or result.get("audit_status") != audit.status
+        or result.get("mutate") is not audit.request.mutate
+    ):
+        raise AuditDeliveryError(
+            "Launchplane service returned a mismatched audit acceptance response.",
+            retryable=False,
+        )
+    return response_payload
 
 
 def _audit_route_payload(audit: RunnerHostHygieneApplyAuditRecord) -> dict[str, object]:
