@@ -1609,7 +1609,15 @@ context only, and `context_instance` has both context and instance.
   container. Artifact inputs or base images make addon files available, but the
   target env install list is what activates modules such as
   `launchplane_settings` and `disable_odoo_online` in already-initialized
-  databases.
+  databases. Preview refresh, stable replacement, post-deploy update, and stable
+  bootstrap also preserve the recorded addon path while adding the managed
+  `/opt/launchplane/addons` and `/opt/enterprise` roots when missing. This
+  prevents a stale explicit `ODOO_ADDONS_PATH` record from overriding the
+  compose default and making a required module dependency unavailable during
+  fresh database initialization or maintenance. Managed data-workflow schedules
+  also pass their resolved `ODOO_FILESTORE_PATH` explicitly so a target that
+  relies on the compose default still satisfies the workflow's typed runtime
+  configuration.
 - When a deploy-phase payload is expected, Launchplane also persists generic
   runtime assertion flags that tell the Odoo runtime to fail closed if managed
   instance overrides or website bootstrap data are missing. Launchplane re-reads

@@ -28,6 +28,9 @@ from control_plane.contracts.odoo_preview_runtime_plan import (
     OdooPreviewRuntimePlanStatus,
     plan_odoo_preview_runtime,
 )
+from control_plane.contracts.odoo_runtime_environment import (
+    merge_required_odoo_addons_path,
+)
 from control_plane.contracts.odoo_stable_target_replacement import (
     LAUNCHPLANE_REQUIRED_ODOO_MODULES,
     merge_odoo_install_modules,
@@ -1409,6 +1412,11 @@ def _preview_refresh_environment_values(
     *, request: OdooPreviewDokployApplyRequest
 ) -> dict[str, str]:
     environment_values = dict(request.environment_values)
+    addons_path = merge_required_odoo_addons_path(environment_values.get("ODOO_ADDONS_PATH", ""))
+    if addons_path:
+        environment_values["ODOO_ADDONS_PATH"] = addons_path
+    else:
+        environment_values.pop("ODOO_ADDONS_PATH", None)
     manifest_modules = request.manifest.odoo_install_modules if request.manifest is not None else ()
     update_modules = merge_odoo_install_modules(
         LAUNCHPLANE_REQUIRED_ODOO_MODULES,

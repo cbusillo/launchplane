@@ -2343,6 +2343,7 @@ domains = ["cm-testing.shinycomputers.com"]
                     else (
                         "ODOO_DB_NAME=old_db\n"
                         "ODOO_FILESTORE_PATH=/volumes/data/filestore\n"
+                        "ODOO_ADDONS_PATH=/opt/project/addons,/opt/launchplane/addons,/odoo/addons\n"
                         "ODOO_INSTALL_MODULES=opw_custom\n"
                     ),
                     "appName": "opw-prod-app",
@@ -2412,6 +2413,10 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertIn("ODOO_DB_NAME=opw_prod", updated_env_payloads[0])
         self.assertIn("ODOO_FILESTORE_PATH=/volumes/data/custom-filestore", updated_env_payloads[0])
         self.assertIn(
+            "ODOO_ADDONS_PATH=/opt/project/addons,/opt/launchplane/addons,/odoo/addons,/opt/enterprise",
+            updated_env_payloads[0],
+        )
+        self.assertIn(
             f"{ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY}={override_payload_b64}",
             updated_env_payloads[0],
         )
@@ -2429,12 +2434,18 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertIn("--post-deploy-maintenance", schedule_script)
         self.assertNotIn("--update-only", schedule_script)
         self.assertIn("ONE_OFF_WORKFLOW_ONLY", schedule_script)
+        self.assertIn(
+            "workflow_environment+=(-e ODOO_FILESTORE_PATH=/volumes/data/custom-filestore)",
+            schedule_script,
+        )
         self.assertIn("workflow_environment+=(-e ODOO_UPDATE_MODULES=opw_custom)", schedule_script)
         self.assertIn("resolve_single_running_container", schedule_script)
         self.assertIn('echo "odoo_module_update_image_match=true"', schedule_script)
         self.assertIn('echo "odoo_module_update_modules_configured=true"', schedule_script)
         self.assertIn('echo "odoo_module_update_completed=true"', schedule_script)
-        self.assertIn("workflow_output_status=${PIPESTATUS[1]}", schedule_script)
+        self.assertIn('workflow_pipeline_status=("${PIPESTATUS[@]}")', schedule_script)
+        self.assertIn("workflow_exit_status=${workflow_pipeline_status[0]}", schedule_script)
+        self.assertIn("workflow_output_status=${workflow_pipeline_status[1]}", schedule_script)
         self.assertIn("/api/compose.deploy", request_paths)
         self.assertIn("/api/schedule.runManually", request_paths)
         self.assertEqual(
@@ -3558,6 +3569,7 @@ domains = ["cm-testing.shinycomputers.com"]
             target_name="cm-testing",
         )
         schedule_payloads: list[dict[str, object]] = []
+        updated_env_payloads: list[str] = []
         request_paths: list[str] = []
 
         def capture_schedule_payload(**kwargs: object) -> dict[str, str]:
@@ -3576,6 +3588,7 @@ domains = ["cm-testing.shinycomputers.com"]
                     "env": (
                         "ODOO_DB_NAME=cm_testing\n"
                         "ODOO_FILESTORE_PATH=/volumes/data/filestore\n"
+                        "ODOO_ADDONS_PATH=/opt/project/addons,/opt/launchplane/addons,/odoo/addons\n"
                         "ODOO_INSTALL_MODULES=launchplane_settings,disable_odoo_online,cm_website\n"
                     ),
                     "appName": "cm-testing-app",
@@ -3586,6 +3599,16 @@ domains = ["cm-testing.shinycomputers.com"]
                 "control_plane.dokploy.api.find_matching_dokploy_schedule",
                 return_value=None,
             ),
+            patch(
+                "control_plane.dokploy.api.update_dokploy_target_env",
+                side_effect=lambda **kwargs: updated_env_payloads.append(str(kwargs["env_text"])),
+            ),
+            patch(
+                "control_plane.dokploy.api.latest_deployment_for_target",
+                return_value={"deploymentId": "deployment-before"},
+            ),
+            patch("control_plane.dokploy.api.trigger_deployment"),
+            patch("control_plane.dokploy.api.wait_for_target_deployment"),
             patch(
                 "control_plane.dokploy.api.upsert_dokploy_schedule",
                 side_effect=capture_schedule_payload,
@@ -3620,6 +3643,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 env_file=None,
             )
 
+        self.assertEqual(len(updated_env_payloads), 1)
+        self.assertIn(
+            "ODOO_ADDONS_PATH=/opt/project/addons,/opt/launchplane/addons,/odoo/addons,/opt/enterprise",
+            updated_env_payloads[0],
+        )
         self.assertEqual(len(schedule_payloads), 1)
         self.assertEqual(
             schedule_payloads[0]["name"],
@@ -3631,6 +3659,10 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertNotIn("workflow_arguments=(--update-only)", script)
         self.assertIn(
             "workflow_environment+=(-e ODOO_UPDATE_MODULES=launchplane_settings,disable_odoo_online,cm_website)",
+            script,
+        )
+        self.assertIn(
+            "workflow_environment+=(-e ODOO_FILESTORE_PATH=/volumes/data/filestore)",
             script,
         )
         self.assertIn("/api/schedule.runManually", request_paths)
@@ -4211,7 +4243,9 @@ actions = ["launchplane_service_deploy.execute"]
         self.assertIn('if [ "${web_was_running}" != "1" ]; then', script)
         self.assertIn('docker start "${web_container_id}" >/dev/null || true', script)
         self.assertIn("workflow_output_file=$(mktemp)", script)
-        self.assertIn("workflow_exit_status=${PIPESTATUS[0]}", script)
+        self.assertIn('workflow_pipeline_status=("${PIPESTATUS[@]}")', script)
+        self.assertIn("workflow_exit_status=${workflow_pipeline_status[0]}", script)
+        self.assertIn("workflow_output_status=${workflow_pipeline_status[1]}", script)
         self.assertIn("Odoo post-deploy maintenance readback markers:", script)
         self.assertIn("grep -E '^(", script)
         self.assertIn("odoo_instance_overrides_payload_present", script)

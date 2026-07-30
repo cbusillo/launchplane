@@ -22,6 +22,10 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyPhase
+from control_plane.contracts.odoo_runtime_environment import (
+    LAUNCHPLANE_REQUIRED_ODOO_ADDON_PATHS,
+    merge_required_odoo_addons_path,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -102,6 +106,7 @@ class OdooStableTargetReplacementStore(RuntimeKeySafetyPolicyReadStore, Protocol
 DokployRequest = Callable[..., JsonValue]
 DokployConfigReader = Callable[..., tuple[str, str]]
 ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS = 5
+ODOO_ADDONS_PATH_ENV_KEY = "ODOO_ADDONS_PATH"
 ODOO_INSTALL_MODULES_ENV_KEY = "ODOO_INSTALL_MODULES"
 ODOO_REQUIRED_VOLUME_ENV_KEYS = ("ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME", "ODOO_DB_VOLUME")
 
@@ -1484,6 +1489,13 @@ def execute_odoo_stable_target_replacement_apply(
         desired_env_map.pop(ODOO_INSTALL_MODULES_ENV_KEY, None)
         desired_env_map.update(runtime_environment_values)
         desired_env_map.update(runtime_override_environment)
+        addons_path = merge_required_odoo_addons_path(
+            desired_env_map.get(ODOO_ADDONS_PATH_ENV_KEY, "")
+        )
+        if addons_path:
+            desired_env_map[ODOO_ADDONS_PATH_ENV_KEY] = addons_path
+        else:
+            desired_env_map.pop(ODOO_ADDONS_PATH_ENV_KEY, None)
         explicit_odoo_install_modules = desired_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, "")
         manifest_odoo_install_modules = artifact_manifest.odoo_install_modules
         fallback_odoo_install_modules = (
@@ -1496,6 +1508,10 @@ def execute_odoo_stable_target_replacement_apply(
             explicit_odoo_install_modules,
         )
         runtime_source["required_odoo_modules"] = ",".join(LAUNCHPLANE_REQUIRED_ODOO_MODULES)
+        runtime_source["required_odoo_addon_paths"] = ",".join(
+            LAUNCHPLANE_REQUIRED_ODOO_ADDON_PATHS
+        )
+        runtime_source["odoo_addons_path"] = desired_env_map.get(ODOO_ADDONS_PATH_ENV_KEY, "")
         runtime_source["artifact_odoo_install_modules"] = ",".join(
             artifact_manifest.odoo_install_modules
         )
