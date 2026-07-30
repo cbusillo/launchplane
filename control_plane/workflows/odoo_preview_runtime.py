@@ -103,6 +103,8 @@ ODOO_PREVIEW_GENERATED_ENV_KEYS = (
     "ODOO_LOG_VOLUME",
     "ODOO_DB_VOLUME",
 )
+ODOO_PREVIEW_MAX_APPLY_TIMEOUT_SECONDS = 600
+ODOO_PREVIEW_DESTROY_SUPERSESSION_GRACE_SECONDS = ODOO_PREVIEW_MAX_APPLY_TIMEOUT_SECONDS + 300
 
 
 class OdooPreviewTargetDiscoveryAmbiguousError(click.ClickException):
@@ -1077,7 +1079,11 @@ class OdooPreviewDokployApplyRequest(BaseModel):
     manifest: ArtifactIdentityManifest | None = None
     environment_values: dict[str, str] = Field(default_factory=dict)
     health_path: str = DEFAULT_ODOO_RUNTIME_HEALTH_PATH
-    timeout_seconds: int = Field(default=300, ge=1)
+    timeout_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=ODOO_PREVIEW_MAX_APPLY_TIMEOUT_SECONDS,
+    )
     wait_for_deploy: bool = True
     smoke_check: bool | None = None
 
@@ -1374,6 +1380,51 @@ def observe_odoo_preview_dokploy_apply(
     except click.ClickException:
         return OdooPreviewDokployObservation(outcome="unknown")
     return OdooPreviewDokployObservation(outcome="unknown")
+
+
+def odoo_preview_destroy_target_is_quiescent(
+    *,
+    control_plane_root: Path,
+    request: OdooPreviewDokployApplyRequest,
+    database_url: str | None,
+) -> bool:
+    plan = request.dry_run_plan
+    if plan.operation != "destroy" or not plan.compose_ref:
+        return False
+    try:
+        host, token = dokploy_source.read_dokploy_config(
+            control_plane_root=control_plane_root,
+            database_url=database_url,
+        )
+        if not _compose_exists_by_id(
+            host=host,
+            token=token,
+            compose_id=plan.compose_ref,
+        ):
+            return True
+        if any(
+            dokploy_api.deployment_status(deployment)
+            in dokploy_post_deploy.DOKPLOY_RUNNING_DEPLOYMENT_STATUSES
+            for deployment in dokploy_api.list_deployments_for_target(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=plan.compose_ref,
+            )
+        ):
+            return False
+        return dokploy_post_deploy.compose_data_workflow_is_quiescent(
+            host=host,
+            token=token,
+            target_definition=dokploy_source.DokployTargetDefinition(
+                context=plan.product,
+                instance=plan.preview_slug,
+                target_id=plan.compose_ref,
+                target_name=plan.compose_name,
+            ),
+        )
+    except click.ClickException:
+        return False
 
 
 def _missing_endpoint_paths(*, request: OdooPreviewDokployDryRunRequest) -> tuple[str, ...]:

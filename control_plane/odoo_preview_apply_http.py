@@ -28,6 +28,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
     observe_odoo_preview_dokploy_apply,
+    odoo_preview_destroy_target_is_quiescent,
     odoo_preview_apply_plan_sha256,
 )
 
@@ -340,6 +341,19 @@ def observe_odoo_preview_apply_result(
     if observation.outcome != "present" or observation.result is None:
         return observation.outcome, None, observation.retry_safe
     return observation.outcome, observation.result.model_dump(mode="json"), False
+
+
+def odoo_preview_destroy_supersession_is_quiescent(
+    *,
+    control_plane_root_path: Path,
+    request: OdooPreviewApplyEnvelope,
+    database_url: str | None,
+) -> bool:
+    return odoo_preview_destroy_target_is_quiescent(
+        control_plane_root=control_plane_root_path,
+        request=request.apply,
+        database_url=database_url,
+    )
 
 
 def driver_result_contains_status(

@@ -2085,6 +2085,41 @@ def _resolve_dokploy_schedule_runtime(
     return "dokploy-server", user_id, compose_app_name, None
 
 
+def compose_data_workflow_is_quiescent(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+) -> bool:
+    target_payload = api.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type="compose",
+        target_id=target_definition.target_id,
+    )
+    schedule_type, schedule_lookup_id, _compose_app_name, _schedule_server_id = (
+        _resolve_dokploy_schedule_runtime(
+            host=host,
+            token=token,
+            compose_id=target_definition.target_id,
+            compose_name=target_definition.target_name,
+            target_payload=target_payload,
+        )
+    )
+    schedule = api.find_matching_dokploy_schedule(
+        host=host,
+        token=token,
+        target_id=schedule_lookup_id,
+        schedule_type=schedule_type,
+        schedule_name=DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME,
+        app_name=_build_dokploy_data_workflow_schedule_app_name(
+            context_name=target_definition.context,
+            instance_name=target_definition.instance,
+        ),
+    )
+    return not _has_running_schedule_deployment(schedule)
+
+
 def _build_dokploy_data_workflow_script(
     *,
     compose_app_name: str,

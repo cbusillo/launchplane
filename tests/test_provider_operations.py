@@ -14,6 +14,7 @@ from control_plane.provider_operations import (
     ProviderMutationUnknownError,
     ProviderObservation,
     ProviderOperationLease,
+    ProviderTargetSupersession,
     run_durable_provider_operation,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -115,18 +116,22 @@ class _StoreFixture:
         response_trace_id: str = "provider-op-trace-a",
         lease_seconds: int = 300,
         heartbeat_interval_seconds: float | None = None,
+        idempotency_key: str = _KEY,
+        request_fingerprint: str = _FINGERPRINT,
+        target_supersession: ProviderTargetSupersession | None = None,
     ) -> DurableProviderOperationResult:
         return run_durable_provider_operation(
             store=self.store,
             scope=_SCOPE,
             route_path=_ROUTE,
-            idempotency_key=_KEY,
-            request_fingerprint=_FINGERPRINT,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
             lease_owner=lease_owner,
             response_trace_id=response_trace_id,
             adapter=adapter,
             lease_seconds=lease_seconds,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
+            target_supersession=target_supersession,
         )
 
     def maybe_stored(self) -> LaunchplaneIdempotencyRecord | None:
@@ -215,6 +220,141 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             )
 
             result = fixture.run(adapter, lease_owner="instance-b")
+
+            self.assertEqual(result.status, "target_busy")
+            self.assertEqual(adapter.apply_calls, 0)
+
+    def test_destroy_supersedes_expired_reconcile_required_target(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            adapter = _FakeAdapter()
+            clock = {"now": "2026-07-30T15:00:00Z"}
+            with patch.object(
+                fixture.store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                stale = fixture.store.reserve_mutation(
+                    scope=_SCOPE,
+                    route_path=_ROUTE,
+                    idempotency_key="provider-op:refresh:stale",
+                    request_fingerprint="provider-op-fingerprint-stale",
+                    lease_owner="instance-a",
+                    lease_seconds=60,
+                    reconciliation_key=_RECONCILIATION_KEY,
+                    provider_target_key=adapter.target_key(),
+                )
+                marked = fixture.store.mark_mutation_reconcile_required(
+                    reservation=stale.record,
+                    reconciliation_key=_RECONCILIATION_KEY,
+                )
+                clock["now"] = "2026-07-30T15:17:00Z"
+                result = fixture.run(
+                    adapter,
+                    lease_owner="instance-b",
+                    response_trace_id="destroy-trace",
+                    idempotency_key="provider-op:destroy:new",
+                    request_fingerprint="provider-op-fingerprint-destroy",
+                    target_supersession=ProviderTargetSupersession(
+                        response_status_code=409,
+                        response_payload={"status": "superseded"},
+                        minimum_expired_seconds=900,
+                        quiescence_check=lambda _reservation: True,
+                    ),
+                )
+            stored_stale = fixture.store.read_idempotency_record(
+                scope=_SCOPE,
+                route_path=_ROUTE,
+                idempotency_key="provider-op:refresh:stale",
+            )
+
+            self.assertEqual(marked.status, "updated")
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(adapter.apply_calls, 1)
+            self.assertIsNotNone(stored_stale)
+            assert stored_stale is not None
+            self.assertEqual(stored_stale.state, "completed")
+            self.assertEqual(stored_stale.response_status_code, 409)
+            self.assertEqual(stored_stale.response_payload, {"status": "superseded"})
+
+    def test_destroy_does_not_supersede_reconciled_target_with_active_lease(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            adapter = _FakeAdapter()
+            clock = {"now": "2026-07-30T15:00:00Z"}
+            with patch.object(
+                fixture.store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                stale = fixture.store.reserve_mutation(
+                    scope=_SCOPE,
+                    route_path=_ROUTE,
+                    idempotency_key="provider-op:refresh:settling",
+                    request_fingerprint="provider-op-fingerprint-settling",
+                    lease_owner="instance-a",
+                    lease_seconds=300,
+                    reconciliation_key=_RECONCILIATION_KEY,
+                    provider_target_key=adapter.target_key(),
+                )
+                fixture.store.mark_mutation_reconcile_required(
+                    reservation=stale.record,
+                    reconciliation_key=_RECONCILIATION_KEY,
+                )
+                result = fixture.run(
+                    adapter,
+                    lease_owner="instance-b",
+                    response_trace_id="destroy-trace",
+                    idempotency_key="provider-op:destroy:new",
+                    request_fingerprint="provider-op-fingerprint-destroy",
+                    target_supersession=ProviderTargetSupersession(
+                        response_status_code=409,
+                        response_payload={"status": "superseded"},
+                        quiescence_check=lambda _reservation: True,
+                    ),
+                )
+
+            self.assertEqual(result.status, "target_busy")
+            self.assertEqual(adapter.apply_calls, 0)
+
+    def test_destroy_does_not_supersede_without_provider_quiescence(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            adapter = _FakeAdapter()
+            clock = {"now": "2026-07-30T15:00:00Z"}
+            with patch.object(
+                fixture.store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: clock["now"],
+            ):
+                stale = fixture.store.reserve_mutation(
+                    scope=_SCOPE,
+                    route_path=_ROUTE,
+                    idempotency_key="provider-op:refresh:not-quiescent",
+                    request_fingerprint="provider-op-fingerprint-not-quiescent",
+                    lease_owner="instance-a",
+                    lease_seconds=60,
+                    reconciliation_key=_RECONCILIATION_KEY,
+                    provider_target_key=adapter.target_key(),
+                )
+                fixture.store.mark_mutation_reconcile_required(
+                    reservation=stale.record,
+                    reconciliation_key=_RECONCILIATION_KEY,
+                )
+                clock["now"] = "2026-07-30T15:17:00Z"
+                result = fixture.run(
+                    adapter,
+                    lease_owner="instance-b",
+                    response_trace_id="destroy-trace",
+                    idempotency_key="provider-op:destroy:new",
+                    request_fingerprint="provider-op-fingerprint-destroy",
+                    target_supersession=ProviderTargetSupersession(
+                        response_status_code=409,
+                        response_payload={"status": "superseded"},
+                        minimum_expired_seconds=900,
+                        quiescence_check=lambda _reservation: False,
+                    ),
+                )
 
             self.assertEqual(result.status, "target_busy")
             self.assertEqual(adapter.apply_calls, 0)
