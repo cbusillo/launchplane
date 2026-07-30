@@ -2279,6 +2279,26 @@ domains = ["cm-testing.shinycomputers.com"]
 
         self.assertIn("DOKPLOY_HOST or DOKPLOY_TOKEN", str(raised_error.exception))
 
+    def test_require_odoo_module_update_readback_evidence_accepts_complete_proof(self) -> None:
+        control_plane_dokploy.require_odoo_module_update_readback_evidence(
+            {
+                "log_available": "true",
+                "odoo_module_update_completed": "true",
+                "odoo_module_update_image_match": "true",
+                "odoo_module_update_modules_configured": "true",
+            }
+        )
+
+    def test_require_odoo_module_update_readback_evidence_rejects_missing_marker(self) -> None:
+        with self.assertRaisesRegex(click.ClickException, "did not prove"):
+            control_plane_dokploy.require_odoo_module_update_readback_evidence(
+                {
+                    "log_available": "true",
+                    "odoo_module_update_image_match": "true",
+                    "odoo_module_update_modules_configured": "true",
+                }
+            )
+
     def test_run_compose_post_deploy_update_applies_explicit_env_file_without_control_plane_secrets(
         self,
     ) -> None:
@@ -2320,7 +2340,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 return {
                     "env": updated_env_payloads[-1]
                     if updated_env_payloads
-                    else "ODOO_DB_NAME=old_db\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
+                    else (
+                        "ODOO_DB_NAME=old_db\n"
+                        "ODOO_FILESTORE_PATH=/volumes/data/filestore\n"
+                        "ODOO_INSTALL_MODULES=opw_custom\n"
+                    ),
                     "appName": "opw-prod-app",
                     "serverId": "server-123",
                 }
@@ -2401,9 +2425,16 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertNotIn("DOKPLOY_TOKEN=should-not-sync", updated_env_payloads[0])
         self.assertEqual(len(schedule_payloads), 1)
         self.assertEqual(schedule_payloads[0]["command"], "control-plane post-deploy update")
-        self.assertIn("--post-deploy-maintenance", str(schedule_payloads[0]["script"]))
-        self.assertNotIn("--update-only", str(schedule_payloads[0]["script"]))
-        self.assertIn("ONE_OFF_WORKFLOW_ONLY", str(schedule_payloads[0]["script"]))
+        schedule_script = str(schedule_payloads[0]["script"])
+        self.assertIn("--post-deploy-maintenance", schedule_script)
+        self.assertNotIn("--update-only", schedule_script)
+        self.assertIn("ONE_OFF_WORKFLOW_ONLY", schedule_script)
+        self.assertIn("workflow_environment+=(-e ODOO_UPDATE_MODULES=opw_custom)", schedule_script)
+        self.assertIn("resolve_single_running_container", schedule_script)
+        self.assertIn('echo "odoo_module_update_image_match=true"', schedule_script)
+        self.assertIn('echo "odoo_module_update_modules_configured=true"', schedule_script)
+        self.assertIn('echo "odoo_module_update_completed=true"', schedule_script)
+        self.assertIn("workflow_output_status=${PIPESTATUS[1]}", schedule_script)
         self.assertIn("/api/compose.deploy", request_paths)
         self.assertIn("/api/schedule.runManually", request_paths)
         self.assertEqual(
@@ -3542,7 +3573,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
                     "name": "cm-testing",
-                    "env": "ODOO_DB_NAME=cm_testing\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
+                    "env": (
+                        "ODOO_DB_NAME=cm_testing\n"
+                        "ODOO_FILESTORE_PATH=/volumes/data/filestore\n"
+                        "ODOO_INSTALL_MODULES=launchplane_settings,disable_odoo_online,cm_website\n"
+                    ),
                     "appName": "cm-testing-app",
                     "serverId": "server-123",
                 },
@@ -3557,11 +3592,21 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
-                return_value={"deploymentId": "schedule-before"},
+                side_effect=(
+                    {"deploymentId": "schedule-before"},
+                    {
+                        "deploymentId": "schedule-after",
+                        "logs": [
+                            "odoo_module_update_image_match=true",
+                            "odoo_module_update_modules_configured=true",
+                            "odoo_module_update_completed=true",
+                        ],
+                    },
+                ),
             ),
             patch(
                 "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
-                side_effect=lambda **_kwargs: None,
+                return_value="deployment=schedule-after status=done",
             ),
             patch(
                 "control_plane.dokploy.api.dokploy_request",
@@ -3584,7 +3629,41 @@ domains = ["cm-testing.shinycomputers.com"]
         script = str(schedule_payloads[0]["script"])
         self.assertIn("workflow_arguments=(--bootstrap)", script)
         self.assertNotIn("workflow_arguments=(--update-only)", script)
+        self.assertIn(
+            "workflow_environment+=(-e ODOO_UPDATE_MODULES=launchplane_settings,disable_odoo_online,cm_website)",
+            script,
+        )
         self.assertIn("/api/schedule.runManually", request_paths)
+
+    def test_run_compose_odoo_stable_bootstrap_requires_artifact_module_list(self) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="cm",
+            instance="testing",
+            target_id="compose-123",
+            target_name="cm-testing",
+        )
+
+        with (
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "cm-testing",
+                    "env": "ODOO_DB_NAME=cm_testing\n",
+                    "appName": "cm-testing-app",
+                    "serverId": "server-123",
+                },
+            ),
+            patch("control_plane.dokploy.api.upsert_dokploy_schedule") as upsert_schedule,
+            self.assertRaisesRegex(click.ClickException, "ODOO_INSTALL_MODULES"),
+        ):
+            control_plane_dokploy.run_compose_odoo_stable_bootstrap(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                env_file=None,
+            )
+
+        upsert_schedule.assert_not_called()
 
     def test_run_compose_odoo_stable_bootstrap_refuses_live_name_mismatch(self) -> None:
         target_definition = control_plane_dokploy.DokployTargetDefinition(

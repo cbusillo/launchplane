@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -36,6 +36,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementRequest,
+    merge_odoo_install_modules,
     missing_required_odoo_modules_from_artifact,
 )
 from control_plane.workflows.inventory import build_environment_inventory
@@ -657,23 +658,8 @@ def _record_with_target_replacement_canonical(
     )
 
 
-def _merge_odoo_install_modules(*module_groups: str | Iterable[str]) -> str:
-    merged_modules: list[str] = []
-    for module_group in module_groups:
-        if isinstance(module_group, str):
-            raw_module_names: Iterable[str] = module_group.split(",")
-        else:
-            raw_module_names = module_group
-        for module_name in raw_module_names:
-            normalized_module_name = str(module_name).strip()
-            if not normalized_module_name or normalized_module_name in merged_modules:
-                continue
-            merged_modules.append(normalized_module_name)
-    return ",".join(merged_modules)
-
-
 def _merge_required_odoo_install_modules(raw_modules: str) -> str:
-    return _merge_odoo_install_modules(LAUNCHPLANE_REQUIRED_ODOO_MODULES, raw_modules)
+    return merge_odoo_install_modules(LAUNCHPLANE_REQUIRED_ODOO_MODULES, raw_modules)
 
 
 def _normalize_domain(raw_domain: str) -> str:
@@ -1503,7 +1489,7 @@ def execute_odoo_stable_target_replacement_apply(
         fallback_odoo_install_modules = (
             "" if manifest_odoo_install_modules else legacy_odoo_install_modules
         )
-        desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY] = _merge_odoo_install_modules(
+        desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY] = merge_odoo_install_modules(
             LAUNCHPLANE_REQUIRED_ODOO_MODULES,
             manifest_odoo_install_modules,
             fallback_odoo_install_modules,

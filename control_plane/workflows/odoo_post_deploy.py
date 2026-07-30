@@ -247,6 +247,9 @@ def execute_odoo_post_deploy(
             )
             or {}
         )
+        dokploy_post_deploy.require_odoo_module_update_readback_evidence(
+            post_deploy_readback_markers
+        )
     except click.ClickException as error:
         if odoo_override_record is not None and override_should_apply:
             _write_odoo_instance_override_apply_result(

@@ -1501,7 +1501,14 @@ run` is the foreground loop intended for an external process supervisor, and
   required-module availability evidence. Managed Odoo artifacts must declare
   Launchplane-required modules such as `launchplane_settings` and
   `disable_odoo_online`; deployment fails closed before provider mutation when
-  that evidence is absent.
+  that evidence is absent. Post-deploy maintenance forces the deployed artifact
+  module list through `ODOO_UPDATE_MODULES` and only records pass after provider
+  schedule logs prove a matching web/script-runner artifact image, an explicit
+  module list, and successful install/update completion. Missing or unavailable
+  readback evidence fails the deployment instead of allowing health-only
+  readiness against stale database-backed Odoo views. Stable bootstrap uses the
+  same explicit artifact module list and provider-log evidence gate before it
+  can report completion.
 - Artifact manifests may carry `build_provenance` metadata for Odoo runtime and
   devtools base images plus build tools such as `odoo-devkit`. That provenance
   is artifact evidence, not addon ownership: `odoo-docker`, `odoo-devkit`,

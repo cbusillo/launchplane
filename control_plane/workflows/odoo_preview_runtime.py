@@ -28,6 +28,10 @@ from control_plane.contracts.odoo_preview_runtime_plan import (
     OdooPreviewRuntimePlanStatus,
     plan_odoo_preview_runtime,
 )
+from control_plane.contracts.odoo_stable_target_replacement import (
+    LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+    merge_odoo_install_modules,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
@@ -45,6 +49,7 @@ from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALT
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import compose as dokploy_compose
+from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.dokploy.api import JsonObject, JsonValue
 
 
@@ -70,6 +75,7 @@ OdooPreviewDokployOperationName = Literal[
     "domain_lookup",
     "domain_create_or_update",
     "compose_deploy",
+    "module_install_update",
     "smoke_check",
     "domain_delete",
     "compose_delete",
@@ -1113,6 +1119,8 @@ class OdooPreviewDokployApplyResult(BaseModel):
     created_compose: bool = False
     provider_effect_attempted: bool = False
     domain_id: str = ""
+    module_install_update_status: Literal["pass", "fail", "skipped"] = "skipped"
+    module_install_update_evidence: dict[str, str] = Field(default_factory=dict)
     steps: tuple[OdooPreviewDokployApplyStep, ...] = ()
     rollback_errors: tuple[str, ...] = ()
     error_message: str = ""
@@ -1336,20 +1344,7 @@ def observe_odoo_preview_dokploy_apply(
         if status in {"", "pending", "queued", "running"}:
             return OdooPreviewDokployObservation(outcome="unknown")
         if status in {"success", "succeeded", "done", "completed", "healthy", "finished"}:
-            if request.smoke_check:
-                _wait_for_smoke_check(
-                    preview_url=plan.preview_url,
-                    health_path=request.health_path,
-                    timeout_seconds=request.timeout_seconds,
-                )
-            return OdooPreviewDokployObservation(
-                outcome="present",
-                result=_apply_result(
-                    request=request,
-                    status="pass",
-                    compose_id=target.target_id,
-                ),
-            )
+            return OdooPreviewDokployObservation(outcome="unknown")
         if status in {
             "failed",
             "error",
@@ -1410,6 +1405,21 @@ def _missing_endpoint_paths(*, request: OdooPreviewDokployDryRunRequest) -> tupl
     return tuple(missing)
 
 
+def _preview_refresh_environment_values(
+    *, request: OdooPreviewDokployApplyRequest
+) -> dict[str, str]:
+    environment_values = dict(request.environment_values)
+    manifest_modules = request.manifest.odoo_install_modules if request.manifest is not None else ()
+    update_modules = merge_odoo_install_modules(
+        LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+        manifest_modules,
+        environment_values.get("ODOO_INSTALL_MODULES", ""),
+    )
+    environment_values["ODOO_INSTALL_MODULES"] = update_modules
+    environment_values["ODOO_UPDATE_MODULES"] = update_modules
+    return environment_values
+
+
 def _execute_refresh(
     *,
     host: str,
@@ -1426,6 +1436,8 @@ def _execute_refresh(
     domain_id = ""
     deploy_triggered = False
     provider_effect_attempted = False
+    module_install_update_status: Literal["pass", "fail", "skipped"] = "skipped"
+    module_install_update_evidence: dict[str, str] = {}
     steps: list[OdooPreviewDokployApplyStep] = []
 
     def checkpoint_provider_effect(phase: str) -> None:
@@ -1479,7 +1491,8 @@ def _execute_refresh(
         )
         steps.append(_step("compose_update_raw_source", compose_id))
 
-        env_text = dokploy_api.serialize_dokploy_env_text(request.environment_values)
+        environment_values = _preview_refresh_environment_values(request=request)
+        env_text = dokploy_api.serialize_dokploy_env_text(environment_values)
         checkpoint_provider_effect("compose_update")
         dokploy_api.update_dokploy_target_env(
             host=host,
@@ -1548,6 +1561,26 @@ def _execute_refresh(
                     before_key=dokploy_api.deployment_key(latest_before),
                     timeout_seconds=request.timeout_seconds,
                 )
+        module_install_update_status = "fail"
+        module_install_update_evidence = dokploy_post_deploy.run_compose_post_deploy_update(
+            host=host,
+            token=token,
+            target_definition=dokploy_source.DokployTargetDefinition(
+                context=plan.product,
+                instance=plan.preview_slug,
+                target_id=compose_id,
+                target_name=plan.compose_name,
+                deploy_timeout_seconds=request.timeout_seconds,
+            ),
+            env_file=None,
+            before_provider_mutation=checkpoint_provider_effect,
+            deployment_title=provider_operation_title,
+        )
+        dokploy_post_deploy.require_odoo_module_update_readback_evidence(
+            module_install_update_evidence
+        )
+        module_install_update_status = "pass"
+        steps.append(_step("module_install_update", compose_id))
         if request.smoke_check:
             _wait_for_smoke_check(
                 preview_url=plan.preview_url,
@@ -1562,6 +1595,8 @@ def _execute_refresh(
             domain_id=domain_id,
             created_compose=bool(created_compose_id),
             provider_effect_attempted=provider_effect_attempted,
+            module_install_update_status=module_install_update_status,
+            module_install_update_evidence=module_install_update_evidence,
             steps=tuple(steps),
         )
     except click.ClickException as exc:
@@ -1593,6 +1628,8 @@ def _execute_refresh(
             compose_id=resolved_compose_id,
             created_compose=bool(created_compose_id),
             provider_effect_attempted=provider_effect_attempted,
+            module_install_update_status=module_install_update_status,
+            module_install_update_evidence=module_install_update_evidence,
             steps=tuple(steps),
             rollback_errors=rollback_errors,
         )
@@ -1924,6 +1961,8 @@ def _apply_result(
     domain_id: str = "",
     created_compose: bool = False,
     provider_effect_attempted: bool = False,
+    module_install_update_status: Literal["pass", "fail", "skipped"] = "skipped",
+    module_install_update_evidence: dict[str, str] | None = None,
     steps: tuple[OdooPreviewDokployApplyStep, ...] = (),
     rollback_errors: tuple[str, ...] = (),
     error_message: str = "",
@@ -1942,6 +1981,8 @@ def _apply_result(
         created_compose=created_compose,
         provider_effect_attempted=provider_effect_attempted,
         domain_id=domain_id,
+        module_install_update_status=module_install_update_status,
+        module_install_update_evidence=module_install_update_evidence or {},
         steps=steps,
         rollback_errors=rollback_errors,
         error_message=error_message,
@@ -2044,6 +2085,13 @@ def _operations(
                 target=compose_ref,
                 payload_keys=("composeId",),
             ),
+        )
+    )
+    operations.append(
+        OdooPreviewDokployOperation(
+            name="module_install_update",
+            method="LOCAL",
+            target=compose_ref,
         )
     )
     if request.smoke_check:

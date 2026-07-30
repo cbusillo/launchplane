@@ -1,6 +1,7 @@
 import base64
 import json
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
@@ -20,6 +21,26 @@ from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployRequest,
     execute_odoo_post_deploy,
 )
+
+
+def _module_update_evidence(**extra: str) -> dict[str, str]:
+    return {
+        "log_available": "true",
+        "odoo_module_update_completed": "true",
+        "odoo_module_update_image_match": "true",
+        "odoo_module_update_modules_configured": "true",
+        **extra,
+    }
+
+
+def _capture_module_update_runs(
+    captured_runs: list[dict[str, object]],
+) -> Callable[..., dict[str, str]]:
+    def capture(**kwargs: object) -> dict[str, str]:
+        captured_runs.append(kwargs)
+        return _module_update_evidence()
+
+    return capture
 
 
 class OdooPostDeployWorkflowTests(unittest.TestCase):
@@ -63,10 +84,10 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
 
             def capture_post_deploy_run(**kwargs: object) -> dict[str, str]:
                 captured_runs.append(kwargs)
-                return {
-                    "odoo_instance_overrides_payload_present": "true",
-                    "website_bootstrap_domain_matches_canonical": "true",
-                }
+                return _module_update_evidence(
+                    odoo_instance_overrides_payload_present="true",
+                    website_bootstrap_domain_matches_canonical="true",
+                )
 
             with (
                 patch(
@@ -151,7 +172,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
-                    side_effect=lambda **kwargs: captured_runs.append(kwargs),
+                    side_effect=_capture_module_update_runs(captured_runs),
                 ),
             ):
                 result = execute_odoo_post_deploy(
@@ -165,6 +186,34 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             self.assertFalse(result.override_record_found)
             self.assertEqual(len(captured_runs), 1)
             self.assertEqual(captured_runs[0]["workflow_environment_overrides"], {})
+
+    def test_execute_fails_when_module_update_evidence_is_incomplete(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth",
+                    return_value=self._source_of_truth(),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
+                    return_value={"log_available": "true"},
+                ),
+            ):
+                result = execute_odoo_post_deploy(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=OdooPostDeployRequest(context="opw", instance="testing"),
+                )
+
+            self.assertEqual(result.post_deploy_status, "fail")
+            self.assertIn("did not prove", result.error_message)
 
     def test_execute_can_request_destructive_restore_for_prelaunch_rebuild(self) -> None:
         captured_runs: list[dict[str, object]] = []
@@ -183,7 +232,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
-                    side_effect=lambda **kwargs: captured_runs.append(kwargs),
+                    side_effect=_capture_module_update_runs(captured_runs),
                 ),
             ):
                 result = execute_odoo_post_deploy(
@@ -244,7 +293,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
-                    side_effect=lambda **kwargs: captured_runs.append(kwargs),
+                    side_effect=_capture_module_update_runs(captured_runs),
                 ),
             ):
                 result = execute_odoo_post_deploy(
@@ -318,7 +367,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
-                    side_effect=lambda **kwargs: captured_runs.append(kwargs),
+                    side_effect=_capture_module_update_runs(captured_runs),
                 ),
             ):
                 result = execute_odoo_post_deploy(
