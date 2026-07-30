@@ -171,6 +171,9 @@ from control_plane.contracts.runtime_environment_record import (
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
+from control_plane.contracts.runner_host_hygiene import (
+    sanitize_runner_host_hygiene_audit_record_for_persistence,
+)
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
@@ -8366,14 +8369,15 @@ class PostgresRecordStore(HumanSessionStore):
     def write_runner_host_hygiene_audit_record(
         self, record: RunnerHostHygieneApplyAuditRecord
     ) -> None:
+        persisted_record = sanitize_runner_host_hygiene_audit_record_for_persistence(record)
         self._write_row(
             LaunchplaneRunnerHostHygieneAuditRow(
-                audit_record_key=record.audit_record_key,
-                host_name=record.request.host_name,
-                action=record.request.action,
-                status=record.status,
-                mutate=int(record.request.mutate),
-                payload=self._payload_dict(record),
+                audit_record_key=persisted_record.audit_record_key,
+                host_name=persisted_record.request.host_name,
+                action=persisted_record.request.action,
+                status=persisted_record.status,
+                mutate=int(persisted_record.request.mutate),
+                payload=self._payload_dict(persisted_record),
             )
         )
 
@@ -8381,6 +8385,7 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         *,
         host_name: str = "",
+        action: str = "",
         status: str = "",
         limit: int | None = None,
     ) -> tuple[RunnerHostHygieneApplyAuditRecord, ...]:
@@ -8388,6 +8393,8 @@ class PostgresRecordStore(HumanSessionStore):
         normalized_host_name = host_name.strip().lower()
         if normalized_host_name:
             filters.append(LaunchplaneRunnerHostHygieneAuditRow.host_name == normalized_host_name)
+        if action:
+            filters.append(LaunchplaneRunnerHostHygieneAuditRow.action == action)
         if status:
             filters.append(LaunchplaneRunnerHostHygieneAuditRow.status == status)
         return self._list_models(
@@ -8396,6 +8403,15 @@ class PostgresRecordStore(HumanSessionStore):
             filters=filters,
             order_by=(LaunchplaneRunnerHostHygieneAuditRow.audit_record_key.desc(),),
             limit=limit,
+        )
+
+    def read_runner_host_hygiene_audit_record(
+        self, audit_record_key: str
+    ) -> RunnerHostHygieneApplyAuditRecord:
+        return self._read_model(
+            model_type=RunnerHostHygieneApplyAuditRecord,
+            orm_model=LaunchplaneRunnerHostHygieneAuditRow,
+            filters=(LaunchplaneRunnerHostHygieneAuditRow.audit_record_key == audit_record_key,),
         )
 
     def write_runner_lane_registration_audit_record(

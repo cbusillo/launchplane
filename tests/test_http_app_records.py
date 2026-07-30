@@ -4,8 +4,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import patch
+from urllib.parse import quote
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import (
     BearerIdentityConfig,
@@ -70,6 +72,7 @@ from tests.http_app_test_support import (
     _record_read_policy,
     _RejectingVerifier,
     _runner_host_hygiene_audit_payload,
+    _runner_host_hygiene_audit_read_policy,
     _runner_host_hygiene_audit_write_identity,
     _runner_host_hygiene_audit_write_policy,
     _runner_lane_registration_audit_payload,
@@ -2279,6 +2282,350 @@ class FastApiPreviewDestroyedEvidenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
         envelope_schema = openapi["components"]["schemas"]["PreviewDestroyedEvidenceEnvelope"]
         self.assertFalse(envelope_schema["additionalProperties"])
+
+
+class FastApiRunnerHostHygieneAuditReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runner_host_hygiene_audit_list_normalizes_invalid_observed_at(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record = RunnerHostHygieneApplyAuditRecord.model_validate(
+                _runner_host_hygiene_audit_payload(
+                    audit_record_key="runner-host-hygiene/2026-07-30/invalid-timestamp"
+                )["audit"]
+            )
+            record = record.model_copy(
+                update={
+                    "pre_apply_report": record.pre_apply_report.model_copy(
+                        update={"observed_at": "not-a-timestamp"}
+                    )
+                }
+            )
+            store.write_runner_host_hygiene_audit_record(record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_read_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await http_request(
+                app,
+                "GET",
+                "/v1/evidence/runner-host-hygiene/audits?host_name=chris-testing",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["records"][0]["pre_apply_observed_at"])
+
+    async def test_runner_host_hygiene_audit_list_and_detail_return_durable_history(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            older_record = RunnerHostHygieneApplyAuditRecord.model_validate(
+                _runner_host_hygiene_audit_payload(
+                    audit_record_key="runner-host-hygiene/2026-07-29/runner-host-report"
+                )["audit"]
+            )
+            newer_record = RunnerHostHygieneApplyAuditRecord.model_validate(
+                _runner_host_hygiene_audit_payload(
+                    audit_record_key="runner-host-hygiene/2026-07-30/runner-host-report"
+                )["audit"]
+            )
+            store.write_runner_host_hygiene_audit_record(older_record)
+            store.write_runner_host_hygiene_audit_record(newer_record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_read_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            list_response = await http_request(
+                app,
+                "GET",
+                (
+                    "/v1/evidence/runner-host-hygiene/audits"
+                    "?host_name=Chris-Testing&action=prune_docker_cache"
+                    "&audit_status=planned&limit=1"
+                ),
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            detail_response = await http_request(
+                app,
+                "GET",
+                (
+                    "/v1/evidence/runner-host-hygiene/audits/record?audit_record_key="
+                    + quote(newer_record.audit_record_key, safe="")
+                ),
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            history_response = await http_request(
+                app,
+                "GET",
+                (
+                    "/v1/evidence/runner-host-hygiene/history"
+                    "?host_name=Chris-Testing&cache_key=images&limit=2"
+                ),
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(list_response.status_code, 200)
+        list_payload = list_response.json()
+        self.assertEqual(list_payload["status"], "ok")
+        self.assertEqual(list_payload["host_name"], "chris-testing")
+        self.assertEqual(list_payload["action"], "prune_docker_cache")
+        self.assertEqual(list_payload["audit_status"], "planned")
+        self.assertEqual(list_payload["count"], 1)
+        self.assertTrue(list_payload["truncated"])
+        self.assertEqual(
+            list_payload["records"][0]["audit_record_key"],
+            newer_record.audit_record_key,
+        )
+        self.assertEqual(
+            list_payload["records"][0]["pre_apply_observed_at"],
+            "2026-05-23T13:00:00Z",
+        )
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertEqual(
+            detail_response.json()["record"]["summary"]["audit_record_key"],
+            newer_record.audit_record_key,
+        )
+        self.assertNotIn("image_inventory", detail_response.json()["record"]["pre_apply_report"])
+        self.assertEqual(history_response.status_code, 200)
+        history_payload = history_response.json()
+        self.assertEqual(history_payload["host_name"], "chris-testing")
+        self.assertEqual(history_payload["cache_key"], "images")
+        self.assertEqual(history_payload["count"], 2)
+        self.assertEqual(history_payload["scan_limit"], 100)
+        self.assertFalse(history_payload["scan_truncated"])
+        self.assertFalse(history_payload["result_truncated"])
+        self.assertTrue(
+            all(
+                point["report"]["cache_class_telemetry"][0]["cache_key"] == "images"
+                for point in history_payload["points"]
+            )
+        )
+        self.assertTrue(
+            all(
+                point["report"]["chronology_state"] == "timestamped"
+                for point in history_payload["points"]
+            )
+        )
+
+    async def test_runner_host_hygiene_history_sorts_legacy_reports_last(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            timestamped_record = RunnerHostHygieneApplyAuditRecord.model_validate(
+                _runner_host_hygiene_audit_payload(
+                    audit_record_key="runner-host-hygiene/2026-07-30/timestamped"
+                )["audit"]
+            )
+            legacy_record = RunnerHostHygieneApplyAuditRecord.model_validate(
+                _runner_host_hygiene_audit_payload(
+                    audit_record_key="runner-host-hygiene/2099-01-01/legacy"
+                )["audit"]
+            )
+            store.write_runner_host_hygiene_audit_record(timestamped_record)
+            legacy_record_path = store.write_runner_host_hygiene_audit_record(legacy_record)
+            legacy_payload = cast(
+                dict[str, object],
+                _runner_host_hygiene_audit_payload(audit_record_key=legacy_record.audit_record_key)[
+                    "audit"
+                ],
+            )
+            legacy_report = cast(dict[str, object], legacy_payload["pre_apply_report"])
+            for field_name in (
+                "observed_at",
+                "cache_class_telemetry",
+                "image_inventory_total_count",
+                "image_inventory_truncated",
+                "volume_inventory_total_count",
+                "volume_inventory_truncated",
+            ):
+                legacy_report.pop(field_name, None)
+            legacy_report["runner_workdir_usage"] = [
+                {
+                    "root_key": "legacy",
+                    "measurement_status": "partial",
+                }
+            ]
+            legacy_report["image_inventory"] = [
+                {
+                    "image_id": "legacy-image",
+                    "repository": "legacy/image",
+                    "tag": "latest",
+                }
+            ]
+            legacy_report["volume_inventory"] = [
+                {
+                    "name": "legacy-volume",
+                    "driver": "local",
+                }
+            ]
+            legacy_record_path.write_text(
+                json.dumps(legacy_payload, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            reloaded_legacy = store.read_runner_host_hygiene_audit_record(
+                legacy_record.audit_record_key
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_read_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await http_request(
+                app,
+                "GET",
+                "/v1/evidence/runner-host-hygiene/history?host_name=chris-testing",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        points = response.json()["points"]
+        self.assertEqual(points[0]["audit_record_key"], timestamped_record.audit_record_key)
+        self.assertEqual(points[0]["report"]["chronology_state"], "timestamped")
+        self.assertEqual(points[-1]["audit_record_key"], legacy_record.audit_record_key)
+        self.assertEqual(points[-1]["report"]["chronology_state"], "legacy_missing")
+        self.assertEqual(
+            reloaded_legacy.pre_apply_report.runner_workdir_usage[0].reason_code,
+            "legacy_incomplete",
+        )
+        self.assertIsNone(reloaded_legacy.pre_apply_report.image_inventory[0].size_bytes)
+        self.assertIsNone(
+            reloaded_legacy.pre_apply_report.volume_inventory[0].referenced_by_containers
+        )
+
+    async def test_runner_host_hygiene_history_rejects_blank_host_name(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+            authz_policy=_runner_host_hygiene_audit_read_policy(),
+            record_store_factory=object,
+        )
+
+        response = await http_request(
+            app,
+            "GET",
+            "/v1/evidence/runner-host-hygiene/history?host_name=%20%20%20",
+            headers={"Authorization": "Bearer valid-token"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_query")
+
+    async def test_runner_host_hygiene_audit_reads_require_read_authorization(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+            authz_policy=_runner_host_hygiene_audit_write_policy(),
+            record_store_factory=object,
+        )
+
+        response = await http_request(
+            app,
+            "GET",
+            "/v1/evidence/runner-host-hygiene/audits",
+            headers={"Authorization": "Bearer valid-token"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_runner_host_hygiene_read_grant_cannot_write_audit(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+            authz_policy=_runner_host_hygiene_audit_read_policy(),
+            record_store_factory=object,
+        )
+
+        response = await _post_runner_host_hygiene_audit_evidence(
+            app,
+            _runner_host_hygiene_audit_payload(),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_runner_host_hygiene_audit_detail_returns_not_found(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_read_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await http_request(
+                app,
+                "GET",
+                ("/v1/evidence/runner-host-hygiene/audits/record?audit_record_key=missing"),
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_runner_host_hygiene_audit_detail_handles_overlong_missing_key(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_read_policy(),
+                record_store_factory=lambda: store,
+            )
+            audit_record_key = "runner-host-hygiene/" + ("a" * 300)
+
+            response = await http_request(
+                app,
+                "GET",
+                (
+                    "/v1/evidence/runner-host-hygiene/audits/record?audit_record_key="
+                    + quote(audit_record_key, safe="")
+                ),
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_runner_host_hygiene_audit_list_rejects_invalid_limit(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+            authz_policy=_runner_host_hygiene_audit_read_policy(),
+            record_store_factory=object,
+        )
+
+        response = await http_request(
+            app,
+            "GET",
+            "/v1/evidence/runner-host-hygiene/audits?limit=101",
+            headers={"Authorization": "Bearer valid-token"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_query")
+
+    def test_openapi_includes_runner_host_hygiene_audit_read_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+            authz_policy=_runner_host_hygiene_audit_read_policy(),
+            record_store_factory=object,
+        )
+
+        openapi = app.openapi()
+
+        list_route = openapi["paths"]["/v1/evidence/runner-host-hygiene/audits"]["get"]
+        self.assertEqual(list_route["operationId"], "list_runner_host_hygiene_audit_records")
+        detail_route = openapi["paths"]["/v1/evidence/runner-host-hygiene/audits/record"]["get"]
+        self.assertEqual(detail_route["operationId"], "read_runner_host_hygiene_audit_record")
+        history_route = openapi["paths"]["/v1/evidence/runner-host-hygiene/history"]["get"]
+        self.assertEqual(history_route["operationId"], "read_runner_host_hygiene_history")
+        self.assertIn(
+            "RunnerHostHygieneCacheClassTelemetry",
+            openapi["components"]["schemas"],
+        )
 
 
 class FastApiRunnerHostHygieneAuditEvidenceTests(unittest.IsolatedAsyncioTestCase):

@@ -1105,6 +1105,25 @@ def _runner_host_hygiene_audit_write_policy() -> LaunchplaneAuthzPolicy:
     )
 
 
+def _runner_host_hygiene_audit_read_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "cbusillo/launchplane",
+                    "workflow_refs": [
+                        "cbusillo/launchplane/.github/workflows/runner-host-hygiene.yml@refs/heads/main"
+                    ],
+                    "event_names": ["workflow_dispatch"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["runner_host_hygiene_audit.read"],
+                }
+            ]
+        }
+    )
+
+
 def _github_human_runner_host_hygiene_audit_write_policy() -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {

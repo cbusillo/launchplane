@@ -219,7 +219,11 @@ class FastApiIngressTopologyRegistrarTests(unittest.TestCase):
 
         self.assertEqual(
             route_paths[preceding_route_index : preceding_route_index + len(expected_paths) + 2],
-            ["/v1/ingress/canary-routes/apply", *expected_paths, "/v1/deployments/{record_id}"],
+            [
+                "/v1/ingress/canary-routes/apply",
+                *expected_paths,
+                "/v1/evidence/runner-host-hygiene/audits",
+            ],
         )
         routes_by_path = {route.path: route for route in api_routes}
         for path, name, module_name in expected_routes:

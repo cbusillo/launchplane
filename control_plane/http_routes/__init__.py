@@ -47,6 +47,9 @@ from control_plane.http_routes.preview import (
     register_preview_readiness_read_routes,
     register_preview_record_read_routes,
 )
+from control_plane.http_routes.runner_host_hygiene import (
+    register_runner_host_hygiene_read_routes,
+)
 from control_plane.http_routes.products import (
     ProductReadRouteDependencies,
     product_profile_context_cutover_contexts_allowed,
@@ -111,6 +114,7 @@ __all__ = (
     "register_product_promotion_status_read_routes",
     "register_product_profile_read_routes",
     "register_protected_artifact_read_routes",
+    "register_runner_host_hygiene_read_routes",
     "register_topology_read_routes",
     "register_tracked_target_log_read_routes",
     "register_work_graph_issue_inbox_read_routes",

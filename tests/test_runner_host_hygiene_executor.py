@@ -32,8 +32,15 @@ from control_plane.workflows.runner_host_hygiene_executor import (
 )
 from control_plane.workflows.runner_host_hygiene_executor import _DOCKER_DISK_USAGE_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import _GENERATED_RUN_CACHE_HELPER
+from control_plane.workflows.runner_host_hygiene_executor import (
+    MAX_DOCKER_IMAGE_INVENTORY_ITEMS,
+)
+from control_plane.workflows.runner_host_hygiene_executor import (
+    MAX_DOCKER_VOLUME_INVENTORY_ITEMS,
+)
 from control_plane.workflows.runner_host_hygiene_executor import _parse_docker_disk_usage
 from control_plane.workflows.runner_host_hygiene_executor import _RUNNER_WORKDIR_USAGE_HELPER
+from control_plane.workflows.runner_host_hygiene_executor import collect_runner_host_hygiene_report
 from control_plane.workflows.runner_host_hygiene_executor import validate_local_executor_environment
 from control_plane.workflows.runner_host_hygiene_audit_spool import (
     RunnerHostHygieneAuditSpool,
@@ -705,11 +712,11 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertIsNotNone(post_apply_report)
         assert post_apply_report is not None
         warm_image = next(
-            image
-            for image in post_apply_report.image_inventory
-            if image.repository == "odoo-docker-chris-testing"
+            image for image in post_apply_report.image_inventory if image.is_warm_builder
         )
-        self.assertEqual(warm_image.tag, "latest")
+        self.assertEqual(warm_image.repository, "")
+        self.assertEqual(warm_image.tag, "")
+        self.assertEqual(warm_image.created_at, "")
         self.assertEqual(warm_image.size_bytes, 1_200_000_000)
         self.assertTrue(warm_image.in_use)
         self.assertFalse(warm_image.dangling)
@@ -723,8 +730,79 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertEqual(volume.size_bytes, 45_500_000_000)
         self.assertEqual(volume.referenced_by_containers, 0)
         self.assertTrue(volume.dangling)
-        self.assertEqual(volume.labels, ("launchplane.scope=test",))
+        self.assertEqual(volume.mountpoint, "")
+        self.assertEqual(volume.labels, ())
         self.assertEqual(command_runner.commands.count(_DOCKER_DISK_USAGE_COMMAND), 2)
+
+    def test_report_bounds_docker_inventories_and_marks_telemetry_partial(self) -> None:
+        image_rows: list[dict[str, object]] = [
+            {
+                "CreatedAt": "2026-07-30 01:00:00 +0000 UTC",
+                "ID": f"sha256:image-{index}",
+                "Repository": f"example/image-{index}",
+                "Size": "1MB",
+                "Tag": "latest",
+            }
+            for index in range(MAX_DOCKER_IMAGE_INVENTORY_ITEMS + 2)
+        ]
+        image_inventory = _json_lines(*image_rows)
+        volume_inventory = [
+            {
+                "Driver": "local",
+                "Labels": {},
+                "Mountpoint": f"/var/lib/docker/volumes/cache-{index}/_data",
+                "Name": f"cache-{index}",
+                "UsageData": {"RefCount": 0, "Size": 1_000_000},
+            }
+            for index in range(MAX_DOCKER_VOLUME_INVENTORY_ITEMS + 2)
+        ]
+        command_runner = _CommandRunner(
+            image_inventory=image_inventory,
+            volume_inventory=json.dumps(volume_inventory),
+        )
+
+        report = collect_runner_host_hygiene_report(
+            request=_request(mutate=False),
+            remote_runner=command_runner,
+        )
+
+        self.assertEqual(len(report.image_inventory), MAX_DOCKER_IMAGE_INVENTORY_ITEMS)
+        self.assertTrue(report.image_inventory_truncated)
+        self.assertEqual(len(report.volume_inventory), MAX_DOCKER_VOLUME_INVENTORY_ITEMS)
+        self.assertTrue(report.volume_inventory_truncated)
+        telemetry = {item.cache_class: item for item in report.cache_class_telemetry}
+        self.assertEqual(telemetry["docker_images"].availability, "available")
+        self.assertEqual(telemetry["docker_volumes"].availability, "available")
+        self.assertEqual(telemetry["docker_images"].entry_count, 1)
+        self.assertEqual(
+            telemetry["docker_volumes"].entry_count,
+            MAX_DOCKER_VOLUME_INVENTORY_ITEMS + 2,
+        )
+
+    def test_report_preserves_unavailable_docker_image_size(self) -> None:
+        command_runner = _CommandRunner(
+            image_inventory=_json_lines(
+                {
+                    "CreatedAt": "2026-07-30 01:00:00 +0000 UTC",
+                    "ID": "sha256:image-without-size",
+                    "Repository": "example/image",
+                    "Size": "N/A",
+                    "Tag": "latest",
+                }
+            )
+        )
+
+        report = collect_runner_host_hygiene_report(
+            request=_request(mutate=False),
+            remote_runner=command_runner,
+        )
+
+        self.assertIsNone(report.image_inventory[0].size_bytes)
+        image_telemetry = next(
+            item for item in report.cache_class_telemetry if item.cache_class == "docker_images"
+        )
+        self.assertEqual(image_telemetry.availability, "available")
+        self.assertEqual(image_telemetry.logical_bytes, 500_000_000)
 
     def test_executor_records_runner_workdir_bytes(self) -> None:
         command_runner = _CommandRunner(runner_workdir_bytes=12_345_678)
@@ -1113,7 +1191,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 ),
             )
 
-    def test_executor_hides_workdir_helper_failure_detail(self) -> None:
+    def test_report_records_workdir_helper_failure_as_unavailable_without_detail(self) -> None:
         command_runner = _CommandRunner()
 
         def failing_runner(command: Sequence[str], timeout_seconds: int) -> RemoteCommandResult:
@@ -1128,14 +1206,20 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 )
             return command_runner(command, timeout_seconds)
 
-        with self.assertRaises(click.ClickException) as raised:
-            execute_runner_host_hygiene_executor(
-                request=_request(mutate=False),
-                remote_runner=failing_runner,
-                audit_poster=_AuditPoster(),
-            )
+        report = collect_runner_host_hygiene_report(
+            request=_request(mutate=False),
+            remote_runner=failing_runner,
+        )
 
-        self.assertNotIn("/private/runner/root", str(raised.exception))
+        self.assertEqual(report.status, "attention")
+        self.assertEqual(report.runner_workdir_usage[0].measurement_status, "unavailable")
+        self.assertEqual(report.runner_workdir_usage[0].reason_code, "probe_failed")
+        telemetry = next(
+            item for item in report.cache_class_telemetry if item.cache_class == "runner_workdir"
+        )
+        self.assertEqual(telemetry.availability, "unavailable")
+        self.assertEqual(telemetry.unavailable_reason, "probe_failed")
+        self.assertNotIn("/private/runner/root", report.model_dump_json())
 
     def test_executor_records_failed_terminal_audit_when_post_report_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1282,6 +1366,87 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertEqual(snapshot.volume_inventory[0].size_bytes, 45_500_000_000)
         self.assertEqual(snapshot.reclaimable_breakdown.local_volumes_bytes, 45_500_000_000)
 
+    def test_docker_disk_usage_uses_legacy_api_class_semantics(self) -> None:
+        snapshot = _parse_docker_disk_usage(
+            _docker_disk_usage_json(
+                images=[
+                    {"Containers": 0, "SharedSize": 90, "Size": 100},
+                    {"Containers": 1, "SharedSize": 90, "Size": 100},
+                ],
+                build_cache=[
+                    {"InUse": False, "Shared": False, "Size": 100},
+                    {"InUse": False, "Shared": True, "Size": 200},
+                    {"InUse": True, "Shared": False, "Size": 40},
+                ],
+                layers_size=110,
+            )
+        )
+        measurements = {item.cache_class: item for item in snapshot.cache_class_measurements}
+
+        self.assertEqual(measurements["docker_images"].logical_bytes, 110)
+        self.assertEqual(measurements["docker_images"].reclaimable_bytes, 10)
+        self.assertEqual(measurements["docker_build_cache"].logical_bytes, 140)
+        self.assertEqual(measurements["docker_build_cache"].reclaimable_bytes, 100)
+
+    def test_docker_disk_usage_marks_unknown_values_partial(self) -> None:
+        snapshot = _parse_docker_disk_usage(
+            json.dumps(
+                {
+                    "Images": [{"Containers": 0, "SharedSize": -1, "Size": -1}],
+                    "LayersSize": 100,
+                    "Containers": [{"SizeRw": -1}],
+                    "Volumes": [
+                        {
+                            "Driver": "local",
+                            "Labels": {},
+                            "Mountpoint": "/private/docker/volume",
+                            "Name": "unknown-volume",
+                            "UsageData": {"RefCount": -1, "Size": -1},
+                        }
+                    ],
+                    "BuildCache": [{"Size": 100}],
+                }
+            )
+        )
+        measurements = {item.cache_class: item for item in snapshot.cache_class_measurements}
+
+        self.assertTrue(all(item.availability == "partial" for item in measurements.values()))
+        self.assertIsNone(measurements["docker_images"].reclaimable_bytes)
+        self.assertIsNone(measurements["docker_containers"].logical_bytes)
+        self.assertIsNone(measurements["docker_volumes"].logical_bytes)
+        self.assertIsNone(measurements["docker_build_cache"].reclaimable_bytes)
+        self.assertIsNone(snapshot.volume_inventory[0].referenced_by_containers)
+
+    def test_docker_disk_usage_distinguishes_empty_and_unavailable_classes(self) -> None:
+        empty_snapshot = _parse_docker_disk_usage(_docker_disk_usage_json())
+        empty_measurements = {
+            item.cache_class: item for item in empty_snapshot.cache_class_measurements
+        }
+
+        self.assertTrue(
+            all(item.availability == "available" for item in empty_measurements.values())
+        )
+        self.assertTrue(all(item.logical_bytes == 0 for item in empty_measurements.values()))
+        self.assertTrue(all(item.reclaimable_bytes == 0 for item in empty_measurements.values()))
+
+        missing_snapshot = _parse_docker_disk_usage(json.dumps({"Images": [], "LayersSize": 0}))
+        missing_measurements = {
+            item.cache_class: item for item in missing_snapshot.cache_class_measurements
+        }
+
+        self.assertEqual(missing_measurements["docker_images"].availability, "available")
+        for cache_class in (
+            "docker_containers",
+            "docker_volumes",
+            "docker_build_cache",
+        ):
+            with self.subTest(cache_class=cache_class):
+                measurement = missing_measurements[cache_class]
+                self.assertEqual(measurement.availability, "unavailable")
+                self.assertEqual(measurement.reason_code, "class_unavailable")
+                self.assertIsNone(measurement.logical_bytes)
+                self.assertIsNone(measurement.reclaimable_bytes)
+
     def test_executor_fails_closed_when_docker_summary_is_unparseable(self) -> None:
         command_runner = _CommandRunner(docker_disk_usage="not-json")
         audit_poster = _AuditPoster()
@@ -1294,6 +1459,87 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             )
 
         self.assertEqual(audit_poster.records, [])
+
+    def test_report_records_unavailable_docker_summary_without_aborting(self) -> None:
+        report = collect_runner_host_hygiene_report(
+            request=_request(mutate=False),
+            remote_runner=_CommandRunner(docker_disk_usage="not-json"),
+        )
+
+        docker_telemetry = tuple(
+            item
+            for item in report.cache_class_telemetry
+            if item.measurement_basis == "docker_engine"
+        )
+        self.assertEqual(len(docker_telemetry), 4)
+        self.assertTrue(all(item.availability == "unavailable" for item in docker_telemetry))
+        self.assertTrue(all(item.unavailable_reason == "probe_failed" for item in docker_telemetry))
+
+    def test_report_marks_failed_image_inventory_partial(self) -> None:
+        command_runner = _CommandRunner()
+
+        def fail_image_inventory(
+            command: Sequence[str], timeout_seconds: int
+        ) -> RemoteCommandResult:
+            if tuple(command) == (
+                "docker",
+                "image",
+                "ls",
+                "--all",
+                "--no-trunc",
+                "--format",
+                "{{json .}}",
+            ):
+                return RemoteCommandResult(returncode=1, stderr="inventory unavailable")
+            return command_runner(command, timeout_seconds)
+
+        report = collect_runner_host_hygiene_report(
+            request=_request(mutate=False),
+            remote_runner=fail_image_inventory,
+        )
+        image_telemetry = next(
+            item for item in report.cache_class_telemetry if item.cache_class == "docker_images"
+        )
+
+        self.assertEqual(image_telemetry.availability, "partial")
+        self.assertEqual(image_telemetry.unavailable_reason, "inventory_probe_failed")
+
+    def test_report_merges_partial_image_and_inventory_reasons(self) -> None:
+        command_runner = _CommandRunner(
+            docker_disk_usage=_docker_disk_usage_json(
+                images=[{"Containers": 0, "SharedSize": -1, "Size": 100}],
+                layers_size=100,
+            )
+        )
+
+        def fail_image_inventory(
+            command: Sequence[str], timeout_seconds: int
+        ) -> RemoteCommandResult:
+            if tuple(command) == (
+                "docker",
+                "image",
+                "ls",
+                "--all",
+                "--no-trunc",
+                "--format",
+                "{{json .}}",
+            ):
+                return RemoteCommandResult(returncode=1, stderr="inventory unavailable")
+            return command_runner(command, timeout_seconds)
+
+        report = collect_runner_host_hygiene_report(
+            request=_request(mutate=False),
+            remote_runner=fail_image_inventory,
+        )
+        image_telemetry = next(
+            item for item in report.cache_class_telemetry if item.cache_class == "docker_images"
+        )
+
+        self.assertEqual(image_telemetry.availability, "partial")
+        self.assertEqual(
+            image_telemetry.unavailable_reason,
+            "measurement_partial,inventory_probe_failed",
+        )
 
     def test_executor_blocks_before_prune_without_mutate_intent(self) -> None:
         command_runner = _CommandRunner()
@@ -2074,13 +2320,20 @@ def _docker_disk_usage_json(
     containers: list[dict[str, object]] | None = None,
     volumes: list[dict[str, object]] | None = None,
     build_cache: list[dict[str, object]] | None = None,
+    layers_size: int | None = None,
 ) -> str:
+    image_rows = images or []
+    build_cache_rows = build_cache or []
     return json.dumps(
         {
-            "BuildCache": build_cache or [],
+            "BuildCache": build_cache_rows,
             "Containers": containers or [],
-            "Images": images or [],
-            "LayersSize": 0,
+            "Images": image_rows,
+            "LayersSize": (
+                layers_size
+                if layers_size is not None
+                else sum(size for row in image_rows if isinstance((size := row.get("Size")), int))
+            ),
             "Volumes": volumes or [],
         }
     )

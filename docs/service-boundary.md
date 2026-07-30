@@ -253,6 +253,12 @@ cleanup scope so the store is always closed.
   - `POST /v1/evidence/runner-host-hygiene/audits` (native FastAPI for
     bearer-token callers, with Pydantic/OpenAPI contract coverage, idempotency
     replay preservation, and runner-host hygiene audit storage)
+  - `GET /v1/evidence/runner-host-hygiene/audits` (bounded runner-host hygiene
+    audit summaries for authorized bearer-token callers)
+  - `GET /v1/evidence/runner-host-hygiene/audits/record` (one sanitized audit
+    projection selected by `audit_record_key`)
+  - `GET /v1/evidence/runner-host-hygiene/history` (bounded timestamped
+    pre/post cache telemetry history for one runner host)
   - `POST /v1/evidence/runner-lane-registration/audits` (native FastAPI for
     bearer-token callers, with Pydantic/OpenAPI contract coverage, idempotency
     replay preservation, and runner-lane registration audit storage)
@@ -3004,6 +3010,27 @@ accepted records and result details. It is native FastAPI evidence ingress for
 bearer-token callers with OpenAPI contract coverage and idempotency replay
 preservation. It records planned, completed, or failed audit facts supplied by a
 future approved executor, but it does not mutate runner hosts itself.
+
+The corresponding read routes require the separate
+`runner_host_hygiene_audit.read` action for product/context
+`launchplane/launchplane`:
+
+- `GET /v1/evidence/runner-host-hygiene/audits` accepts optional `host_name`,
+  `action`, and `audit_status` filters plus a bounded `limit`.
+- `GET /v1/evidence/runner-host-hygiene/audits/record` requires an
+  `audit_record_key` query parameter because audit keys contain `/` characters.
+- `GET /v1/evidence/runner-host-hygiene/history` requires `host_name`, accepts
+  optional `cache_key`, and returns timestamped pre/post report points.
+
+List responses contain summaries rather than inventory-bearing audit payloads.
+Detail and history responses omit raw image and volume rows and expose bounded
+counts, truncation state, finding codes, and availability-aware cache telemetry.
+Limits default to 25 and cannot exceed 100. Reports written after this contract
+preserve `observed_at`; older reports remain readable as `legacy_missing`
+without inferring time from an audit key. Read access does not authorize writes,
+host mutation, or any new cleanup class. History responses report the fixed
+100-audit `scan_limit` and distinguish `scan_truncated` from
+`result_truncated`; neither condition implies that older evidence was deleted.
 
 ### Runner lane lifecycle audit evidence
 
