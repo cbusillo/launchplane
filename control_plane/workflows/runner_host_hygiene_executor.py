@@ -83,6 +83,8 @@ _GITHUB_ACTIVE_WORKFLOW_RUN_STATUSES = (
     "pending",
     "requested",
 )
+_GITHUB_ACTIVE_JOB_STATUSES = frozenset(("queued", "in_progress", "waiting", "pending"))
+_GITHUB_KNOWN_JOB_STATUSES = _GITHUB_ACTIVE_JOB_STATUSES | {"completed"}
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
 _BUILDCTL_STORAGE_MB_BYTES = 1_000_000
 _RUNNER_WORKDIR_USAGE_HELPER = "/usr/local/sbin/launchplane-runner-workdir-usage"
@@ -1552,10 +1554,9 @@ def _read_github_idle_sample(
     observations: list[RunnerHostHygieneIdleObservation] = []
     for binding in request.github_idle_bindings:
         subject_key = _github_binding_subject_key(binding)
-        is_current_binding = (
+        is_current_repository_lane = (
             binding.repository_scope == request.repository_scope.lower()
             and binding.execution_lane == request.execution_lane.lower()
-            and binding.runner_name == request.current_runner_name
         )
         if github_idle_evidence_reader is None:
             returned: tuple[RunnerHostHygieneIdleObservation, ...] = ()
@@ -1566,7 +1567,7 @@ def _read_github_idle_sample(
                     binding.repository_scope,
                     binding.execution_lane,
                     binding.runner_name,
-                    is_current_binding,
+                    is_current_repository_lane,
                 )
                 unavailable_reason = "source_missing"
             except (OSError, ValueError):
@@ -2068,12 +2069,15 @@ def build_github_idle_evidence_reader(
         repository: str,
         execution_lane: str,
         runner_name: str = "",
-        exclude_current: bool = False,
+        exclude_current_job: bool = False,
     ) -> tuple[RunnerHostHygieneIdleObservation, ...]:
         owner, name = repository.split("/", maxsplit=1)
         observed_at = utc_now_timestamp()
         effective_runner_name = runner_name.strip() or normalized_runner_name
-        effective_exclude_current = exclude_current or not runner_name.strip()
+        effective_exclude_current_job = exclude_current_job or not runner_name.strip()
+        exclude_current_runner = (
+            effective_exclude_current_job and effective_runner_name == normalized_runner_name
+        )
         subject_key = _public_identity_key(
             "runner",
             "|".join(
@@ -2092,7 +2096,8 @@ def build_github_idle_evidence_reader(
             execution_lane=execution_lane,
             bearer_token=normalized_token,
             current_run_id=current_run_id,
-            exclude_current_run=effective_exclude_current,
+            current_runner_name=normalized_runner_name,
+            exclude_current_job=effective_exclude_current_job,
             subject_key=subject_key,
             observed_at=observed_at,
         )
@@ -2101,7 +2106,7 @@ def build_github_idle_evidence_reader(
             execution_lane=execution_lane,
             bearer_token=normalized_token,
             runner_name=effective_runner_name,
-            exclude_current_runner=effective_exclude_current,
+            exclude_current_runner=exclude_current_runner,
             subject_key=subject_key,
             observed_at=observed_at,
         )
@@ -2116,11 +2121,12 @@ def _github_jobs_idle_observation(
     execution_lane: str,
     bearer_token: str,
     current_run_id: int | None,
-    exclude_current_run: bool,
+    current_runner_name: str,
+    exclude_current_job: bool,
     subject_key: str,
     observed_at: str,
 ) -> RunnerHostHygieneIdleObservation:
-    if exclude_current_run and current_run_id is None:
+    if exclude_current_job and (current_run_id is None or not current_runner_name):
         return _unavailable_idle_observation(
             source="github_jobs",
             scope="full_host",
@@ -2178,8 +2184,16 @@ def _github_jobs_idle_observation(
                     reason_code="source_contradictory",
                 )
             run_id = workflow_run.get("id")
-            if isinstance(run_id, int) and (not exclude_current_run or run_id != current_run_id):
-                active_run_ids.add(run_id)
+            if not isinstance(run_id, int) or run_id <= 0:
+                return _unavailable_idle_observation(
+                    source="github_jobs",
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key=subject_key,
+                    observed_at=observed_at,
+                    reason_code="source_contradictory",
+                )
+            active_run_ids.add(run_id)
     if len(active_run_ids) > MAX_GITHUB_IDLE_ACTIVE_RUNS:
         return _partial_idle_observation(
             source="github_jobs",
@@ -2195,6 +2209,7 @@ def _github_jobs_idle_observation(
     normalized_lane = execution_lane.strip().lower()
     active_jobs = 0
     observed_jobs = 0
+    current_job_observed = False
     for run_id in sorted(active_run_ids):
         payload, reason_code = _github_api_object(
             url=f"{repository_url}/actions/runs/{run_id}/jobs?filter=latest&per_page=100",
@@ -2242,6 +2257,33 @@ def _github_jobs_idle_observation(
                     observed_at=observed_at,
                     reason_code="source_contradictory",
                 )
+            job_status = job.get("status")
+            if not isinstance(job_status, str) or job_status not in _GITHUB_KNOWN_JOB_STATUSES:
+                return _unavailable_idle_observation(
+                    source="github_jobs",
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key=subject_key,
+                    observed_at=observed_at,
+                    reason_code="source_contradictory",
+                )
+            job_runner_name = job.get("runner_name")
+            if job_runner_name is not None and not isinstance(job_runner_name, str):
+                return _unavailable_idle_observation(
+                    source="github_jobs",
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key=subject_key,
+                    observed_at=observed_at,
+                    reason_code="source_contradictory",
+                )
+            if (
+                exclude_current_job
+                and run_id == current_run_id
+                and job_runner_name == current_runner_name
+            ):
+                current_job_observed = True
+                continue
             labels = job.get("labels")
             if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
                 return _unavailable_idle_observation(
@@ -2256,8 +2298,17 @@ def _github_jobs_idle_observation(
             if "self-hosted" not in normalized_labels or normalized_lane not in normalized_labels:
                 continue
             observed_jobs += 1
-            if job.get("status") in {"queued", "in_progress", "waiting", "pending"}:
+            if job_status in _GITHUB_ACTIVE_JOB_STATUSES:
                 active_jobs += 1
+    if exclude_current_job and not current_job_observed:
+        return _unavailable_idle_observation(
+            source="github_jobs",
+            scope="full_host",
+            scope_key="host",
+            subject_key=subject_key,
+            observed_at=observed_at,
+            reason_code="source_missing",
+        )
     return RunnerHostHygieneIdleObservation(
         source="github_jobs",
         scope="full_host",

@@ -622,6 +622,73 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertEqual(len(github_observations), 4)
         self.assertEqual(len({item.subject_key for item in github_observations}), 2)
 
+    def test_full_host_idle_excludes_current_job_across_same_repository_lane(self) -> None:
+        bindings = (
+            RunnerHostGitHubBinding(
+                repository_scope="cbusillo/launchplane",
+                execution_lane="shared-lane",
+                runner_name="primary-runner",
+                service_unit="launchplane-runner@primary.service",
+            ),
+            RunnerHostGitHubBinding(
+                repository_scope="cbusillo/launchplane",
+                execution_lane="shared-lane",
+                runner_name="secondary-runner",
+                service_unit="launchplane-runner@secondary.service",
+            ),
+        )
+        exclusions: list[tuple[str, bool]] = []
+
+        def github_reader(
+            repository: str,
+            execution_lane: str,
+            runner_name: str,
+            exclude_current_job: bool,
+        ) -> tuple[RunnerHostHygieneIdleObservation, ...]:
+            exclusions.append((runner_name, exclude_current_job))
+            subject_key = _public_identity_key(
+                "runner",
+                "|".join((repository, execution_lane, runner_name)),
+            )
+            return tuple(
+                RunnerHostHygieneIdleObservation(
+                    source=source,
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key=subject_key,
+                    observed_at=utc_now_timestamp(),
+                    availability="available",
+                    state="idle",
+                    active_count=0,
+                    total_count=1,
+                )
+                for source in ("github_jobs", "github_runners")
+            )
+
+        report = _collect_runner_host_hygiene_report(
+            request=_request(
+                mutate=False,
+                repository_scope="cbusillo/launchplane",
+                execution_lane="shared-lane",
+                current_runner_name="primary-runner",
+                github_idle_bindings=bindings,
+            ),
+            remote_runner=_CommandRunner(
+                runner_service_output=(
+                    "launchplane-runner@primary.service active running\n"
+                    "launchplane-runner@secondary.service active running\n"
+                )
+            ),
+            github_idle_evidence_reader=github_reader,
+            idle_observation_sleeper=lambda _seconds: None,
+        )
+
+        self.assertEqual(report.idle_convergences[0].status, "idle")
+        self.assertEqual(
+            set(exclusions),
+            {("primary-runner", True), ("secondary-runner", True)},
+        )
+
     def test_executor_posts_planned_and_completed_audits(self) -> None:
         command_runner = _CommandRunner()
         audit_poster = _AuditPoster()
@@ -1946,6 +2013,10 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             artifact_text = (temporary_path / "artifact.json").read_text(encoding="utf-8")
             self.assertNotIn("Bearer", artifact_text)
             self.assertNotIn("temporary-token", artifact_text)
+            self.assertNotIn(request.execution_lane, artifact_text)
+            self.assertNotIn(request.service_user, artifact_text)
+            self.assertNotIn(request.repository_scope, artifact_text)
+            self.assertNotIn(request.current_runner_name, artifact_text)
 
             reconciliation_runner = _CommandRunner()
             reconciled = execute_runner_host_hygiene_executor(
@@ -2692,6 +2763,16 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                     }
                 ],
             },
+            "/actions/runs/999/jobs": {
+                "total_count": 1,
+                "jobs": [
+                    {
+                        "status": "in_progress",
+                        "labels": ["self-hosted", "ops-gate"],
+                        "runner_name": "current-runner",
+                    }
+                ],
+            },
             "/actions/runners": {
                 "total_count": 2,
                 "runners": [
@@ -2756,17 +2837,107 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertNotEqual(by_source["github_jobs"].subject_key, "ops-gate")
         self.assertTrue(by_source["github_jobs"].subject_key.startswith("runner-"))
 
-    def test_github_idle_reader_preserves_unauthorized_runner_source(self) -> None:
+    def test_github_idle_reader_excludes_only_current_runner_for_sibling_binding(self) -> None:
+        responses = {
+            "status=queued": {"total_count": 0, "workflow_runs": []},
+            "status=in_progress": {
+                "total_count": 1,
+                "workflow_runs": [{"id": 999}],
+            },
+            "status=waiting": {"total_count": 0, "workflow_runs": []},
+            "status=pending": {"total_count": 0, "workflow_runs": []},
+            "status=requested": {"total_count": 0, "workflow_runs": []},
+            "/actions/runs/999/jobs": {
+                "total_count": 1,
+                "jobs": [
+                    {
+                        "status": "in_progress",
+                        "labels": ["self-hosted", "ops-gate"],
+                        "runner_name": "current-runner",
+                    }
+                ],
+            },
+            "/actions/runners": {
+                "total_count": 2,
+                "runners": [
+                    {
+                        "name": "current-runner",
+                        "status": "online",
+                        "busy": True,
+                        "labels": [{"name": "ops-gate"}],
+                    },
+                    {
+                        "name": "sibling-runner",
+                        "status": "online",
+                        "busy": True,
+                        "labels": [{"name": "ops-gate"}],
+                    },
+                ],
+            },
+        }
+
         class _Response:
+            def __init__(self, payload: Mapping[str, object]) -> None:
+                self._payload = payload
+
             def __enter__(self) -> "_Response":
                 return self
 
             def __exit__(self, *_args: object) -> None:
                 return None
 
-            @staticmethod
-            def read() -> bytes:
-                return b'{"total_count":0,"workflow_runs":[]}'
+            def read(self) -> bytes:
+                return json.dumps(self._payload).encode()
+
+        def fake_urlopen(request: Request, timeout: int) -> _Response:
+            self.assertEqual(timeout, 30)
+            for fragment, payload in responses.items():
+                if fragment in request.full_url:
+                    return _Response(payload)
+            raise AssertionError(f"unexpected GitHub request: {request.full_url}")
+
+        reader = build_github_idle_evidence_reader(
+            bearer_token="token",
+            current_run_id=999,
+            current_runner_name="current-runner",
+        )
+        with patch(
+            "control_plane.workflows.runner_host_hygiene_executor.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            current = reader(
+                "cbusillo/launchplane",
+                "ops-gate",
+                "current-runner",
+                True,
+            )
+            sibling = reader(
+                "cbusillo/launchplane",
+                "ops-gate",
+                "sibling-runner",
+                True,
+            )
+
+        current_by_source = {item.source: item for item in current}
+        sibling_by_source = {item.source: item for item in sibling}
+        self.assertEqual(current_by_source["github_jobs"].state, "idle")
+        self.assertEqual(current_by_source["github_runners"].state, "idle")
+        self.assertEqual(sibling_by_source["github_jobs"].state, "idle")
+        self.assertEqual(sibling_by_source["github_runners"].state, "active")
+
+    def test_github_idle_reader_preserves_unauthorized_runner_source(self) -> None:
+        class _Response:
+            def __init__(self, payload: Mapping[str, object]) -> None:
+                self._payload = payload
+
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps(self._payload).encode()
 
         def fake_urlopen(request: Request, timeout: int) -> _Response:
             self.assertEqual(timeout, 30)
@@ -2778,7 +2949,27 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                     hdrs=Message(),
                     fp=BytesIO(b"forbidden"),
                 )
-            return _Response()
+            if "/actions/runs/999/jobs" in request.full_url:
+                return _Response(
+                    {
+                        "total_count": 1,
+                        "jobs": [
+                            {
+                                "status": "in_progress",
+                                "labels": ["self-hosted", "ops-gate"],
+                                "runner_name": "current-runner",
+                            }
+                        ],
+                    }
+                )
+            return _Response(
+                {
+                    "total_count": 1 if "status=in_progress" in request.full_url else 0,
+                    "workflow_runs": (
+                        [{"id": 999}] if "status=in_progress" in request.full_url else []
+                    ),
+                }
+            )
 
         reader = build_github_idle_evidence_reader(
             bearer_token="token",

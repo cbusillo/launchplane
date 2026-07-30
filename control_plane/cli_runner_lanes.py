@@ -1802,6 +1802,11 @@ def runner_host_hygiene_executor(
                 "runner host hygiene GitHub evidence requires --github-token-env."
             )
         github_token = os.environ.get(github_token_env_name, "").strip()
+        if parsed_github_idle_bindings and not github_token:
+            raise click.ClickException(
+                "runner host hygiene GitHub idle evidence requires a populated token in "
+                f"{github_token_env_name}."
+            )
         request = RunnerHostHygieneExecutorRequest(
             action=apply_action,
             host_name=host_name,

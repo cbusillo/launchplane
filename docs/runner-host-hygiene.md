@@ -265,10 +265,11 @@ builds GitHub source requirements from that manifest and requires its service
 units to match the complete local `systemctl` inventory; an omitted or extra
 lane therefore blocks rather than disappearing from `full_host` evidence. Only
 public hashes and counts enter persisted evidence. The executor excludes only
-its own GitHub run and runner registration, using `GITHUB_RUN_ID` and
-`RUNNER_NAME`; missing identity, unauthorized APIs, incomplete pagination,
-manifest disagreement, stale timestamps, or a short or zero observation window
-blocks the apply plan.
+its own GitHub job, identified by `GITHUB_RUN_ID` and `RUNNER_NAME`, across the
+current repository/lane bindings, and excludes only its own runner
+registration. Sibling jobs and runner registrations remain visible. Missing
+identity, unauthorized APIs, incomplete pagination, manifest disagreement,
+stale timestamps, or a short or zero observation window blocks the apply plan.
 Generated run-cache actions do not use full-host evidence. Each policy-owned
 root instead records one `isolated_user` convergence with owner-process,
 per-entry open-handle, and GitHub run-state evidence. `isolated_lane` remains a
