@@ -1734,6 +1734,9 @@ run` is the foreground loop intended for an external process supervisor, and
 - Record the resolved manifest fingerprint, exact repo-to-SHA source map,
   baseline release tuple, artifact identity, health evidence, and failure
   details when a replacement does not become ready.
+- Ready generation evidence preserves the runtime identity checked by the
+  preview health verifier so downstream approval can bind the exact observed
+  product, context, source ref, preview runtime, deployment, artifact, and image.
 - Generation history should remain ordered and inspectable even when the latest
   generation failed and an older generation is still serving.
 - Launchplane read models should derive status/list/history payloads from these
@@ -1754,6 +1757,37 @@ run` is the foreground loop intended for an external process supervisor, and
 - Those CLI surfaces should be treated as temporary adapters for the target
   Launchplane API payloads, not as the final integration boundary external
   products are expected to couple to forever.
+
+## Manager Preview Approval Event Record
+
+- One append-only event per manager decision or lifecycle invalidation for an
+  exact rendered preview identity. Events use deterministic ids derived from
+  the exact binding, action, and source event so delivery retries replay without
+  overwriting history; a conflicting replay is rejected.
+- The binding captures product, context, repository, pull request, head SHA,
+  preview and serving-generation ids, artifact id and immutable image digest,
+  resolved manifest fingerprint, preview URL, and the full checked runtime
+  identity plus canonical runtime/binding digests.
+- Manager-authored `approved`, `changes_requested`, and `revoked` events require
+  a stable GitHub numeric identity and exactly one schema-v2 managed
+  authorization rule granting `manager_preview_approval.write` for the product
+  and context. The event stores the display login only as audit presentation and
+  records the managed rule ids plus authorization policy record id, revision,
+  source, and digest.
+- Lifecycle-authored `superseded` and `invalidated` events preserve teardown,
+  PR-close, generation-replacement, and related history without impersonating a
+  manager. Preview destroy and cleanup remain available independently of
+  approval and never consult approval as an admission gate.
+- The decision projection is computed from the append-only ledger and current
+  preview/generation/policy evidence. It returns `pending`, `approved`,
+  `changes_requested`, `revoked`, `stale`, or `unavailable` with a public-safe
+  reason. Any head, serving generation, artifact digest, manifest, runtime
+  identity, verification, preview state, or policy mismatch fails closed.
+- People-based manager resolution is private agent routing for communication and
+  planning only. It is not persisted in this record and is never runtime
+  authorization. Launchplane's active managed policy is the authority; GitHub
+  interaction and promotion-check projection are separate downstream adapters,
+  and tenant repositories own only their thin workflow integration.
 
 ## Launchplane Preview Enablement Record
 
@@ -1923,11 +1957,11 @@ preflights.
 - Every Code PR feedback webhooks and `/preview ok` or `/preview changes ...`
   source-issue comments are actor-gated before they become pending work for a
   local session. The repository owner is trusted, the source issue author is
-  trusted for preview validation, and configured managers from the local planning
-  manager map are accepted as a bootstrap policy source until Launchplane owns a
-  mutable repo trust-policy record. Bot-authored and untrusted human comments are
-  accepted-but-skipped so webhook delivery remains idempotent without sending
-  automation chatter to Every Code.
+  trusted for Every Code source-issue validation. Those semantics are distinct
+  from Launchplane manager approval of a rendered product preview: local People
+  or planning maps never authorize runtime approval. Bot-authored and untrusted
+  human comments are accepted-but-skipped so webhook delivery remains idempotent
+  without sending automation chatter to Every Code.
 - Agent callers should prefer `GET /v1/every-code/summary` over raw work-request
   reads when they only need status. The summary projection links back to the
   issue and result PR, reports whether work is active, stuck, complete, or

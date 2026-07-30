@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "d7f9a1b3c5e7"
+EXPECTED_ALEMBIC_HEAD_REVISION = "e8a0c2d4f6b8"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -159,6 +159,16 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_public_ingress_incident_events",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_manager_preview_approval_events",
+        "manager_github_id",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_manager_preview_approval_events",
         "payload",
         ("jsonb",),
     ),
@@ -372,12 +382,31 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_merge_train_controller_states_lease_idx",
         ("status", "lease_expires_at", "updated_at"),
     ),
+    CriticalIndex(
+        "launchplane_manager_preview_approval_events",
+        "launchplane_manager_preview_approval_events_subject_idx",
+        ("product", "context", "repository", "pr_number", "occurred_at"),
+    ),
+    CriticalIndex(
+        "launchplane_manager_preview_approval_events",
+        "launchplane_manager_preview_approval_events_preview_idx",
+        ("preview_id", "serving_generation_id", "occurred_at"),
+    ),
+    CriticalIndex(
+        "launchplane_manager_preview_approval_events",
+        "launchplane_manager_preview_approval_events_approval_idx",
+        ("approval_id", "occurred_at"),
+    ),
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_route_bindings",
         ("product", "context", "instance"),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_manager_preview_approval_events",
+        ("event_id",),
     ),
 )
 

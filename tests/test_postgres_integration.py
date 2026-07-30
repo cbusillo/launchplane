@@ -33,6 +33,11 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
 )
+from control_plane.contracts.manager_preview_approval import (
+    ManagerPreviewApprovalAuthorization,
+    ManagerPreviewApprovalBinding,
+    ManagerPreviewApprovalEventRecord,
+)
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerLeaseHeldError,
     MergeTrainControllerLeaseLostError,
@@ -66,6 +71,8 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingSource,
     RouteBindingTls,
 )
+from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
     ProviderMutationOutcome,
@@ -491,7 +498,77 @@ def _outbox_delivery(*, suffix: str = "one") -> OutboxDeliveryRecord:
     )
 
 
+def _manager_preview_approval_event() -> ManagerPreviewApprovalEventRecord:
+    occurred_at = "2026-07-30T12:00:00Z"
+    binding = ManagerPreviewApprovalBinding(
+        product="example-site",
+        context="example-site-testing",
+        repository="example/example-site",
+        pr_number=17,
+        pr_url="https://github.com/example/example-site/pull/17",
+        head_sha="1" * 40,
+        preview_id="preview-17",
+        serving_generation_id="generation-17",
+        artifact_id="artifact-17",
+        artifact_image_digest=f"sha256:{'a' * 64}",
+        manifest_fingerprint="manifest-17",
+        preview_url="https://preview-17.example.com/",
+        runtime_identity=RuntimeIdentity(
+            product="example-site",
+            context="example-site-testing",
+            instance="preview-17",
+            environment_kind="preview",
+            deployment_record_id="deployment-17",
+            artifact_id="artifact-17",
+            source_git_ref="1" * 40,
+            image_reference=f"ghcr.io/example/site@sha256:{'a' * 64}",
+            preview_id="preview-17",
+            preview_generation_id="generation-17",
+        ),
+    )
+    return ManagerPreviewApprovalEventRecord(
+        binding=binding,
+        action="approved",
+        occurred_at=occurred_at,
+        source_event_kind="github_issue_comment",
+        source_event_id="comment-101",
+        authorization=ManagerPreviewApprovalAuthorization(
+            manager_github_id=101,
+            manager_login="manager",
+            managed_set_id="manager.example-site",
+            managed_rule_id="preview-approval",
+            policy_record_id="launchplane-authz-policy-r00000000000000000001-example",
+            policy_revision=1,
+            policy_sha256="b" * 64,
+            policy_source="test:manager-preview-approval",
+            authorized_at=occurred_at,
+        ),
+    )
+
+
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_manager_preview_approval_events_persist_append_only(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            event = _manager_preview_approval_event()
+
+            self.assertEqual(store.write_manager_preview_approval_event_record(event), "written")
+            self.assertEqual(store.write_manager_preview_approval_event_record(event), "replayed")
+            self.assertEqual(
+                store.list_manager_preview_approval_event_records(
+                    product="example-site",
+                    context="example-site-testing",
+                    repository="example/example-site",
+                    pr_number=17,
+                ),
+                (event,),
+            )
+
+            conflicting = ManagerPreviewApprovalEventRecord.model_validate(
+                {**event.model_dump(mode="json"), "reason": "Conflicting replay."}
+            )
+            with self.assertRaises(ManagerPreviewApprovalEventConflictError):
+                store.write_manager_preview_approval_event_record(conflicting)
+
     def test_full_release_upgrades_compatibility_floor_before_store_startup(self) -> None:
         with _isolated_postgres_database() as database_url:
             alembic_command.upgrade(

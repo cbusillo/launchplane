@@ -142,6 +142,9 @@ def build_launchplane_preview_generation_from_request(
             max((record.sequence for record in existing_generations), default=0) + 1
         )
         resolved_generation_id = request.generation_id.strip()
+    resolved_runtime_identity = request.runtime_identity
+    if resolved_runtime_identity is None and existing_generation is not None:
+        resolved_runtime_identity = existing_generation.runtime_identity
 
     return build_preview_generation_record(
         preview_id=preview_record.preview_id,
@@ -170,6 +173,7 @@ def build_launchplane_preview_generation_from_request(
         overall_health_status=request.overall_health_status,
         failure_stage=request.failure_stage,
         failure_summary=request.failure_summary,
+        runtime_identity=resolved_runtime_identity,
     )
 
 

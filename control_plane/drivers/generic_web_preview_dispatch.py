@@ -485,6 +485,7 @@ def _generic_web_preview_refresh_mutation_requests(
         overall_health_status=states.overall_health_status,
         failure_stage=states.failure_stage,
         failure_summary="" if refresh_passed else failure_summary,
+        runtime_identity=driver_result.runtime_identity,
     )
     return preview_request, generation_request
 
@@ -581,6 +582,7 @@ def _apply_generic_web_preview_verification_records(
             overall_health_status="pass" if verification_passed else "fail",
             failure_stage="" if verification_passed else "verify",
             failure_summary="" if verification_passed else failure_summary,
+            runtime_identity=generation.runtime_identity,
         ),
     )
     verification_result = GenericWebPreviewVerificationResult(

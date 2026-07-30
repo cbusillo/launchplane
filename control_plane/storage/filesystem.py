@@ -41,6 +41,10 @@ from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanR
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
+from control_plane.contracts.manager_preview_approval import (
+    ManagerPreviewApprovalEventRecord,
+    ManagerPreviewApprovalEventWriteStatus,
+)
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.merge_train_controller_state import (
@@ -128,6 +132,7 @@ from control_plane.contracts.public_ingress_monitoring import PublicIngressObser
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.runtime_environment_record import (
@@ -1541,6 +1546,55 @@ class FilesystemRecordStore:
         records.sort(key=lambda record: (record.updated_at, record.gate_id), reverse=True)
         if offset > 0:
             records = records[offset:]
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_manager_preview_approval_event_record(
+        self, record: ManagerPreviewApprovalEventRecord
+    ) -> ManagerPreviewApprovalEventWriteStatus:
+        record_type = "launchplane_manager_preview_approval_events"
+        with self._product_authority_bundle_lock():
+            record_path = self._record_path(record_type, record.event_id)
+            if record_path.exists():
+                existing = self._read_model_locked(
+                    ManagerPreviewApprovalEventRecord,
+                    record_type,
+                    record.event_id,
+                )
+                if existing != record:
+                    raise ManagerPreviewApprovalEventConflictError(
+                        "Manager preview approval event replay changed the persisted payload."
+                    )
+                return "replayed"
+            self._write_model_locked(record_type, record.event_id, record)
+            return "written"
+
+    def list_manager_preview_approval_event_records(
+        self,
+        *,
+        product: str = "",
+        context: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        preview_id: str = "",
+        action: str = "",
+        limit: int | None = None,
+    ) -> tuple[ManagerPreviewApprovalEventRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                ManagerPreviewApprovalEventRecord,
+                "launchplane_manager_preview_approval_events",
+            )
+            if (not product or record.binding.product == product.lower())
+            and (not context or record.binding.context == context.lower())
+            and (not repository or record.binding.repository == repository.lower())
+            and (pr_number is None or record.binding.pr_number == pr_number)
+            and (not preview_id or record.binding.preview_id == preview_id)
+            and (not action or record.action == action)
+        ]
+        records.sort(key=lambda record: (record.occurred_at, record.event_id), reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)

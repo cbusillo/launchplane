@@ -9322,6 +9322,16 @@
             "title": "Resolved Manifest Fingerprint",
             "type": "string"
           },
+          "runtime_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -24271,6 +24281,14 @@
                           "type": "string"
                         },
                         "title": "Contexts",
+                        "type": "array"
+                      },
+                      "github_ids": {
+                        "default": [],
+                        "items": {
+                          "type": "integer"
+                        },
+                        "title": "Github Ids",
                         "type": "array"
                       },
                       "instances": {

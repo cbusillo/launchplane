@@ -225,6 +225,7 @@ class GenericWebPreviewRefreshResult(BaseModel):
     preview_url: str
     readiness: GenericWebPreviewReadinessResult | None = None
     smoke: GenericWebPreviewSmokeResult | None = None
+    runtime_identity: RuntimeIdentity | None = None
     error_message: str = ""
 
 
@@ -1292,6 +1293,7 @@ def execute_generic_web_preview_refresh(
     application_id = ""
     host = ""
     token = ""
+    preview_runtime_identity: RuntimeIdentity | None = None
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
         target_definition, template_application, target_error = _read_template_payload(
@@ -1403,6 +1405,7 @@ def execute_generic_web_preview_refresh(
             application_id=application_id,
             preview_url=preview_url,
             readiness=readiness,
+            runtime_identity=preview_runtime_identity,
             error_message=message,
         )
 
@@ -1418,6 +1421,7 @@ def execute_generic_web_preview_refresh(
         application_id=application_id,
         preview_url=preview_url,
         readiness=readiness,
+        runtime_identity=preview_runtime_identity,
     )
 
 

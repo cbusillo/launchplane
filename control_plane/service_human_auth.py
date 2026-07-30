@@ -239,6 +239,7 @@ class GitHubOAuthClient:
         login = str(user_payload.get("login", "")).strip()
         if not login:
             raise ValueError("GitHub OAuth user response did not include a login.")
+        github_id = int(user_payload.get("id") or 0)
         public_email = str(user_payload.get("email") or "").strip()
         verified_emails = _verified_email_addresses(email_payload)
         primary_email = _primary_email_address(email_payload)
@@ -259,6 +260,7 @@ class GitHubOAuthClient:
             role: Literal["read_only", "admin"] | None = "admin"
         else:
             role = authz_policy.human_role_for(
+                github_id=github_id,
                 login=login,
                 organizations=organizations,
                 teams=teams,
@@ -267,7 +269,7 @@ class GitHubOAuthClient:
             raise PermissionError("GitHub user is not authorized for Launchplane.")
         return GitHubHumanIdentity(
             login=login,
-            github_id=int(user_payload.get("id") or 0),
+            github_id=github_id,
             name=str(user_payload.get("name") or "").strip(),
             email=(
                 bootstrap_admin_email
@@ -354,6 +356,7 @@ class HumanSessionManager:
         if email and email in self._config.bootstrap_admin_emails:
             return "admin"
         return authz_policy.human_role_for(
+            github_id=identity.github_id,
             login=identity.login,
             organizations=identity.organizations,
             teams=identity.teams,
