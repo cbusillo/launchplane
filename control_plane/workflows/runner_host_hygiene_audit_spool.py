@@ -28,6 +28,7 @@ class RunnerHostHygieneAuditSpool:
         *,
         planned_audit: RunnerHostHygieneApplyAuditRecord,
         planned_idempotency_key: str,
+        executor_intent_sha256: str = "",
     ) -> RunnerHostHygieneAuditDeliveryEnvelope:
         existing = self.read(
             host_name=planned_audit.request.host_name,
@@ -38,6 +39,7 @@ class RunnerHostHygieneAuditSpool:
             if (
                 existing.planned_audit != planned_audit
                 or existing.planned_idempotency_key != planned_idempotency_key
+                or existing.executor_intent_sha256 != executor_intent_sha256
             ):
                 raise click.ClickException(
                     "runner host hygiene audit spool key already exists with different intent"
@@ -45,11 +47,13 @@ class RunnerHostHygieneAuditSpool:
             return existing
         timestamp = utc_now_timestamp()
         envelope = RunnerHostHygieneAuditDeliveryEnvelope(
+            schema_version=2 if executor_intent_sha256 else 1,
             host_name=planned_audit.request.host_name,
             action=planned_audit.request.action,
             audit_record_key=planned_audit.audit_record_key,
             planned_audit=planned_audit,
             planned_idempotency_key=planned_idempotency_key,
+            executor_intent_sha256=executor_intent_sha256,
             created_at=timestamp,
             updated_at=timestamp,
         )

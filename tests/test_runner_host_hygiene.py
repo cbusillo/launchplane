@@ -418,6 +418,7 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 ),
             ),
             remote_runner=runner,
+            idle_observation_sleeper=lambda _seconds: None,
         )
 
         self.assertIsNotNone(report.docker_toolchain)
@@ -518,6 +519,7 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 ),
             ),
             remote_runner=runner,
+            idle_observation_sleeper=lambda _seconds: None,
         )
 
         self.assertIsNotNone(report.docker_toolchain)
@@ -638,6 +640,7 @@ class RunnerHostHygieneTests(unittest.TestCase):
                 ),
             ),
             remote_runner=runner,
+            idle_observation_sleeper=lambda _seconds: None,
         )
 
         self.assertIsNone(report.docker_toolchain)

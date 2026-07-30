@@ -10,6 +10,9 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAu
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditStatus
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneCacheClassTelemetry
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneReport
+from control_plane.contracts.runner_host_hygiene_idle import (
+    RunnerHostHygieneIdleConvergence,
+)
 from control_plane.http_routes.support import (
     LAUNCHPLANE_SERVICE_CONTEXT,
     ApiRouteRegistrar,
@@ -37,6 +40,7 @@ class RunnerHostHygieneReportReadModel(BaseModel):
     generated_cache_apparent_bytes: int
     generated_cache_allocated_bytes: int
     cache_class_telemetry: tuple[RunnerHostHygieneCacheClassTelemetry, ...]
+    idle_convergences: tuple[RunnerHostHygieneIdleConvergence, ...]
     image_inventory_total_count: int
     image_inventory_truncated: bool
     volume_inventory_total_count: int
@@ -186,6 +190,7 @@ def _report_read_model(report: RunnerHostHygieneReport) -> RunnerHostHygieneRepo
         generated_cache_apparent_bytes=report.generated_cache_apparent_bytes,
         generated_cache_allocated_bytes=report.generated_cache_allocated_bytes,
         cache_class_telemetry=report.cache_class_telemetry,
+        idle_convergences=report.idle_convergences,
         image_inventory_total_count=report.image_inventory_total_count,
         image_inventory_truncated=report.image_inventory_truncated,
         volume_inventory_total_count=report.volume_inventory_total_count,

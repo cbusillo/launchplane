@@ -76,10 +76,14 @@ from control_plane.workflows.runner_lane_retirement_executor import (
 )
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
 from control_plane.workflows.runner_host_hygiene_executor import GeneratedRunCacheRoot
+from control_plane.workflows.runner_host_hygiene_executor import RunnerHostGitHubBinding
 from control_plane.workflows.runner_host_hygiene_executor import RunnerWorkdirRoot
 from control_plane.workflows.runner_host_hygiene_executor import DOCKER_BUILDX_PLUGIN_PATH_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandRunner
 from control_plane.workflows.runner_host_hygiene_executor import build_local_command_runner
+from control_plane.workflows.runner_host_hygiene_executor import (
+    build_github_idle_evidence_reader,
+)
 from control_plane.workflows.runner_host_hygiene_executor import build_github_run_state_reader
 from control_plane.workflows.runner_host_hygiene_executor import (
     build_refreshing_service_audit_poster,
@@ -1674,6 +1678,15 @@ def runner_host_hygiene_adapter_boundary_plan(
     ),
 )
 @click.option(
+    "--github-idle-binding",
+    "github_idle_bindings",
+    multiple=True,
+    help=(
+        "Complete host runner binding formatted as "
+        "owner/repo|lane|runner-name|systemd-service-unit. Repeat for every host lane."
+    ),
+)
+@click.option(
     "--target-generated-cache-key",
     default="",
     help="Exact public generated-cache key selected for bounded completed-run cleanup.",
@@ -1689,8 +1702,15 @@ def runner_host_hygiene_adapter_boundary_plan(
     "--idle-observation-interval-seconds",
     default=5,
     show_default=True,
-    type=click.IntRange(min=0, max=60),
+    type=click.IntRange(min=1, max=60),
     help="Delay between consecutive local idle samples.",
+)
+@click.option(
+    "--idle-max-age-seconds",
+    default=300,
+    show_default=True,
+    type=click.IntRange(min=1, max=86_400),
+    help="Maximum age for source-attributed idle evidence used by the apply gate.",
 )
 @click.option(
     "--resolve-action-started/--no-resolve-action-started",
@@ -1753,9 +1773,11 @@ def runner_host_hygiene_executor(
     prune_until: str,
     runner_workdir_roots: tuple[str, ...],
     generated_run_cache_roots: tuple[str, ...],
+    github_idle_bindings: tuple[str, ...],
     target_generated_cache_key: str,
     idle_observation_count: int,
     idle_observation_interval_seconds: int,
+    idle_max_age_seconds: int,
     resolve_action_started: bool,
     timeout_seconds: int,
     service_url: str,
@@ -1776,17 +1798,15 @@ def runner_host_hygiene_executor(
             raise click.ClickException(
                 "runner host hygiene generated cache evidence requires --github-token-env."
             )
-        github_token = (
-            os.environ.get(github_token_env_name, "").strip()
-            if parsed_generated_run_cache_roots
-            else ""
-        )
+        github_token = os.environ.get(github_token_env_name, "").strip()
         request = RunnerHostHygieneExecutorRequest(
             action=apply_action,
             host_name=host_name,
             execution_lane=execution_lane,
             service_user=service_user,
             repository_scope=repository_scope,
+            current_runner_name=os.environ.get("RUNNER_NAME", ""),
+            github_idle_bindings=_parse_runner_host_github_bindings(github_idle_bindings),
             audit_record_key=audit_record_key,
             retained_warm_builders=retained_warm_builders,
             target_buildkit_builder=target_buildkit_builder,
@@ -1803,6 +1823,7 @@ def runner_host_hygiene_executor(
             target_generated_cache_key=target_generated_cache_key,
             idle_observation_count=idle_observation_count,
             idle_observation_interval_seconds=idle_observation_interval_seconds,
+            idle_max_age_seconds=idle_max_age_seconds,
             resolve_action_started=resolve_action_started,
         )
         validate_runner_host_hygiene_environment(request=request)
@@ -1825,6 +1846,15 @@ def runner_host_hygiene_executor(
                 if parsed_generated_run_cache_roots
                 else None
             ),
+            github_idle_evidence_reader=build_github_idle_evidence_reader(
+                bearer_token=github_token,
+                current_run_id=(
+                    int(os.environ["GITHUB_RUN_ID"])
+                    if os.environ.get("GITHUB_RUN_ID", "").isdigit()
+                    else None
+                ),
+                current_runner_name=os.environ.get("RUNNER_NAME", ""),
+            ),
         )
     except (OSError, ValidationError, ValueError) as error:
         raise click.ClickException(str(error)) from error
@@ -1845,6 +1875,29 @@ def _parse_runner_workdir_roots(values: tuple[str, ...]) -> tuple[RunnerWorkdirR
             raise click.ClickException("runner workdir roots must use public-key=/absolute/path")
         roots.append(RunnerWorkdirRoot(key=key, path=path))
     return tuple(roots)
+
+
+def _parse_runner_host_github_bindings(
+    values: tuple[str, ...],
+) -> tuple[RunnerHostGitHubBinding, ...]:
+    bindings: list[RunnerHostGitHubBinding] = []
+    for value in values:
+        parts = value.split("|")
+        if len(parts) != 4:
+            raise click.ClickException(
+                "runner host GitHub bindings must use "
+                "owner/repo|lane|runner-name|systemd-service-unit"
+            )
+        repository_scope, execution_lane, runner_name, service_unit = parts
+        bindings.append(
+            RunnerHostGitHubBinding(
+                repository_scope=repository_scope,
+                execution_lane=execution_lane,
+                runner_name=runner_name,
+                service_unit=service_unit,
+            )
+        )
+    return tuple(bindings)
 
 
 def _parse_generated_run_cache_roots(

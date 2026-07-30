@@ -529,9 +529,13 @@ an ORM column/table or remains only in the evidence payload.
   source and measurement-basis metadata, filesystem apparent/allocated bytes,
   Docker logical/reclaimable bytes, bounded inventory counts and truncation,
   age buckets, numeric run ids, GitHub completion state, bounded worker and
-  open-handle observations, cleanup history, and hysteresis/cooldown evidence
-  also stay payload-only. Absolute cache paths and source repository identity
-  are executor-local runtime authority and are not persisted in the audit.
+  open-handle observations, cleanup history, hysteresis/cooldown evidence, and
+  source-attributed idle convergence also stay payload-only. Idle convergence
+  records public-safe scope and subject keys, source availability, state,
+  sample count, nonzero observation window, timestamps, bounded counts,
+  truncation/reason codes, and derived blockers. Absolute cache paths, raw
+  command output, runner names, and source repository identity are
+  executor-local runtime authority and are not persisted in the audit.
   Docker toolchain evidence, host-command output, Docker summaries, and rollout
   notes stay payload-only until they need queryable operational views. Bounded
   list, sanitized detail, and observation-history reads use the existing JSON

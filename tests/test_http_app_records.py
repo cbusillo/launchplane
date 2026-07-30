@@ -2392,7 +2392,16 @@ class FastApiRunnerHostHygieneAuditReadTests(unittest.IsolatedAsyncioTestCase):
             detail_response.json()["record"]["summary"]["audit_record_key"],
             newer_record.audit_record_key,
         )
-        self.assertNotIn("image_inventory", detail_response.json()["record"]["pre_apply_report"])
+        pre_apply_report = detail_response.json()["record"]["pre_apply_report"]
+        self.assertNotIn("image_inventory", pre_apply_report)
+        self.assertEqual(pre_apply_report["idle_convergences"][0]["status"], "idle")
+        self.assertEqual(
+            {
+                observation["source"]
+                for observation in pre_apply_report["idle_convergences"][0]["observations"]
+            },
+            {"github_jobs", "github_runners", "local_processes", "runner_services"},
+        )
         self.assertEqual(history_response.status_code, 200)
         history_payload = history_response.json()
         self.assertEqual(history_payload["host_name"], "chris-testing")

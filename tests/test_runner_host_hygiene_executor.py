@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from email.message import Message
+from functools import partial
 from io import BytesIO
 import tempfile
 import unittest
@@ -10,7 +11,8 @@ from collections.abc import Sequence
 from collections.abc import Mapping
 import subprocess
 from pathlib import Path
-from typing import Literal
+import time
+from typing import Any, Literal
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request
@@ -18,17 +20,24 @@ from urllib.request import Request
 import click
 
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
+from control_plane.contracts.runner_host_hygiene_idle import (
+    RunnerHostHygieneIdleObservation,
+)
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
 from control_plane.workflows.runner_host_hygiene_executor import GeneratedRunCacheRoot
+from control_plane.workflows.runner_host_hygiene_executor import RunnerHostGitHubBinding
 from control_plane.workflows.runner_host_hygiene_executor import RunnerWorkdirRoot
 from control_plane.workflows.runner_host_hygiene_executor import AuditDeliveryError
 from control_plane.workflows.runner_host_hygiene_executor import (
     build_refreshing_service_audit_poster,
 )
+from control_plane.workflows.runner_host_hygiene_executor import (
+    build_github_idle_evidence_reader,
+)
 from control_plane.workflows.runner_host_hygiene_executor import build_github_run_state_reader
 from control_plane.workflows.runner_host_hygiene_executor import (
-    execute_runner_host_hygiene_executor,
+    execute_runner_host_hygiene_executor as _execute_runner_host_hygiene_executor,
 )
 from control_plane.workflows.runner_host_hygiene_executor import _DOCKER_DISK_USAGE_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import _GENERATED_RUN_CACHE_HELPER
@@ -40,8 +49,13 @@ from control_plane.workflows.runner_host_hygiene_executor import (
 )
 from control_plane.workflows.runner_host_hygiene_executor import _parse_docker_disk_usage
 from control_plane.workflows.runner_host_hygiene_executor import _RUNNER_WORKDIR_USAGE_HELPER
-from control_plane.workflows.runner_host_hygiene_executor import collect_runner_host_hygiene_report
+from control_plane.workflows.runner_host_hygiene_executor import (
+    collect_runner_host_hygiene_report as _collect_runner_host_hygiene_report,
+)
+from control_plane.workflows.runner_host_hygiene_executor import _public_identity_key
+from control_plane.workflows.runner_host_hygiene_executor import _aggregate_github_idle_samples
 from control_plane.workflows.runner_host_hygiene_executor import validate_local_executor_environment
+from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.runner_host_hygiene_audit_spool import (
     RunnerHostHygieneAuditSpool,
 )
@@ -93,6 +107,7 @@ class _CommandRunner:
         runner_workdir_status: Literal["complete", "partial"] = "complete",
         generated_cache_before: str = "",
         generated_cache_after: str = "",
+        runner_service_output: str = ("launchplane-runner@ops-gate.service active running\n"),
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
         self._prune_returncode = prune_returncode
@@ -146,6 +161,7 @@ class _CommandRunner:
         self._runner_workdir_status = runner_workdir_status
         self._generated_cache_before = generated_cache_before
         self._generated_cache_after = generated_cache_after
+        self._runner_service_output = runner_service_output
         self._generated_cache_pruned = False
         self._pruned = False
         self.removed_volumes: list[str] = []
@@ -226,6 +242,11 @@ class _CommandRunner:
             return RemoteCommandResult(returncode=1, stderr="image missing")
         if command_tuple[:2] == ("bash", "-lc") and "pgrep -af" in command_tuple[2]:
             return RemoteCommandResult(returncode=0, stdout=self._active_build_processes)
+        if command_tuple[:2] == ("bash", "-lc") and "systemctl list-units" in command_tuple[2]:
+            return RemoteCommandResult(
+                returncode=0,
+                stdout=self._runner_service_output,
+            )
         if command_tuple[:4] == ("docker", "inspect", "--format", "{{.State.Running}}"):
             return RemoteCommandResult(returncode=0, stdout="true\n")
         if command_tuple[:2] == ("docker", "exec") and command_tuple[3:] == (
@@ -294,6 +315,56 @@ class _CommandRunner:
                 stderr="volume rm failed",
             )
         return RemoteCommandResult(returncode=127, stderr="unexpected command")
+
+
+def _github_idle_evidence_reader(
+    repository: str,
+    execution_lane: str,
+    runner_name: str = "test-runner",
+    _exclude_current: bool = True,
+) -> tuple[RunnerHostHygieneIdleObservation, ...]:
+    observed_at = utc_now_timestamp()
+    subject_key = _public_identity_key(
+        "runner",
+        "|".join((repository.lower(), execution_lane.lower(), runner_name)),
+    )
+    return tuple(
+        RunnerHostHygieneIdleObservation(
+            source=source,
+            scope="full_host",
+            scope_key="host",
+            subject_key=subject_key,
+            observed_at=observed_at,
+            availability="available",
+            state="idle",
+            active_count=0,
+            total_count=1,
+        )
+        for source in ("github_jobs", "github_runners")
+    )
+
+
+def execute_runner_host_hygiene_executor(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    **kwargs: Any,
+) -> Any:
+    kwargs.setdefault("audit_delivery_sleeper", lambda _seconds: None)
+    kwargs.setdefault("github_idle_evidence_reader", _github_idle_evidence_reader)
+    if request.mutate and kwargs.get("audit_spool") is None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            kwargs["audit_spool"] = RunnerHostHygieneAuditSpool(
+                root=Path(temporary_directory) / "spool"
+            )
+            return _execute_runner_host_hygiene_executor(request=request, **kwargs)
+    return _execute_runner_host_hygiene_executor(request=request, **kwargs)
+
+
+collect_runner_host_hygiene_report = partial(
+    _collect_runner_host_hygiene_report,
+    idle_observation_sleeper=lambda _seconds: None,
+    github_idle_evidence_reader=_github_idle_evidence_reader,
+)
 
 
 def _buildkit_volume_evidence(
@@ -397,6 +468,20 @@ class _CrashingCommandRunner(_CommandRunner):
         return super().__call__(command_tuple, timeout_seconds)
 
 
+class _PreActionCrashingCommandRunner(_CommandRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self._disk_observations = 0
+
+    def __call__(self, command: Sequence[str], timeout_seconds: int) -> RemoteCommandResult:
+        command_tuple = tuple(command)
+        if command_tuple == ("df", "-B1", "-P", "/"):
+            self._disk_observations += 1
+            if self._disk_observations == 2:
+                raise RuntimeError("simulated pre-action termination")
+        return super().__call__(command_tuple, timeout_seconds)
+
+
 class RunnerHostHygieneWorkflowTests(unittest.TestCase):
     def test_workflow_runs_on_ops_lane_without_xargs_dependency(self) -> None:
         workflow_text = Path(".github/workflows/runner-host-hygiene.yml").read_text(
@@ -446,6 +531,97 @@ class RunnerHostHygieneWorkflowTests(unittest.TestCase):
 
 
 class RunnerHostHygieneExecutorTests(unittest.TestCase):
+    def test_full_host_idle_requires_complete_binding_manifest(self) -> None:
+        report = collect_runner_host_hygiene_report(
+            request=_request(
+                mutate=False,
+                current_runner_name="",
+                github_idle_bindings=(),
+            ),
+            remote_runner=_CommandRunner(),
+        )
+
+        convergence = report.idle_convergences[0]
+        self.assertEqual(convergence.status, "incomplete")
+        self.assertIn("source_missing", convergence.blocker_codes)
+        self.assertEqual(
+            {
+                observation.source
+                for observation in convergence.observations
+                if observation.reason_code == "source_missing"
+            },
+            {"github_jobs", "github_runners", "runner_services"},
+        )
+
+    def test_full_host_idle_covers_every_repository_binding(self) -> None:
+        bindings = (
+            RunnerHostGitHubBinding(
+                repository_scope="cbusillo/launchplane",
+                execution_lane="shared-lane",
+                runner_name="primary-runner",
+                service_unit="launchplane-runner@ops-gate.service",
+            ),
+            RunnerHostGitHubBinding(
+                repository_scope="example/secondary",
+                execution_lane="shared-lane",
+                runner_name="secondary-runner",
+                service_unit="launchplane-runner@secondary.service",
+            ),
+        )
+
+        def github_reader(
+            repository: str,
+            execution_lane: str,
+            runner_name: str,
+            _exclude_current: bool,
+        ) -> tuple[RunnerHostHygieneIdleObservation, ...]:
+            subject_key = _public_identity_key(
+                "runner",
+                "|".join((repository, execution_lane, runner_name)),
+            )
+            active = repository == "example/secondary"
+            return tuple(
+                RunnerHostHygieneIdleObservation(
+                    source=source,
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key=subject_key,
+                    observed_at=utc_now_timestamp(),
+                    availability="available",
+                    state="active" if active and source == "github_jobs" else "idle",
+                    active_count=1 if active and source == "github_jobs" else 0,
+                    total_count=1,
+                )
+                for source in ("github_jobs", "github_runners")
+            )
+
+        report = _collect_runner_host_hygiene_report(
+            request=_request(
+                mutate=False,
+                execution_lane="shared-lane",
+                current_runner_name="primary-runner",
+                github_idle_bindings=bindings,
+            ),
+            remote_runner=_CommandRunner(
+                runner_service_output=(
+                    "launchplane-runner@ops-gate.service active running\n"
+                    "launchplane-runner@secondary.service active running\n"
+                )
+            ),
+            github_idle_evidence_reader=github_reader,
+            idle_observation_sleeper=lambda _seconds: None,
+        )
+
+        convergence = report.idle_convergences[0]
+        self.assertEqual(convergence.status, "active")
+        github_observations = tuple(
+            observation
+            for observation in convergence.observations
+            if observation.source in {"github_jobs", "github_runners"}
+        )
+        self.assertEqual(len(github_observations), 4)
+        self.assertEqual(len({item.subject_key for item in github_observations}), 2)
+
     def test_executor_posts_planned_and_completed_audits(self) -> None:
         command_runner = _CommandRunner()
         audit_poster = _AuditPoster()
@@ -555,6 +731,10 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
     def test_executor_rejects_prune_age_below_retention_floor(self) -> None:
         with self.assertRaisesRegex(ValueError, "retain at least 168 hours"):
             _request(mutate=True, prune_until="167h")
+
+    def test_executor_rejects_zero_idle_observation_interval(self) -> None:
+        with self.assertRaisesRegex(ValueError, "idle_observation_interval_seconds"):
+            _request(mutate=True, idle_observation_interval_seconds=0)
 
     def test_executor_normalizes_prune_age_hours(self) -> None:
         request = _request(mutate=True, prune_until="168H")
@@ -732,7 +912,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertTrue(volume.dangling)
         self.assertEqual(volume.mountpoint, "")
         self.assertEqual(volume.labels, ())
-        self.assertEqual(command_runner.commands.count(_DOCKER_DISK_USAGE_COMMAND), 2)
+        self.assertEqual(command_runner.commands.count(_DOCKER_DISK_USAGE_COMMAND), 3)
 
     def test_report_bounds_docker_inventories_and_marks_telemetry_partial(self) -> None:
         image_rows: list[dict[str, object]] = [
@@ -869,6 +1049,15 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             audit_poster.audits[0].request.target_generated_cache_run_ids,
             (101, 102),
         )
+        pre_apply_idle = audit_poster.audits[0].pre_apply_report.idle_convergences
+        self.assertEqual(len(pre_apply_idle), 1)
+        self.assertEqual(pre_apply_idle[0].scope, "isolated_user")
+        self.assertEqual(pre_apply_idle[0].scope_key, root.key)
+        self.assertEqual(pre_apply_idle[0].status, "idle")
+        self.assertEqual(
+            {observation.source for observation in pre_apply_idle[0].observations},
+            {"github_jobs", "local_user_processes", "open_handles"},
+        )
         prune_command = next(
             command
             for command in command_runner.commands
@@ -964,6 +1153,67 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             any(command[:7] == _GENERATED_CACHE_PRUNE_PREFIX for command in command_runner.commands)
         )
 
+    def test_generated_run_cache_preserves_unauthorized_github_state(self) -> None:
+        root = GeneratedRunCacheRoot(
+            key="codex-lab-runs",
+            path="/home/gha/.cache/codex-ci",
+            source_repository="cbusillo/codex-lab",
+            high_water_bytes=100,
+            low_water_bytes=10,
+            minimum_age_hours=1,
+            cooldown_hours=1,
+        )
+        command_runner = _CommandRunner(
+            generated_cache_before=_generated_cache_evidence(
+                entries=((101, 120, 120, 7_200, (0, 0)),),
+                worker_observations=(0, 0),
+            )
+        )
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(
+                mutate=True,
+                action="prune_generated_run_cache",
+                generated_run_cache_roots=(root,),
+                target_generated_cache_key=root.key,
+            ),
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+            github_run_state_reader=lambda _repository, run_ids: {
+                run_id: "unauthorized" for run_id in run_ids
+            },
+        )
+
+        self.assertEqual(result.status, "blocked")
+        cache = audit_poster.audits[0].pre_apply_report.generated_cache_usage[0]
+        self.assertEqual(cache.entries[0].github_run_state, "unauthorized")
+        assert cache.idle_convergence is not None
+        github_observation = next(
+            item for item in cache.idle_convergence.observations if item.source == "github_jobs"
+        )
+        self.assertEqual(github_observation.reason_code, "source_unauthorized")
+
+    def test_generated_run_cache_rejects_unimplemented_isolated_lane_scope(self) -> None:
+        root = GeneratedRunCacheRoot(
+            key="codex-lab-runs",
+            path="/home/gha/.cache/codex-ci",
+            source_repository="cbusillo/codex-lab",
+            high_water_bytes=100,
+            low_water_bytes=10,
+            minimum_age_hours=1,
+            cooldown_hours=1,
+            idle_scope="isolated_lane",
+        )
+
+        with self.assertRaisesRegex(ValueError, "isolated_user"):
+            _request(
+                mutate=False,
+                action="prune_generated_run_cache",
+                generated_run_cache_roots=(root,),
+                target_generated_cache_key=root.key,
+            )
+
     def test_generated_run_cache_mutation_requires_durable_spool(self) -> None:
         root = GeneratedRunCacheRoot(
             key="codex-lab-runs",
@@ -976,7 +1226,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(click.ClickException, "requires durable"):
-            execute_runner_host_hygiene_executor(
+            _execute_runner_host_hygiene_executor(
                 request=_request(
                     mutate=True,
                     action="prune_generated_run_cache",
@@ -985,6 +1235,8 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 ),
                 remote_runner=_CommandRunner(),
                 audit_poster=_AuditPoster(),
+                audit_delivery_sleeper=lambda _seconds: None,
+                github_idle_evidence_reader=_github_idle_evidence_reader,
             )
 
     def test_generated_run_cache_below_high_water_is_not_needed(self) -> None:
@@ -1042,6 +1294,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             generated_cache_before=_generated_cache_evidence(
                 entries=((101, 120, 120, 7_200, (0, 0)),),
                 worker_observations=(0, 0),
+                observed_epoch_seconds=10_000,
                 last_cleanup_epoch_seconds=9_900,
             )
         )
@@ -1152,6 +1405,10 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertIn("/proc/self/fd/4", helper_text)
         self.assertIn("owner_worker_observations", helper_text)
         self.assertIn("open_handle_observations", helper_text)
+        self.assertIn(
+            '[[ "$observation_interval_seconds" =~ ^([1-9]|[1-5][0-9]|60)$ ]]',
+            helper_text,
+        )
         self.assertIn("--one-file-system", helper_text)
         self.assertIn("candidate_low_water < candidate_high_water", helper_text)
         self.assertIn("entry_identity_by_name", helper_text)
@@ -1236,7 +1493,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                     _RUNNER_WORKDIR_USAGE_HELPER,
                 ):
                     helper_calls += 1
-                    if helper_calls == 2:
+                    if helper_calls == 3:
                         return RemoteCommandResult(
                             returncode=1,
                             stderr="sudo denied legacy=/private/runner/root",
@@ -1567,11 +1824,11 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             audit_poster=audit_poster,
         )
 
-        self.assertEqual(result.status, "failed")
-        self.assertIn("active runner or build processes", result.message)
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual([record[0] for record in audit_poster.records], ["planned"])
         self.assertIn(
-            ("failed", "runner-host-hygiene:runner-host-hygiene/2026-05-23/chris-testing:failed"),
-            audit_poster.records,
+            "idle_evidence_active",
+            {finding.code for finding in audit_poster.audits[0].pre_apply_report.findings},
         )
         self.assertFalse(
             any(command[:5] == _ENGINE_PRUNE_PREFIX for command in command_runner.commands)
@@ -1589,8 +1846,11 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             audit_poster=audit_poster,
         )
 
-        self.assertEqual(result.status, "failed")
-        self.assertIn("Runner.Worker", result.message)
+        self.assertEqual(result.status, "blocked")
+        self.assertIn(
+            "idle_evidence_active",
+            {finding.code for finding in audit_poster.audits[0].pre_apply_report.findings},
+        )
         self.assertFalse(
             any(command[:5] == _ENGINE_PRUNE_PREFIX for command in command_runner.commands)
         )
@@ -1628,8 +1888,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             audit_delivery_sleeper=lambda _seconds: None,
         )
 
-        self.assertEqual(result.status, "failed")
-        self.assertIn("789", result.message)
+        self.assertEqual(result.status, "blocked")
 
     def test_executor_requires_two_consecutive_idle_samples(self) -> None:
         command_runner = _CommandRunner()
@@ -1647,7 +1906,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             for command in command_runner.commands
             if command[:2] == ("bash", "-lc") and "pgrep -af" in command[2]
         ]
-        self.assertEqual(len(idle_commands), 2)
+        self.assertEqual(len(idle_commands), 6)
 
     def test_executor_spools_terminal_audit_before_failed_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1822,10 +2081,27 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
             request = _request(mutate=True)
+            crashing_runner = _CrashingCommandRunner()
+            disk_observations = iter((900, 800))
+
+            def varying_evidence_runner(
+                command: Sequence[str], timeout_seconds: int
+            ) -> RemoteCommandResult:
+                if tuple(command) == ("df", "-B1", "-P", "/"):
+                    available_bytes = next(disk_observations)
+                    return RemoteCommandResult(
+                        returncode=0,
+                        stdout=(
+                            "Filesystem 1B-blocks Used Available Use% Mounted on\n"
+                            f"/dev/disk 1000 100 {available_bytes} 10% /\n"
+                        ),
+                    )
+                return crashing_runner(command, timeout_seconds)
+
             with self.assertRaisesRegex(RuntimeError, "simulated runner termination"):
                 execute_runner_host_hygiene_executor(
                     request=request,
-                    remote_runner=_CrashingCommandRunner(),
+                    remote_runner=varying_evidence_runner,
                     audit_poster=_AuditPoster(),
                     audit_spool=spool,
                     audit_delivery_sleeper=lambda _seconds: None,
@@ -1837,18 +2113,33 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             )
             assert envelope is not None
             self.assertEqual(envelope.execution_state, "action_started")
+            self.assertIsNotNone(envelope.action_authorization)
+            assert envelope.action_authorization is not None
+            self.assertEqual(
+                envelope.planned_audit.pre_apply_report.free_disk_bytes,
+                900,
+            )
+            self.assertEqual(
+                envelope.action_authorization.pre_apply_report.free_disk_bytes,
+                800,
+            )
             resolution_runner = _CommandRunner()
+            resolution_poster = _AuditPoster()
 
             resolved = execute_runner_host_hygiene_executor(
                 request=_request(mutate=True, resolve_action_started=True),
                 remote_runner=resolution_runner,
-                audit_poster=_AuditPoster(),
+                audit_poster=resolution_poster,
                 audit_spool=spool,
                 audit_delivery_sleeper=lambda _seconds: None,
             )
 
             self.assertEqual(resolved.status, "failed")
             self.assertTrue(resolved.reconciled)
+            self.assertEqual(
+                resolution_poster.audits[-1].pre_apply_report.free_disk_bytes,
+                800,
+            )
             self.assertFalse(
                 any(
                     command[:5]
@@ -1862,6 +2153,65 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                     for command in resolution_runner.commands
                 )
             )
+
+    def test_executor_terminalizes_interrupted_planned_state_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
+            request = _request(mutate=True)
+            with self.assertRaisesRegex(RuntimeError, "pre-action termination"):
+                execute_runner_host_hygiene_executor(
+                    request=request,
+                    remote_runner=_PreActionCrashingCommandRunner(),
+                    audit_poster=_AuditPoster(),
+                    audit_spool=spool,
+                )
+            envelope = spool.read(
+                host_name=request.host_name,
+                action=request.action,
+                audit_record_key=request.audit_record_key,
+            )
+            assert envelope is not None
+            self.assertEqual(envelope.execution_state, "planned")
+            reconciliation_runner = _CommandRunner()
+
+            result = execute_runner_host_hygiene_executor(
+                request=request,
+                remote_runner=reconciliation_runner,
+                audit_poster=_AuditPoster(),
+                audit_spool=spool,
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertTrue(result.reconciled)
+            self.assertEqual(reconciliation_runner.commands, [])
+
+    def test_action_started_recovery_rejects_changed_executor_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
+            request = _request(mutate=True)
+            with self.assertRaisesRegex(RuntimeError, "simulated runner termination"):
+                execute_runner_host_hygiene_executor(
+                    request=request,
+                    remote_runner=_CrashingCommandRunner(),
+                    audit_poster=_AuditPoster(),
+                    audit_spool=spool,
+                )
+            resolution_runner = _CommandRunner()
+
+            result = execute_runner_host_hygiene_executor(
+                request=_request(
+                    mutate=True,
+                    resolve_action_started=True,
+                    idle_observation_interval_seconds=2,
+                ),
+                remote_runner=resolution_runner,
+                audit_poster=_AuditPoster(),
+                audit_spool=spool,
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertIn("do not match", result.message)
+            self.assertEqual(resolution_runner.commands, [])
 
     def test_executor_redacts_action_failure_before_audit_and_artifact(self) -> None:
         secret = "ghp_aaaaaaaaaaaa"
@@ -2179,6 +2529,200 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertEqual(states, {101: "completed"})
         self.assertEqual(observed_authorization, [None])
 
+    def test_github_run_state_reader_preserves_unauthorized_response(self) -> None:
+        reader = build_github_run_state_reader(bearer_token="token")
+
+        with patch(
+            "control_plane.workflows.runner_host_hygiene_executor.urlopen",
+            side_effect=HTTPError(
+                url="https://api.github.test/run",
+                code=403,
+                msg="forbidden",
+                hdrs=Message(),
+                fp=BytesIO(b"forbidden"),
+            ),
+        ):
+            states = reader("cbusillo/codex-lab", (101,))
+
+        self.assertEqual(states, {101: "unauthorized"})
+
+    def test_github_idle_reader_attributes_job_and_runner_activity(self) -> None:
+        responses = {
+            "status=queued": {
+                "total_count": 1,
+                "workflow_runs": [{"id": 101}],
+            },
+            "status=in_progress": {
+                "total_count": 2,
+                "workflow_runs": [{"id": 102}, {"id": 999}],
+            },
+            "/actions/runs/101/jobs": {
+                "total_count": 1,
+                "jobs": [
+                    {
+                        "status": "queued",
+                        "labels": ["self-hosted", "ops-gate"],
+                    }
+                ],
+            },
+            "/actions/runs/102/jobs": {
+                "total_count": 1,
+                "jobs": [
+                    {
+                        "status": "in_progress",
+                        "labels": ["self-hosted", "other-lane"],
+                    }
+                ],
+            },
+            "/actions/runners": {
+                "total_count": 2,
+                "runners": [
+                    {
+                        "name": "current-runner",
+                        "status": "online",
+                        "busy": True,
+                        "labels": [{"name": "ops-gate"}],
+                    },
+                    {
+                        "name": "peer-runner",
+                        "status": "online",
+                        "busy": False,
+                        "labels": [{"name": "ops-gate"}],
+                    },
+                ],
+            },
+        }
+
+        class _Response:
+            def __init__(self, payload: Mapping[str, object]) -> None:
+                self._payload = payload
+
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps(self._payload).encode()
+
+        def fake_urlopen(request: Request, timeout: int) -> _Response:
+            self.assertEqual(timeout, 30)
+            self.assertEqual(request.get_header("Authorization"), "Bearer token")
+            for fragment, payload in responses.items():
+                if fragment in request.full_url:
+                    return _Response(payload)
+            raise AssertionError(f"unexpected GitHub request: {request.full_url}")
+
+        reader = build_github_idle_evidence_reader(
+            bearer_token="token",
+            current_run_id=999,
+            current_runner_name="current-runner",
+        )
+        with patch(
+            "control_plane.workflows.runner_host_hygiene_executor.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            observations = reader(
+                "cbusillo/launchplane",
+                "ops-gate",
+                "current-runner",
+                True,
+            )
+
+        by_source = {observation.source: observation for observation in observations}
+        self.assertEqual(by_source["github_jobs"].state, "active")
+        self.assertEqual(by_source["github_jobs"].active_count, 1)
+        self.assertEqual(by_source["github_runners"].state, "idle")
+        self.assertEqual(by_source["github_runners"].active_count, 0)
+        self.assertNotEqual(by_source["github_jobs"].subject_key, "ops-gate")
+        self.assertTrue(by_source["github_jobs"].subject_key.startswith("runner-"))
+
+    def test_github_idle_reader_preserves_unauthorized_runner_source(self) -> None:
+        class _Response:
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b'{"total_count":0,"workflow_runs":[]}'
+
+        def fake_urlopen(request: Request, timeout: int) -> _Response:
+            self.assertEqual(timeout, 30)
+            if "/actions/runners" in request.full_url:
+                raise HTTPError(
+                    url=request.full_url,
+                    code=403,
+                    msg="forbidden",
+                    hdrs=Message(),
+                    fp=BytesIO(b"forbidden"),
+                )
+            return _Response()
+
+        reader = build_github_idle_evidence_reader(
+            bearer_token="token",
+            current_run_id=999,
+            current_runner_name="current-runner",
+        )
+        with patch(
+            "control_plane.workflows.runner_host_hygiene_executor.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            observations = reader(
+                "cbusillo/launchplane",
+                "ops-gate",
+                "current-runner",
+                True,
+            )
+
+        by_source = {observation.source: observation for observation in observations}
+        self.assertEqual(by_source["github_jobs"].state, "idle")
+        self.assertEqual(by_source["github_runners"].availability, "unavailable")
+        self.assertEqual(by_source["github_runners"].reason_code, "source_unauthorized")
+
+    def test_github_idle_reader_fails_closed_without_current_job_identity(self) -> None:
+        reader = build_github_idle_evidence_reader(bearer_token="token")
+
+        observations = reader("cbusillo/launchplane", "ops-gate", "", True)
+
+        self.assertEqual(
+            {observation.reason_code for observation in observations},
+            {"source_missing"},
+        )
+
+    def test_github_idle_aggregation_preserves_source_timestamp(self) -> None:
+        samples = tuple(
+            tuple(
+                RunnerHostHygieneIdleObservation(
+                    source=source,
+                    scope="full_host",
+                    scope_key="host",
+                    subject_key="lane-key",
+                    observed_at="2026-07-30T12:00:00Z",
+                    availability="available",
+                    state="idle",
+                    active_count=0,
+                    total_count=1,
+                )
+                for source in ("github_jobs", "github_runners")
+            )
+            for _ in range(2)
+        )
+
+        observations = _aggregate_github_idle_samples(
+            samples=samples,
+            observed_at="2026-07-30T13:00:00Z",
+            observation_window_seconds=5,
+        )
+
+        self.assertEqual(
+            {observation.observed_at for observation in observations},
+            {"2026-07-30T12:00:00Z"},
+        )
+
     def test_service_audit_poster_marks_route_not_found_non_retryable(self) -> None:
         poster = build_refreshing_service_audit_poster(
             service_url="https://launchplane.example",
@@ -2226,14 +2770,28 @@ def _request(
     ),
     generated_run_cache_roots: tuple[GeneratedRunCacheRoot, ...] = (),
     target_generated_cache_key: str = "",
+    idle_observation_interval_seconds: int = 1,
     resolve_action_started: bool = False,
+    execution_lane: str = "chris-testing-ops-gate",
+    repository_scope: str = "cbusillo/launchplane",
+    current_runner_name: str = "test-runner",
+    github_idle_bindings: tuple[RunnerHostGitHubBinding, ...] = (
+        RunnerHostGitHubBinding(
+            repository_scope="cbusillo/launchplane",
+            execution_lane="chris-testing-ops-gate",
+            runner_name="test-runner",
+            service_unit="launchplane-runner@ops-gate.service",
+        ),
+    ),
 ) -> RunnerHostHygieneExecutorRequest:
     return RunnerHostHygieneExecutorRequest(
         action=action,
         host_name="chris-testing",
-        execution_lane="chris-testing-ops-gate",
+        execution_lane=execution_lane,
         service_user="launchplane-runner-hygiene",
-        repository_scope="cbusillo/launchplane",
+        repository_scope=repository_scope,
+        current_runner_name=current_runner_name,
+        github_idle_bindings=github_idle_bindings,
         audit_record_key=audit_record_key,
         retained_warm_builders=("odoo-docker-chris-testing",),
         target_buildkit_builder=target_buildkit_builder,
@@ -2246,7 +2804,7 @@ def _request(
         runner_workdir_roots=runner_workdir_roots,
         generated_run_cache_roots=generated_run_cache_roots,
         target_generated_cache_key=target_generated_cache_key,
-        idle_observation_interval_seconds=0,
+        idle_observation_interval_seconds=idle_observation_interval_seconds,
         resolve_action_started=resolve_action_started,
     )
 
@@ -2270,6 +2828,7 @@ def _generated_cache_evidence(
     *,
     entries: tuple[tuple[int, int, int, int, tuple[int, ...]], ...],
     worker_observations: tuple[int, ...],
+    observed_epoch_seconds: int | None = None,
     last_cleanup_epoch_seconds: int = 0,
     last_reclaimed_bytes: int = 0,
 ) -> str:
@@ -2279,7 +2838,9 @@ def _generated_cache_evidence(
         {
             "record_type": "summary",
             "cache_key": "codex-lab-runs",
-            "observed_epoch_seconds": 10_000,
+            "observed_epoch_seconds": (
+                int(time.time()) if observed_epoch_seconds is None else observed_epoch_seconds
+            ),
             "apparent_bytes": apparent_bytes,
             "allocated_bytes": allocated_bytes,
             "entry_count": len(entries),

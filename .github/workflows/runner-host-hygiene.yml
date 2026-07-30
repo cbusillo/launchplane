@@ -26,6 +26,12 @@ name: Runner Host Hygiene
         required: true
         default: false
         type: boolean
+      github_idle_bindings:
+        description: >-
+          Complete comma-separated owner/repo|lane|runner|service-unit host manifest
+        required: false
+        default: ""
+        type: string
       target_buildkit_state_volumes:
         description: >-
           One zero-link BuildKit state volume for removal
@@ -87,6 +93,9 @@ jobs:
       RUNNER_SERVICE_USER: >-
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SERVICE_USER }}
       RUNNER_REPOSITORY_SCOPE: ${{ github.repository }}
+      RUNNER_GITHUB_IDLE_BINDINGS: >-
+        ${{ inputs.github_idle_bindings ||
+        vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_IDLE_BINDINGS }}
       RUNNER_RETAINED_WARM_BUILDERS: >-
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS }}
       RUNNER_WORKDIR_ROOTS: >-
@@ -210,6 +219,16 @@ jobs:
             exit 1
           fi
 
+          github_idle_binding_args=()
+          IFS=',' read -r -a github_idle_bindings <<< "$RUNNER_GITHUB_IDLE_BINDINGS"
+          for github_idle_binding in "${github_idle_bindings[@]}"; do
+            trimmed="${github_idle_binding#"${github_idle_binding%%[![:space:]]*}"}"
+            trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+            if [ -n "$trimmed" ]; then
+              github_idle_binding_args+=(--github-idle-binding "$trimmed")
+            fi
+          done
+
           generated_cache_args=()
           generated_cache_keys=()
           declare -A seen_generated_cache_keys=()
@@ -328,6 +347,7 @@ jobs:
               --audit-record-key "$audit_key" \
               "${builder_args[@]}" \
               "${runner_root_args[@]}" \
+              "${github_idle_binding_args[@]}" \
               "${generated_cache_args[@]}" \
               "$@" \
               "$mutation_flag" \

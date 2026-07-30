@@ -43,7 +43,7 @@ else
   readonly observation_interval_seconds="$4"
 fi
 [[ "$observation_count" =~ ^([2-9]|10)$ ]]
-[[ "$observation_interval_seconds" =~ ^([0-9]|[1-5][0-9]|60)$ ]]
+[[ "$observation_interval_seconds" =~ ^([1-9]|[1-5][0-9]|60)$ ]]
 
 readonly cache_key="${binding%%=*}"
 readonly root_path="${binding#*=}"

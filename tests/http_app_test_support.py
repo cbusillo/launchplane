@@ -100,6 +100,13 @@ from control_plane.contracts.runner_host_hygiene import (
     evaluate_runner_host_hygiene,
     plan_runner_host_hygiene_apply,
 )
+from control_plane.contracts.runner_host_hygiene_idle import (
+    RunnerHostHygieneIdleConvergence,
+    RunnerHostHygieneIdleObservation,
+    RunnerHostHygieneIdleSource,
+    RunnerHostHygieneIdleSourceRequirement,
+    build_runner_host_hygiene_idle_convergence,
+)
 from control_plane.contracts.runner_lane_inventory import build_runner_lane_inventory
 from control_plane.contracts.runner_lane_registration import (
     RunnerLaneRegistrationAuditRecord,
@@ -1168,6 +1175,7 @@ def _runner_host_hygiene_audit_payload(
             observed_at="2026-05-23T13:00:00Z",
             free_disk_bytes=500,
             warm_builders=("odoo-docker-chris-testing",),
+            idle_convergences=(_runner_host_idle_convergence(),),
         ),
     )
     request = RunnerHostHygieneApplyRequest(
@@ -1199,6 +1207,46 @@ def _runner_host_hygiene_audit_payload(
         "product": product,
         "audit": audit_record.model_dump(mode="json"),
     }
+
+
+def _runner_host_idle_convergence() -> RunnerHostHygieneIdleConvergence:
+    sources: tuple[tuple[RunnerHostHygieneIdleSource, str], ...] = (
+        ("github_jobs", "lane-key"),
+        ("github_runners", "lane-key"),
+        ("local_processes", "host-processes"),
+        ("runner_services", "runner-services"),
+    )
+    return build_runner_host_hygiene_idle_convergence(
+        scope="full_host",
+        scope_key="host",
+        evaluated_at="2026-05-23T13:00:00Z",
+        minimum_observation_interval_seconds=5,
+        maximum_evidence_age_seconds=300,
+        requirements=tuple(
+            RunnerHostHygieneIdleSourceRequirement(
+                source=source,
+                subject_key=subject_key,
+                minimum_observation_count=2,
+            )
+            for source, subject_key in sources
+        ),
+        observations=tuple(
+            RunnerHostHygieneIdleObservation(
+                source=source,
+                scope="full_host",
+                scope_key="host",
+                subject_key=subject_key,
+                observed_at="2026-05-23T13:00:00Z",
+                availability="available",
+                state="idle",
+                sample_count=2,
+                observation_window_seconds=5,
+                active_count=0,
+                total_count=1,
+            )
+            for source, subject_key in sources
+        ),
+    )
 
 
 def _runner_lane_registration_audit_write_identity() -> GitHubActionsIdentity:

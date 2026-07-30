@@ -3024,7 +3024,11 @@ The corresponding read routes require the separate
 
 List responses contain summaries rather than inventory-bearing audit payloads.
 Detail and history responses omit raw image and volume rows and expose bounded
-counts, truncation state, finding codes, and availability-aware cache telemetry.
+counts, truncation state, finding codes, availability-aware cache telemetry,
+and public-safe source-attributed idle convergence. The convergence payload
+distinguishes `idle`, `active`, `incomplete`, and `conflicting` states and keeps
+unavailable, stale, unauthorized, truncated, and contradictory sources
+explicit rather than converting them to zero activity.
 Limits default to 25 and cannot exceed 100. Reports written after this contract
 preserve `observed_at`; older reports remain readable as `legacy_missing`
 without inferring time from an audit key. Read access does not authorize writes,
