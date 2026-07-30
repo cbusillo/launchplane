@@ -2184,7 +2184,8 @@ def _github_jobs_idle_observation(
                     reason_code="source_contradictory",
                 )
             run_id = workflow_run.get("id")
-            if not isinstance(run_id, int) or run_id <= 0:
+            workflow_run_status = workflow_run.get("status")
+            if not isinstance(run_id, int) or run_id <= 0 or workflow_run_status != status:
                 return _unavailable_idle_observation(
                     source="github_jobs",
                     scope="full_host",
