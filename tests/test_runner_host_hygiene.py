@@ -20,8 +20,13 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPl
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRequest
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterPolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterProposal
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneCacheClassTelemetry
+from control_plane.contracts.runner_host_hygiene import (
+    RunnerHostHygieneDockerReclaimableBreakdown,
+)
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneImageInventoryItem
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheBudget
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheAgeBucket
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheEntry
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneGeneratedCacheUsage
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
@@ -31,6 +36,9 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneVolumeI
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_adapter_boundary
+from control_plane.contracts.runner_host_hygiene import (
+    sanitize_runner_host_hygiene_audit_record_for_persistence,
+)
 from control_plane.cli_runner_lanes import _runner_host_hygiene_bearer_token
 from control_plane.workflows.runner_host_hygiene_executor import DOCKER_BUILDX_PLUGIN_PATH_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
@@ -65,9 +73,98 @@ class RunnerHostHygieneTests(unittest.TestCase):
 
         self.assertEqual(report.status, "healthy")
         self.assertEqual(report.host_name, "chris-testing")
+        self.assertEqual(report.observed_at, "2026-05-23T13:00:00Z")
         self.assertEqual(report.warm_builders, ("odoo-docker-chris-testing",))
         self.assertEqual(report.findings, ())
         self.assertIn("report-only", report.summary)
+
+    def test_report_exposes_honest_cache_class_measurement_semantics(self) -> None:
+        report = evaluate_runner_host_hygiene(
+            policy=RunnerHostHygienePolicy(),
+            observation=RunnerHostHygieneObservation(
+                host_name="runner-host",
+                observed_at="2026-07-30T02:00:00Z",
+                free_disk_bytes=200,
+                docker_reclaimable_bytes=40,
+                docker_reclaimable_breakdown=RunnerHostHygieneDockerReclaimableBreakdown(
+                    images_bytes=10,
+                    containers_bytes=5,
+                    local_volumes_bytes=15,
+                    build_cache_bytes=10,
+                ),
+                runner_workdir_usage=(
+                    RunnerHostHygieneRunnerWorkdirUsage(
+                        root_key="primary",
+                        apparent_bytes=100,
+                        allocated_bytes=80,
+                    ),
+                ),
+                generated_cache_usage=(
+                    RunnerHostHygieneGeneratedCacheUsage(
+                        cache_key="run-cache",
+                        apparent_bytes=60,
+                        allocated_bytes=50,
+                        entry_count=1,
+                        owner_valid=True,
+                        mode_valid=True,
+                        symlink_safe=True,
+                        entries_truncated=True,
+                    ),
+                ),
+                image_inventory=(
+                    RunnerHostHygieneImageInventoryItem(
+                        image_id="abc123",
+                        repository="example/image",
+                        tag="latest",
+                        size_bytes=None,
+                    ),
+                ),
+                volume_inventory=(
+                    RunnerHostHygieneVolumeInventoryItem(
+                        name="cache-volume",
+                        driver="local",
+                        size_bytes=30,
+                    ),
+                ),
+            ),
+        )
+
+        telemetry = {
+            (item.cache_class, item.cache_key): item for item in report.cache_class_telemetry
+        }
+        workdir = telemetry[("runner_workdir", "primary")]
+        self.assertEqual(workdir.measurement_basis, "filesystem_apparent_allocated")
+        self.assertEqual(workdir.apparent_bytes, 100)
+        self.assertEqual(workdir.allocated_bytes, 80)
+        generated = telemetry[("generated_filesystem", "run-cache")]
+        self.assertEqual(generated.availability, "partial")
+        self.assertEqual(generated.unavailable_reason, "entry_history_truncated")
+        self.assertIsNone(generated.estimated_daily_growth_bytes)
+        images = telemetry[("docker_images", "images")]
+        self.assertEqual(images.measurement_basis, "docker_engine")
+        self.assertEqual(images.availability, "partial")
+        self.assertIsNone(images.logical_bytes)
+        self.assertEqual(images.reclaimable_bytes, 10)
+        volumes = telemetry[("docker_volumes", "volumes")]
+        self.assertEqual(volumes.availability, "available")
+        self.assertEqual(volumes.logical_bytes, 30)
+        self.assertEqual(volumes.reclaimable_bytes, 15)
+
+    def test_unavailable_cache_class_telemetry_requires_reason_without_measurements(
+        self,
+    ) -> None:
+        telemetry = RunnerHostHygieneCacheClassTelemetry(
+            cache_key="package-cache",
+            cache_class="generated_filesystem",
+            scope="generated_cache",
+            availability="unavailable",
+            measurement_basis="filesystem_apparent_allocated",
+            source="filesystem_probe",
+            observed_at="2026-07-30T02:00:00Z",
+            unavailable_reason="not_configured",
+        )
+
+        self.assertEqual(telemetry.unavailable_reason, "not_configured")
 
     def test_report_marks_partial_runner_workdir_measurement_for_attention(self) -> None:
         report = evaluate_runner_host_hygiene(
@@ -166,6 +263,26 @@ class RunnerHostHygieneTests(unittest.TestCase):
         self.assertTrue(report.image_inventory[0].in_use)
         self.assertEqual([item.name for item in report.volume_inventory], ["a-volume", "z-volume"])
         self.assertEqual(report.volume_inventory[0].labels, ("role=cache",))
+
+    def test_generated_cache_age_buckets_are_chronological(self) -> None:
+        usage = RunnerHostHygieneGeneratedCacheUsage(
+            cache_key="run-cache",
+            owner_valid=True,
+            mode_valid=True,
+            symlink_safe=True,
+            age_buckets=(
+                RunnerHostHygieneGeneratedCacheAgeBucket(bucket="30d_or_more"),
+                RunnerHostHygieneGeneratedCacheAgeBucket(bucket="under_1h"),
+                RunnerHostHygieneGeneratedCacheAgeBucket(bucket="7d_to_30d"),
+                RunnerHostHygieneGeneratedCacheAgeBucket(bucket="1h_to_24h"),
+                RunnerHostHygieneGeneratedCacheAgeBucket(bucket="1d_to_7d"),
+            ),
+        )
+
+        self.assertEqual(
+            [item.bucket for item in usage.age_buckets],
+            ["under_1h", "1h_to_24h", "1d_to_7d", "7d_to_30d", "30d_or_more"],
+        )
 
     def test_report_finds_missing_builder_and_low_free_disk(self) -> None:
         report = evaluate_runner_host_hygiene(
@@ -927,6 +1044,7 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
                     name=target_volume,
                     driver="local",
                     size_bytes=50_490_000_000,
+                    referenced_by_containers=0,
                     dangling=True,
                 )
             ),
@@ -1349,6 +1467,101 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
         )
 
         self.assertIsNone(audit.post_apply_report)
+
+    def test_audit_persistence_sanitizer_bounds_and_redacts_docker_inventory(self) -> None:
+        audit_record_key = "runner-host-hygiene/2026-07-30/chris-testing"
+        request = RunnerHostHygieneApplyRequest(
+            action="prune_docker_cache",
+            host_name="chris-testing",
+            mutate=True,
+            audit_record_key=audit_record_key,
+        )
+        report = _healthy_report().model_copy(
+            update={
+                "cache_class_telemetry": (
+                    RunnerHostHygieneCacheClassTelemetry(
+                        cache_key="images",
+                        cache_class="docker_images",
+                        scope="host",
+                        availability="partial",
+                        measurement_basis="docker_engine",
+                        source="docker_engine",
+                        observed_at="2026-07-30T00:00:00Z",
+                        unavailable_reason="private path: /var/lib/docker",
+                        logical_bytes=1,
+                    ),
+                    RunnerHostHygieneCacheClassTelemetry(
+                        cache_key="volumes",
+                        cache_class="docker_volumes",
+                        scope="host",
+                        availability="partial",
+                        measurement_basis="docker_engine",
+                        source="docker_engine",
+                        observed_at="2026-07-30T00:00:00Z",
+                        unavailable_reason=("inventory_truncated,inventory_size_unavailable"),
+                        reclaimable_bytes=1,
+                    ),
+                ),
+                "image_inventory": tuple(
+                    RunnerHostHygieneImageInventoryItem(
+                        image_id=f"image-{index:03d}",
+                        repository="private.example/product/image",
+                        tag="private-tag",
+                        created_at="2026-07-30T00:00:00Z",
+                    )
+                    for index in range(130)
+                ),
+                "image_inventory_total_count": 130,
+                "image_inventory_truncated": False,
+                "volume_inventory": tuple(
+                    RunnerHostHygieneVolumeInventoryItem(
+                        name=f"volume-{index:03d}",
+                        driver="local",
+                        mountpoint=f"/var/lib/docker/volumes/volume-{index:03d}/_data",
+                        labels=("private.repository=example/product",),
+                        referenced_by_containers=0,
+                        dangling=True,
+                    )
+                    for index in range(130)
+                ),
+                "volume_inventory_total_count": 130,
+                "volume_inventory_truncated": False,
+            }
+        )
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_docker_cache_prune=True,
+            ),
+            request=request,
+            report=report,
+        )
+        persisted = sanitize_runner_host_hygiene_audit_record_for_persistence(
+            RunnerHostHygieneApplyAuditRecord(
+                audit_record_key=audit_record_key,
+                status="planned",
+                request=request,
+                plan=plan,
+                pre_apply_report=report,
+            )
+        )
+
+        persisted_report = persisted.pre_apply_report
+        self.assertEqual(len(persisted_report.image_inventory), 128)
+        self.assertEqual(len(persisted_report.volume_inventory), 128)
+        self.assertTrue(persisted_report.image_inventory_truncated)
+        self.assertTrue(persisted_report.volume_inventory_truncated)
+        self.assertEqual(persisted_report.image_inventory[0].repository, "")
+        self.assertEqual(persisted_report.image_inventory[0].tag, "")
+        self.assertEqual(persisted_report.image_inventory[0].created_at, "")
+        self.assertEqual(persisted_report.volume_inventory[0].mountpoint, "")
+        self.assertEqual(persisted_report.volume_inventory[0].labels, ())
+        telemetry_by_key = {item.cache_key: item for item in persisted_report.cache_class_telemetry}
+        self.assertEqual(telemetry_by_key["images"].unavailable_reason, "redacted_reason")
+        self.assertEqual(
+            telemetry_by_key["volumes"].unavailable_reason,
+            "inventory_truncated,inventory_size_unavailable",
+        )
 
     def test_apply_audit_record_requires_terminal_ready_plan(self) -> None:
         request = RunnerHostHygieneApplyRequest(

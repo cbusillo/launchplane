@@ -525,13 +525,19 @@ an ORM column/table or remains only in the evidence payload.
 - Runner host hygiene audit: modeled fields are `audit_record_key`,
   `host_name`, `action`, `status`, and `mutate`. The payload carries the typed
   request, plan, pre/post hygiene reports, retained warm-builder evidence, and
-  operator message. Generated-cache public keys, apparent and allocated bytes,
+  operator message. Observation timestamps, generic cache-class availability,
+  source and measurement-basis metadata, filesystem apparent/allocated bytes,
+  Docker logical/reclaimable bytes, bounded inventory counts and truncation,
   age buckets, numeric run ids, GitHub completion state, bounded worker and
   open-handle observations, cleanup history, and hysteresis/cooldown evidence
   also stay payload-only. Absolute cache paths and source repository identity
   are executor-local runtime authority and are not persisted in the audit.
   Docker toolchain evidence, host-command output, Docker summaries, and rollout
-  notes stay payload-only until they need queryable operational views. The host-local audit-delivery envelope is a separate
+  notes stay payload-only until they need queryable operational views. Bounded
+  list, sanitized detail, and observation-history reads use the existing JSON
+  payload and promoted host/action/status columns; no separate history table or
+  inferred timestamp is required. Legacy reports without `observed_at` sort
+  after timestamped evidence. The host-local audit-delivery envelope is a separate
   recovery record: it stores planned and optional terminal audit payloads,
   execution phase, delivery state, idempotency keys, bounded redacted errors,
   and attempt counts. It is written atomically under an explicit state

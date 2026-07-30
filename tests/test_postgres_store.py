@@ -4903,9 +4903,14 @@ env_var = "GH_TOKEN"
             store.write_runner_host_hygiene_audit_record(failed_record)
             planned_records = store.list_runner_host_hygiene_audit_records(
                 host_name="Chris-Testing",
+                action="prune_docker_cache",
                 status="planned",
             )
+            nonmatching_action_records = store.list_runner_host_hygiene_audit_records(
+                action="prune_dangling_images"
+            )
             limited_records = store.list_runner_host_hygiene_audit_records(limit=1)
+            read_record = store.read_runner_host_hygiene_audit_record(newer_record.audit_record_key)
             store.close()
 
         self.assertEqual(
@@ -4916,6 +4921,8 @@ env_var = "GH_TOKEN"
             [record.audit_record_key for record in limited_records],
             [failed_record.audit_record_key],
         )
+        self.assertEqual(nonmatching_action_records, ())
+        self.assertEqual(read_record, newer_record)
         self.assertEqual(limited_records[0].message, "post-apply evidence reported low disk")
 
     def test_runner_lane_registration_audit_records_round_trip(self) -> None:

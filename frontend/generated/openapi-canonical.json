@@ -18753,6 +18753,415 @@
         "title": "RunnerHostHygieneAuditEvidenceEnvelope",
         "type": "object"
       },
+      "RunnerHostHygieneAuditReadRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "post_apply_report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunnerHostHygieneReportReadModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pre_apply_report": {
+            "$ref": "#/components/schemas/RunnerHostHygieneReportReadModel"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/RunnerHostHygieneAuditSummary"
+          }
+        },
+        "required": [
+          "summary",
+          "pre_apply_report",
+          "post_apply_report"
+        ],
+        "title": "RunnerHostHygieneAuditReadRecord",
+        "type": "object"
+      },
+      "RunnerHostHygieneAuditRecordResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/RunnerHostHygieneAuditReadRecord"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "record"
+        ],
+        "title": "RunnerHostHygieneAuditRecordResponse",
+        "type": "object"
+      },
+      "RunnerHostHygieneAuditRecordsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "enum": [
+                  "prune_docker_cache",
+                  "prune_dangling_images",
+                  "prune_generated_run_cache",
+                  "remove_buildkit_state_volumes",
+                  "prune_runner_workdir",
+                  "restart_runner_service"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          },
+          "audit_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "planned",
+                  "completed",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audit Status"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "host_name": {
+            "title": "Host Name",
+            "type": "string"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneAuditSummary"
+            },
+            "title": "Records",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "trace_id",
+          "host_name",
+          "action",
+          "audit_status",
+          "limit",
+          "count",
+          "truncated",
+          "records"
+        ],
+        "title": "RunnerHostHygieneAuditRecordsResponse",
+        "type": "object"
+      },
+      "RunnerHostHygieneAuditSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "prune_docker_cache",
+              "prune_dangling_images",
+              "prune_generated_run_cache",
+              "remove_buildkit_state_volumes",
+              "prune_runner_workdir",
+              "restart_runner_service"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "audit_record_key": {
+            "title": "Audit Record Key",
+            "type": "string"
+          },
+          "audit_status": {
+            "enum": [
+              "planned",
+              "completed",
+              "failed"
+            ],
+            "title": "Audit Status",
+            "type": "string"
+          },
+          "host_name": {
+            "title": "Host Name",
+            "type": "string"
+          },
+          "mutate": {
+            "title": "Mutate",
+            "type": "boolean"
+          },
+          "post_apply_observed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Post Apply Observed At"
+          },
+          "post_apply_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "healthy",
+                  "attention"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Post Apply Status"
+          },
+          "pre_apply_observed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pre Apply Observed At"
+          },
+          "pre_apply_status": {
+            "enum": [
+              "healthy",
+              "attention"
+            ],
+            "title": "Pre Apply Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audit_record_key",
+          "audit_status",
+          "action",
+          "host_name",
+          "mutate",
+          "pre_apply_observed_at",
+          "post_apply_observed_at",
+          "pre_apply_status",
+          "post_apply_status"
+        ],
+        "title": "RunnerHostHygieneAuditSummary",
+        "type": "object"
+      },
+      "RunnerHostHygieneCacheClassTelemetry": {
+        "additionalProperties": false,
+        "properties": {
+          "age_buckets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneGeneratedCacheAgeBucket"
+            },
+            "title": "Age Buckets",
+            "type": "array"
+          },
+          "allocated_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allocated Bytes"
+          },
+          "apparent_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Apparent Bytes"
+          },
+          "availability": {
+            "enum": [
+              "available",
+              "partial",
+              "unavailable",
+              "stale"
+            ],
+            "title": "Availability",
+            "type": "string"
+          },
+          "cache_class": {
+            "enum": [
+              "runner_workdir",
+              "generated_filesystem",
+              "docker_images",
+              "docker_containers",
+              "docker_volumes",
+              "docker_build_cache"
+            ],
+            "title": "Cache Class",
+            "type": "string"
+          },
+          "cache_key": {
+            "title": "Cache Key",
+            "type": "string"
+          },
+          "entry_count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry Count"
+          },
+          "estimated_daily_growth_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Daily Growth Bytes"
+          },
+          "last_cleanup_epoch_seconds": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Cleanup Epoch Seconds"
+          },
+          "last_reclaimed_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Reclaimed Bytes"
+          },
+          "logical_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logical Bytes"
+          },
+          "measurement_basis": {
+            "enum": [
+              "filesystem_apparent_allocated",
+              "docker_engine"
+            ],
+            "title": "Measurement Basis",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "reclaimable_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reclaimable Bytes"
+          },
+          "scope": {
+            "enum": [
+              "host",
+              "runner_root",
+              "generated_cache"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "unavailable_reason": {
+            "default": "",
+            "title": "Unavailable Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cache_key",
+          "cache_class",
+          "scope",
+          "availability",
+          "measurement_basis",
+          "source",
+          "observed_at"
+        ],
+        "title": "RunnerHostHygieneCacheClassTelemetry",
+        "type": "object"
+      },
       "RunnerHostHygieneDockerReclaimableBreakdown": {
         "additionalProperties": false,
         "properties": {
@@ -18992,7 +19401,9 @@
             "default": "complete",
             "enum": [
               "complete",
-              "partial"
+              "partial",
+              "unavailable",
+              "stale"
             ],
             "title": "Measurement Status",
             "type": "string"
@@ -19015,6 +19426,11 @@
             "title": "Owner Worker Observations",
             "type": "array"
           },
+          "reason_code": {
+            "default": "",
+            "title": "Reason Code",
+            "type": "string"
+          },
           "symlink_safe": {
             "default": false,
             "title": "Symlink Safe",
@@ -19025,6 +19441,129 @@
           "cache_key"
         ],
         "title": "RunnerHostHygieneGeneratedCacheUsage",
+        "type": "object"
+      },
+      "RunnerHostHygieneHistoryPoint": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "prune_docker_cache",
+              "prune_dangling_images",
+              "prune_generated_run_cache",
+              "remove_buildkit_state_volumes",
+              "prune_runner_workdir",
+              "restart_runner_service"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "audit_record_key": {
+            "title": "Audit Record Key",
+            "type": "string"
+          },
+          "audit_status": {
+            "enum": [
+              "planned",
+              "completed",
+              "failed"
+            ],
+            "title": "Audit Status",
+            "type": "string"
+          },
+          "mutate": {
+            "title": "Mutate",
+            "type": "boolean"
+          },
+          "phase": {
+            "enum": [
+              "pre_apply",
+              "post_apply"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "report": {
+            "$ref": "#/components/schemas/RunnerHostHygieneReportReadModel"
+          }
+        },
+        "required": [
+          "audit_record_key",
+          "phase",
+          "audit_status",
+          "action",
+          "mutate",
+          "report"
+        ],
+        "title": "RunnerHostHygieneHistoryPoint",
+        "type": "object"
+      },
+      "RunnerHostHygieneHistoryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "cache_key": {
+            "title": "Cache Key",
+            "type": "string"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "host_name": {
+            "title": "Host Name",
+            "type": "string"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneHistoryPoint"
+            },
+            "title": "Points",
+            "type": "array"
+          },
+          "result_truncated": {
+            "title": "Result Truncated",
+            "type": "boolean"
+          },
+          "scan_limit": {
+            "title": "Scan Limit",
+            "type": "integer"
+          },
+          "scan_truncated": {
+            "title": "Scan Truncated",
+            "type": "boolean"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "trace_id",
+          "host_name",
+          "cache_key",
+          "limit",
+          "scan_limit",
+          "count",
+          "scan_truncated",
+          "result_truncated",
+          "truncated",
+          "points"
+        ],
+        "title": "RunnerHostHygieneHistoryResponse",
         "type": "object"
       },
       "RunnerHostHygieneImageInventoryItem": {
@@ -19059,10 +19598,16 @@
             "type": "string"
           },
           "size_bytes": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Size Bytes",
-            "type": "integer"
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
           },
           "tag": {
             "title": "Tag",
@@ -19080,6 +19625,14 @@
       "RunnerHostHygieneReport": {
         "additionalProperties": false,
         "properties": {
+          "cache_class_telemetry": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneCacheClassTelemetry"
+            },
+            "title": "Cache Class Telemetry",
+            "type": "array"
+          },
           "docker_reclaimable_breakdown": {
             "$ref": "#/components/schemas/RunnerHostHygieneDockerReclaimableBreakdown"
           },
@@ -19145,6 +19698,17 @@
             "title": "Image Inventory",
             "type": "array"
           },
+          "image_inventory_total_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Image Inventory Total Count",
+            "type": "integer"
+          },
+          "image_inventory_truncated": {
+            "default": false,
+            "title": "Image Inventory Truncated",
+            "type": "boolean"
+          },
           "next_steps": {
             "default": [],
             "items": {
@@ -19152,6 +19716,11 @@
             },
             "title": "Next Steps",
             "type": "array"
+          },
+          "observed_at": {
+            "default": "",
+            "title": "Observed At",
+            "type": "string"
           },
           "orphan_buildkit_containers": {
             "default": 0,
@@ -19211,6 +19780,17 @@
             "title": "Volume Inventory",
             "type": "array"
           },
+          "volume_inventory_total_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Volume Inventory Total Count",
+            "type": "integer"
+          },
+          "volume_inventory_truncated": {
+            "default": false,
+            "title": "Volume Inventory Truncated",
+            "type": "boolean"
+          },
           "warm_builders": {
             "default": [],
             "items": {
@@ -19226,6 +19806,122 @@
           "summary"
         ],
         "title": "RunnerHostHygieneReport",
+        "type": "object"
+      },
+      "RunnerHostHygieneReportReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "cache_class_telemetry": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneCacheClassTelemetry"
+            },
+            "title": "Cache Class Telemetry",
+            "type": "array"
+          },
+          "chronology_state": {
+            "enum": [
+              "timestamped",
+              "legacy_missing",
+              "invalid"
+            ],
+            "title": "Chronology State",
+            "type": "string"
+          },
+          "docker_reclaimable_bytes": {
+            "title": "Docker Reclaimable Bytes",
+            "type": "integer"
+          },
+          "finding_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Finding Codes",
+            "type": "array"
+          },
+          "free_disk_bytes": {
+            "title": "Free Disk Bytes",
+            "type": "integer"
+          },
+          "generated_cache_allocated_bytes": {
+            "title": "Generated Cache Allocated Bytes",
+            "type": "integer"
+          },
+          "generated_cache_apparent_bytes": {
+            "title": "Generated Cache Apparent Bytes",
+            "type": "integer"
+          },
+          "host_name": {
+            "title": "Host Name",
+            "type": "string"
+          },
+          "image_inventory_total_count": {
+            "title": "Image Inventory Total Count",
+            "type": "integer"
+          },
+          "image_inventory_truncated": {
+            "title": "Image Inventory Truncated",
+            "type": "boolean"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "runner_workdir_allocated_bytes": {
+            "title": "Runner Workdir Allocated Bytes",
+            "type": "integer"
+          },
+          "runner_workdir_apparent_bytes": {
+            "title": "Runner Workdir Apparent Bytes",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "healthy",
+              "attention"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "volume_inventory_total_count": {
+            "title": "Volume Inventory Total Count",
+            "type": "integer"
+          },
+          "volume_inventory_truncated": {
+            "title": "Volume Inventory Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status",
+          "host_name",
+          "observed_at",
+          "chronology_state",
+          "free_disk_bytes",
+          "docker_reclaimable_bytes",
+          "runner_workdir_apparent_bytes",
+          "runner_workdir_allocated_bytes",
+          "generated_cache_apparent_bytes",
+          "generated_cache_allocated_bytes",
+          "cache_class_telemetry",
+          "image_inventory_total_count",
+          "image_inventory_truncated",
+          "volume_inventory_total_count",
+          "volume_inventory_truncated",
+          "finding_codes",
+          "summary"
+        ],
+        "title": "RunnerHostHygieneReportReadModel",
         "type": "object"
       },
       "RunnerHostHygieneRunnerWorkdirUsage": {
@@ -19247,9 +19943,16 @@
             "default": "complete",
             "enum": [
               "complete",
-              "partial"
+              "partial",
+              "unavailable",
+              "stale"
             ],
             "title": "Measurement Status",
+            "type": "string"
+          },
+          "reason_code": {
+            "default": "",
+            "title": "Reason Code",
             "type": "string"
           },
           "root_key": {
@@ -19293,16 +19996,28 @@
             "type": "string"
           },
           "referenced_by_containers": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Referenced By Containers",
-            "type": "integer"
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Referenced By Containers"
           },
           "size_bytes": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Size Bytes",
-            "type": "integer"
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
           }
         },
         "required": [
@@ -39890,6 +40605,159 @@
       }
     },
     "/v1/evidence/runner-host-hygiene/audits": {
+      "get": {
+        "operationId": "list_runner_host_hygiene_audit_records",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "host_name",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Host Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "prune_docker_cache",
+                    "prune_dangling_images",
+                    "prune_generated_run_cache",
+                    "remove_buildkit_state_volumes",
+                    "prune_runner_workdir",
+                    "restart_runner_service"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Action"
+            }
+          },
+          {
+            "in": "query",
+            "name": "audit_status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "planned",
+                    "completed",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Audit Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": "25",
+              "title": "Limit",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerHostHygieneAuditRecordsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List runner host hygiene audit records"
+      },
       "post": {
         "operationId": "write_runner_host_hygiene_audit_evidence",
         "parameters": [
@@ -39997,6 +40865,226 @@
           }
         },
         "summary": "Write runner host hygiene audit evidence"
+      }
+    },
+    "/v1/evidence/runner-host-hygiene/audits/record": {
+      "get": {
+        "operationId": "read_runner_host_hygiene_audit_record",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "audit_record_key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Audit Record Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerHostHygieneAuditRecordResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read one runner host hygiene audit record"
+      }
+    },
+    "/v1/evidence/runner-host-hygiene/history": {
+      "get": {
+        "operationId": "read_runner_host_hygiene_history",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "host_name",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Host Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cache_key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cache Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": "25",
+              "title": "Limit",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerHostHygieneHistoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read runner host hygiene observation history"
       }
     },
     "/v1/evidence/runner-lane-registration/audits": {

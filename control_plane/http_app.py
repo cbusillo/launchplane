@@ -93,6 +93,7 @@ from control_plane.http_routes import (
     register_product_promotion_status_read_routes,
     register_product_profile_read_routes,
     register_protected_artifact_read_routes,
+    register_runner_host_hygiene_read_routes,
     register_topology_read_routes,
     register_tracked_target_log_read_routes,
     register_work_graph_issue_inbox_read_routes,
@@ -19165,6 +19166,7 @@ def create_launchplane_fastapi_app(
 
     register_topology_read_routes(app, dependencies=read_route_dependencies)
     register_ingress_read_routes(app, dependencies=read_route_dependencies)
+    register_runner_host_hygiene_read_routes(app, dependencies=read_route_dependencies)
     register_deployment_promotion_read_routes(app, dependencies=read_route_dependencies)
 
     every_code_work_request_write_error_responses: dict[int | str, dict[str, object]] = {

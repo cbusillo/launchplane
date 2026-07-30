@@ -8,6 +8,32 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 RunnerHostHygieneStatus = Literal["healthy", "attention"]
+RunnerHostHygieneEvidenceAvailability = Literal[
+    "available",
+    "partial",
+    "unavailable",
+    "stale",
+]
+RunnerHostHygieneMeasurementStatus = Literal[
+    "complete",
+    "partial",
+    "unavailable",
+    "stale",
+]
+RunnerHostHygieneCacheClass = Literal[
+    "runner_workdir",
+    "generated_filesystem",
+    "docker_images",
+    "docker_containers",
+    "docker_volumes",
+    "docker_build_cache",
+]
+RunnerHostHygieneCacheScope = Literal["host", "runner_root", "generated_cache"]
+RunnerHostHygieneMeasurementBasis = Literal[
+    "filesystem_apparent_allocated",
+    "docker_engine",
+]
+RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS = 128
 RunnerHostHygieneApplyAction = Literal[
     "prune_docker_cache",
     "prune_dangling_images",
@@ -163,7 +189,8 @@ class RunnerHostHygieneRunnerWorkdirUsage(BaseModel):
     root_key: str
     apparent_bytes: int = Field(default=0, ge=0)
     allocated_bytes: int = Field(default=0, ge=0)
-    measurement_status: Literal["complete", "partial"] = "complete"
+    measurement_status: RunnerHostHygieneMeasurementStatus = "complete"
+    reason_code: str = ""
 
     @model_validator(mode="after")
     def _normalize_usage(self) -> "RunnerHostHygieneRunnerWorkdirUsage":
@@ -171,6 +198,15 @@ class RunnerHostHygieneRunnerWorkdirUsage(BaseModel):
             _normalized_token(self.root_key),
             "runner host hygiene workdir usage requires root_key",
         )
+        self.reason_code = _normalized_public_token(self.reason_code)
+        if self.measurement_status == "complete" and self.reason_code:
+            raise ValueError("complete runner workdir measurement cannot include reason_code")
+        if self.measurement_status != "complete" and not self.reason_code:
+            self.reason_code = "legacy_incomplete"
+        if self.measurement_status in {"unavailable", "stale"} and (
+            self.apparent_bytes or self.allocated_bytes
+        ):
+            raise ValueError("unavailable runner workdir measurement cannot include bytes")
         return self
 
 
@@ -207,7 +243,8 @@ class RunnerHostHygieneGeneratedCacheUsage(BaseModel):
     apparent_bytes: int = Field(default=0, ge=0)
     allocated_bytes: int = Field(default=0, ge=0)
     entry_count: int = Field(default=0, ge=0)
-    measurement_status: Literal["complete", "partial"] = "complete"
+    measurement_status: RunnerHostHygieneMeasurementStatus = "complete"
+    reason_code: str = ""
     owner_valid: bool = False
     mode_valid: bool = False
     symlink_safe: bool = False
@@ -228,15 +265,103 @@ class RunnerHostHygieneGeneratedCacheUsage(BaseModel):
             self.cache_key,
             "runner host hygiene generated cache usage requires cache_key",
         )
+        self.reason_code = _normalized_public_token(self.reason_code)
+        if self.measurement_status == "complete" and self.reason_code:
+            raise ValueError("complete generated cache measurement cannot include reason_code")
+        if self.measurement_status != "complete" and not self.reason_code:
+            self.reason_code = "legacy_incomplete"
+        if self.measurement_status in {"unavailable", "stale"} and (
+            self.apparent_bytes
+            or self.allocated_bytes
+            or self.entry_count
+            or self.age_buckets
+            or self.entries
+        ):
+            raise ValueError("unavailable generated cache measurement cannot include usage")
         if any(value < 0 for value in self.owner_worker_observations):
             raise ValueError("generated cache worker observations cannot be negative")
-        self.age_buckets = tuple(sorted(self.age_buckets, key=lambda item: item.bucket))
+        self.age_buckets = tuple(sorted(self.age_buckets, key=_cache_age_bucket_sort_key))
         self.entries = tuple(sorted(self.entries, key=lambda item: item.run_id))
         self.last_removed_run_ids = tuple(sorted(set(self.last_removed_run_ids)))
         if any(run_id <= 0 for run_id in self.last_removed_run_ids):
             raise ValueError("generated cache cleanup history run ids must be positive")
         if self.entry_count < len(self.entries):
             raise ValueError("generated cache entry_count cannot be smaller than entries")
+        return self
+
+
+class RunnerHostHygieneCacheClassTelemetry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cache_key: str
+    cache_class: RunnerHostHygieneCacheClass
+    scope: RunnerHostHygieneCacheScope
+    availability: RunnerHostHygieneEvidenceAvailability
+    measurement_basis: RunnerHostHygieneMeasurementBasis
+    source: str
+    observed_at: str
+    unavailable_reason: str = ""
+    apparent_bytes: int | None = Field(default=None, ge=0)
+    allocated_bytes: int | None = Field(default=None, ge=0)
+    logical_bytes: int | None = Field(default=None, ge=0)
+    reclaimable_bytes: int | None = Field(default=None, ge=0)
+    entry_count: int | None = Field(default=None, ge=0)
+    age_buckets: tuple[RunnerHostHygieneGeneratedCacheAgeBucket, ...] = ()
+    estimated_daily_growth_bytes: int | None = Field(default=None, ge=0)
+    last_cleanup_epoch_seconds: int | None = Field(default=None, ge=0)
+    last_reclaimed_bytes: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _normalize_telemetry(self) -> "RunnerHostHygieneCacheClassTelemetry":
+        self.cache_key = _required_public_token(
+            self.cache_key,
+            "runner host hygiene cache-class telemetry requires cache_key",
+        )
+        self.source = _required_public_token(
+            self.source,
+            "runner host hygiene cache-class telemetry requires source",
+        )
+        self.observed_at = _required_text(
+            self.observed_at,
+            "runner host hygiene cache-class telemetry requires observed_at",
+        )
+        self.unavailable_reason = self.unavailable_reason.strip()
+        self.age_buckets = tuple(sorted(self.age_buckets, key=_cache_age_bucket_sort_key))
+        filesystem_measurements = (self.apparent_bytes, self.allocated_bytes)
+        docker_measurements = (self.logical_bytes, self.reclaimable_bytes)
+        if self.measurement_basis == "filesystem_apparent_allocated" and any(
+            value is not None for value in docker_measurements
+        ):
+            raise ValueError("filesystem cache telemetry cannot include Docker byte measurements")
+        if self.measurement_basis == "docker_engine" and any(
+            value is not None for value in filesystem_measurements
+        ):
+            raise ValueError("Docker cache telemetry cannot include filesystem byte measurements")
+        if self.cache_class in {"runner_workdir", "generated_filesystem"}:
+            if self.measurement_basis != "filesystem_apparent_allocated":
+                raise ValueError("filesystem cache classes require filesystem measurement basis")
+        elif self.measurement_basis != "docker_engine":
+            raise ValueError("Docker cache classes require Docker measurement basis")
+        measurements = (
+            *filesystem_measurements,
+            *docker_measurements,
+            self.entry_count,
+            self.estimated_daily_growth_bytes,
+            self.last_cleanup_epoch_seconds,
+            self.last_reclaimed_bytes,
+        )
+        if self.availability in {"unavailable", "stale"}:
+            if any(value is not None for value in measurements) or self.age_buckets:
+                raise ValueError("unavailable cache telemetry cannot include measurements")
+            if not self.unavailable_reason:
+                raise ValueError("unavailable cache telemetry requires unavailable_reason")
+        else:
+            if not any(value is not None for value in measurements) and not self.age_buckets:
+                raise ValueError("available cache telemetry requires measurement evidence")
+            if self.availability == "partial" and not self.unavailable_reason:
+                raise ValueError("partial cache telemetry requires unavailable_reason")
+            if self.availability == "available" and self.unavailable_reason:
+                raise ValueError("available cache telemetry cannot include unavailable_reason")
         return self
 
 
@@ -256,10 +381,15 @@ class RunnerHostHygieneObservation(BaseModel):
     generated_cache_apparent_bytes: int = Field(default=0, ge=0)
     generated_cache_allocated_bytes: int = Field(default=0, ge=0)
     generated_cache_usage: tuple[RunnerHostHygieneGeneratedCacheUsage, ...] = ()
+    cache_class_telemetry: tuple[RunnerHostHygieneCacheClassTelemetry, ...] = ()
     docker_toolchain: "RunnerHostDockerToolchainObservation | None" = None
     warm_builders: tuple[str, ...] = ()
     image_inventory: tuple["RunnerHostHygieneImageInventoryItem", ...] = ()
+    image_inventory_total_count: int = Field(default=0, ge=0)
+    image_inventory_truncated: bool = False
     volume_inventory: tuple["RunnerHostHygieneVolumeInventoryItem", ...] = ()
+    volume_inventory_total_count: int = Field(default=0, ge=0)
+    volume_inventory_truncated: bool = False
     orphan_buildkit_containers: int = Field(default=0, ge=0)
     orphan_buildkit_volumes: int = Field(default=0, ge=0)
     notes: tuple[str, ...] = ()
@@ -279,8 +409,25 @@ class RunnerHostHygieneObservation(BaseModel):
         self.generated_cache_usage = tuple(
             sorted(self.generated_cache_usage, key=lambda item: item.cache_key)
         )
+        self.cache_class_telemetry = _sorted_cache_class_telemetry(self.cache_class_telemetry)
         self.image_inventory = _sorted_image_inventory(self.image_inventory)
         self.volume_inventory = _sorted_volume_inventory(self.volume_inventory)
+        if not self.image_inventory_total_count:
+            self.image_inventory_total_count = len(self.image_inventory)
+        if not self.volume_inventory_total_count:
+            self.volume_inventory_total_count = len(self.volume_inventory)
+        if self.image_inventory_total_count < len(self.image_inventory):
+            raise ValueError("image inventory total count cannot be smaller than retained rows")
+        if self.volume_inventory_total_count < len(self.volume_inventory):
+            raise ValueError("volume inventory total count cannot be smaller than retained rows")
+        if self.image_inventory_truncated != (
+            self.image_inventory_total_count > len(self.image_inventory)
+        ):
+            raise ValueError("image inventory truncation must match total count")
+        if self.volume_inventory_truncated != (
+            self.volume_inventory_total_count > len(self.volume_inventory)
+        ):
+            raise ValueError("volume inventory truncation must match total count")
         self.notes = tuple(note.strip() for note in self.notes if note.strip())
         return self
 
@@ -327,7 +474,7 @@ class RunnerHostHygieneImageInventoryItem(BaseModel):
     image_id: str
     repository: str
     tag: str
-    size_bytes: int = Field(default=0, ge=0)
+    size_bytes: int | None = Field(default=None, ge=0)
     created_at: str = ""
     dangling: bool = False
     in_use: bool = False
@@ -351,8 +498,8 @@ class RunnerHostHygieneVolumeInventoryItem(BaseModel):
     driver: str
     mountpoint: str = ""
     labels: tuple[str, ...] = ()
-    size_bytes: int = Field(default=0, ge=0)
-    referenced_by_containers: int = Field(default=0, ge=0)
+    size_bytes: int | None = Field(default=None, ge=0)
+    referenced_by_containers: int | None = Field(default=None, ge=0)
     dangling: bool = False
 
     @model_validator(mode="after")
@@ -386,6 +533,7 @@ class RunnerHostHygieneReport(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     status: RunnerHostHygieneStatus
     host_name: str
+    observed_at: str = ""
     free_disk_bytes: int = Field(default=0, ge=0)
     docker_reclaimable_bytes: int = Field(default=0, ge=0)
     docker_reclaimable_breakdown: RunnerHostHygieneDockerReclaimableBreakdown = Field(
@@ -397,10 +545,15 @@ class RunnerHostHygieneReport(BaseModel):
     generated_cache_apparent_bytes: int = Field(default=0, ge=0)
     generated_cache_allocated_bytes: int = Field(default=0, ge=0)
     generated_cache_usage: tuple[RunnerHostHygieneGeneratedCacheUsage, ...] = ()
+    cache_class_telemetry: tuple[RunnerHostHygieneCacheClassTelemetry, ...] = ()
     docker_toolchain: RunnerHostDockerToolchainObservation | None = None
     warm_builders: tuple[str, ...] = ()
     image_inventory: tuple[RunnerHostHygieneImageInventoryItem, ...] = ()
+    image_inventory_total_count: int = Field(default=0, ge=0)
+    image_inventory_truncated: bool = False
     volume_inventory: tuple[RunnerHostHygieneVolumeInventoryItem, ...] = ()
+    volume_inventory_total_count: int = Field(default=0, ge=0)
+    volume_inventory_truncated: bool = False
     orphan_buildkit_containers: int = Field(default=0, ge=0)
     orphan_buildkit_volumes: int = Field(default=0, ge=0)
     findings: tuple[RunnerHostHygieneFinding, ...] = ()
@@ -412,6 +565,7 @@ class RunnerHostHygieneReport(BaseModel):
         self.host_name = _required_text(
             self.host_name, "runner host hygiene report requires host_name"
         )
+        self.observed_at = self.observed_at.strip()
         self.warm_builders = _normalized_tokens(self.warm_builders)
         self.runner_workdir_usage = tuple(
             sorted(self.runner_workdir_usage, key=lambda item: item.root_key)
@@ -419,8 +573,25 @@ class RunnerHostHygieneReport(BaseModel):
         self.generated_cache_usage = tuple(
             sorted(self.generated_cache_usage, key=lambda item: item.cache_key)
         )
+        self.cache_class_telemetry = _sorted_cache_class_telemetry(self.cache_class_telemetry)
         self.image_inventory = _sorted_image_inventory(self.image_inventory)
         self.volume_inventory = _sorted_volume_inventory(self.volume_inventory)
+        if not self.image_inventory_total_count:
+            self.image_inventory_total_count = len(self.image_inventory)
+        if not self.volume_inventory_total_count:
+            self.volume_inventory_total_count = len(self.volume_inventory)
+        if self.image_inventory_total_count < len(self.image_inventory):
+            raise ValueError("image inventory total count cannot be smaller than retained rows")
+        if self.volume_inventory_total_count < len(self.volume_inventory):
+            raise ValueError("volume inventory total count cannot be smaller than retained rows")
+        if self.image_inventory_truncated != (
+            self.image_inventory_total_count > len(self.image_inventory)
+        ):
+            raise ValueError("image inventory truncation must match total count")
+        if self.volume_inventory_truncated != (
+            self.volume_inventory_total_count > len(self.volume_inventory)
+        ):
+            raise ValueError("volume inventory truncation must match total count")
         self.findings = tuple(sorted(self.findings, key=lambda finding: finding.code))
         self.summary = _required_text(self.summary, "runner host hygiene report requires summary")
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
@@ -618,6 +789,73 @@ class RunnerHostHygieneApplyAuditRecord(BaseModel):
         if self.status in {"completed", "failed"} and self.plan.status != "ready":
             raise ValueError("terminal runner host hygiene audit record requires a ready plan")
         return self
+
+
+def sanitize_runner_host_hygiene_audit_record_for_persistence(
+    audit: RunnerHostHygieneApplyAuditRecord,
+) -> RunnerHostHygieneApplyAuditRecord:
+    return RunnerHostHygieneApplyAuditRecord.model_validate(
+        {
+            **audit.model_dump(mode="python"),
+            "pre_apply_report": _sanitize_runner_host_hygiene_report_for_persistence(
+                audit.pre_apply_report
+            ).model_dump(mode="python"),
+            "post_apply_report": (
+                _sanitize_runner_host_hygiene_report_for_persistence(
+                    audit.post_apply_report
+                ).model_dump(mode="python")
+                if audit.post_apply_report is not None
+                else None
+            ),
+        }
+    )
+
+
+def _sanitize_runner_host_hygiene_report_for_persistence(
+    report: RunnerHostHygieneReport,
+) -> RunnerHostHygieneReport:
+    image_inventory = tuple(
+        item.model_copy(
+            update={
+                "repository": "",
+                "tag": "",
+                "created_at": "",
+            }
+        )
+        for item in report.image_inventory[:RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS]
+    )
+    volume_inventory = tuple(
+        item.model_copy(update={"mountpoint": "", "labels": ()})
+        for item in report.volume_inventory[:RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS]
+    )
+    image_inventory_total_count = max(
+        report.image_inventory_total_count,
+        len(report.image_inventory),
+    )
+    volume_inventory_total_count = max(
+        report.volume_inventory_total_count,
+        len(report.volume_inventory),
+    )
+    cache_class_telemetry = tuple(
+        item.model_copy(
+            update={"unavailable_reason": _sanitized_unavailable_reason(item.unavailable_reason)}
+        )
+        for item in report.cache_class_telemetry
+    )
+    return RunnerHostHygieneReport.model_validate(
+        {
+            **report.model_dump(mode="python"),
+            "cache_class_telemetry": tuple(
+                item.model_dump(mode="python") for item in cache_class_telemetry
+            ),
+            "image_inventory": tuple(item.model_dump(mode="python") for item in image_inventory),
+            "image_inventory_total_count": image_inventory_total_count,
+            "image_inventory_truncated": image_inventory_total_count > len(image_inventory),
+            "volume_inventory": tuple(item.model_dump(mode="python") for item in volume_inventory),
+            "volume_inventory_total_count": volume_inventory_total_count,
+            "volume_inventory_truncated": volume_inventory_total_count > len(volume_inventory),
+        }
+    )
 
 
 class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
@@ -876,7 +1114,7 @@ def evaluate_runner_host_hygiene(
     partial_workdir_roots = tuple(
         item.root_key
         for item in observation.runner_workdir_usage
-        if item.measurement_status == "partial"
+        if item.measurement_status != "complete"
     )
     if partial_workdir_roots:
         findings.append(
@@ -908,7 +1146,7 @@ def evaluate_runner_host_hygiene(
     partial_generated_caches = tuple(
         item.cache_key
         for item in observation.generated_cache_usage
-        if item.measurement_status == "partial"
+        if item.measurement_status != "complete"
     )
     if partial_generated_caches:
         findings.append(
@@ -958,9 +1196,14 @@ def evaluate_runner_host_hygiene(
         )
 
     status: RunnerHostHygieneStatus = "attention" if findings else "healthy"
+    cache_class_telemetry = _merged_cache_class_telemetry(
+        _cache_class_telemetry_from_observation(observation),
+        observation.cache_class_telemetry,
+    )
     return RunnerHostHygieneReport(
         status=status,
         host_name=observation.host_name,
+        observed_at=observation.observed_at,
         free_disk_bytes=observation.free_disk_bytes,
         docker_reclaimable_bytes=observation.docker_reclaimable_bytes,
         docker_reclaimable_breakdown=observation.docker_reclaimable_breakdown,
@@ -970,10 +1213,15 @@ def evaluate_runner_host_hygiene(
         generated_cache_apparent_bytes=observation.generated_cache_apparent_bytes,
         generated_cache_allocated_bytes=observation.generated_cache_allocated_bytes,
         generated_cache_usage=observation.generated_cache_usage,
+        cache_class_telemetry=cache_class_telemetry,
         docker_toolchain=observation.docker_toolchain,
         warm_builders=observation.warm_builders,
         image_inventory=observation.image_inventory,
+        image_inventory_total_count=observation.image_inventory_total_count,
+        image_inventory_truncated=observation.image_inventory_truncated,
         volume_inventory=observation.volume_inventory,
+        volume_inventory_total_count=observation.volume_inventory_total_count,
+        volume_inventory_truncated=observation.volume_inventory_truncated,
         orphan_buildkit_containers=observation.orphan_buildkit_containers,
         orphan_buildkit_volumes=observation.orphan_buildkit_volumes,
         findings=tuple(findings),
@@ -984,6 +1232,177 @@ def evaluate_runner_host_hygiene(
         ),
         next_steps=_next_steps(status),
     )
+
+
+def _cache_class_telemetry_from_observation(
+    observation: RunnerHostHygieneObservation,
+) -> tuple[RunnerHostHygieneCacheClassTelemetry, ...]:
+    telemetry: list[RunnerHostHygieneCacheClassTelemetry] = []
+    for workdir_usage in observation.runner_workdir_usage:
+        availability = _telemetry_availability(workdir_usage.measurement_status)
+        unavailable_reason = workdir_usage.reason_code if availability != "available" else ""
+        telemetry.append(
+            RunnerHostHygieneCacheClassTelemetry(
+                cache_key=workdir_usage.root_key,
+                cache_class="runner_workdir",
+                scope="runner_root",
+                availability=availability,
+                measurement_basis="filesystem_apparent_allocated",
+                source="runner_workdir_probe",
+                observed_at=observation.observed_at,
+                unavailable_reason=unavailable_reason,
+                apparent_bytes=(
+                    workdir_usage.apparent_bytes
+                    if availability in {"available", "partial"}
+                    else None
+                ),
+                allocated_bytes=(
+                    workdir_usage.allocated_bytes
+                    if availability in {"available", "partial"}
+                    else None
+                ),
+            )
+        )
+    for generated_usage in observation.generated_cache_usage:
+        unavailable_reasons: list[str] = []
+        availability = _telemetry_availability(generated_usage.measurement_status)
+        if availability != "available":
+            unavailable_reasons.append(generated_usage.reason_code)
+        if generated_usage.entries_truncated:
+            unavailable_reasons.append("entry_history_truncated")
+            if availability == "available":
+                availability = "partial"
+        has_cleanup_history = generated_usage.last_cleanup_epoch_seconds > 0
+        has_measurement = availability in {"available", "partial"}
+        telemetry.append(
+            RunnerHostHygieneCacheClassTelemetry(
+                cache_key=generated_usage.cache_key,
+                cache_class="generated_filesystem",
+                scope="generated_cache",
+                availability=availability,
+                measurement_basis="filesystem_apparent_allocated",
+                source="generated_cache_probe",
+                observed_at=observation.observed_at,
+                unavailable_reason=",".join(unavailable_reasons),
+                apparent_bytes=generated_usage.apparent_bytes if has_measurement else None,
+                allocated_bytes=generated_usage.allocated_bytes if has_measurement else None,
+                entry_count=generated_usage.entry_count if has_measurement else None,
+                age_buckets=generated_usage.age_buckets if has_measurement else (),
+                estimated_daily_growth_bytes=(
+                    generated_usage.estimated_daily_growth_bytes
+                    if has_measurement and has_cleanup_history
+                    else None
+                ),
+                last_cleanup_epoch_seconds=(
+                    generated_usage.last_cleanup_epoch_seconds
+                    if has_measurement and has_cleanup_history
+                    else None
+                ),
+                last_reclaimed_bytes=(
+                    generated_usage.last_reclaimed_bytes
+                    if has_measurement and has_cleanup_history
+                    else None
+                ),
+            )
+        )
+    image_logical_bytes = _inventory_size_total(
+        observation.image_inventory,
+        truncated=observation.image_inventory_truncated,
+    )
+    image_unavailable_reasons = _inventory_unavailable_reasons(
+        observation.image_inventory,
+        truncated=observation.image_inventory_truncated,
+    )
+    telemetry.append(
+        RunnerHostHygieneCacheClassTelemetry(
+            cache_key="images",
+            cache_class="docker_images",
+            scope="host",
+            availability="partial" if image_unavailable_reasons else "available",
+            measurement_basis="docker_engine",
+            source="docker_engine",
+            observed_at=observation.observed_at,
+            unavailable_reason=",".join(image_unavailable_reasons),
+            logical_bytes=image_logical_bytes,
+            reclaimable_bytes=observation.docker_reclaimable_breakdown.images_bytes,
+            entry_count=observation.image_inventory_total_count,
+        )
+    )
+    telemetry.append(
+        RunnerHostHygieneCacheClassTelemetry(
+            cache_key="containers",
+            cache_class="docker_containers",
+            scope="host",
+            availability="available",
+            measurement_basis="docker_engine",
+            source="docker_engine",
+            observed_at=observation.observed_at,
+            reclaimable_bytes=observation.docker_reclaimable_breakdown.containers_bytes,
+        )
+    )
+    volume_logical_bytes = _inventory_size_total(
+        observation.volume_inventory,
+        truncated=observation.volume_inventory_truncated,
+    )
+    volume_unavailable_reasons = _inventory_unavailable_reasons(
+        observation.volume_inventory,
+        truncated=observation.volume_inventory_truncated,
+    )
+    telemetry.append(
+        RunnerHostHygieneCacheClassTelemetry(
+            cache_key="volumes",
+            cache_class="docker_volumes",
+            scope="host",
+            availability="partial" if volume_unavailable_reasons else "available",
+            measurement_basis="docker_engine",
+            source="docker_engine",
+            observed_at=observation.observed_at,
+            unavailable_reason=",".join(volume_unavailable_reasons),
+            logical_bytes=volume_logical_bytes,
+            reclaimable_bytes=observation.docker_reclaimable_breakdown.local_volumes_bytes,
+            entry_count=observation.volume_inventory_total_count,
+        )
+    )
+    telemetry.append(
+        RunnerHostHygieneCacheClassTelemetry(
+            cache_key="build-cache",
+            cache_class="docker_build_cache",
+            scope="host",
+            availability="available",
+            measurement_basis="docker_engine",
+            source="docker_engine",
+            observed_at=observation.observed_at,
+            reclaimable_bytes=observation.docker_reclaimable_breakdown.build_cache_bytes,
+        )
+    )
+    return _sorted_cache_class_telemetry(tuple(telemetry))
+
+
+def _inventory_size_total(
+    inventory: tuple[
+        RunnerHostHygieneImageInventoryItem | RunnerHostHygieneVolumeInventoryItem, ...
+    ],
+    *,
+    truncated: bool,
+) -> int | None:
+    if truncated or any(item.size_bytes is None for item in inventory):
+        return None
+    return sum(cast(int, item.size_bytes) for item in inventory)
+
+
+def _inventory_unavailable_reasons(
+    inventory: tuple[
+        RunnerHostHygieneImageInventoryItem | RunnerHostHygieneVolumeInventoryItem, ...
+    ],
+    *,
+    truncated: bool,
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if truncated:
+        reasons.append("inventory_truncated")
+    if any(item.size_bytes is None for item in inventory):
+        reasons.append("inventory_size_unavailable")
+    return tuple(reasons)
 
 
 def plan_runner_host_hygiene_apply(
@@ -1500,13 +1919,22 @@ def _target_volume_blockers(
                 )
             )
             continue
-        if not volume.dangling or volume.referenced_by_containers > 0:
+        if (
+            volume.referenced_by_containers is None
+            or not volume.dangling
+            or volume.referenced_by_containers > 0
+        ):
+            reference_summary = (
+                str(volume.referenced_by_containers)
+                if volume.referenced_by_containers is not None
+                else "unknown"
+            )
             blockers.append(
                 _apply_blocker(
                     "target_volume_active",
                     (
                         "runner host hygiene target volume is still referenced: "
-                        f"{volume_name} links={volume.referenced_by_containers}"
+                        f"{volume_name} links={reference_summary}"
                     ),
                 )
             )
@@ -1651,12 +2079,53 @@ def _sorted_volume_inventory(
     return tuple(sorted(values, key=lambda item: (item.name, item.driver)))
 
 
+def _sorted_cache_class_telemetry(
+    values: tuple[RunnerHostHygieneCacheClassTelemetry, ...],
+) -> tuple[RunnerHostHygieneCacheClassTelemetry, ...]:
+    sorted_values = tuple(sorted(values, key=lambda item: (item.cache_class, item.cache_key)))
+    keys = tuple((item.cache_class, item.cache_key) for item in sorted_values)
+    if len(set(keys)) != len(keys):
+        raise ValueError("runner host hygiene cache-class telemetry must be unique")
+    return sorted_values
+
+
+def _merged_cache_class_telemetry(
+    derived: tuple[RunnerHostHygieneCacheClassTelemetry, ...],
+    explicit: tuple[RunnerHostHygieneCacheClassTelemetry, ...],
+) -> tuple[RunnerHostHygieneCacheClassTelemetry, ...]:
+    telemetry_by_key = {(item.cache_class, item.cache_key): item for item in derived}
+    telemetry_by_key.update({(item.cache_class, item.cache_key): item for item in explicit})
+    return _sorted_cache_class_telemetry(tuple(telemetry_by_key.values()))
+
+
+def _telemetry_availability(
+    measurement_status: RunnerHostHygieneMeasurementStatus,
+) -> RunnerHostHygieneEvidenceAvailability:
+    if measurement_status == "complete":
+        return "available"
+    if measurement_status == "partial":
+        return "partial"
+    if measurement_status == "unavailable":
+        return "unavailable"
+    return "stale"
+
+
 def _normalized_values(values: tuple[str, ...], normalize: Callable[[str], str]) -> tuple[str, ...]:
     return tuple(sorted({normalized for value in values if (normalized := normalize(value))}))
 
 
 def _normalized_token(value: str) -> str:
     return value.strip().lower()
+
+
+def _cache_age_bucket_sort_key(item: RunnerHostHygieneGeneratedCacheAgeBucket) -> int:
+    return {
+        "under_1h": 0,
+        "1h_to_24h": 1,
+        "1d_to_7d": 2,
+        "7d_to_30d": 3,
+        "30d_or_more": 4,
+    }[item.bucket]
 
 
 def _normalized_public_token(value: str) -> str:
@@ -1668,6 +2137,23 @@ def _normalized_public_token(value: str) -> str:
 
 def _required_public_token(value: str, message: str) -> str:
     return _required_text(_normalized_public_token(value), message)
+
+
+def _sanitized_unavailable_reason(value: str) -> str:
+    if not value.strip():
+        return ""
+    try:
+        normalized_reasons = tuple(
+            _required_public_token(
+                reason,
+                "runner host hygiene unavailable reason must be public-safe",
+            )
+            for reason in value.split(",")
+        )
+    except ValueError:
+        return "redacted_reason"
+    summary = ",".join(normalized_reasons)
+    return summary if len(summary) <= 64 else "redacted_reason"
 
 
 def _normalized_volume_name(value: str) -> str:

@@ -27,7 +27,11 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAu
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPlan
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRequest
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneCacheClassTelemetry
 from control_plane.contracts.runner_host_hygiene import RunnerHostDockerToolchainObservation
+from control_plane.contracts.runner_host_hygiene import (
+    RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS,
+)
 from control_plane.contracts.runner_host_hygiene import (
     RunnerHostHygieneAuditDeliveryEnvelope,
 )
@@ -46,6 +50,9 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneRunnerW
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneVolumeInventoryItem
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
+from control_plane.contracts.runner_host_hygiene import (
+    sanitize_runner_host_hygiene_audit_record_for_persistence,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.runner_host_hygiene_audit_spool import (
     RunnerHostHygieneAuditSpool,
@@ -56,6 +63,8 @@ AUDIT_ROUTE_PATH = "/v1/evidence/runner-host-hygiene/audits"
 DEFAULT_PRUNE_UNTIL = "168h"
 MINIMUM_PRUNE_UNTIL_HOURS = 168
 MINIMUM_DEFAULT_CACHE_KEEP_STORAGE_BYTES = 8 * 1024**3
+MAX_DOCKER_IMAGE_INVENTORY_ITEMS = RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS
+MAX_DOCKER_VOLUME_INVENTORY_ITEMS = RUNNER_HOST_HYGIENE_MAX_DOCKER_INVENTORY_ITEMS
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
 _BUILDCTL_STORAGE_MB_BYTES = 1_000_000
 _RUNNER_WORKDIR_USAGE_HELPER = "/usr/local/sbin/launchplane-runner-workdir-usage"
@@ -120,6 +129,26 @@ class RemoteCommandResult:
 class _DockerDiskUsageSnapshot:
     reclaimable_breakdown: RunnerHostHygieneDockerReclaimableBreakdown
     volume_inventory: tuple[RunnerHostHygieneVolumeInventoryItem, ...]
+    cache_class_measurements: tuple[_DockerCacheClassMeasurement, ...]
+
+
+_DockerCacheClass = Literal[
+    "docker_images",
+    "docker_containers",
+    "docker_volumes",
+    "docker_build_cache",
+]
+
+
+@dataclass(frozen=True)
+class _DockerCacheClassMeasurement:
+    cache_key: str
+    cache_class: _DockerCacheClass
+    availability: Literal["available", "partial", "unavailable"]
+    reason_code: str
+    logical_bytes: int | None
+    reclaimable_bytes: int | None
+    entry_count: int | None
 
 
 RemoteCommandRunner = Callable[[Sequence[str], int], RemoteCommandResult]
@@ -443,6 +472,8 @@ def execute_runner_host_hygiene_executor(
         remote_runner=remote_runner,
         github_run_state_reader=github_run_state_reader,
     )
+    if request.mutate:
+        _assert_required_docker_telemetry_available(request=request, report=pre_report)
     selected_generated_run_ids = _select_generated_cache_run_ids(
         request=request,
         report=pre_report,
@@ -495,13 +526,15 @@ def execute_runner_host_hygiene_executor(
         request=apply_request,
         report=pre_report,
     )
-    planned_audit = RunnerHostHygieneApplyAuditRecord(
-        audit_record_key=request.audit_record_key,
-        status="planned",
-        request=apply_request,
-        plan=apply_plan,
-        pre_apply_report=pre_report,
-        message="planned runner host hygiene apply; no host mutation was executed yet",
+    planned_audit = sanitize_runner_host_hygiene_audit_record_for_persistence(
+        RunnerHostHygieneApplyAuditRecord(
+            audit_record_key=request.audit_record_key,
+            status="planned",
+            request=apply_request,
+            plan=apply_plan,
+            pre_apply_report=pre_report,
+            message="planned runner host hygiene apply; no host mutation was executed yet",
+        )
     )
     _assert_generated_cache_audit_redacted(audit=planned_audit, request=action_request)
     planned_idempotency_key = f"runner-host-hygiene:{request.audit_record_key}:planned"
@@ -1029,6 +1062,7 @@ def collect_runner_host_hygiene_report(
     remote_runner: RemoteCommandRunner,
     github_run_state_reader: GitHubRunStateReader | None = None,
 ) -> RunnerHostHygieneReport:
+    observed_at = utc_now_timestamp()
     df_result = _require_remote_success(
         remote_runner(("df", "-B1", "-P", "/"), request.timeout_seconds),
         evidence_name="df",
@@ -1045,15 +1079,35 @@ def collect_runner_host_hygiene_report(
         ).returncode
         == 0
     )
-    image_inventory = _collect_image_inventory(
-        request=request,
-        remote_runner=remote_runner,
+    try:
+        collected_image_inventory = _collect_image_inventory(
+            request=request,
+            remote_runner=remote_runner,
+        )
+        image_inventory_available = True
+    except click.ClickException:
+        if request.mutate:
+            raise
+        collected_image_inventory = ()
+        image_inventory_available = False
+    full_image_inventory = _ordered_image_inventory(collected_image_inventory)
+    try:
+        container_inventory = _collect_container_inventory(
+            request=request,
+            remote_runner=remote_runner,
+        )
+        container_inventory_available = True
+    except click.ClickException:
+        if request.mutate:
+            raise
+        container_inventory = ()
+        container_inventory_available = False
+    full_volume_inventory = _ordered_volume_inventory(
+        docker_disk_usage.volume_inventory,
+        allowed_volume_names=set(request.allowed_buildkit_state_volumes),
     )
-    container_inventory = _collect_container_inventory(
-        request=request,
-        remote_runner=remote_runner,
-    )
-    volume_inventory = docker_disk_usage.volume_inventory
+    image_inventory = full_image_inventory[:MAX_DOCKER_IMAGE_INVENTORY_ITEMS]
+    volume_inventory = full_volume_inventory[:MAX_DOCKER_VOLUME_INVENTORY_ITEMS]
     docker_reclaimable_breakdown = docker_disk_usage.reclaimable_breakdown
     runner_workdir_usage = _collect_runner_workdir_usage(
         request=request,
@@ -1064,9 +1118,22 @@ def collect_runner_host_hygiene_report(
         remote_runner=remote_runner,
         github_run_state_reader=github_run_state_reader,
     )
+    docker_cache_class_measurements = docker_disk_usage.cache_class_measurements
+    if not image_inventory_available:
+        docker_cache_class_measurements = _mark_docker_cache_class_measurement_partial(
+            docker_cache_class_measurements,
+            cache_class="docker_images",
+            reason_code="inventory_probe_failed",
+        )
+    if not container_inventory_available:
+        docker_cache_class_measurements = _mark_docker_cache_class_measurement_partial(
+            docker_cache_class_measurements,
+            cache_class="docker_containers",
+            reason_code="inventory_probe_failed",
+        )
     observation = RunnerHostHygieneObservation(
         host_name=request.host_name,
-        observed_at=utc_now_timestamp(),
+        observed_at=observed_at,
         free_disk_bytes=_parse_df_available_bytes(df_result.stdout),
         docker_reclaimable_bytes=docker_reclaimable_breakdown.total_bytes,
         docker_reclaimable_breakdown=docker_reclaimable_breakdown,
@@ -1076,15 +1143,23 @@ def collect_runner_host_hygiene_report(
         generated_cache_apparent_bytes=sum(item.apparent_bytes for item in generated_cache_usage),
         generated_cache_allocated_bytes=sum(item.allocated_bytes for item in generated_cache_usage),
         generated_cache_usage=generated_cache_usage,
+        cache_class_telemetry=_docker_cache_class_telemetry(
+            docker_cache_class_measurements,
+            observed_at=observed_at,
+        ),
         docker_toolchain=_collect_docker_toolchain(
             request=request,
             remote_runner=remote_runner,
         ),
         warm_builders=warm_builders,
         image_inventory=image_inventory,
+        image_inventory_total_count=len(full_image_inventory),
+        image_inventory_truncated=len(full_image_inventory) > len(image_inventory),
         volume_inventory=volume_inventory,
+        volume_inventory_total_count=len(full_volume_inventory),
+        volume_inventory_truncated=len(full_volume_inventory) > len(volume_inventory),
         orphan_buildkit_containers=_count_orphan_buildkit_containers(container_inventory),
-        orphan_buildkit_volumes=_count_orphan_buildkit_volumes(volume_inventory),
+        orphan_buildkit_volumes=_count_orphan_buildkit_volumes(full_volume_inventory),
         notes=(
             f"execution_lane={request.execution_lane}",
             f"service_user={request.service_user}",
@@ -1472,6 +1547,108 @@ def _collect_image_inventory(
     return tuple(inventory)
 
 
+def _ordered_image_inventory(
+    inventory: tuple[RunnerHostHygieneImageInventoryItem, ...],
+) -> tuple[RunnerHostHygieneImageInventoryItem, ...]:
+    return tuple(
+        sorted(
+            inventory,
+            key=lambda item: (
+                not item.is_warm_builder,
+                not item.dangling,
+                not item.in_use,
+                -(item.size_bytes if item.size_bytes is not None else -1),
+                item.image_id,
+            ),
+        )
+    )
+
+
+def _ordered_volume_inventory(
+    inventory: tuple[RunnerHostHygieneVolumeInventoryItem, ...],
+    *,
+    allowed_volume_names: set[str],
+) -> tuple[RunnerHostHygieneVolumeInventoryItem, ...]:
+    return tuple(
+        sorted(
+            inventory,
+            key=lambda item: (
+                item.name not in allowed_volume_names,
+                item.referenced_by_containers != 0,
+                -(item.size_bytes if item.size_bytes is not None else -1),
+                item.name,
+            ),
+        )
+    )
+
+
+def _docker_cache_class_telemetry(
+    measurements: tuple[_DockerCacheClassMeasurement, ...],
+    *,
+    observed_at: str,
+) -> tuple[RunnerHostHygieneCacheClassTelemetry, ...]:
+    return tuple(
+        RunnerHostHygieneCacheClassTelemetry(
+            cache_key=measurement.cache_key,
+            cache_class=measurement.cache_class,
+            scope="host",
+            availability=measurement.availability,
+            measurement_basis="docker_engine",
+            source="docker_engine",
+            observed_at=observed_at,
+            unavailable_reason=measurement.reason_code,
+            logical_bytes=measurement.logical_bytes,
+            reclaimable_bytes=measurement.reclaimable_bytes,
+            entry_count=measurement.entry_count,
+        )
+        for measurement in measurements
+    )
+
+
+def _assert_required_docker_telemetry_available(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    report: RunnerHostHygieneReport,
+) -> None:
+    required_cache_class = {
+        "prune_docker_cache": "docker_build_cache",
+        "prune_dangling_images": "docker_images",
+        "remove_buildkit_state_volumes": "docker_volumes",
+    }.get(request.action)
+    if required_cache_class is None:
+        return
+    telemetry = next(
+        (item for item in report.cache_class_telemetry if item.cache_class == required_cache_class),
+        None,
+    )
+    if telemetry is None or telemetry.availability != "available":
+        raise click.ClickException(
+            "runner host hygiene required Docker telemetry was unavailable or partial"
+        )
+
+
+def _mark_docker_cache_class_measurement_partial(
+    measurements: tuple[_DockerCacheClassMeasurement, ...],
+    *,
+    cache_class: _DockerCacheClass,
+    reason_code: str,
+) -> tuple[_DockerCacheClassMeasurement, ...]:
+    return tuple(
+        measurement
+        if measurement.cache_class != cache_class or measurement.availability == "unavailable"
+        else _DockerCacheClassMeasurement(
+            cache_key=measurement.cache_key,
+            cache_class=measurement.cache_class,
+            availability="partial",
+            reason_code=reason_code,
+            logical_bytes=measurement.logical_bytes,
+            reclaimable_bytes=measurement.reclaimable_bytes,
+            entry_count=measurement.entry_count,
+        )
+        for measurement in measurements
+    )
+
+
 def _collect_container_inventory(
     *,
     request: RunnerHostHygieneExecutorRequest,
@@ -1561,12 +1738,32 @@ def _collect_runner_workdir_usage(
             request.timeout_seconds,
         )
         if result.returncode != 0:
-            raise click.ClickException(
-                f"runner host hygiene runner_workdir_bytes:{root.key} evidence failed"
+            if request.mutate:
+                raise click.ClickException(
+                    f"runner host hygiene runner_workdir_bytes:{root.key} evidence failed"
+                )
+            usage.append(
+                RunnerHostHygieneRunnerWorkdirUsage(
+                    root_key=root.key,
+                    measurement_status="unavailable",
+                    reason_code="probe_failed",
+                )
             )
+            continue
         lines = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
         if len(lines) not in {2, 3}:
-            raise click.ClickException("runner host hygiene runner workdir evidence was incomplete")
+            if request.mutate:
+                raise click.ClickException(
+                    "runner host hygiene runner workdir evidence was incomplete"
+                )
+            usage.append(
+                RunnerHostHygieneRunnerWorkdirUsage(
+                    root_key=root.key,
+                    measurement_status="unavailable",
+                    reason_code="invalid_evidence",
+                )
+            )
+            continue
         raw_measurement_status = lines[2] if len(lines) == 3 else "complete"
         measurement_status: Literal["complete", "partial"]
         if raw_measurement_status == "complete":
@@ -1574,9 +1771,18 @@ def _collect_runner_workdir_usage(
         elif raw_measurement_status == "partial":
             measurement_status = "partial"
         else:
-            raise click.ClickException(
-                "runner host hygiene runner workdir evidence had an invalid status"
+            if request.mutate:
+                raise click.ClickException(
+                    "runner host hygiene runner workdir evidence had an invalid status"
+                )
+            usage.append(
+                RunnerHostHygieneRunnerWorkdirUsage(
+                    root_key=root.key,
+                    measurement_status="unavailable",
+                    reason_code="invalid_evidence",
+                )
             )
+            continue
         usage.append(
             RunnerHostHygieneRunnerWorkdirUsage(
                 root_key=root.key,
@@ -1587,6 +1793,7 @@ def _collect_runner_workdir_usage(
                     lines[1], evidence_name=f"runner_workdir_allocated_bytes:{root.key}"
                 ),
                 measurement_status=measurement_status,
+                reason_code=("probe_reported_partial" if measurement_status == "partial" else ""),
             )
         )
     return tuple(usage)
@@ -1621,7 +1828,8 @@ def _collect_generated_run_cache_usage(
             usage.append(
                 RunnerHostHygieneGeneratedCacheUsage(
                     cache_key=root.key,
-                    measurement_status="partial",
+                    measurement_status="unavailable",
+                    reason_code="probe_failed",
                 )
             )
             continue
@@ -1637,7 +1845,8 @@ def _collect_generated_run_cache_usage(
             usage.append(
                 RunnerHostHygieneGeneratedCacheUsage(
                     cache_key=root.key,
-                    measurement_status="partial",
+                    measurement_status="unavailable",
+                    reason_code="invalid_evidence",
                 )
             )
     return tuple(usage)
@@ -1740,6 +1949,7 @@ def _parse_generated_run_cache_usage(
         estimated_daily_growth_bytes = (
             (allocated_bytes - last_post_cleanup_allocated_bytes) * 86_400 // elapsed_since_cleanup
         )
+    measurement_status = _generated_cache_measurement_status(summary.get("measurement_status"))
     return RunnerHostHygieneGeneratedCacheUsage(
         cache_key=root.key,
         apparent_bytes=_strict_non_negative_int(
@@ -1750,7 +1960,8 @@ def _parse_generated_run_cache_usage(
         entry_count=_strict_non_negative_int(
             summary.get("entry_count"), evidence_name="generated cache entry count"
         ),
-        measurement_status=_generated_cache_measurement_status(summary.get("measurement_status")),
+        measurement_status=measurement_status,
+        reason_code=("probe_reported_partial" if measurement_status == "partial" else ""),
         owner_valid=_strict_bool(summary.get("owner_valid"), evidence_name="owner_valid"),
         mode_valid=_strict_bool(summary.get("mode_valid"), evidence_name="mode_valid"),
         symlink_safe=_strict_bool(summary.get("symlink_safe"), evidence_name="symlink_safe"),
@@ -1961,11 +2172,42 @@ def _collect_docker_disk_usage(
     request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
 ) -> _DockerDiskUsageSnapshot:
-    result = _require_remote_success(
-        remote_runner(_DOCKER_DISK_USAGE_COMMAND, request.timeout_seconds),
-        evidence_name="docker_summary",
+    try:
+        result = _require_remote_success(
+            remote_runner(_DOCKER_DISK_USAGE_COMMAND, request.timeout_seconds),
+            evidence_name="docker_summary",
+        )
+        return _parse_docker_disk_usage(result.stdout)
+    except click.ClickException:
+        if request.mutate:
+            raise
+        return _unavailable_docker_disk_usage_snapshot()
+
+
+def _unavailable_docker_disk_usage_snapshot() -> _DockerDiskUsageSnapshot:
+    cache_classes: tuple[tuple[str, _DockerCacheClass], ...] = (
+        ("images", "docker_images"),
+        ("containers", "docker_containers"),
+        ("volumes", "docker_volumes"),
+        ("build-cache", "docker_build_cache"),
     )
-    return _parse_docker_disk_usage(result.stdout)
+    measurements = tuple(
+        _DockerCacheClassMeasurement(
+            cache_key=cache_key,
+            cache_class=cache_class,
+            availability="unavailable",
+            reason_code="probe_failed",
+            logical_bytes=None,
+            reclaimable_bytes=None,
+            entry_count=None,
+        )
+        for cache_key, cache_class in cache_classes
+    )
+    return _DockerDiskUsageSnapshot(
+        reclaimable_breakdown=RunnerHostHygieneDockerReclaimableBreakdown(),
+        volume_inventory=(),
+        cache_class_measurements=measurements,
+    )
 
 
 def _parse_docker_disk_usage(output: str) -> _DockerDiskUsageSnapshot:
@@ -1980,34 +2222,79 @@ def _parse_docker_disk_usage(output: str) -> _DockerDiskUsageSnapshot:
             "runner host hygiene Docker disk usage evidence was not a JSON object"
         )
 
-    image_reclaimable = 0
-    for row in _docker_disk_usage_rows(payload, "Images"):
-        containers = _optional_int(row.get("Containers"))
-        size = _optional_int(row.get("Size"))
-        shared_size = _optional_int(row.get("SharedSize"))
-        if containers == 0 and size is not None and shared_size is not None:
-            image_reclaimable += max(size - shared_size, 0)
+    image_rows = _docker_disk_usage_rows(payload, "Images")
+    images_present = "Images" in payload
+    image_partial = False
+    image_used = 0
+    image_reclaimable_known = True
+    for row in image_rows:
+        containers = _optional_non_negative_int(row.get("Containers"))
+        size = _optional_non_negative_int(row.get("Size"))
+        shared_size = _optional_non_negative_int(row.get("SharedSize"))
+        if containers is None or size is None or shared_size is None:
+            image_partial = True
+            image_reclaimable_known = False
+            continue
+        if containers != 0:
+            image_used += max(size - shared_size, 0)
+    image_logical = _optional_non_negative_int(payload.get("LayersSize"))
+    if images_present and image_logical is None:
+        image_partial = True
+        image_reclaimable_known = False
+    image_reclaimable = (
+        max(image_logical - image_used, 0)
+        if image_logical is not None and image_reclaimable_known
+        else None
+    )
 
+    container_rows = _docker_disk_usage_rows(payload, "Containers")
+    containers_present = "Containers" in payload
+    container_partial = False
     container_total = 0
     container_used = 0
-    for row in _docker_disk_usage_rows(payload, "Containers"):
-        size = max(_optional_int(row.get("SizeRw")) or 0, 0)
-        container_total += size
-        if _docker_json_text(row, "State").lower() in {"running", "paused", "restarting"}:
-            container_used += size
+    container_logical_known = True
+    container_reclaimable_known = True
+    for row in container_rows:
+        raw_size = _optional_non_negative_int(row.get("SizeRw"))
+        if raw_size is None:
+            container_partial = True
+            container_logical_known = False
+            container_reclaimable_known = False
+            continue
+        container_total += raw_size
+        state = _docker_json_text(row, "State").lower()
+        if not state:
+            container_partial = True
+            container_reclaimable_known = False
+        elif state in {"running", "paused", "restarting"}:
+            container_used += raw_size
 
+    volume_rows = _docker_disk_usage_rows(payload, "Volumes")
+    volumes_present = "Volumes" in payload
+    volume_partial = False
     volume_total = 0
     volume_used = 0
+    volume_logical_known = True
+    volume_reclaimable_known = True
     volume_inventory: list[RunnerHostHygieneVolumeInventoryItem] = []
-    for row in _docker_disk_usage_rows(payload, "Volumes"):
+    for row in volume_rows:
         usage_data = row.get("UsageData")
         if not isinstance(usage_data, dict):
             usage_data = {}
-        ref_count = _non_negative_int(usage_data.get("RefCount"))
-        size = _non_negative_int(usage_data.get("Size"))
-        if size > 0:
+            volume_partial = True
+        raw_ref_count = _optional_non_negative_int(usage_data.get("RefCount"))
+        raw_size = _optional_non_negative_int(usage_data.get("Size"))
+        if raw_size is None:
+            volume_logical_known = False
+            volume_reclaimable_known = False
+        if raw_ref_count is None:
+            volume_reclaimable_known = False
+        if raw_ref_count is None or raw_size is None:
+            volume_partial = True
+        size = raw_size
+        if size is not None and size > 0:
             volume_total += size
-            if ref_count > 0:
+            if raw_ref_count is not None and raw_ref_count > 0:
                 volume_used += size
         volume_inventory.append(
             RunnerHostHygieneVolumeInventoryItem(
@@ -2016,29 +2303,119 @@ def _parse_docker_disk_usage(output: str) -> _DockerDiskUsageSnapshot:
                 mountpoint=_docker_json_text(row, "Mountpoint"),
                 labels=_docker_labels(row.get("Labels")),
                 size_bytes=size,
-                referenced_by_containers=ref_count,
-                dangling=ref_count == 0,
+                referenced_by_containers=raw_ref_count,
+                dangling=raw_ref_count == 0,
             )
         )
 
-    build_cache_total = 0
+    build_cache_rows = _docker_disk_usage_rows(payload, "BuildCache")
+    build_cache_present = "BuildCache" in payload
+    build_cache_partial = False
+    build_cache_total = _optional_non_negative_int(payload.get("BuilderSize"))
+    build_cache_reclaimable_known = build_cache_total is not None
+    if build_cache_present and build_cache_total is None:
+        build_cache_partial = True
     build_cache_used = 0
-    for row in _docker_disk_usage_rows(payload, "BuildCache"):
-        if row.get("Shared") is True:
+    for row in build_cache_rows:
+        in_use = row.get("InUse")
+        shared = row.get("Shared")
+        raw_size = _optional_non_negative_int(row.get("Size"))
+        if not isinstance(in_use, bool) or not isinstance(shared, bool) or raw_size is None:
+            build_cache_partial = True
+            build_cache_reclaimable_known = False
             continue
-        size = max(_optional_int(row.get("Size")) or 0, 0)
-        build_cache_total += size
-        if row.get("InUse") is True:
-            build_cache_used += size
+        if in_use and not shared:
+            build_cache_used += raw_size
+
+    container_logical = container_total if container_logical_known else None
+    container_reclaimable = (
+        max(container_total - container_used, 0) if container_reclaimable_known else None
+    )
+    volume_logical = volume_total if volume_logical_known else None
+    volume_reclaimable = max(volume_total - volume_used, 0) if volume_reclaimable_known else None
+    build_cache_reclaimable = (
+        max(build_cache_total - build_cache_used, 0)
+        if build_cache_total is not None and build_cache_reclaimable_known
+        else None
+    )
 
     return _DockerDiskUsageSnapshot(
         reclaimable_breakdown=RunnerHostHygieneDockerReclaimableBreakdown(
-            images_bytes=image_reclaimable,
-            containers_bytes=max(container_total - container_used, 0),
-            local_volumes_bytes=max(volume_total - volume_used, 0),
-            build_cache_bytes=max(build_cache_total - build_cache_used, 0),
+            images_bytes=image_reclaimable or 0,
+            containers_bytes=container_reclaimable or 0,
+            local_volumes_bytes=volume_reclaimable or 0,
+            build_cache_bytes=build_cache_reclaimable or 0,
         ),
         volume_inventory=tuple(volume_inventory),
+        cache_class_measurements=(
+            _docker_cache_class_measurement(
+                cache_key="images",
+                cache_class="docker_images",
+                present=images_present,
+                partial=image_partial,
+                logical_bytes=image_logical,
+                reclaimable_bytes=image_reclaimable,
+                entry_count=len(image_rows),
+            ),
+            _docker_cache_class_measurement(
+                cache_key="containers",
+                cache_class="docker_containers",
+                present=containers_present,
+                partial=container_partial,
+                logical_bytes=container_logical,
+                reclaimable_bytes=container_reclaimable,
+                entry_count=len(container_rows),
+            ),
+            _docker_cache_class_measurement(
+                cache_key="volumes",
+                cache_class="docker_volumes",
+                present=volumes_present,
+                partial=volume_partial,
+                logical_bytes=volume_logical,
+                reclaimable_bytes=volume_reclaimable,
+                entry_count=len(volume_rows),
+            ),
+            _docker_cache_class_measurement(
+                cache_key="build-cache",
+                cache_class="docker_build_cache",
+                present=build_cache_present,
+                partial=build_cache_partial,
+                logical_bytes=build_cache_total,
+                reclaimable_bytes=build_cache_reclaimable,
+                entry_count=len(build_cache_rows),
+            ),
+        ),
+    )
+
+
+def _docker_cache_class_measurement(
+    *,
+    cache_key: str,
+    cache_class: _DockerCacheClass,
+    present: bool,
+    partial: bool,
+    logical_bytes: int | None,
+    reclaimable_bytes: int | None,
+    entry_count: int,
+) -> _DockerCacheClassMeasurement:
+    if not present:
+        return _DockerCacheClassMeasurement(
+            cache_key=cache_key,
+            cache_class=cache_class,
+            availability="unavailable",
+            reason_code="class_unavailable",
+            logical_bytes=None,
+            reclaimable_bytes=None,
+            entry_count=None,
+        )
+    return _DockerCacheClassMeasurement(
+        cache_key=cache_key,
+        cache_class=cache_class,
+        availability="partial" if partial else "available",
+        reason_code="measurement_partial" if partial else "",
+        logical_bytes=logical_bytes,
+        reclaimable_bytes=reclaimable_bytes,
+        entry_count=entry_count,
     )
 
 
@@ -2059,6 +2436,13 @@ def _optional_int(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
+
+
+def _optional_non_negative_int(value: object) -> int | None:
+    parsed_value = _optional_int(value)
+    if parsed_value is None or parsed_value < 0:
+        return None
+    return parsed_value
 
 
 def _parse_json_lines(output: str, *, evidence_name: str) -> tuple[dict[str, object], ...]:
@@ -2120,9 +2504,9 @@ def _optional_scalar_text(value: object) -> str:
     return ""
 
 
-def _parse_optional_docker_size_bytes(value: str) -> int:
+def _parse_optional_docker_size_bytes(value: str) -> int | None:
     if not value.strip() or value.strip() in {"N/A", "-"}:
-        return 0
+        return None
     return _parse_docker_size_bytes(value)
 
 
@@ -2211,14 +2595,16 @@ def _terminal_audit(
     status: RunnerHostHygieneApplyAuditStatus,
     message: str,
 ) -> RunnerHostHygieneApplyAuditRecord:
-    return RunnerHostHygieneApplyAuditRecord(
-        audit_record_key=request.audit_record_key,
-        status=status,
-        request=request,
-        plan=apply_plan,
-        pre_apply_report=pre_report,
-        post_apply_report=post_report,
-        message=message,
+    return sanitize_runner_host_hygiene_audit_record_for_persistence(
+        RunnerHostHygieneApplyAuditRecord(
+            audit_record_key=request.audit_record_key,
+            status=status,
+            request=request,
+            plan=apply_plan,
+            pre_apply_report=pre_report,
+            post_apply_report=post_report,
+            message=message,
+        )
     )
 
 
