@@ -2103,18 +2103,16 @@ def _build_dokploy_data_workflow_script(
     quoted_database_name = shlex.quote(database_name)
     quoted_filestore_path = shlex.quote(normalized_filestore_path)
     quoted_lock_path = shlex.quote(data_workflow_lock_path)
+    resolved_workflow_environment_overrides = dict(workflow_environment_overrides or {})
+    resolved_workflow_environment_overrides["ODOO_FILESTORE_PATH"] = normalized_filestore_path
     workflow_environment_lines = _render_docker_exec_environment_lines(
-        workflow_environment_overrides or {}
+        resolved_workflow_environment_overrides
     )
     effective_required_workflow_environment_keys = tuple(
         sorted(
             {
                 *required_workflow_environment_keys,
-                *(
-                    tuple(workflow_environment_overrides or {})
-                    if workflow_environment_overrides
-                    else ()
-                ),
+                *resolved_workflow_environment_overrides,
             }
         )
     )
