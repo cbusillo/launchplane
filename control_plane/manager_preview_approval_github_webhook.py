@@ -554,7 +554,59 @@ def _handle_issue_comment(
             dependencies=dependencies,
         )
         return 202, _accepted(trace_id, skipped=True, reason="stale_fingerprint")
-    if projection_before.decision.status in {"stale", "unavailable"}:
+    if projection_before.decision.status == "unavailable" or projection_before.pr_state != "open":
+        _write_projection_best_effort(
+            projection=projection_before,
+            token=token,
+            dependencies=dependencies,
+        )
+        return 202, _accepted(trace_id, skipped=True, reason="preview_evidence_not_current")
+    preview, generation = _preview_and_generation(
+        record_store=record_store,
+        profile=profile,
+        repository=repository,
+        pr_number=pr_number,
+    )
+    if generation.anchor_summary.head_sha != _nested_string(pull_request, "head", "sha"):
+        _write_projection_best_effort(
+            projection=projection_before,
+            token=token,
+            dependencies=dependencies,
+        )
+        return 202, _accepted(trace_id, skipped=True, reason="stale_head")
+    current_binding = build_current_manager_preview_approval_binding(
+        product=profile.product,
+        preview=preview,
+        generation=generation,
+    )
+    if current_binding.binding_sha256 != command.fingerprint:
+        current_projection = build_manager_preview_approval_projection(
+            record_store=record_store,
+            repository=repository,
+            pr_number=pr_number,
+            pr_url=_string(pull_request, "html_url"),
+            pr_state=_string(pull_request, "state"),
+            current_head_sha=_nested_string(pull_request, "head", "sha"),
+            evaluated_at=evaluated_at,
+        )
+        _write_projection_best_effort(
+            projection=current_projection,
+            token=token,
+            dependencies=dependencies,
+        )
+        return 202, _accepted(trace_id, skipped=True, reason="stale_fingerprint")
+    current_events = record_store.list_manager_preview_approval_event_records(
+        product=profile.product,
+        context=preview.context,
+        repository=preview.anchor_repo,
+        pr_number=pr_number,
+        limit=200,
+    )
+    if any(
+        event.binding.binding_sha256 == current_binding.binding_sha256
+        and event.action in {"superseded", "invalidated"}
+        for event in current_events
+    ):
         _write_projection_best_effort(
             projection=projection_before,
             token=token,
@@ -573,14 +625,6 @@ def _handle_issue_comment(
     )
     if _positive_int(actor, "id") != github_id:
         return 202, _accepted(trace_id, skipped=True, reason="actor_identity_mismatch")
-    preview, generation = _preview_and_generation(
-        record_store=record_store,
-        profile=profile,
-        repository=repository,
-        pr_number=pr_number,
-    )
-    if generation.anchor_summary.head_sha != _nested_string(pull_request, "head", "sha"):
-        return 202, _accepted(trace_id, skipped=True, reason="stale_head")
     policy_record = read_active_authz_policy_record(record_store)
     try:
         result = record_manager_preview_approval_event(
@@ -599,7 +643,7 @@ def _handle_issue_comment(
             preview=preview,
             generation=generation,
             action=command.action,
-            occurred_at=evaluated_at,
+            occurred_at=_string(comment, "created_at"),
             source_event_kind="github_issue_comment",
             source_event_id=f"{repository}#{comment_id}",
             reason=command.reason,

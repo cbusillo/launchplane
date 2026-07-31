@@ -182,6 +182,12 @@ unavailable evidence, verification failure, destroy, PR close, preview-label
 removal, or authorization-policy drift. Required code-review approvals remain a
 separate repository rule and may remain zero.
 
+Stale approval history on an older binding does not prevent a new exact manager
+decision for complete current evidence. The webhook accepts the current
+fingerprint only while the pull request is open, its head matches the serving
+generation, and the exact current binding has not been superseded or invalidated.
+Unavailable evidence and exact terminal bindings remain non-actionable.
+
 When a recorded destroy or supersession ends the prior serving binding, a later
 verified replacement generation starts pending for its own exact fingerprint.
 The terminal event remains append-only audit evidence, but it does not carry a
