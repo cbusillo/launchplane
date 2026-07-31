@@ -134,6 +134,9 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     "actions/cache/restore": ActionClassification("GitHub-maintained", "cache restore"),
     "actions/cache/save": ActionClassification("GitHub-maintained", "cache persistence"),
     "actions/checkout": ActionClassification("GitHub-maintained", "repository checkout"),
+    "actions/create-github-app-token": ActionClassification(
+        "GitHub-maintained", "short-lived GitHub App token minting"
+    ),
     "actions/download-artifact": ActionClassification("GitHub-maintained", "artifact download"),
     "actions/github-script": ActionClassification("GitHub-maintained", "GitHub API interaction"),
     "actions/setup-node": ActionClassification("GitHub-maintained", "Node runtime bootstrap"),
