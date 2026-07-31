@@ -1905,10 +1905,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("LAUNCHPLANE_GITHUB_CLIENT_SECRET", "$github_client_secret,"),
             ("LAUNCHPLANE_PUBLIC_URL", "$public_url,"),
             ("LAUNCHPLANE_SESSION_SECRET", "$session_secret,"),
-            (
-                "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET",
-                "$manager_preview_webhook_secret",
-            ),
             ("GH_TOKEN", "$work_graph_gh_token"),
         )
         for key, value in service_env_payload:

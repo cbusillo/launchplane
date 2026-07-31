@@ -116,7 +116,6 @@ jobs:
       LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN: ${{ secrets.LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN }}
       LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: ${{ secrets.LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN }}
       LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: ${{ secrets.LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET }}
-      LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET: ${{ secrets.LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET }}
       LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN: ${{ secrets.LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN }}
       LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR: ${{ vars.LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR }}
       LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: ${{ secrets.LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN }}
@@ -359,11 +358,6 @@ jobs:
           fi
           printf 'previous_image_reference=%s\n' "$previous_image_reference" >> "$GITHUB_OUTPUT"
 
-          if [ -z "${LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET:-}" ]; then
-            echo "Missing LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET secret." >&2
-            exit 1
-          fi
-
           service_env_json="$({
             jq -n \
               --arg github_client_id "${LAUNCHPLANE_GITHUB_CLIENT_ID:-}" \
@@ -384,7 +378,6 @@ jobs:
               --arg enable_every_code_runtime_secrets "${LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS:-}" \
               --arg every_code_worker_token "${LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN:-}" \
               --arg every_code_webhook_secret "${LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET:-}" \
-              --arg manager_preview_webhook_secret "${LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET:-}" \
               --arg every_code_github_token "${LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN:-}" \
               --arg every_code_github_actor "${LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR:-}" \
               --arg terminal_agent_read_token "${LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN:-}" \
@@ -411,8 +404,7 @@ jobs:
                 LAUNCHPLANE_PUBLIC_URL: $public_url,
                 LAUNCHPLANE_SESSION_SECRET: $session_secret,
                 LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
-                LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails,
-                LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET: $manager_preview_webhook_secret
+                LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
                 }
                 + (
                   if ($omit_terminal_agent_env | not) then
