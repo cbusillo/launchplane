@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 import unittest
 
 from control_plane.contracts.tenant_merge_eligibility import (
@@ -61,7 +62,7 @@ class TenantRepositoryClassificationDomainTests(unittest.TestCase):
                 expected_current_record_id="",
                 mode="dry_run",
             )
-            self.assertEqual(res.status, "applied")
+            self.assertEqual(res.status, "would_apply")
             self.assertEqual(res.mode, "dry_run")
 
             read_model = get_tenant_repository_classification_read_model(
@@ -232,6 +233,55 @@ class TenantRepositoryClassificationDomainTests(unittest.TestCase):
                     expected_current_record_id="",
                     mode="apply",
                 )
+
+    def test_ambiguous_highest_revision_fails_closed(self) -> None:
+        revision_1 = _record(revision=1)
+        revision_2a = _record(
+            revision=2,
+            kind="tenant_ui",
+            supersedes_record_id=revision_1.record_id,
+        )
+        revision_2b = _record(
+            revision=2,
+            kind="engineering",
+            supersedes_record_id=revision_1.record_id,
+        )
+
+        class AmbiguousStore:
+            def list_tenant_repository_classification_records(
+                self, *, repository_id: str = "", limit: int | None = None
+            ) -> tuple[TenantRepositoryClassificationRecord, ...]:
+                records = (revision_2a, revision_2b, revision_1)
+                return records if limit is None else records[:limit]
+
+            def write_tenant_repository_classification_record(
+                self, record: TenantRepositoryClassificationRecord
+            ) -> Literal["written", "replayed"]:
+                raise AssertionError("ambiguous history must not be written")
+
+            def read_tenant_repository_classification_record(
+                self, record_id: str
+            ) -> TenantRepositoryClassificationRecord:
+                raise KeyError(record_id)
+
+        store = AmbiguousStore()
+        read_model = get_tenant_repository_classification_read_model(
+            repository_id=REPOSITORY_ID,
+            store=store,
+        )
+        self.assertEqual(read_model.status, "ambiguous")
+        self.assertIsNone(read_model.current_record)
+
+        with self.assertRaises(TenantRepositoryClassificationConflictError):
+            apply_tenant_repository_classification(
+                store=store,
+                record=_record(
+                    revision=3,
+                    supersedes_record_id=revision_2a.record_id,
+                ),
+                expected_current_record_id=revision_2a.record_id,
+                mode="apply",
+            )
 
     def test_require_store_helpers(self) -> None:
         class IncompleteStore:

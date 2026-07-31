@@ -192,7 +192,7 @@ from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationRecord,
 )
 from control_plane.tenant_repository_classification import (
-    TenantRepositoryClassificationConflictError,
+    plan_tenant_repository_classification_append,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -7203,42 +7203,47 @@ class PostgresRecordStore(HumanSessionStore):
     def write_tenant_repository_classification_record(
         self, record: TenantRepositoryClassificationRecord
     ) -> Literal["written", "replayed"]:
+        insert_error: IntegrityError | None = None
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = select(LaunchplaneTenantRepositoryClassificationRow).where(
+                LaunchplaneTenantRepositoryClassificationRow.repository_id == record.repository_id
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            existing_records = tuple(
+                self._read_payload(
+                    model_type=TenantRepositoryClassificationRecord,
+                    payload=row.payload,
+                )
+                for row in session.scalars(statement).all()
+            )
+            plan = plan_tenant_repository_classification_append(
+                records=existing_records,
+                record=record,
+            )
+            if plan.status == "replayed":
+                session.rollback()
+                return "replayed"
             session.add(self._tenant_repository_classification_row(record))
             try:
                 session.commit()
                 return "written"
-            except IntegrityError:
+            except IntegrityError as error:
                 session.rollback()
-                existing_row = session.scalar(
-                    select(LaunchplaneTenantRepositoryClassificationRow).where(
-                        LaunchplaneTenantRepositoryClassificationRow.repository_id
-                        == record.repository_id,
-                        LaunchplaneTenantRepositoryClassificationRow.classification_revision
-                        == record.classification_revision,
-                    )
-                )
-                if existing_row is None:
-                    existing_row = session.get(
-                        LaunchplaneTenantRepositoryClassificationRow,
-                        record.record_id,
-                    )
-                if existing_row is None:
-                    raise
-                existing = self._read_payload(
-                    model_type=TenantRepositoryClassificationRecord,
-                    payload=existing_row.payload,
-                )
-                if (
-                    existing.repository_id == record.repository_id
-                    and existing.classification_revision == record.classification_revision
-                    and existing.classification_digest == record.classification_digest
-                    and existing == record
-                ):
-                    return "replayed"
-                raise TenantRepositoryClassificationConflictError(
-                    "Tenant repository classification revision already exists with different payload."
-                )
+                insert_error = error
+
+        current_records = self.list_tenant_repository_classification_records(
+            repository_id=record.repository_id
+        )
+        replay_plan = plan_tenant_repository_classification_append(
+            records=current_records,
+            record=record,
+        )
+        if replay_plan.status == "replayed":
+            return "replayed"
+        assert insert_error is not None
+        raise insert_error
 
     def read_tenant_repository_classification_record(
         self, record_id: str
@@ -7277,11 +7282,15 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> TenantRepositoryClassificationLookup:
         records = self.list_tenant_repository_classification_records(
             repository_id=repository_id,
-            limit=1,
         )
         if not records:
             return TenantRepositoryClassificationLookup(status="missing")
-        return TenantRepositoryClassificationLookup(records=records)
+        latest_revision = records[0].classification_revision
+        return TenantRepositoryClassificationLookup(
+            records=tuple(
+                record for record in records if record.classification_revision == latest_revision
+            )
+        )
 
     def list_manager_preview_approval_event_records(
         self,
@@ -11084,9 +11093,15 @@ class PostgresRecordStore(HumanSessionStore):
             self.write_runtime_key_safety_policy_record(policy_record)
             counts["runtime_key_safety_policies"] += 1
         if hasattr(filesystem_store, "list_tenant_repository_classification_records"):
-            for (
-                classification_record
-            ) in filesystem_store.list_tenant_repository_classification_records():
+            classification_records = sorted(
+                filesystem_store.list_tenant_repository_classification_records(),
+                key=lambda record: (
+                    record.repository_id,
+                    record.classification_revision,
+                    record.record_id,
+                ),
+            )
+            for classification_record in classification_records:
                 self.write_tenant_repository_classification_record(classification_record)
                 counts["tenant_repository_classifications"] += 1
         for backup_gate_record in filesystem_store.list_backup_gate_records():

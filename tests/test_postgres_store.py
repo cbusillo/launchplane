@@ -189,6 +189,7 @@ from control_plane.service_human_auth import LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationConflictError,
+    TenantRepositoryClassificationSequenceError,
 )
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.postgres import (
@@ -1315,6 +1316,21 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.close()
 
         self.assertEqual(listed, (record,))
+
+    def test_tenant_repository_classification_rejects_invalid_first_revision(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+
+            with self.assertRaises(TenantRepositoryClassificationSequenceError):
+                store.write_tenant_repository_classification_record(
+                    _tenant_repository_classification_record(classification_revision=2)
+                )
+            store.close()
 
     def test_tenant_repository_classification_unique_repository_revision(
         self,
@@ -6101,8 +6117,18 @@ env_var = "GH_TOKEN"
                     ),
                 )
             )
+            classification_revision_1 = _tenant_repository_classification_record()
+            classification_revision_2 = _tenant_repository_classification_record(
+                classification_kind="engineering",
+                classification_revision=2,
+                classified_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=classification_revision_1.record_id,
+            )
             filesystem_store.write_tenant_repository_classification_record(
-                _tenant_repository_classification_record()
+                classification_revision_1
+            )
+            filesystem_store.write_tenant_repository_classification_record(
+                classification_revision_2
             )
             filesystem_store.write_merge_train_policy_record(
                 MergeTrainPolicyRecord(
@@ -6207,14 +6233,18 @@ env_var = "GH_TOKEN"
                     "odoo_stable_target_replacement_operations": 1,
                     "release_tuples": 1,
                     "runtime_key_safety_policies": 1,
-                    "tenant_repository_classifications": 1,
+                    "tenant_repository_classifications": 2,
                 },
             )
             self.assertEqual(
                 store.latest_tenant_repository_classification_lookup(repository_id="1001")
                 .records[0]
                 .classification_kind,
-                "tenant_ui",
+                "engineering",
+            )
+            self.assertEqual(
+                len(store.list_tenant_repository_classification_records(repository_id="1001")),
+                2,
             )
             self.assertEqual(
                 store.read_promotion_record(

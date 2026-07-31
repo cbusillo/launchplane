@@ -4,12 +4,12 @@ from typing import Any, cast
 import unittest
 
 from control_plane.contracts.tenant_merge_eligibility import (
-    TenantRepositoryClassificationRecord,
     build_tenant_repository_classification_record_id,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy, TerminalAgentIdentity
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_get, _asgi_request
 from tests.support.auth import _StubVerifier, _identity
 
@@ -23,19 +23,16 @@ SOURCE = "operator"
 REASON = "initial classification"
 
 
-class _DummyStoreNoWrites:
-    """Store that lacks write_tenant_repository_classification_record for 503 testing."""
-
-    def list_tenant_repository_classification_records(
-        self, *, repository_id: str = "", limit: int | None = None
-    ) -> tuple[TenantRepositoryClassificationRecord, ...]:
-        return ()
+def _postgres_store(root: Path) -> PostgresRecordStore:
+    store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}")
+    store.ensure_schema()
+    return store
 
 
 class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_initial_create_applies_revision_1(self) -> None:
         with TemporaryDirectory() as tmp_dir:
-            store = FilesystemRecordStore(Path(tmp_dir))
+            store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_authz_policy(actions=("tenant_repository_classification.write",)),
@@ -67,7 +64,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dry_run_no_write(self) -> None:
         with TemporaryDirectory() as tmp_dir:
-            store = FilesystemRecordStore(Path(tmp_dir))
+            store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_authz_policy(
@@ -87,7 +84,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(dry_run_response.status_code, 200)
             self.assertEqual(dry_run_response.json()["result"]["mode"], "dry_run")
-            self.assertEqual(dry_run_response.json()["result"]["status"], "applied")
+            self.assertEqual(dry_run_response.json()["result"]["status"], "would_apply")
 
             read_response = await _asgi_get(
                 app,
@@ -103,7 +100,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_revision_update(self) -> None:
         with TemporaryDirectory() as tmp_dir:
-            store = FilesystemRecordStore(Path(tmp_dir))
+            store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_authz_policy(
@@ -164,7 +161,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stale_expected_current_conflict(self) -> None:
         with TemporaryDirectory() as tmp_dir:
-            store = FilesystemRecordStore(Path(tmp_dir))
+            store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_authz_policy(actions=("tenant_repository_classification.write",)),
@@ -219,7 +216,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_skipped_revision_and_supersedes_mismatch_rejection(self) -> None:
         with TemporaryDirectory() as tmp_dir:
-            store = FilesystemRecordStore(Path(tmp_dir))
+            store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_authz_policy(actions=("tenant_repository_classification.write",)),
@@ -274,7 +271,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_idempotent_replay(self) -> None:
         with TemporaryDirectory() as tmp_dir:
-            store = FilesystemRecordStore(Path(tmp_dir))
+            store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_authz_policy(actions=("tenant_repository_classification.write",)),
@@ -309,7 +306,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_terminal_agent_denial(self) -> None:
         with TemporaryDirectory() as tmp_dir:
-            store = FilesystemRecordStore(Path(tmp_dir))
+            store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
                 verifier=cast(
                     Any,
@@ -342,7 +339,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_authz_denial(self) -> None:
         with TemporaryDirectory() as tmp_dir:
-            store = FilesystemRecordStore(Path(tmp_dir))
+            store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_authz_policy(actions=()),
@@ -369,7 +366,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_classification_read(self) -> None:
         with TemporaryDirectory() as tmp_dir:
-            store = FilesystemRecordStore(Path(tmp_dir))
+            store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_authz_policy(actions=("tenant_repository_classification.read",)),
@@ -390,7 +387,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_immutable_repository_id_lookup(self) -> None:
         with TemporaryDirectory() as tmp_dir:
-            store = FilesystemRecordStore(Path(tmp_dir))
+            store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_authz_policy(
@@ -428,7 +425,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_evaluate_or_evidence_ingress_route(self) -> None:
         with TemporaryDirectory() as tmp_dir:
-            store = FilesystemRecordStore(Path(tmp_dir))
+            store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_authz_policy(
@@ -459,21 +456,23 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status_code, 404)
 
     async def test_missing_db_capability_503(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_authz_policy(actions=("tenant_repository_classification.write",)),
-            record_store_factory=lambda: _DummyStoreNoWrites(),
-        )
-        response = await _asgi_request(
-            app,
-            "POST",
-            "/v1/tenant-admission/repository-classifications/apply",
-            headers={
-                "Authorization": "Bearer valid-token",
-                "Idempotency-Key": "key-503",
-            },
-            payload=_apply_payload(revision=1),
-        )
+        with TemporaryDirectory() as tmp_dir:
+            store = FilesystemRecordStore(Path(tmp_dir))
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_authz_policy(actions=("tenant_repository_classification.write",)),
+                record_store_factory=lambda: store,
+            )
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/repository-classifications/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "key-503",
+                },
+                payload=_apply_payload(revision=1),
+            )
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
 

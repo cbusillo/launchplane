@@ -2853,13 +2853,13 @@ should prefer the thin `prod-promotion-run` path.
 `GET /v1/work-graph/tenant-admission/repository-classification` and `POST /v1/tenant-admission/repository-classifications/apply` provide DB-backed authority for repository classification.
 
 - `GET /v1/work-graph/tenant-admission/repository-classification?repository_id=...`:
-  Returns the current classification read model (`missing` or `available`, active record, history count, generated_at). Requires `tenant_repository_classification.read` authorization against Launchplane service context (`launchplane`).
+  Returns the current classification read model (`missing`, `available`, or fail-closed `ambiguous`, plus active record when unique, history count, and generated_at). Requires `tenant_repository_classification.read` authorization against Launchplane service context (`launchplane`).
 - `POST /v1/tenant-admission/repository-classifications/apply`:
   Accepts a strict envelope (`schema_version`, `mode: dry_run|apply`, `expected_current_record_id`, `record`).
   Terminal agents are denied (HTTP 403). Requires `tenant_repository_classification.write` authorization against Launchplane service context (`launchplane`).
-  Apply mode requires a non-empty `Idempotency-Key` header and a database-backed record store capability (returns HTTP 503 `database_storage_required` if unsupported).
+  Apply mode requires a non-empty `Idempotency-Key` header and `PostgresRecordStore` shared storage (returns HTTP 503 `database_storage_required` for filesystem or unsupported stores). Launchplane reserves durable idempotency before applying the immutable classification revision and completes the reservation after the write; interrupted exact-payload retries safely replay the immutable record and finish the reservation.
   Validation uses CAS (compare-and-swap): first revision must be revision 1 with no `supersedes_record_id` and empty `expected_current_record_id`. Subsequent revisions must increment revision by 1, set `supersedes_record_id` to the active current record ID, and match `expected_current_record_id`. Mismatches fail closed with HTTP 409 conflict, and sequence gaps fail closed with HTTP 400.
-  Dry-run mode performs full CAS/sequence validation without persisting changes.
+  Dry-run mode performs full CAS/sequence validation without persisting changes and reports `would_apply` or `would_replay`.
   Pure tenant merge eligibility evaluation uses this DB authority without heuristics, PR label fallbacks, or wildcard matching. Repositories classified as `engineering` take the normal engineering fast path. Repositories classified as `tenant_ui` default to requiring exact manager preview approval (or optional fast-path waiver/maintenance evidence bound to the exact head SHA and classification digest).
   This pure evaluator remains internal and separate from scheduler merge train admission (`merge_train_admission`).
 

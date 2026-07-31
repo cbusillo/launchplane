@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 TenantRepositoryClassificationKind = Literal["engineering", "tenant_ui"]
-TenantRepositoryClassificationLookupStatus = Literal["available", "missing", "unknown"]
+TenantRepositoryClassificationLookupStatus = Literal["available", "missing", "ambiguous", "unknown"]
 TenantAdmissionPathKind = Literal[
     "trusted_maintenance", "technical_human_waiver", "manager_preview_approval"
 ]
@@ -298,6 +298,8 @@ class TenantMergeEligibilityDecision(BaseModel):
 def build_tenant_repository_classification_record_id(
     *, repository_id: str, classification_revision: int
 ) -> str:
+    if classification_revision < 1:
+        raise ValueError("tenant repository classification revision must be positive")
     return f"tenant-repository-classification-{_required_decimal_id(repository_id, 'repository_id')}-r{classification_revision}"
 
 
@@ -382,7 +384,7 @@ def evaluate_tenant_merge_eligibility(
                 evidence_digest=path_result.evidence_digest,
             )
 
-    blocked_code, blocked_detail = _determine_blocked_reason(
+    blocked_code, blocked_detail, blocked_path = _determine_blocked_reason(
         candidate=candidate, classification=classification, evidence=evidence
     )
     return _decision(
@@ -392,6 +394,9 @@ def evaluate_tenant_merge_eligibility(
         reason_code=blocked_code,
         detail=blocked_detail,
         evaluated_at=normalized_evaluated_at,
+        evidence_kind=blocked_path.path_kind if blocked_path is not None else "none",
+        evidence_id=blocked_path.evidence_id if blocked_path is not None else "",
+        evidence_digest=blocked_path.evidence_digest if blocked_path is not None else "",
     )
 
 
@@ -424,6 +429,14 @@ def _select_current_classification(
             (
                 "classification_unknown",
                 "Repository classification lookup returned an unknown state.",
+            ),
+        )
+    if lookup.status == "ambiguous":
+        return _ClassificationSelection(
+            None,
+            (
+                "classification_ambiguous",
+                "Repository classification lookup returned an ambiguous state.",
             ),
         )
     if not lookup.records:
@@ -543,7 +556,11 @@ def _determine_blocked_reason(
     candidate: TenantMergeCandidate,
     classification: TenantRepositoryClassificationRecord,
     evidence: TenantMergeEligibilityEvidenceInputs,
-) -> tuple[TenantMergeEligibilityReasonCode, str]:
+) -> tuple[
+    TenantMergeEligibilityReasonCode,
+    str,
+    TenantAdmissionPathResult | None,
+]:
     if evidence.manager_preview_approval is not None:
         eval_res = _evaluate_path_result(
             candidate=candidate,
@@ -551,25 +568,13 @@ def _determine_blocked_reason(
             path_result=evidence.manager_preview_approval,
         )
         if eval_res.blocked_reason is not None:
-            return eval_res.blocked_reason
-
-    for path_result in (evidence.technical_human_waiver, evidence.trusted_maintenance):
-        if path_result is not None:
-            eval_res = _evaluate_path_result(
-                candidate=candidate, classification=classification, path_result=path_result
-            )
-            if eval_res.blocked_reason is not None:
-                reason, _ = eval_res.blocked_reason
-                if reason in {
-                    "evidence_identity_drift",
-                    "evidence_head_mismatch",
-                    "evidence_policy_drift",
-                }:
-                    return eval_res.blocked_reason
+            reason_code, detail = eval_res.blocked_reason
+            return reason_code, detail, evidence.manager_preview_approval
 
     return (
         "manager_preview_required",
         "Tenant UI repository requires manager preview approval before merge eligibility.",
+        None,
     )
 
 

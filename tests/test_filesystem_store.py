@@ -141,6 +141,7 @@ from control_plane.storage.filesystem import (
 )
 from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationConflictError,
+    TenantRepositoryClassificationSequenceError,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
@@ -581,6 +582,15 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             )
 
         self.assertEqual(listed, (record,))
+
+    def test_tenant_repository_classification_rejects_invalid_first_revision(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+
+            with self.assertRaises(TenantRepositoryClassificationSequenceError):
+                store.write_tenant_repository_classification_record(
+                    _tenant_repository_classification_record(classification_revision=2)
+                )
 
     def test_latest_tenant_repository_classification_lookup_preserves_corrupt_ambiguity(
         self,

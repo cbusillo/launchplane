@@ -21744,6 +21744,8 @@
           },
           "status": {
             "enum": [
+              "would_apply",
+              "would_replay",
               "applied",
               "replayed"
             ],
@@ -21811,6 +21813,7 @@
             "enum": [
               "available",
               "missing",
+              "ambiguous",
               "unknown"
             ],
             "title": "Status",

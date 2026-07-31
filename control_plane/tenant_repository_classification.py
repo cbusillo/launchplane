@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -21,7 +22,7 @@ class TenantRepositoryClassificationSequenceError(ValueError):
     """Raised when repository classification revision sequence is invalid."""
 
 
-class TenantRepositoryClassificationStore(Protocol):
+class TenantRepositoryClassificationReadStore(Protocol):
     def list_tenant_repository_classification_records(
         self,
         *,
@@ -29,6 +30,8 @@ class TenantRepositoryClassificationStore(Protocol):
         limit: int | None = None,
     ) -> tuple[TenantRepositoryClassificationRecord, ...]: ...
 
+
+class TenantRepositoryClassificationStore(TenantRepositoryClassificationReadStore, Protocol):
     def write_tenant_repository_classification_record(
         self, record: TenantRepositoryClassificationRecord
     ) -> Literal["written", "replayed"]: ...
@@ -58,6 +61,8 @@ class TenantRepositoryClassificationReadModel(BaseModel):
         self.generated_at = _normalize_utc_timestamp(self.generated_at, "generated_at")
         if self.status == "missing" and self.current_record is not None:
             raise ValueError("missing classification read model cannot include current_record")
+        if self.status in {"ambiguous", "unknown"} and self.current_record is not None:
+            raise ValueError("unavailable classification read model cannot include current_record")
         if self.status == "available" and self.current_record is None:
             raise ValueError("available classification read model requires current_record")
         return self
@@ -82,7 +87,16 @@ class TenantRepositoryClassificationApplyEnvelope(BaseModel):
         return self
 
 
-TenantRepositoryClassificationApplyStatus = Literal["applied", "replayed"]
+TenantRepositoryClassificationApplyStatus = Literal[
+    "would_apply", "would_replay", "applied", "replayed"
+]
+TenantRepositoryClassificationAppendStatus = Literal["written", "replayed"]
+
+
+@dataclass(frozen=True)
+class TenantRepositoryClassificationAppendPlan:
+    status: TenantRepositoryClassificationAppendStatus
+    current_record: TenantRepositoryClassificationRecord | None
 
 
 class TenantRepositoryClassificationApplyResult(BaseModel):
@@ -136,7 +150,7 @@ def require_tenant_repository_classification_store(
 
 def require_tenant_repository_classification_read_store(
     record_store: object,
-) -> TenantRepositoryClassificationStore:
+) -> TenantRepositoryClassificationReadStore:
     required_methods = ("list_tenant_repository_classification_records",)
     missing_methods = [
         method_name
@@ -149,13 +163,13 @@ def require_tenant_repository_classification_read_store(
             "Launchplane record store does not support tenant repository classification reads: "
             f"{missing_summary}"
         )
-    return cast(TenantRepositoryClassificationStore, record_store)
+    return cast(TenantRepositoryClassificationReadStore, record_store)
 
 
 def get_tenant_repository_classification_read_model(
     *,
     repository_id: str,
-    store: TenantRepositoryClassificationStore,
+    store: TenantRepositoryClassificationReadStore,
 ) -> TenantRepositoryClassificationReadModel:
     normalized_repo_id = _required_decimal_id(repository_id, "repository_id")
     records = store.list_tenant_repository_classification_records(repository_id=normalized_repo_id)
@@ -168,7 +182,19 @@ def get_tenant_repository_classification_read_model(
             history_count=0,
             generated_at=utc_now_timestamp(),
         )
-    current_record = max(matching_records, key=lambda r: r.classification_revision)
+    highest_revision = max(record.classification_revision for record in matching_records)
+    current_records = tuple(
+        record for record in matching_records if record.classification_revision == highest_revision
+    )
+    if len(current_records) != 1:
+        return TenantRepositoryClassificationReadModel(
+            status="ambiguous",
+            repository_id=normalized_repo_id,
+            current_record=None,
+            history_count=len(matching_records),
+            generated_at=utc_now_timestamp(),
+        )
+    current_record = current_records[0]
     return TenantRepositoryClassificationReadModel(
         status="available",
         repository_id=normalized_repo_id,
@@ -180,7 +206,7 @@ def get_tenant_repository_classification_read_model(
 
 def apply_tenant_repository_classification(
     *,
-    store: TenantRepositoryClassificationStore,
+    store: TenantRepositoryClassificationReadStore,
     record: TenantRepositoryClassificationRecord,
     expected_current_record_id: str = "",
     mode: TenantRepositoryClassificationApplyMode = "apply",
@@ -189,65 +215,26 @@ def apply_tenant_repository_classification(
     records = store.list_tenant_repository_classification_records(
         repository_id=record.repository_id
     )
-    matching_records = tuple(r for r in records if r.repository_id == record.repository_id)
-
-    if not matching_records:
-        if normalized_expected:
+    plan = plan_tenant_repository_classification_append(records=records, record=record)
+    if plan.status == "written":
+        if plan.current_record is None and normalized_expected:
             raise TenantRepositoryClassificationConflictError(
                 f"Expected current classification record ID '{normalized_expected}' does not match current state: repository has no existing classification record."
             )
-        if record.classification_revision != 1:
-            raise TenantRepositoryClassificationSequenceError(
-                f"First classification record for repository {record.repository_id} must have revision 1, got {record.classification_revision}."
+        if plan.current_record is not None and normalized_expected != plan.current_record.record_id:
+            raise TenantRepositoryClassificationConflictError(
+                f"Expected current classification record ID '{normalized_expected}' does not match active current record ID '{plan.current_record.record_id}'."
             )
-        if record.supersedes_record_id:
-            raise TenantRepositoryClassificationSequenceError(
-                "First classification record for a repository cannot set supersedes_record_id."
-            )
-        planned_status = "written"
-    else:
-        current_record = max(matching_records, key=lambda r: r.classification_revision)
-        same_revision_record = next(
-            (
-                r
-                for r in matching_records
-                if r.classification_revision == record.classification_revision
-            ),
-            None,
-        )
-        if same_revision_record is not None:
-            if (
-                same_revision_record.classification_digest == record.classification_digest
-                and same_revision_record == record
-            ):
-                planned_status = "replayed"
-            else:
-                raise TenantRepositoryClassificationConflictError(
-                    "Tenant repository classification revision already exists with different payload."
-                )
-        else:
-            if record.classification_revision != current_record.classification_revision + 1:
-                raise TenantRepositoryClassificationSequenceError(
-                    f"Next classification revision must be {current_record.classification_revision + 1}, got {record.classification_revision}."
-                )
-            if record.supersedes_record_id != current_record.record_id:
-                raise TenantRepositoryClassificationSequenceError(
-                    f"Classification record supersedes_record_id must be '{current_record.record_id}', got '{record.supersedes_record_id}'."
-                )
-            if normalized_expected != current_record.record_id:
-                raise TenantRepositoryClassificationConflictError(
-                    f"Expected current classification record ID '{normalized_expected}' does not match active current record ID '{current_record.record_id}'."
-                )
-            planned_status = "written"
 
     if mode == "apply":
-        if planned_status == "written":
-            store.write_tenant_repository_classification_record(record)
+        if plan.status == "written":
+            write_store = require_tenant_repository_classification_store(store)
+            write_store.write_tenant_repository_classification_record(record)
             final_status: TenantRepositoryClassificationApplyStatus = "applied"
         else:
             final_status = "replayed"
     else:
-        final_status = "applied" if planned_status == "written" else "replayed"
+        final_status = "would_apply" if plan.status == "written" else "would_replay"
 
     return TenantRepositoryClassificationApplyResult(
         status=final_status,
@@ -258,4 +245,70 @@ def apply_tenant_repository_classification(
         classification_digest=record.classification_digest,
         supersedes_record_id=record.supersedes_record_id,
         applied_at=record.classified_at,
+    )
+
+
+def plan_tenant_repository_classification_append(
+    *,
+    records: tuple[TenantRepositoryClassificationRecord, ...],
+    record: TenantRepositoryClassificationRecord,
+) -> TenantRepositoryClassificationAppendPlan:
+    matching_records = tuple(
+        existing for existing in records if existing.repository_id == record.repository_id
+    )
+    if not matching_records:
+        if record.classification_revision != 1:
+            raise TenantRepositoryClassificationSequenceError(
+                f"First classification record for repository {record.repository_id} must have revision 1, got {record.classification_revision}."
+            )
+        if record.supersedes_record_id:
+            raise TenantRepositoryClassificationSequenceError(
+                "First classification record for a repository cannot set supersedes_record_id."
+            )
+        return TenantRepositoryClassificationAppendPlan(
+            status="written",
+            current_record=None,
+        )
+
+    highest_revision = max(existing.classification_revision for existing in matching_records)
+    current_records = tuple(
+        existing
+        for existing in matching_records
+        if existing.classification_revision == highest_revision
+    )
+    if len(current_records) != 1:
+        raise TenantRepositoryClassificationConflictError(
+            "Tenant repository classification history has multiple records at the highest revision."
+        )
+    current_record = current_records[0]
+    same_revision_records = tuple(
+        existing
+        for existing in matching_records
+        if existing.classification_revision == record.classification_revision
+    )
+    if len(same_revision_records) > 1:
+        raise TenantRepositoryClassificationConflictError(
+            "Tenant repository classification revision is ambiguous."
+        )
+    if same_revision_records:
+        existing = same_revision_records[0]
+        if existing.classification_digest == record.classification_digest and existing == record:
+            return TenantRepositoryClassificationAppendPlan(
+                status="replayed",
+                current_record=current_record,
+            )
+        raise TenantRepositoryClassificationConflictError(
+            "Tenant repository classification revision already exists with different payload."
+        )
+    if record.classification_revision != current_record.classification_revision + 1:
+        raise TenantRepositoryClassificationSequenceError(
+            f"Next classification revision must be {current_record.classification_revision + 1}, got {record.classification_revision}."
+        )
+    if record.supersedes_record_id != current_record.record_id:
+        raise TenantRepositoryClassificationSequenceError(
+            f"Classification record supersedes_record_id must be '{current_record.record_id}', got '{record.supersedes_record_id}'."
+        )
+    return TenantRepositoryClassificationAppendPlan(
+        status="written",
+        current_record=current_record,
     )

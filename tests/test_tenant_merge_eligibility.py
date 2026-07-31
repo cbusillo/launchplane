@@ -247,6 +247,26 @@ class TenantMergeEligibilityTests(unittest.TestCase):
                 )
                 self.assertFalse(decision.admitted)
                 self.assertEqual(decision.reason_code, expected_reason)
+                self.assertEqual(decision.evidence_kind, "manager_preview_approval")
+
+    def test_stale_alternate_binding_does_not_block_manager_path(self) -> None:
+        cls = _classification(kind="tenant_ui")
+        stale_waiver = _path_result(
+            path_kind="technical_human_waiver",
+            state="satisfied",
+            head_sha=OLDER_HEAD_SHA,
+            classification_digest=cls.classification_digest,
+        )
+        decision = evaluate_tenant_merge_eligibility(
+            candidate=_candidate(),
+            classification_lookup=_lookup(cls),
+            evaluated_at=EVALUATED_AT,
+            evidence_inputs=TenantMergeEligibilityEvidenceInputs(
+                technical_human_waiver=stale_waiver,
+            ),
+        )
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.reason_code, "manager_preview_required")
 
     def test_missing_manager_pending(self) -> None:
         cls = _classification(kind="tenant_ui")

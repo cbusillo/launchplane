@@ -160,6 +160,9 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
     build_cancelled_verireel_prod_backup_gate_record,
 )
+from control_plane.tenant_repository_classification import (
+    plan_tenant_repository_classification_append,
+)
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
@@ -170,11 +173,6 @@ RecordModel = TypeVar("RecordModel", bound=BaseModel)
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
 CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
 ProviderTargetCreateStatus = Literal["created", "exists"]
-
-
-from control_plane.tenant_repository_classification import (
-    TenantRepositoryClassificationConflictError,
-)
 
 
 class _AuthorityBundleStageEntry(BaseModel):
@@ -794,39 +792,20 @@ class FilesystemRecordStore:
     ) -> Literal["written", "replayed"]:
         record_type = "launchplane_tenant_repository_classifications"
         with self._product_authority_bundle_lock():
-            record_path = self._record_path(record_type, record.record_id)
-            if record_path.exists():
-                existing = self._read_model_locked(
+            records = tuple(
+                existing
+                for existing in self._list_models_locked(
                     TenantRepositoryClassificationRecord,
                     record_type,
-                    record.record_id,
                 )
-                if (
-                    existing.repository_id == record.repository_id
-                    and existing.classification_revision == record.classification_revision
-                    and existing.classification_digest == record.classification_digest
-                    and existing == record
-                ):
-                    return "replayed"
-                raise TenantRepositoryClassificationConflictError(
-                    "Tenant repository classification replay changed immutable history."
-                )
-            for existing in self._list_models_locked(
-                TenantRepositoryClassificationRecord,
-                record_type,
-            ):
-                if (
-                    existing.repository_id == record.repository_id
-                    and existing.classification_revision == record.classification_revision
-                ):
-                    if (
-                        existing.classification_digest == record.classification_digest
-                        and existing == record
-                    ):
-                        return "replayed"
-                    raise TenantRepositoryClassificationConflictError(
-                        "Tenant repository classification revision already exists with different payload."
-                    )
+                if existing.repository_id == record.repository_id
+            )
+            plan = plan_tenant_repository_classification_append(
+                records=records,
+                record=record,
+            )
+            if plan.status == "replayed":
+                return "replayed"
             self._write_model_locked(record_type, record.record_id, record)
             return "written"
 
