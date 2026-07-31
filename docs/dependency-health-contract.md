@@ -110,8 +110,9 @@ uv run launchplane dependency-health compare \
 Omit `--policy-file` for the default no-high-or-critical-regressions policy.
 Callers may instead repeat `--target-advisory-id` or provide
 `--target-advisory-text-file`; Launchplane extracts GHSA, CVE, PYSEC, and OSV
-identifiers from that trusted text. A policy file cannot be combined with the
-target options.
+identifiers from that trusted text and keeps only identifiers represented in
+the baseline snapshot. Use repeated explicit IDs when a missing baseline target
+must fail closed. A policy file cannot be combined with the target options.
 The command prints one JSON evaluation and exits `0` on pass or `1` on policy
 failure. Invalid JSON, invalid contracts, and incompatible provenance fail
 without producing a partial evaluation.

@@ -64,6 +64,7 @@ def compare_dependency_health(
         baseline = DependencyHealthSnapshot.model_validate(_load_json_object(baseline_snapshot))
         candidate = DependencyHealthSnapshot.model_validate(_load_json_object(candidate_snapshot))
         policy = _load_dependency_health_policy(
+            baseline=baseline,
             policy_file=policy_file,
             target_advisory_ids=target_advisory_id,
             target_advisory_text_file=target_advisory_text_file,
@@ -159,6 +160,7 @@ def _load_json_object(path: Path) -> dict[str, object]:
 
 def _load_dependency_health_policy(
     *,
+    baseline: DependencyHealthSnapshot,
     policy_file: Path | None,
     target_advisory_ids: tuple[str, ...],
     target_advisory_text_file: Path | None,
@@ -172,8 +174,17 @@ def _load_dependency_health_policy(
 
     extracted_ids: tuple[str, ...] = ()
     if target_advisory_text_file is not None:
-        extracted_ids = extract_dependency_health_advisory_ids(
-            target_advisory_text_file.read_text(encoding="utf-8")
+        baseline_ids = {
+            advisory_id
+            for finding in baseline.findings
+            for advisory_id in (finding.advisory_id, *finding.aliases)
+        }
+        extracted_ids = tuple(
+            advisory_id
+            for advisory_id in extract_dependency_health_advisory_ids(
+                target_advisory_text_file.read_text(encoding="utf-8")
+            )
+            if advisory_id in baseline_ids
         )
     return DependencyHealthPolicy(
         target_advisory_ids=(*target_advisory_ids, *extracted_ids),

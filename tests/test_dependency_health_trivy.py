@@ -416,6 +416,57 @@ class DependencyHealthTrivyCliTests(unittest.TestCase):
             ["target_advisory_unresolved"],
         )
 
+    def test_compare_cli_ignores_text_advisories_absent_from_baseline(self) -> None:
+        baseline = dependency_health_snapshot_from_trivy_report(
+            report=_report([_vulnerability("GHSA-AAAA-BBBB-CCCC")]),
+            provenance=_provenance(),
+        )
+        candidate = dependency_health_snapshot_from_trivy_report(
+            report=_report([]),
+            provenance=_provenance(
+                source_commit=CANDIDATE_COMMIT,
+                baseline_commit=BASE_COMMIT,
+            ),
+        )
+
+        with TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            baseline_file = temporary_root / "baseline.json"
+            candidate_file = temporary_root / "candidate.json"
+            advisory_text_file = temporary_root / "pull-request-body.txt"
+            baseline_file.write_text(
+                json.dumps(baseline.model_dump(mode="json")),
+                encoding="utf-8",
+            )
+            candidate_file.write_text(
+                json.dumps(candidate.model_dump(mode="json")),
+                encoding="utf-8",
+            )
+            advisory_text_file.write_text(
+                "Security fixes: GHSA-aaaa-bbbb-cccc GHSA-dddd-eeee-ffff",
+                encoding="utf-8",
+            )
+            result = CliRunner().invoke(
+                main,
+                [
+                    "dependency-health",
+                    "compare",
+                    "--baseline-snapshot",
+                    str(baseline_file),
+                    "--candidate-snapshot",
+                    str(candidate_file),
+                    "--target-advisory-text-file",
+                    str(advisory_text_file),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        evaluation = json.loads(result.output)
+        self.assertEqual(
+            evaluation["policy"]["target_advisory_ids"],
+            ["GHSA-AAAA-BBBB-CCCC"],
+        )
+
     def test_compare_cli_rejects_policy_file_with_target_options(self) -> None:
         snapshot = dependency_health_snapshot_from_trivy_report(
             report=_report([]),
