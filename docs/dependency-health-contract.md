@@ -22,12 +22,14 @@ context.
 
 Product repositories own dependency manifests, lockfiles, Dockerfiles, scanner
 invocation, and product-specific verification. Launchplane owns the normalized
-snapshot schema, comparison semantics, policy evaluation, and future persisted
-health records.
+snapshot schema, Trivy-report normalization, comparison semantics, policy
+evaluation, and future persisted health records.
 
-This first contract slice is read-only. It does not run scanners, call GitHub,
-inspect Dependabot, mutate branches, write Launchplane state, or merge pull
-requests.
+The contract and report adapter are read-only. They do not run scanners, call
+GitHub, inspect Dependabot, mutate branches, write Launchplane state, or merge
+pull requests. Product workflows must produce trusted baseline and candidate
+reports under one scanner database and configuration before invoking
+Launchplane.
 
 ## Snapshot Contract
 
@@ -106,9 +108,38 @@ uv run launchplane dependency-health compare \
 ```
 
 Omit `--policy-file` for the default no-high-or-critical-regressions policy.
+Callers may instead repeat `--target-advisory-id` or provide
+`--target-advisory-text-file`; Launchplane extracts GHSA, CVE, PYSEC, and OSV
+identifiers from that trusted text. A policy file cannot be combined with the
+target options.
 The command prints one JSON evaluation and exits `0` on pass or `1` on policy
 failure. Invalid JSON, invalid contracts, and incompatible provenance fail
 without producing a partial evaluation.
+
+Normalize one Trivy JSON report:
+
+```bash
+uv run launchplane dependency-health trivy-snapshot \
+  --report trivy.json \
+  --repository owner/repository \
+  --source-commit "$SOURCE_COMMIT" \
+  --baseline-commit "$BASELINE_COMMIT" \
+  --producer-version 0.70.0 \
+  --advisory-revision "$TRIVY_DB_REVISION" \
+  --scan-scope production-lockfile \
+  --scan-configuration-sha256 "$SCAN_CONFIGURATION_SHA256"
+```
+
+Omit `--baseline-commit` for the baseline snapshot. The adapter normalizes
+Trivy language and operating-system findings, extracts advisory aliases from
+Trivy references, aggregates repeated package occurrences, and fails on
+unknown severities or malformed report evidence. Unsafe or non-path Trivy
+targets receive deterministic `trivy-targets/` evidence paths rather than being
+silently discarded. Reports must be generated with `--list-all-pkgs`; the
+adapter requires non-empty package inventory evidence even for clean results
+and rejects Trivy modified/ignored findings. Reports must contain only
+`lang-pkgs` and `os-pkgs` vulnerability results; mixed scanner output is
+rejected rather than partially normalized.
 
 Assess one snapshot absolutely:
 
@@ -118,6 +149,29 @@ uv run launchplane dependency-health assess --snapshot snapshot.json
 
 The command prints one JSON evaluation and exits `0` when no high/critical
 finding exists or `1` otherwise.
+
+## Composite Action
+
+Product workflows may call
+`.github/actions/dependency-health-trivy/action.yml` at an immutable Launchplane
+commit after producing baseline and candidate Trivy JSON reports. The action
+normalizes both reports with the same asserted Trivy version, advisory revision,
+scan scope, and configuration digest, then runs the regression policy. It does
+not download a vulnerability database or choose repository refs; those remain
+trusted product-workflow responsibilities.
+
+Trusted scanner commands must reuse one downloaded database for both reports,
+include every severity, and include
+`--scanners vulnerability --list-all-pkgs --show-suppressed`. Any ignore file
+must live outside candidate-controlled source. The adapter rejects every
+reported suppression or modified finding; `--show-suppressed` prevents an
+ignore rule from silently removing evidence. The configuration digest must
+commit to those choices, the trusted ignore file, and any external artifact
+inputs.
+
+The action accepts explicit target advisory IDs and trusted pull-request text.
+It emits baseline snapshot, candidate snapshot, and evaluation file paths for
+artifact retention and fails the job when the comparison policy fails.
 
 ## Dependabot Boundary
 
@@ -131,7 +185,7 @@ high/critical finding remains red until the bot offers a safe update.
 
 This slice does not add:
 
-- scanner adapters or network access
+- scanner execution, advisory database downloads, or network access
 - database tables or service routes
 - GitHub App or workflow mutations
 - advisory waivers or checked-in ignore policy

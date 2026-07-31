@@ -174,6 +174,12 @@ non-checkout `repository` values are rejected by the product-repo profile.
   advisory-revision, scope, and configuration provenance. Product repos own the
   scan invocation; Launchplane owns normalized comparison semantics. See
   [dependency-health-contract.md](dependency-health-contract.md).
+- Trusted baseline and candidate Trivy reports may be passed to the Launchplane
+  dependency-health action pinned at an immutable commit. The product workflow
+  still owns commit selection, scanner database reuse, scan configuration, and
+  artifact construction. Reports must be vulnerability-only and preserve full
+  package and suppression evidence as required by the dependency-health
+  contract.
 - Publishing an immutable image or artifact reference that Launchplane can
   deploy.
 - A minimal GitHub Actions trigger that authenticates to Launchplane with OIDC
