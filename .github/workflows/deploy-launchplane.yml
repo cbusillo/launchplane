@@ -21,14 +21,6 @@ on:
           - none
           - dry_run
           - apply
-      authz_managed_set:
-        description: Protected managed set used by the temporary authz bootstrap path.
-        required: false
-        default: primary
-        type: choice
-        options:
-          - primary
-          - authz-policy-reconcile
       authz_managed_reviewed_plan_sha256:
         description: Managed plan SHA-256 returned by the reviewed dry run; required for apply.
         required: false
@@ -1236,8 +1228,7 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       github.ref_type == 'branch' &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
-      inputs.authz_managed_mode != 'none' &&
-      inputs.authz_managed_set == 'primary'
+      inputs.authz_managed_mode != 'none'
     permissions:
       contents: read
       id-token: write
@@ -1249,26 +1240,6 @@ jobs:
       related_issue: ${{ inputs.authz_managed_related_issue }}
     secrets:
       managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}
-
-  operator-authz-policy-reconcile-bootstrap:
-    needs: operator-authz-managed-validate
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      github.ref_type == 'branch' &&
-      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
-      inputs.authz_managed_mode != 'none' &&
-      inputs.authz_managed_set == 'authz-policy-reconcile'
-    permissions:
-      contents: read
-      id-token: write
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
-    with:
-      mode: ${{ inputs.authz_managed_mode }}
-      reviewed_plan_sha256: ${{ inputs.authz_managed_reviewed_plan_sha256 }}
-      reason: ${{ inputs.authz_managed_reason }}
-      related_issue: ${{ inputs.authz_managed_related_issue }}
-    secrets:
-      managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON }}
 
   emergency-dokploy-rollback:
     if: >-
