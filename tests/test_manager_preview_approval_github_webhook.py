@@ -30,12 +30,15 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.manager_preview_approval import (
     ManagerPreviewApprovalEventConflictError,
     build_current_manager_preview_approval_binding,
+    build_manager_preview_approval_system_event,
 )
 from control_plane.manager_preview_approval_github_webhook import (
     ManagerPreviewApprovalGitHubDependencies,
     handle_manager_preview_approval_github_webhook_request,
     invalidate_manager_preview_approval_for_pr,
     parse_manager_preview_approval_command,
+    reconcile_manager_preview_approval_for_pr,
+    reconcile_manager_preview_approval_for_pr_best_effort,
 )
 from control_plane.manager_preview_approval_projection import (
     build_manager_preview_approval_projection,
@@ -149,12 +152,23 @@ class _GitHubApi:
         self.comments: list[dict[str, object]] = []
         self.statuses: list[dict[str, object]] = []
         self.calls: list[tuple[str, str, object]] = []
+        self.fail_projection_writes = False
 
     def __call__(self, **kwargs: object) -> object:
         path = str(kwargs.get("path") or "")
         method = str(kwargs.get("method") or "GET")
         body = kwargs.get("body")
         self.calls.append((method, path, body))
+        if (
+            self.fail_projection_writes
+            and method in {"PATCH", "POST"}
+            and (
+                "/issues/comments/" in path
+                or path.endswith(f"/issues/{PR_NUMBER}/comments")
+                or "/statuses/" in path
+            )
+        ):
+            raise click.ClickException("GitHub projection is temporarily unavailable.")
         if path == "/user":
             return {"id": self.projection_actor_id, "login": "launchplane"}
         if path == f"/repos/{REPOSITORY}/issues/comments/501" and method == "GET":
@@ -485,6 +499,94 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         self.assertEqual(event.action, "invalidated")
         self.assertEqual(event.binding.binding_sha256, binding.binding_sha256)
         self.assertEqual(github.statuses[-1]["state"], "error")
+
+    def test_reconcile_recovers_pending_projection_after_destroy_and_replacement(self) -> None:
+        store = _Store()
+        prior_binding = build_current_manager_preview_approval_binding(
+            product=PRODUCT,
+            preview=store.preview,
+            generation=store.generation,
+        )
+        store.write_manager_preview_approval_event_record(
+            build_manager_preview_approval_system_event(
+                binding=prior_binding,
+                action="invalidated",
+                occurred_at="2026-07-31T11:45:00Z",
+                source_event_kind="preview_destroy",
+                source_event_id="destroy-generation-17",
+                reason="The prior serving preview was destroyed.",
+            )
+        )
+        assert store.generation.runtime_identity is not None
+        store.preview = store.preview.model_copy(
+            update={
+                "updated_at": "2026-07-31T11:50:00Z",
+                "active_generation_id": "generation-18",
+                "serving_generation_id": "generation-18",
+                "latest_generation_id": "generation-18",
+                "latest_manifest_fingerprint": "manifest-18",
+            }
+        )
+        store.generation = store.generation.model_copy(
+            update={
+                "generation_id": "generation-18",
+                "sequence": 2,
+                "requested_at": "2026-07-31T11:46:00Z",
+                "started_at": "2026-07-31T11:47:00Z",
+                "ready_at": "2026-07-31T11:50:00Z",
+                "finished_at": "2026-07-31T11:50:00Z",
+                "resolved_manifest_fingerprint": "manifest-18",
+                "artifact_id": "artifact-18",
+                "runtime_identity": store.generation.runtime_identity.model_copy(
+                    update={
+                        "deployment_record_id": "deployment-18",
+                        "artifact_id": "artifact-18",
+                        "image_reference": f"ghcr.io/example/site@sha256:{'b' * 64}",
+                        "preview_generation_id": "generation-18",
+                    }
+                ),
+            }
+        )
+        github = _GitHubApi()
+        dependencies = _dependencies(github)
+        github.fail_projection_writes = True
+
+        self.assertFalse(
+            reconcile_manager_preview_approval_for_pr_best_effort(
+                repository=REPOSITORY,
+                pr_number=PR_NUMBER,
+                record_store=store,
+                control_plane_root=Path("/tmp/launchplane"),
+                dependencies=dependencies,
+            )
+        )
+        self.assertEqual(github.statuses, [])
+        github.fail_projection_writes = False
+
+        result = reconcile_manager_preview_approval_for_pr(
+            repository=REPOSITORY,
+            pr_number=PR_NUMBER,
+            record_store=store,
+            control_plane_root=Path("/tmp/launchplane"),
+            dependencies=dependencies,
+        )
+        replayed_result = reconcile_manager_preview_approval_for_pr(
+            repository=REPOSITORY,
+            pr_number=PR_NUMBER,
+            record_store=store,
+            control_plane_root=Path("/tmp/launchplane"),
+            dependencies=dependencies,
+        )
+
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(result["check_state"], "pending")
+        self.assertNotEqual(result["fingerprint"], prior_binding.binding_sha256)
+        self.assertEqual(replayed_result["fingerprint"], result["fingerprint"])
+        self.assertEqual(replayed_result["status"], "pending")
+        self.assertEqual(len(store.events), 1)
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(github.statuses[-1]["state"], "pending")
+        self.assertIn(str(result["fingerprint"]), str(github.comments[-1]["body"]))
 
 
 def _dependencies(github: _GitHubApi) -> ManagerPreviewApprovalGitHubDependencies:
