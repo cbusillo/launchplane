@@ -154,6 +154,33 @@ def build_launchplane_idempotency_record_id(*, response_trace_id: str) -> str:
     return f"idempotency-{normalized_trace_id}"
 
 
+def build_launchplane_mutation_reservation_id(
+    *,
+    scope: str,
+    route_path: str,
+    idempotency_key: str,
+) -> str:
+    normalized_scope = _normalize_required(scope, "Mutation reservation requires scope.")
+    normalized_route_path = _normalize_required(
+        route_path,
+        "Mutation reservation requires route_path.",
+    )
+    normalized_idempotency_key = _normalize_required(
+        idempotency_key,
+        "Mutation reservation requires idempotency_key.",
+    )
+    record_digest = hashlib.sha256(
+        "\x1f".join(
+            (
+                normalized_scope,
+                normalized_route_path,
+                normalized_idempotency_key,
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"mutation-reservation-{record_digest}"
+
+
 def build_launchplane_mutation_reservation(
     *,
     scope: str,
@@ -175,17 +202,12 @@ def build_launchplane_mutation_reservation(
         idempotency_key,
         "Mutation reservation requires idempotency_key.",
     )
-    record_digest = hashlib.sha256(
-        "\x1f".join(
-            (
-                normalized_scope,
-                normalized_route_path,
-                normalized_idempotency_key,
-            )
-        ).encode("utf-8")
-    ).hexdigest()
     return LaunchplaneIdempotencyRecord(
-        record_id=f"mutation-reservation-{record_digest}",
+        record_id=build_launchplane_mutation_reservation_id(
+            scope=normalized_scope,
+            route_path=normalized_route_path,
+            idempotency_key=normalized_idempotency_key,
+        ),
         scope=normalized_scope,
         route_path=normalized_route_path,
         idempotency_key=normalized_idempotency_key,
