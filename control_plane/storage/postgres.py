@@ -187,6 +187,11 @@ from control_plane.contracts.secret_record import (
     SecretRotationWrite,
     SecretVersion,
 )
+from control_plane.contracts.tenant_merge_eligibility import (
+    TenantRepositoryClassificationLookup,
+    TenantRepositoryClassificationRecord,
+)
+from control_plane.storage.filesystem import TenantRepositoryClassificationConflictError
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
     build_cancelled_verireel_prod_backup_gate_record,
@@ -605,6 +610,35 @@ class LaunchplaneManagerPreviewApprovalEventRow(Base):
     policy_record_id: Mapped[str] = mapped_column(String, nullable=False, server_default="")
     policy_sha256: Mapped[str] = mapped_column(String, nullable=False, server_default="")
     occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneTenantRepositoryClassificationRow(Base):
+    __tablename__ = "launchplane_tenant_repository_classifications"
+    __table_args__ = (
+        Index(
+            "launchplane_tenant_repo_class_revision_uidx",
+            "repository_id",
+            "classification_revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_tenant_repo_class_current_idx",
+            "repository_id",
+            desc("classification_revision"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    repository_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository_owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    classification_kind: Mapped[str] = mapped_column(String, nullable=False)
+    classification_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    classified_at: Mapped[str] = mapped_column(String, nullable=False)
+    classification_digest: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -7147,6 +7181,106 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 return "replayed"
 
+    def _tenant_repository_classification_row(
+        self, record: TenantRepositoryClassificationRecord
+    ) -> LaunchplaneTenantRepositoryClassificationRow:
+        return LaunchplaneTenantRepositoryClassificationRow(
+            record_id=record.record_id,
+            repository_id=record.repository_id,
+            repository_owner_id=record.repository_owner_id,
+            repository=record.repository,
+            product=record.product,
+            context=record.context,
+            classification_kind=record.classification_kind,
+            classification_revision=record.classification_revision,
+            classified_at=record.classified_at,
+            classification_digest=record.classification_digest,
+            payload=self._payload_dict(record),
+        )
+
+    def write_tenant_repository_classification_record(
+        self, record: TenantRepositoryClassificationRecord
+    ) -> Literal["written", "replayed"]:
+        with self._session_factory() as session:
+            session.add(self._tenant_repository_classification_row(record))
+            try:
+                session.commit()
+                return "written"
+            except IntegrityError:
+                session.rollback()
+                existing_row = session.scalar(
+                    select(LaunchplaneTenantRepositoryClassificationRow).where(
+                        LaunchplaneTenantRepositoryClassificationRow.repository_id
+                        == record.repository_id,
+                        LaunchplaneTenantRepositoryClassificationRow.classification_revision
+                        == record.classification_revision,
+                    )
+                )
+                if existing_row is None:
+                    existing_row = session.get(
+                        LaunchplaneTenantRepositoryClassificationRow,
+                        record.record_id,
+                    )
+                if existing_row is None:
+                    raise
+                existing = self._read_payload(
+                    model_type=TenantRepositoryClassificationRecord,
+                    payload=existing_row.payload,
+                )
+                if (
+                    existing.repository_id == record.repository_id
+                    and existing.classification_revision == record.classification_revision
+                    and existing.classification_digest == record.classification_digest
+                    and existing == record
+                ):
+                    return "replayed"
+                raise TenantRepositoryClassificationConflictError(
+                    "Tenant repository classification revision already exists with different payload."
+                )
+
+    def read_tenant_repository_classification_record(
+        self, record_id: str
+    ) -> TenantRepositoryClassificationRecord:
+        return self._read_model(
+            model_type=TenantRepositoryClassificationRecord,
+            orm_model=LaunchplaneTenantRepositoryClassificationRow,
+            filters=(LaunchplaneTenantRepositoryClassificationRow.record_id == record_id,),
+        )
+
+    def list_tenant_repository_classification_records(
+        self,
+        *,
+        repository_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[TenantRepositoryClassificationRecord, ...]:
+        filters: list[object] = []
+        if repository_id:
+            filters.append(
+                LaunchplaneTenantRepositoryClassificationRow.repository_id == repository_id
+            )
+        return self._list_models(
+            model_type=TenantRepositoryClassificationRecord,
+            orm_model=LaunchplaneTenantRepositoryClassificationRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneTenantRepositoryClassificationRow.classification_revision.desc(),
+                LaunchplaneTenantRepositoryClassificationRow.repository_id.desc(),
+                LaunchplaneTenantRepositoryClassificationRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def latest_tenant_repository_classification_lookup(
+        self, *, repository_id: str
+    ) -> TenantRepositoryClassificationLookup:
+        records = self.list_tenant_repository_classification_records(
+            repository_id=repository_id,
+            limit=1,
+        )
+        if not records:
+            return TenantRepositoryClassificationLookup(status="missing")
+        return TenantRepositoryClassificationLookup(records=records)
+
     def list_manager_preview_approval_event_records(
         self,
         *,
@@ -10939,6 +11073,7 @@ class PostgresRecordStore(HumanSessionStore):
             "odoo_stable_target_replacement_operations": 0,
             "release_tuples": 0,
             "runtime_key_safety_policies": 0,
+            "tenant_repository_classifications": 0,
         }
         for artifact_manifest in filesystem_store.list_artifact_manifests():
             self.write_artifact_manifest(artifact_manifest)
@@ -10946,6 +11081,12 @@ class PostgresRecordStore(HumanSessionStore):
         for policy_record in filesystem_store.list_runtime_key_safety_policy_records():
             self.write_runtime_key_safety_policy_record(policy_record)
             counts["runtime_key_safety_policies"] += 1
+        if hasattr(filesystem_store, "list_tenant_repository_classification_records"):
+            for (
+                classification_record
+            ) in filesystem_store.list_tenant_repository_classification_records():
+                self.write_tenant_repository_classification_record(classification_record)
+                counts["tenant_repository_classifications"] += 1
         for backup_gate_record in filesystem_store.list_backup_gate_records():
             self.write_backup_gate_record(backup_gate_record)
             counts["backup_gates"] += 1

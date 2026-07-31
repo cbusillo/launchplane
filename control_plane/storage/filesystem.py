@@ -146,6 +146,10 @@ from control_plane.contracts.secret_record import (
     SecretRotationWrite,
     SecretVersion,
 )
+from control_plane.contracts.tenant_merge_eligibility import (
+    TenantRepositoryClassificationLookup,
+    TenantRepositoryClassificationRecord,
+)
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_host_hygiene import (
@@ -166,6 +170,10 @@ RecordModel = TypeVar("RecordModel", bound=BaseModel)
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
 CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
 ProviderTargetCreateStatus = Literal["created", "exists"]
+
+
+class TenantRepositoryClassificationConflictError(ValueError):
+    """Raised when immutable repository classification history is replayed differently."""
 
 
 class _AuthorityBundleStageEntry(BaseModel):
@@ -779,6 +787,97 @@ class FilesystemRecordStore:
 
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> Path:
         return self._write_model("launchplane_agent_write_intents", record.record_id, record)
+
+    def write_tenant_repository_classification_record(
+        self, record: TenantRepositoryClassificationRecord
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_tenant_repository_classifications"
+        with self._product_authority_bundle_lock():
+            record_path = self._record_path(record_type, record.record_id)
+            if record_path.exists():
+                existing = self._read_model_locked(
+                    TenantRepositoryClassificationRecord,
+                    record_type,
+                    record.record_id,
+                )
+                if (
+                    existing.repository_id == record.repository_id
+                    and existing.classification_revision == record.classification_revision
+                    and existing.classification_digest == record.classification_digest
+                    and existing == record
+                ):
+                    return "replayed"
+                raise TenantRepositoryClassificationConflictError(
+                    "Tenant repository classification replay changed immutable history."
+                )
+            for existing in self._list_models_locked(
+                TenantRepositoryClassificationRecord,
+                record_type,
+            ):
+                if (
+                    existing.repository_id == record.repository_id
+                    and existing.classification_revision == record.classification_revision
+                ):
+                    if (
+                        existing.classification_digest == record.classification_digest
+                        and existing == record
+                    ):
+                        return "replayed"
+                    raise TenantRepositoryClassificationConflictError(
+                        "Tenant repository classification revision already exists with different payload."
+                    )
+            self._write_model_locked(record_type, record.record_id, record)
+            return "written"
+
+    def read_tenant_repository_classification_record(
+        self, record_id: str
+    ) -> TenantRepositoryClassificationRecord:
+        return self._read_model(
+            TenantRepositoryClassificationRecord,
+            "launchplane_tenant_repository_classifications",
+            record_id,
+        )
+
+    def list_tenant_repository_classification_records(
+        self,
+        *,
+        repository_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[TenantRepositoryClassificationRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                TenantRepositoryClassificationRecord,
+                "launchplane_tenant_repository_classifications",
+            )
+            if not repository_id or record.repository_id == repository_id
+        ]
+        records.sort(
+            key=lambda record: (
+                record.classification_revision,
+                record.repository_id,
+                record.record_id,
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def latest_tenant_repository_classification_lookup(
+        self, *, repository_id: str
+    ) -> TenantRepositoryClassificationLookup:
+        records = self.list_tenant_repository_classification_records(
+            repository_id=repository_id,
+        )
+        if not records:
+            return TenantRepositoryClassificationLookup(status="missing")
+        latest_revision = records[0].classification_revision
+        return TenantRepositoryClassificationLookup(
+            records=tuple(
+                record for record in records if record.classification_revision == latest_revision
+            )
+        )
 
     def read_agent_write_intent_record(self, record_id: str) -> AgentWriteIntentRecord:
         return AgentWriteIntentRecord.model_validate(

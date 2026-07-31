@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from alembic import command
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -19,6 +19,9 @@ from control_plane.storage.schema_adoption import (
 
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
+    CRITICAL_POSTGRES_COLUMN_TYPES,
+    CRITICAL_PRIMARY_KEYS,
+    CRITICAL_SCHEMA_INDEXES,
     EXPECTED_ALEMBIC_HEAD_REVISION,
 )
 from control_plane.storage.schema_migration import (
@@ -684,6 +687,116 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertEqual(
             tuple(record.record_id for record in active_records),
             ("authz-sqlite-second",),
+        )
+
+    def test_tenant_repository_classification_migration_upgrades_and_downgrades(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = _alembic_config(database_url)
+
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                inspector = inspect(engine)
+                table_names = set(inspector.get_table_names())
+                columns = {
+                    column["name"]
+                    for column in inspector.get_columns(
+                        "launchplane_tenant_repository_classifications"
+                    )
+                }
+                indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes(
+                        "launchplane_tenant_repository_classifications"
+                    )
+                }
+                primary_key = inspector.get_pk_constraint(
+                    "launchplane_tenant_repository_classifications"
+                )
+            finally:
+                engine.dispose()
+
+            command.downgrade(config, "e8a0c2d4f6b8")
+            engine = create_engine(database_url)
+            try:
+                downgraded_table_names = set(inspect(engine).get_table_names())
+            finally:
+                engine.dispose()
+
+        self.assertIn("launchplane_tenant_repository_classifications", table_names)
+        self.assertGreaterEqual(
+            columns,
+            {
+                "record_id",
+                "repository_id",
+                "repository_owner_id",
+                "repository",
+                "product",
+                "context",
+                "classification_kind",
+                "classification_revision",
+                "classified_at",
+                "classification_digest",
+                "payload",
+            },
+        )
+        self.assertEqual(primary_key["constrained_columns"], ["record_id"])
+        self.assertTrue(indexes["launchplane_tenant_repo_class_revision_uidx"]["unique"])
+        self.assertEqual(
+            indexes["launchplane_tenant_repo_class_revision_uidx"]["column_names"],
+            ["repository_id", "classification_revision"],
+        )
+        self.assertFalse(indexes["launchplane_tenant_repo_class_current_idx"]["unique"])
+        self.assertEqual(
+            indexes["launchplane_tenant_repo_class_current_idx"]["column_names"],
+            ["repository_id", "classification_revision"],
+        )
+        self.assertNotIn(
+            "launchplane_tenant_repository_classifications",
+            downgraded_table_names,
+        )
+
+    def test_tenant_repository_classification_schema_invariants_are_expected(
+        self,
+    ) -> None:
+        column_types = {
+            (column.table_name, column.column_name): column.accepted_type_tokens
+            for column in CRITICAL_POSTGRES_COLUMN_TYPES
+        }
+        indexes = {(index.table_name, index.index_name): index for index in CRITICAL_SCHEMA_INDEXES}
+        primary_keys = {
+            primary_key.table_name: primary_key.column_names
+            for primary_key in CRITICAL_PRIMARY_KEYS
+        }
+
+        self.assertEqual(
+            column_types[("launchplane_tenant_repository_classifications", "payload")],
+            ("jsonb",),
+        )
+        self.assertEqual(
+            primary_keys["launchplane_tenant_repository_classifications"],
+            ("record_id",),
+        )
+        self.assertTrue(
+            indexes[
+                (
+                    "launchplane_tenant_repository_classifications",
+                    "launchplane_tenant_repo_class_revision_uidx",
+                )
+            ].unique
+        )
+        self.assertEqual(
+            indexes[
+                (
+                    "launchplane_tenant_repository_classifications",
+                    "launchplane_tenant_repo_class_current_idx",
+                )
+            ].column_names,
+            ("repository_id", "classification_revision"),
         )
 
 
