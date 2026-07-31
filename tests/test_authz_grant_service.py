@@ -1482,6 +1482,105 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             (pinned_job_workflow_ref,),
         )
 
+    def test_managed_reconcile_expands_exact_authz_worker_authority(self) -> None:
+        old_job_workflow_ref = (
+            "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@" + "a" * 40
+        )
+        new_job_workflow_ref = (
+            "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@" + "b" * 40
+        )
+        deploy_workflow_ref = (
+            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+        )
+        operator_workflow_ref = (
+            "cbusillo/launchplane/.github/workflows/authz-policy-reconcile.yml@refs/heads/main"
+        )
+        current_policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    managed_set_id="operator.launchplane",
+                    managed_rule_id="authz.bootstrap",
+                    repository="cbusillo/launchplane",
+                    repository_id="1001",
+                    repository_owner_id="2001",
+                    workflow_refs=(deploy_workflow_ref,),
+                    job_workflow_refs=(old_job_workflow_ref,),
+                    event_names=("workflow_dispatch",),
+                    environments=("launchplane-authz-admin",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("authz_policy_grant.write",),
+                ),
+            ),
+        )
+        new_identity = GitHubActionsIdentity(
+            repository="cbusillo/launchplane",
+            repository_owner="cbusillo",
+            repository_id="1001",
+            repository_owner_id="2001",
+            workflow_ref=operator_workflow_ref,
+            job_workflow_ref=new_job_workflow_ref,
+            event_name="workflow_dispatch",
+            ref="refs/heads/main",
+            ref_type="branch",
+            environment="launchplane-authz-admin",
+            subject="repo:cbusillo/launchplane:environment:launchplane-authz-admin",
+            sha="abc123",
+            raw_claims={},
+        )
+        self.assertFalse(
+            current_policy.allows(
+                identity=new_identity,
+                action="authz_policy_grant.write",
+                product="launchplane",
+                context="launchplane",
+            )
+        )
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.authz-policy-reconcile",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "managed_set_id": "operator.authz-policy-reconcile",
+                            "managed_rule_id": "worker.current",
+                            "repository": "cbusillo/launchplane",
+                            "repository_id": "1001",
+                            "repository_owner_id": "2001",
+                            "workflow_refs": [operator_workflow_ref],
+                            "job_workflow_refs": [new_job_workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "environments": ["launchplane-authz-admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        }
+                    ],
+                },
+            }
+        )
+
+        _, _, updated_policy, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((_active_record_for_policy(current_policy),)),
+            request=request,
+        )
+
+        self.assertEqual(diff.added_rule_count, 1)
+        self.assertEqual(diff.removed_rule_count, 0)
+        self.assertTrue(
+            updated_policy.allows(
+                identity=new_identity,
+                action="authz_policy_grant.write",
+                product="launchplane",
+                context="launchplane",
+            )
+        )
+        self.assertEqual(len(updated_policy.github_actions), 2)
+
     def test_active_summary_reports_managed_migration_readiness_counts(self) -> None:
         unpinned_privileged_rule = GitHubActionsPolicyRule(
             repository="cbusillo/launchplane",

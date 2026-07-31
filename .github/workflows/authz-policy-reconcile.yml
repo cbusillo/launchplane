@@ -19,6 +19,7 @@ name: Manage Launchplane Authorization
         type: choice
         options:
           - primary
+          - authz-policy-reconcile
           - manager-preview-approval
           - product-health-monitoring
           - odoo-route-binding
@@ -59,6 +60,18 @@ jobs:
       related_issue: ${{ inputs.related_issue }}
     secrets:
       managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}
+
+  reconcile-authz-policy-reconcile:
+    if: ${{ inputs.managed_set == 'authz-policy-reconcile' }}
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
+    with:
+      mode: ${{ inputs.mode }}
+      expected_managed_set_id: operator.authz-policy-reconcile
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+      related_issue: ${{ inputs.related_issue }}
+    secrets:
+      managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON }}
 
   reconcile-manager-preview-approval:
     if: ${{ inputs.managed_set == 'manager-preview-approval' }}
