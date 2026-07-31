@@ -1292,6 +1292,103 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(missing_lookup.status, "missing")
         self.assertEqual(missing_lookup.records, ())
 
+    def test_tenant_repository_classification_compare_write_is_atomic_and_replays(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _tenant_repository_classification_record()
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:tenant-classification",
+                route_path="/v1/tenant-admission/repository-classifications/apply",
+                idempotency_key="tenant-classification-atomic",
+                request_fingerprint="tenant-classification-fingerprint",
+                lease_owner="trace-tenant-classification",
+                response_status_code=200,
+                response_trace_id="trace-tenant-classification",
+                response_payload={"status": "ok", "record_id": record.record_id},
+            )
+
+            first_result = store.compare_and_write_tenant_repository_classification_record(
+                record=record,
+                expected_current_record_id="",
+                mutation=mutation,
+            )
+            replay_result = store.compare_and_write_tenant_repository_classification_record(
+                record=record,
+                expected_current_record_id="",
+                mutation=mutation,
+            )
+            stored_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            records = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+            store.close()
+
+        self.assertEqual(first_result.status, "written")
+        self.assertEqual(replay_result.status, "replayed")
+        self.assertEqual(records, (record,))
+        self.assertIsNotNone(stored_idempotency)
+        assert stored_idempotency is not None
+        self.assertEqual(stored_idempotency.state, "completed")
+        self.assertEqual(stored_idempotency.response_payload, mutation.response_payload)
+
+    def test_tenant_repository_classification_compare_write_rolls_back_on_completion_failure(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _tenant_repository_classification_record()
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:tenant-classification",
+                route_path="/v1/tenant-admission/repository-classifications/apply",
+                idempotency_key="tenant-classification-rollback",
+                request_fingerprint="tenant-classification-rollback-fingerprint",
+                lease_owner="trace-tenant-classification-rollback",
+                response_status_code=200,
+                response_trace_id="trace-tenant-classification-rollback",
+                response_payload={"status": "ok", "record_id": record.record_id},
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_sync_idempotency_row",
+                    side_effect=RuntimeError("injected completion failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected completion failure"),
+            ):
+                store.compare_and_write_tenant_repository_classification_record(
+                    record=record,
+                    expected_current_record_id="",
+                    mutation=mutation,
+                )
+
+            stored_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            records = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+            store.close()
+
+        self.assertIsNone(stored_idempotency)
+        self.assertEqual(records, ())
+
     def test_tenant_repository_classification_rejects_conflicting_replay(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

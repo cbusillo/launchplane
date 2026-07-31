@@ -5,9 +5,6 @@ from typing import Annotated, Literal, cast
 from fastapi import Depends, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from control_plane.contracts.idempotency_record import (
-    complete_launchplane_mutation_reservation,
-)
 from control_plane.http_routes.mutation_support import (
     idempotency_scope,
     request_fingerprint,
@@ -20,7 +17,7 @@ from control_plane.http_routes.support import (
     ReadRouteDependencies,
 )
 from control_plane.service_auth import LaunchplaneIdentity, TerminalAgentIdentity
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationApplyEnvelope,
     TenantRepositoryClassificationApplyResult,
@@ -31,7 +28,6 @@ from control_plane.tenant_repository_classification import (
     get_tenant_repository_classification_read_model,
     require_tenant_repository_classification_read_store,
 )
-from control_plane.workflows.ship import utc_now_timestamp
 
 TENANT_REPOSITORY_CLASSIFICATION_READ_ROUTE = (
     "/v1/work-graph/tenant-admission/repository-classification"
@@ -195,13 +191,16 @@ def register_tenant_admission_write_routes(
                     message="Apply operation requires an Idempotency-Key header.",
                 )
 
-            if not isinstance(record_store, PostgresRecordStore):
+            if (
+                not isinstance(record_store, PostgresRecordStore)
+                or record_store.database_dialect_name != "postgresql"
+            ):
                 raise dependencies.http_error(
                     status_code=503,
                     trace_id=trace_id,
                     code="database_storage_required",
                     message=(
-                        "Tenant repository classification apply requires DB-backed "
+                        "Tenant repository classification apply requires PostgreSQL-backed "
                         "Launchplane storage."
                     ),
                 )
@@ -210,14 +209,58 @@ def register_tenant_admission_write_routes(
             normalized_scope = idempotency_scope(identity)
             raw_payload = await request.json()
             payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
-            reservation = store.reserve_mutation(
-                scope=normalized_scope,
-                route_path=TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint=payload_fingerprint,
-                lease_owner=trace_id,
+            result = TenantRepositoryClassificationApplyResult(
+                status="applied",
+                mode="apply",
+                repository_id=envelope.record.repository_id,
+                classification_revision=envelope.record.classification_revision,
+                record_id=envelope.record.record_id,
+                classification_digest=envelope.record.classification_digest,
+                supersedes_record_id=envelope.record.supersedes_record_id,
+                applied_at=envelope.record.classified_at,
             )
-            if reservation.status == "conflict":
+            response = TenantRepositoryClassificationApplyResponse(
+                trace_id=trace_id,
+                result=result,
+            )
+            try:
+                write_result = store.compare_and_write_tenant_repository_classification_record(
+                    record=envelope.record,
+                    expected_current_record_id=envelope.expected_current_record_id,
+                    mutation=DbOnlyMutationRequest(
+                        scope=normalized_scope,
+                        route_path=TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
+                        idempotency_key=normalized_idempotency_key,
+                        request_fingerprint=payload_fingerprint,
+                        lease_owner=trace_id,
+                        response_status_code=200,
+                        response_trace_id=trace_id,
+                        response_payload=response.model_dump(mode="json"),
+                    ),
+                )
+            except TenantRepositoryClassificationConflictError as error:
+                raise dependencies.http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="classification_conflict",
+                    message=str(error),
+                ) from error
+            except TenantRepositoryClassificationSequenceError as error:
+                raise dependencies.http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_sequence",
+                    message=str(error),
+                ) from error
+            except ValueError as error:
+                raise dependencies.http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_request",
+                    message=str(error),
+                ) from error
+
+            if write_result.status == "idempotency_conflict":
                 raise dependencies.http_error(
                     status_code=409,
                     trace_id=trace_id,
@@ -227,19 +270,19 @@ def register_tenant_admission_write_routes(
                         "Launchplane request payload on this route."
                     ),
                 )
-            if reservation.status == "replayed":
-                payload = dict(reservation.record.response_payload)
+            if write_result.status == "replayed" and write_result.idempotency_record is not None:
+                payload = dict(write_result.idempotency_record.response_payload)
                 payload["replayed"] = True
-                payload["original_trace_id"] = reservation.record.response_trace_id
+                payload["original_trace_id"] = write_result.idempotency_record.response_trace_id
                 return TenantRepositoryClassificationApplyResponse.model_validate(payload)
-            if reservation.status in {"in_progress", "target_busy"}:
+            if write_result.status == "reservation_in_progress":
                 raise dependencies.http_error(
                     status_code=409,
                     trace_id=trace_id,
                     code="mutation_in_progress",
                     message="Tenant repository classification apply is already in progress.",
                 )
-            if reservation.status == "reconcile_required":
+            if write_result.status == "reconciliation_required":
                 raise dependencies.http_error(
                     status_code=409,
                     trace_id=trace_id,
@@ -249,67 +292,13 @@ def register_tenant_admission_write_routes(
                         "before retry."
                     ),
                 )
-
-            try:
-                result = apply_tenant_repository_classification(
-                    store=store,
-                    record=envelope.record,
-                    expected_current_record_id=envelope.expected_current_record_id,
-                    mode="apply",
-                )
-            except TenantRepositoryClassificationConflictError as error:
-                store.release_mutation_reservation(reservation=reservation.record)
-                raise dependencies.http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="classification_conflict",
-                    message=str(error),
-                ) from error
-            except TenantRepositoryClassificationSequenceError as error:
-                store.release_mutation_reservation(reservation=reservation.record)
-                raise dependencies.http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="invalid_sequence",
-                    message=str(error),
-                ) from error
-            except ValueError as error:
-                store.release_mutation_reservation(reservation=reservation.record)
-                raise dependencies.http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="invalid_request",
-                    message=str(error),
-                ) from error
-
-            response = TenantRepositoryClassificationApplyResponse(
-                trace_id=trace_id,
-                result=result,
-            )
-            completion = store.complete_mutation_reservation(
-                completion=complete_launchplane_mutation_reservation(
-                    reservation.record,
-                    response_status_code=200,
-                    response_trace_id=trace_id,
-                    completed_at=utc_now_timestamp(),
-                    response_payload=response.model_dump(mode="json"),
-                )
-            )
-            if completion.status == "completed":
+            if write_result.status == "written":
                 return response
-            if completion.status == "replayed" and completion.record is not None:
-                payload = dict(completion.record.response_payload)
-                payload["replayed"] = True
-                payload["original_trace_id"] = completion.record.response_trace_id
-                return TenantRepositoryClassificationApplyResponse.model_validate(payload)
             raise dependencies.http_error(
-                status_code=409,
+                status_code=500,
                 trace_id=trace_id,
-                code="mutation_completion_conflict",
-                message=(
-                    "Tenant repository classification apply completed, but durable "
-                    "idempotency evidence could not be finalized. Retry with the same key."
-                ),
+                code="internal_error",
+                message="Tenant repository classification apply returned an unknown result.",
             )
         else:
             try:

@@ -2209,65 +2209,6 @@ export type StructuredHealthEvidence = {
     version: string;
 };
 
-export type TenantRepositoryClassificationApplyEnvelope = {
-    expected_current_record_id?: string;
-    mode?: 'dry_run' | 'apply';
-    record: TenantRepositoryClassificationRecord;
-    schema_version?: number;
-};
-
-export type TenantRepositoryClassificationApplyResponse = {
-    original_trace_id?: string | null;
-    replayed?: boolean | null;
-    result: TenantRepositoryClassificationApplyResult;
-    status: 'ok';
-    trace_id: string;
-};
-
-export type TenantRepositoryClassificationApplyResult = {
-    applied_at: string;
-    classification_digest: string;
-    classification_revision: number;
-    mode: 'dry_run' | 'apply';
-    record_id: string;
-    repository_id: string;
-    schema_version: number;
-    status: 'would_apply' | 'would_replay' | 'applied' | 'replayed';
-    supersedes_record_id: string | null;
-};
-
-export type TenantRepositoryClassificationReadModel = {
-    current_record: TenantRepositoryClassificationRecord | null;
-    generated_at: string;
-    history_count: number;
-    repository_id: string;
-    schema_version: number;
-    status: 'available' | 'missing' | 'ambiguous' | 'unknown';
-};
-
-export type TenantRepositoryClassificationReadResponse = {
-    read_model: TenantRepositoryClassificationReadModel;
-    status: 'ok';
-    trace_id: string;
-};
-
-export type TenantRepositoryClassificationRecord = {
-    classification_digest: string;
-    classification_kind: 'engineering' | 'tenant_ui';
-    classification_revision: number;
-    classified_at: string;
-    context: string;
-    product: string;
-    reason: string;
-    record_id: string;
-    repository: string;
-    repository_id: string;
-    repository_owner_id: string;
-    schema_version: number;
-    source: string;
-    supersedes_record_id: string | null;
-};
-
 export type WorkGraphIssueInboxResponse = {
     configured: boolean;
     inbox: GitHubIssueInboxReadModel;
@@ -3097,35 +3038,6 @@ export type ReadWorkGraphSnapshotResponses = {
 
 export type ReadWorkGraphSnapshotResponse = ReadWorkGraphSnapshotResponses[keyof ReadWorkGraphSnapshotResponses];
 
-export type ReadTenantRepositoryClassificationData = {
-    body?: never;
-    headers?: {
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query: {
-        repository_id: string;
-    };
-    url: '/v1/work-graph/tenant-admission/repository-classification';
-};
-
-export type ReadTenantRepositoryClassificationErrors = {
-    400: LaunchplaneErrorResponse;
-    401: LaunchplaneErrorResponse;
-    403: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type ReadTenantRepositoryClassificationError = ReadTenantRepositoryClassificationErrors[keyof ReadTenantRepositoryClassificationErrors];
-
-export type ReadTenantRepositoryClassificationResponses = {
-    200: TenantRepositoryClassificationReadResponse;
-};
-
-export type ReadTenantRepositoryClassificationResponse = ReadTenantRepositoryClassificationResponses[keyof ReadTenantRepositoryClassificationResponses];
-
 export type ApplyProductEnvironmentConfigData = {
     body: {
         confirmation?: string;
@@ -3230,34 +3142,6 @@ export type DispatchProductPromotionWorkflowResponses = {
 };
 
 export type DispatchProductPromotionWorkflowResponse = DispatchProductPromotionWorkflowResponses[keyof DispatchProductPromotionWorkflowResponses];
-
-export type ApplyTenantRepositoryClassificationData = {
-    body: TenantRepositoryClassificationApplyEnvelope;
-    headers?: {
-        'Idempotency-Key'?: string;
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/tenant-admission/repository-classifications/apply';
-};
-
-export type ApplyTenantRepositoryClassificationErrors = {
-    400: LaunchplaneErrorResponse;
-    401: LaunchplaneErrorResponse;
-    403: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type ApplyTenantRepositoryClassificationError = ApplyTenantRepositoryClassificationErrors[keyof ApplyTenantRepositoryClassificationErrors];
-
-export type ApplyTenantRepositoryClassificationResponses = {
-    200: TenantRepositoryClassificationApplyResponse;
-};
-
-export type ApplyTenantRepositoryClassificationResponse = ApplyTenantRepositoryClassificationResponses[keyof ApplyTenantRepositoryClassificationResponses];
 
 export type RankWorkGraphSnapshotData = {
     body: WorkGraphRankEnvelope;

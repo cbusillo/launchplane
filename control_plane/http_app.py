@@ -94,6 +94,7 @@ from control_plane.http_routes import (
     register_product_profile_read_routes,
     register_protected_artifact_read_routes,
     register_runner_host_hygiene_read_routes,
+    TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
     TenantAdmissionReadRouteDependencies,
     TenantAdmissionWriteRouteDependencies,
     register_tenant_admission_read_routes,
@@ -708,6 +709,7 @@ _PRODUCT_CONFIG_MAX_BODY_BYTES = 2 * 1024 * 1024
 _PRODUCT_HEALTH_MONITORING_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_MAX_BODY_BYTES = 64 * 1024
 _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
+_TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE = "/v1/product-profiles/prelaunch-rebuild/apply"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
@@ -754,6 +756,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     _SECRET_REENCRYPT_ROUTE: (
         "Managed-secret re-encryption",
         _SECRET_REENCRYPT_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE: (
+        "Tenant repository classification",
+        _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -20468,7 +20476,7 @@ def create_launchplane_fastapi_app(
     )
 
     tenant_admission_write_route_dependencies = TenantAdmissionWriteRouteDependencies(
-        read_write_identity=read_browser_mutation_identity,
+        read_write_identity=read_bearer_identity,
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
         authorization_allows=read_route_authorization_allows,

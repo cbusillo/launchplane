@@ -49,7 +49,10 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "read_browser_mutation_identity",
             "read_browser_work_graph_rank_identity",
         }
-        expected_bearer_only_routes = {"/v1/secrets/reencrypt"}
+        expected_bearer_only_routes = {
+            "/v1/secrets/reencrypt",
+            "/v1/tenant-admission/repository-classifications/apply",
+        }
         actual_routes = {"/auth/logout"}
         actual_bearer_only_routes: set[str] = set()
         unprotected_cookie_routes: set[str] = set()

@@ -6,6 +6,7 @@ import unittest
 from control_plane.contracts.tenant_merge_eligibility import (
     build_tenant_repository_classification_record_id,
 )
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy, TerminalAgentIdentity
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -23,9 +24,34 @@ SOURCE = "operator"
 REASON = "initial classification"
 
 
-def _postgres_store(root: Path) -> PostgresRecordStore:
-    store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}")
+class _TestPostgresRecordStore(PostgresRecordStore):
+    @property
+    def database_dialect_name(self) -> str:
+        return "postgresql"
+
+
+def _postgres_store(
+    root: Path,
+    *,
+    actions: tuple[str, ...] = (
+        "tenant_repository_classification.read",
+        "tenant_repository_classification.write",
+    ),
+) -> PostgresRecordStore:
+    store = _TestPostgresRecordStore(
+        database_url=f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}"
+    )
     store.ensure_schema()
+    store.seed_authz_policy_if_absent(
+        LaunchplaneAuthzPolicyRecord(
+            record_id="test-tenant-admission-authz-policy",
+            revision=1,
+            status="active",
+            source="test",
+            updated_at="2026-07-31T00:00:00Z",
+            policy=_authz_policy(actions=actions),
+        )
+    )
     return store
 
 
@@ -304,6 +330,77 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
         data = res2.json()
         self.assertTrue(data.get("replayed"))
 
+    async def test_identical_payload_with_different_idempotency_key_conflicts(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(Path(tmp_dir))
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_authz_policy(actions=("tenant_repository_classification.write",)),
+                record_store_factory=lambda: store,
+            )
+            payload = _apply_payload(revision=1)
+            first_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/repository-classifications/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "key-replay-original",
+                },
+                payload=payload,
+            )
+            second_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/repository-classifications/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "key-replay-different",
+                },
+                payload=payload,
+            )
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 409)
+        self.assertEqual(
+            second_response.json()["error"]["code"],
+            "classification_conflict",
+        )
+
+    async def test_same_idempotency_key_with_different_payload_conflicts(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(Path(tmp_dir))
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_authz_policy(actions=("tenant_repository_classification.write",)),
+                record_store_factory=lambda: store,
+            )
+            headers = {
+                "Authorization": "Bearer valid-token",
+                "Idempotency-Key": "key-reused-different-payload",
+            }
+            first_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/repository-classifications/apply",
+                headers=headers,
+                payload=_apply_payload(revision=1),
+            )
+            second_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/repository-classifications/apply",
+                headers=headers,
+                payload=_apply_payload(revision=1, kind="engineering"),
+            )
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 409)
+        self.assertEqual(
+            second_response.json()["error"]["code"],
+            "idempotency_key_reused",
+        )
+
     async def test_terminal_agent_denial(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             store = _postgres_store(Path(tmp_dir))
@@ -339,7 +436,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_authz_denial(self) -> None:
         with TemporaryDirectory() as tmp_dir:
-            store = _postgres_store(Path(tmp_dir))
+            store = _postgres_store(Path(tmp_dir), actions=())
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_authz_policy(actions=()),
@@ -473,6 +570,32 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
                 },
                 payload=_apply_payload(revision=1),
             )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
+    async def test_sqlite_backed_postgres_store_is_not_shared_authority(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(tmp_dir) / 'launchplane.sqlite3'}"
+            )
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_authz_policy(actions=("tenant_repository_classification.write",)),
+                record_store_factory=lambda: store,
+            )
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/repository-classifications/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "key-sqlite-503",
+                },
+                payload=_apply_payload(revision=1),
+            )
+            store.close()
+
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
 

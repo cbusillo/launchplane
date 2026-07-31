@@ -64,6 +64,7 @@ from control_plane.http_routes.products import (
 )
 from control_plane.http_routes.support import ReadRouteDependencies
 from control_plane.http_routes.tenant_admission import (
+    TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
     TenantAdmissionReadRouteDependencies,
     TenantAdmissionWriteRouteDependencies,
     register_tenant_admission_read_routes,
@@ -125,6 +126,7 @@ __all__ = (
     "register_runner_host_hygiene_read_routes",
     "register_tenant_admission_read_routes",
     "register_tenant_admission_write_routes",
+    "TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE",
     "register_topology_read_routes",
     "register_tracked_target_log_read_routes",
     "register_work_graph_issue_inbox_read_routes",

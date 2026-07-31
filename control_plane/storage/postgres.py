@@ -192,6 +192,8 @@ from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationRecord,
 )
 from control_plane.tenant_repository_classification import (
+    TenantRepositoryClassificationConflictError,
+    TenantRepositoryClassificationSequenceError,
     plan_tenant_repository_classification_append,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
@@ -217,6 +219,13 @@ ProductProfileCompareWriteStatus = Literal[
     "written",
     "missing",
     "changed",
+    "replayed",
+    "idempotency_conflict",
+    "reservation_in_progress",
+    "reconciliation_required",
+]
+TenantRepositoryClassificationCompareWriteStatus = Literal[
+    "written",
     "replayed",
     "idempotency_conflict",
     "reservation_in_progress",
@@ -312,6 +321,11 @@ MutationReconciliationSupersessionStatus = Literal[
 
 class ProductProfileCompareWriteResult(NamedTuple):
     status: ProductProfileCompareWriteStatus
+    idempotency_record: LaunchplaneIdempotencyRecord | None = None
+
+
+class TenantRepositoryClassificationCompareWriteResult(NamedTuple):
+    status: TenantRepositoryClassificationCompareWriteStatus
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
@@ -7200,12 +7214,231 @@ class PostgresRecordStore(HumanSessionStore):
             payload=self._payload_dict(record),
         )
 
+    def _lock_tenant_repository_classification_write(
+        self,
+        session: Any,
+        *,
+        repository_id: str,
+    ) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": (f"launchplane:tenant-repository-classification:{repository_id}")},
+        )
+
+    def compare_and_write_tenant_repository_classification_record(
+        self,
+        *,
+        record: TenantRepositoryClassificationRecord,
+        expected_current_record_id: str,
+        mutation: DbOnlyMutationRequest,
+    ) -> TenantRepositoryClassificationCompareWriteResult:
+        if not 100 <= mutation.response_status_code <= 599:
+            raise ValueError("DB-only mutation response status must be between 100 and 599.")
+        if not mutation.response_trace_id.strip():
+            raise ValueError("DB-only mutation response trace id is required.")
+        normalized_expected = expected_current_record_id.strip()
+
+        reservation_insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            observed_at = self._database_mutation_timestamp(session)
+            stored_reservation = build_launchplane_mutation_reservation(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                request_fingerprint=mutation.request_fingerprint,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                reserved_at=observed_at,
+            )
+            reservation_row = self._idempotency_row(stored_reservation)
+            session.add(reservation_row)
+            try:
+                session.flush()
+            except IntegrityError as error:
+                session.rollback()
+                reservation_insert_error = error
+            if reservation_insert_error is None:
+                return self._compare_and_write_tenant_repository_classification_locked(
+                    session=session,
+                    record=record,
+                    expected_current_record_id=normalized_expected,
+                    reservation_row=reservation_row,
+                    mutation_reservation=stored_reservation,
+                    mutation=mutation,
+                )
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            reservation_row = session.scalar(
+                self._idempotency_statement(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if reservation_row is None:
+                assert reservation_insert_error is not None
+                raise reservation_insert_error
+            current_reservation = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=reservation_row.payload,
+            )
+            if current_reservation.request_fingerprint != mutation.request_fingerprint:
+                return TenantRepositoryClassificationCompareWriteResult(
+                    status="idempotency_conflict",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "completed":
+                return TenantRepositoryClassificationCompareWriteResult(
+                    status="replayed",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "reconcile_required":
+                return TenantRepositoryClassificationCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=current_reservation,
+                )
+            observed_at = self._database_mutation_timestamp(session)
+            if parse_launchplane_mutation_timestamp(
+                current_reservation.lease_expires_at,
+                field_name="lease_expires_at",
+            ) > parse_launchplane_mutation_timestamp(
+                observed_at,
+                field_name="observed_at",
+            ):
+                return TenantRepositoryClassificationCompareWriteResult(
+                    status="reservation_in_progress",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.reconciliation_key:
+                reconcile_record = self._updated_idempotency_record(
+                    current_reservation,
+                    state="reconcile_required",
+                    updated_at=observed_at,
+                )
+                self._sync_idempotency_row(reservation_row, reconcile_record)
+                session.commit()
+                return TenantRepositoryClassificationCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=reconcile_record,
+                )
+            reclaimed_reservation = self._updated_idempotency_record(
+                current_reservation,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                attempt=current_reservation.attempt + 1,
+                updated_at=observed_at,
+                response_status_code=None,
+                response_trace_id="",
+                recorded_at="",
+                response_payload={},
+            )
+            self._sync_idempotency_row(reservation_row, reclaimed_reservation)
+            return self._compare_and_write_tenant_repository_classification_locked(
+                session=session,
+                record=record,
+                expected_current_record_id=normalized_expected,
+                reservation_row=reservation_row,
+                mutation_reservation=reclaimed_reservation,
+                mutation=mutation,
+            )
+
+    def _compare_and_write_tenant_repository_classification_locked(
+        self,
+        *,
+        session: Any,
+        record: TenantRepositoryClassificationRecord,
+        expected_current_record_id: str,
+        reservation_row: LaunchplaneIdempotencyRow,
+        mutation_reservation: LaunchplaneIdempotencyRecord,
+        mutation: DbOnlyMutationRequest,
+    ) -> TenantRepositoryClassificationCompareWriteResult:
+        self._lock_tenant_repository_classification_write(
+            session,
+            repository_id=record.repository_id,
+        )
+        statement = select(LaunchplaneTenantRepositoryClassificationRow).where(
+            LaunchplaneTenantRepositoryClassificationRow.repository_id == record.repository_id
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        existing_records = tuple(
+            self._read_payload(
+                model_type=TenantRepositoryClassificationRecord,
+                payload=row.payload,
+            )
+            for row in session.scalars(statement).all()
+        )
+        try:
+            plan = plan_tenant_repository_classification_append(
+                records=existing_records,
+                record=record,
+            )
+            if plan.status == "replayed":
+                raise TenantRepositoryClassificationConflictError(
+                    "Tenant repository classification record already exists; retry the "
+                    "original request with the same Idempotency-Key."
+                )
+            if plan.current_record is None and expected_current_record_id:
+                raise TenantRepositoryClassificationConflictError(
+                    f"Expected current classification record ID '{expected_current_record_id}' "
+                    "does not match current state: repository has no existing "
+                    "classification record."
+                )
+            if (
+                plan.current_record is not None
+                and expected_current_record_id != plan.current_record.record_id
+            ):
+                raise TenantRepositoryClassificationConflictError(
+                    f"Expected current classification record ID '{expected_current_record_id}' "
+                    "does not match active current record ID "
+                    f"'{plan.current_record.record_id}'."
+                )
+        except (
+            TenantRepositoryClassificationConflictError,
+            TenantRepositoryClassificationSequenceError,
+        ):
+            session.delete(reservation_row)
+            session.commit()
+            raise
+
+        session.add(self._tenant_repository_classification_row(record))
+        session.flush()
+        completed_at = self._database_mutation_timestamp(session)
+        completion = complete_launchplane_mutation_reservation(
+            mutation_reservation,
+            response_status_code=mutation.response_status_code,
+            response_trace_id=mutation.response_trace_id,
+            completed_at=completed_at,
+            response_payload=mutation.response_payload,
+        )
+        self._sync_idempotency_row(reservation_row, completion)
+        session.commit()
+        return TenantRepositoryClassificationCompareWriteResult(
+            status="written",
+            idempotency_record=completion,
+        )
+
     def write_tenant_repository_classification_record(
         self, record: TenantRepositoryClassificationRecord
     ) -> Literal["written", "replayed"]:
         insert_error: IntegrityError | None = None
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_tenant_repository_classification_write(
+                session,
+                repository_id=record.repository_id,
+            )
             statement = select(LaunchplaneTenantRepositoryClassificationRow).where(
                 LaunchplaneTenantRepositoryClassificationRow.repository_id == record.repository_id
             )
