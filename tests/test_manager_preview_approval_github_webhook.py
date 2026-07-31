@@ -377,6 +377,38 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         error = response["error"]
         assert isinstance(error, dict)
         self.assertEqual(error["code"], "invalid_signature")
+        self.assertEqual(error["message"], "GitHub webhook signature is invalid.")
+        self.assertNotIn("signature mismatch", json.dumps(response))
+
+    def test_unavailable_evidence_does_not_expose_internal_exception(self) -> None:
+        dependencies = ManagerPreviewApprovalGitHubDependencies(
+            webhook_secret=lambda: "secret",
+            verify_signature=lambda **_kwargs: None,
+            github_token=lambda **_kwargs: (_ for _ in ()).throw(
+                click.ClickException("private credential path")
+            ),
+        )
+
+        status, response = handle_manager_preview_approval_github_webhook_request(
+            json.dumps(_issue_comment_payload()).encode(),
+            "issue_comment",
+            "delivery-unavailable",
+            "sha256=test",
+            _Store(),
+            Path("/tmp/launchplane"),
+            "trace-unavailable",
+            dependencies=dependencies,
+        )
+
+        self.assertEqual(status, 503)
+        error = response["error"]
+        assert isinstance(error, dict)
+        self.assertEqual(error["code"], "manager_preview_approval_unavailable")
+        self.assertEqual(
+            error["message"],
+            "Manager preview approval is temporarily unavailable.",
+        )
+        self.assertNotIn("private credential path", json.dumps(response))
 
     def test_preview_label_removal_invalidates_current_approval(self) -> None:
         store = _Store()

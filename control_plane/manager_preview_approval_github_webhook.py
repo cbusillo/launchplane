@@ -145,8 +145,18 @@ def handle_manager_preview_approval_github_webhook_request(
             signature_header=signature_header,
             secret=resolved_dependencies.webhook_secret(),
         )
-    except click.ClickException as error:
-        return _error_response(trace_id, 401, "invalid_signature", str(error))
+    except click.ClickException:
+        _LOGGER.warning(
+            "Manager preview approval webhook signature verification failed",
+            exc_info=True,
+            extra={"trace_id": trace_id},
+        )
+        return _error_response(
+            trace_id,
+            401,
+            "invalid_signature",
+            "GitHub webhook signature is invalid.",
+        )
     try:
         decoded = json.loads(payload_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -179,19 +189,29 @@ def handle_manager_preview_approval_github_webhook_request(
                 dependencies=resolved_dependencies,
             )
         return 202, _accepted(trace_id, skipped=True, reason="unsupported_event")
-    except ManagerPreviewApprovalEventConflictError as error:
+    except ManagerPreviewApprovalEventConflictError:
+        _LOGGER.warning(
+            "Manager preview approval webhook event conflicted with stored evidence",
+            exc_info=True,
+            extra={"trace_id": trace_id},
+        )
         return _error_response(
             trace_id,
             409,
             "manager_preview_approval_conflict",
-            str(error),
+            "Manager preview approval evidence conflicts with an existing event.",
         )
-    except (click.ClickException, ValueError, LookupError, FileNotFoundError) as error:
+    except (click.ClickException, ValueError, LookupError, FileNotFoundError):
+        _LOGGER.warning(
+            "Manager preview approval webhook could not evaluate current evidence",
+            exc_info=True,
+            extra={"trace_id": trace_id},
+        )
         return _error_response(
             trace_id,
             503,
             "manager_preview_approval_unavailable",
-            str(error),
+            "Manager preview approval is temporarily unavailable.",
         )
 
 
