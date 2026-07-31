@@ -133,7 +133,16 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationPolicy
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationRequest
 from control_plane.contracts.runner_lane_registration import plan_runner_lane_registration
-from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.contracts.tenant_merge_eligibility import (
+    TenantRepositoryClassificationRecord,
+)
+from control_plane.storage.filesystem import (
+    FilesystemRecordStore,
+)
+from control_plane.tenant_repository_classification import (
+    TenantRepositoryClassificationConflictError,
+    TenantRepositoryClassificationSequenceError,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from tests.support.artifact_manifests import artifact_manifest_v2
@@ -141,6 +150,37 @@ from tests.support.artifact_manifests import artifact_manifest_v2
 
 def _artifact_identity(artifact_id: str) -> ArtifactIdentityReference:
     return ArtifactIdentityReference(artifact_id=artifact_id)
+
+
+def _tenant_repository_classification_record(
+    *,
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
+    repository: str = "example/example-product",
+    product: str = "example-product",
+    context: str = "example-product",
+    classification_kind: str = "tenant_ui",
+    classification_revision: int = 1,
+    classified_at: str = "2026-07-31T10:00:00Z",
+    source: str = "test-source",
+    reason: str = "test-classification",
+    supersedes_record_id: str | None = None,
+) -> TenantRepositoryClassificationRecord:
+    return TenantRepositoryClassificationRecord.model_validate(
+        {
+            "repository_id": repository_id,
+            "repository_owner_id": repository_owner_id,
+            "repository": repository,
+            "product": product,
+            "context": context,
+            "classification_kind": classification_kind,
+            "classification_revision": classification_revision,
+            "classified_at": classified_at,
+            "source": source,
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
 
 
 def _resolved_target() -> ResolvedTargetEvidence:
@@ -486,6 +526,96 @@ def _merge_train_stack_collapse_plan_record(
 
 
 class FilesystemRecordStoreTests(unittest.TestCase):
+    def test_tenant_repository_classifications_are_immutable_revision_history(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            revision_1 = _tenant_repository_classification_record(classification_revision=1)
+            revision_2 = _tenant_repository_classification_record(
+                classification_kind="engineering",
+                classification_revision=2,
+                classified_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+
+            first_write = store.write_tenant_repository_classification_record(revision_1)
+            second_write = store.write_tenant_repository_classification_record(revision_2)
+            replay = store.write_tenant_repository_classification_record(revision_2)
+            loaded = store.read_tenant_repository_classification_record(revision_1.record_id)
+            listed = store.list_tenant_repository_classification_records(
+                repository_id=revision_1.repository_id
+            )
+            limited = store.list_tenant_repository_classification_records(
+                repository_id=revision_1.repository_id,
+                limit=1,
+            )
+            lookup = store.latest_tenant_repository_classification_lookup(
+                repository_id=revision_1.repository_id
+            )
+
+        self.assertEqual(first_write, "written")
+        self.assertEqual(second_write, "written")
+        self.assertEqual(replay, "replayed")
+        self.assertEqual(loaded, revision_1)
+        self.assertEqual([record.classification_revision for record in listed], [2, 1])
+        self.assertEqual(limited, (revision_2,))
+        self.assertEqual(lookup.status, "available")
+        self.assertEqual(lookup.records, (revision_2,))
+
+    def test_tenant_repository_classification_rejects_conflicting_replay(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            record = _tenant_repository_classification_record()
+            conflicting_record = _tenant_repository_classification_record(
+                reason="changed-test-classification"
+            )
+
+            store.write_tenant_repository_classification_record(record)
+
+            with self.assertRaises(TenantRepositoryClassificationConflictError):
+                store.write_tenant_repository_classification_record(conflicting_record)
+
+            listed = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+
+        self.assertEqual(listed, (record,))
+
+    def test_tenant_repository_classification_rejects_invalid_first_revision(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+
+            with self.assertRaises(TenantRepositoryClassificationSequenceError):
+                store.write_tenant_repository_classification_record(
+                    _tenant_repository_classification_record(classification_revision=2)
+                )
+
+    def test_latest_tenant_repository_classification_lookup_preserves_corrupt_ambiguity(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            record_dir = state_dir / "launchplane_tenant_repository_classifications"
+            record_dir.mkdir(parents=True)
+            record = _tenant_repository_classification_record(classification_revision=3)
+            payload = json.dumps(record.model_dump(mode="json"), sort_keys=True)
+            (record_dir / f"{record.record_id}.json").write_text(payload, encoding="utf-8")
+            (record_dir / "corrupt-duplicate-source.json").write_text(
+                payload,
+                encoding="utf-8",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+
+            lookup = store.latest_tenant_repository_classification_lookup(
+                repository_id=record.repository_id
+            )
+
+        self.assertEqual(lookup.status, "available")
+        self.assertEqual(len(lookup.records), 2)
+        self.assertEqual({item.record_id for item in lookup.records}, {record.record_id})
+
     def test_write_read_and_list_edge_endpoint_records_escape_endpoint_key_paths(
         self,
     ) -> None:

@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "e8a0c2d4f6b8"
+EXPECTED_ALEMBIC_HEAD_REVISION = "f9c1d3e5a7b9"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -189,6 +189,11 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_authz_policies",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_tenant_repository_classifications",
         "payload",
         ("jsonb",),
     ),
@@ -397,6 +402,17 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_manager_preview_approval_events_approval_idx",
         ("approval_id", "occurred_at"),
     ),
+    CriticalIndex(
+        "launchplane_tenant_repository_classifications",
+        "launchplane_tenant_repo_class_revision_uidx",
+        ("repository_id", "classification_revision"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_tenant_repository_classifications",
+        "launchplane_tenant_repo_class_current_idx",
+        ("repository_id", "classification_revision"),
+    ),
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
@@ -407,6 +423,10 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_manager_preview_approval_events",
         ("event_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_tenant_repository_classifications",
+        ("record_id",),
     ),
 )
 

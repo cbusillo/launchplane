@@ -146,6 +146,10 @@ from control_plane.contracts.secret_record import (
     SecretRotationWrite,
     SecretVersion,
 )
+from control_plane.contracts.tenant_merge_eligibility import (
+    TenantRepositoryClassificationLookup,
+    TenantRepositoryClassificationRecord,
+)
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_host_hygiene import (
@@ -155,6 +159,9 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
     build_cancelled_verireel_prod_backup_gate_record,
+)
+from control_plane.tenant_repository_classification import (
+    plan_tenant_repository_classification_append,
 )
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
@@ -779,6 +786,78 @@ class FilesystemRecordStore:
 
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> Path:
         return self._write_model("launchplane_agent_write_intents", record.record_id, record)
+
+    def write_tenant_repository_classification_record(
+        self, record: TenantRepositoryClassificationRecord
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_tenant_repository_classifications"
+        with self._product_authority_bundle_lock():
+            records = tuple(
+                existing
+                for existing in self._list_models_locked(
+                    TenantRepositoryClassificationRecord,
+                    record_type,
+                )
+                if existing.repository_id == record.repository_id
+            )
+            plan = plan_tenant_repository_classification_append(
+                records=records,
+                record=record,
+            )
+            if plan.status == "replayed":
+                return "replayed"
+            self._write_model_locked(record_type, record.record_id, record)
+            return "written"
+
+    def read_tenant_repository_classification_record(
+        self, record_id: str
+    ) -> TenantRepositoryClassificationRecord:
+        return self._read_model(
+            TenantRepositoryClassificationRecord,
+            "launchplane_tenant_repository_classifications",
+            record_id,
+        )
+
+    def list_tenant_repository_classification_records(
+        self,
+        *,
+        repository_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[TenantRepositoryClassificationRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                TenantRepositoryClassificationRecord,
+                "launchplane_tenant_repository_classifications",
+            )
+            if not repository_id or record.repository_id == repository_id
+        ]
+        records.sort(
+            key=lambda record: (
+                record.classification_revision,
+                record.repository_id,
+                record.record_id,
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def latest_tenant_repository_classification_lookup(
+        self, *, repository_id: str
+    ) -> TenantRepositoryClassificationLookup:
+        records = self.list_tenant_repository_classification_records(
+            repository_id=repository_id,
+        )
+        if not records:
+            return TenantRepositoryClassificationLookup(status="missing")
+        latest_revision = records[0].classification_revision
+        return TenantRepositoryClassificationLookup(
+            records=tuple(
+                record for record in records if record.classification_revision == latest_revision
+            )
+        )
 
     def read_agent_write_intent_record(self, record_id: str) -> AgentWriteIntentRecord:
         return AgentWriteIntentRecord.model_validate(

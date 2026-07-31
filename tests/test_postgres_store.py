@@ -11,7 +11,7 @@ from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from click.testing import CliRunner
 from sqlalchemy import create_engine, inspect, insert, text, update
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.sql.schema import Index
 
 from control_plane.cli import main
@@ -175,6 +175,9 @@ from control_plane.contracts.secret_record import (
     SecretRecord,
     SecretVersion,
 )
+from control_plane.contracts.tenant_merge_eligibility import (
+    TenantRepositoryClassificationRecord,
+)
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
@@ -184,12 +187,17 @@ from control_plane.service_auth import (
 )
 from control_plane.service_human_auth import LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.tenant_repository_classification import (
+    TenantRepositoryClassificationConflictError,
+    TenantRepositoryClassificationSequenceError,
+)
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.postgres import (
     Base,
     DbOnlyMutationRequest,
     LaunchplaneIdempotencyRow,
     LaunchplaneProductProfileRow,
+    LaunchplaneTenantRepositoryClassificationRow,
     MutationReservationResult,
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
@@ -203,6 +211,37 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
+
+
+def _tenant_repository_classification_record(
+    *,
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
+    repository: str = "example/example-product",
+    product: str = "example-product",
+    context: str = "example-product",
+    classification_kind: str = "tenant_ui",
+    classification_revision: int = 1,
+    classified_at: str = "2026-07-31T10:00:00Z",
+    source: str = "test-source",
+    reason: str = "test-classification",
+    supersedes_record_id: str | None = None,
+) -> TenantRepositoryClassificationRecord:
+    return TenantRepositoryClassificationRecord.model_validate(
+        {
+            "repository_id": repository_id,
+            "repository_owner_id": repository_owner_id,
+            "repository": repository,
+            "product": product,
+            "context": context,
+            "classification_kind": classification_kind,
+            "classification_revision": classification_revision,
+            "classified_at": classified_at,
+            "source": source,
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
 
 
 def _product_profile_record(
@@ -1204,6 +1243,234 @@ class PostgresRecordStoreTests(unittest.TestCase):
         )
 
         self.assertEqual(too_long_index_names, ())
+
+    def test_tenant_repository_classifications_are_immutable_revision_history(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            revision_1 = _tenant_repository_classification_record(classification_revision=1)
+            revision_2 = _tenant_repository_classification_record(
+                classification_kind="engineering",
+                classification_revision=2,
+                classified_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+
+            first_write = store.write_tenant_repository_classification_record(revision_1)
+            second_write = store.write_tenant_repository_classification_record(revision_2)
+            replay = store.write_tenant_repository_classification_record(revision_2)
+            loaded = store.read_tenant_repository_classification_record(revision_1.record_id)
+            listed = store.list_tenant_repository_classification_records(
+                repository_id=revision_1.repository_id
+            )
+            limited = store.list_tenant_repository_classification_records(
+                repository_id=revision_1.repository_id,
+                limit=1,
+            )
+            lookup = store.latest_tenant_repository_classification_lookup(
+                repository_id=revision_1.repository_id
+            )
+            missing_lookup = store.latest_tenant_repository_classification_lookup(
+                repository_id="9999"
+            )
+            store.close()
+
+        self.assertEqual(first_write, "written")
+        self.assertEqual(second_write, "written")
+        self.assertEqual(replay, "replayed")
+        self.assertEqual(loaded, revision_1)
+        self.assertEqual([record.classification_revision for record in listed], [2, 1])
+        self.assertEqual(limited, (revision_2,))
+        self.assertEqual(lookup.status, "available")
+        self.assertEqual(lookup.records, (revision_2,))
+        self.assertEqual(missing_lookup.status, "missing")
+        self.assertEqual(missing_lookup.records, ())
+
+    def test_tenant_repository_classification_compare_write_is_atomic_and_replays(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _tenant_repository_classification_record()
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:tenant-classification",
+                route_path="/v1/tenant-admission/repository-classifications/apply",
+                idempotency_key="tenant-classification-atomic",
+                request_fingerprint="tenant-classification-fingerprint",
+                lease_owner="trace-tenant-classification",
+                response_status_code=200,
+                response_trace_id="trace-tenant-classification",
+                response_payload={"status": "ok", "record_id": record.record_id},
+            )
+
+            first_result = store.compare_and_write_tenant_repository_classification_record(
+                record=record,
+                expected_current_record_id="",
+                mutation=mutation,
+            )
+            replay_result = store.compare_and_write_tenant_repository_classification_record(
+                record=record,
+                expected_current_record_id="",
+                mutation=mutation,
+            )
+            stored_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            records = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+            store.close()
+
+        self.assertEqual(first_result.status, "written")
+        self.assertEqual(replay_result.status, "replayed")
+        self.assertEqual(records, (record,))
+        self.assertIsNotNone(stored_idempotency)
+        assert stored_idempotency is not None
+        self.assertEqual(stored_idempotency.state, "completed")
+        self.assertEqual(stored_idempotency.response_payload, mutation.response_payload)
+
+    def test_tenant_repository_classification_compare_write_rolls_back_on_completion_failure(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _tenant_repository_classification_record()
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:tenant-classification",
+                route_path="/v1/tenant-admission/repository-classifications/apply",
+                idempotency_key="tenant-classification-rollback",
+                request_fingerprint="tenant-classification-rollback-fingerprint",
+                lease_owner="trace-tenant-classification-rollback",
+                response_status_code=200,
+                response_trace_id="trace-tenant-classification-rollback",
+                response_payload={"status": "ok", "record_id": record.record_id},
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_sync_idempotency_row",
+                    side_effect=RuntimeError("injected completion failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected completion failure"),
+            ):
+                store.compare_and_write_tenant_repository_classification_record(
+                    record=record,
+                    expected_current_record_id="",
+                    mutation=mutation,
+                )
+
+            stored_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            records = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+            store.close()
+
+        self.assertIsNone(stored_idempotency)
+        self.assertEqual(records, ())
+
+    def test_tenant_repository_classification_rejects_conflicting_replay(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _tenant_repository_classification_record()
+            conflicting_record = _tenant_repository_classification_record(
+                reason="changed-test-classification"
+            )
+
+            store.write_tenant_repository_classification_record(record)
+
+            with self.assertRaises(TenantRepositoryClassificationConflictError):
+                store.write_tenant_repository_classification_record(conflicting_record)
+
+            listed = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+            store.close()
+
+        self.assertEqual(listed, (record,))
+
+    def test_tenant_repository_classification_rejects_invalid_first_revision(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+
+            with self.assertRaises(TenantRepositoryClassificationSequenceError):
+                store.write_tenant_repository_classification_record(
+                    _tenant_repository_classification_record(classification_revision=2)
+                )
+            store.close()
+
+    def test_tenant_repository_classification_unique_repository_revision(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _tenant_repository_classification_record()
+            raw_conflict = _tenant_repository_classification_record(
+                repository="example/other-product",
+                product="other-product",
+                context="other-product",
+            )
+
+            store.write_tenant_repository_classification_record(record)
+            with self.assertRaises(IntegrityError):
+                with store._session_factory() as session:
+                    row = LaunchplaneTenantRepositoryClassificationRow(
+                        record_id="tenant-repository-classification-raw-conflict",
+                        repository_id=record.repository_id,
+                        repository_owner_id=raw_conflict.repository_owner_id,
+                        repository=raw_conflict.repository,
+                        product=raw_conflict.product,
+                        context=raw_conflict.context,
+                        classification_kind=raw_conflict.classification_kind,
+                        classification_revision=raw_conflict.classification_revision,
+                        classified_at=raw_conflict.classified_at,
+                        classification_digest=raw_conflict.classification_digest,
+                        payload=raw_conflict.model_dump(mode="json"),
+                    )
+                    session.add(row)
+                    session.commit()
+
+            listed = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+            store.close()
+
+        self.assertEqual(listed, (record,))
 
     def test_write_promotion_evidence_records_writes_promotion_and_inventory(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -5947,6 +6214,19 @@ env_var = "GH_TOKEN"
                     ),
                 )
             )
+            classification_revision_1 = _tenant_repository_classification_record()
+            classification_revision_2 = _tenant_repository_classification_record(
+                classification_kind="engineering",
+                classification_revision=2,
+                classified_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=classification_revision_1.record_id,
+            )
+            filesystem_store.write_tenant_repository_classification_record(
+                classification_revision_1
+            )
+            filesystem_store.write_tenant_repository_classification_record(
+                classification_revision_2
+            )
             filesystem_store.write_merge_train_policy_record(
                 MergeTrainPolicyRecord(
                     record_id="merge-train-policy-20260513T210000Z-active",
@@ -6050,7 +6330,18 @@ env_var = "GH_TOKEN"
                     "odoo_stable_target_replacement_operations": 1,
                     "release_tuples": 1,
                     "runtime_key_safety_policies": 1,
+                    "tenant_repository_classifications": 2,
                 },
+            )
+            self.assertEqual(
+                store.latest_tenant_repository_classification_lookup(repository_id="1001")
+                .records[0]
+                .classification_kind,
+                "engineering",
+            )
+            self.assertEqual(
+                len(store.list_tenant_repository_classification_records(repository_id="1001")),
+                2,
             )
             self.assertEqual(
                 store.read_promotion_record(

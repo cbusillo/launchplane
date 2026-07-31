@@ -21624,6 +21624,325 @@
         "title": "StructuredHealthEvidence",
         "type": "object"
       },
+      "TenantRepositoryClassificationApplyEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_current_record_id": {
+            "default": "",
+            "title": "Expected Current Record Id",
+            "type": "string"
+          },
+          "mode": {
+            "default": "apply",
+            "enum": [
+              "dry_run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "record": {
+            "$ref": "#/components/schemas/TenantRepositoryClassificationRecord"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "record"
+        ],
+        "title": "TenantRepositoryClassificationApplyEnvelope",
+        "type": "object"
+      },
+      "TenantRepositoryClassificationApplyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id",
+            "x-launchplane-optional-response": true
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed",
+            "x-launchplane-optional-response": true
+          },
+          "result": {
+            "$ref": "#/components/schemas/TenantRepositoryClassificationApplyResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "TenantRepositoryClassificationApplyResponse",
+        "type": "object"
+      },
+      "TenantRepositoryClassificationApplyResult": {
+        "additionalProperties": false,
+        "properties": {
+          "applied_at": {
+            "title": "Applied At",
+            "type": "string"
+          },
+          "classification_digest": {
+            "title": "Classification Digest",
+            "type": "string"
+          },
+          "classification_revision": {
+            "title": "Classification Revision",
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "dry_run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "would_apply",
+              "would_replay",
+              "applied",
+              "replayed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "supersedes_record_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Record Id"
+          }
+        },
+        "required": [
+          "status",
+          "mode",
+          "repository_id",
+          "classification_revision",
+          "record_id",
+          "classification_digest",
+          "applied_at"
+        ],
+        "title": "TenantRepositoryClassificationApplyResult",
+        "type": "object"
+      },
+      "TenantRepositoryClassificationReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "current_record": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TenantRepositoryClassificationRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "history_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "History Count",
+            "type": "integer"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "missing",
+              "ambiguous",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "repository_id",
+          "generated_at"
+        ],
+        "title": "TenantRepositoryClassificationReadModel",
+        "type": "object"
+      },
+      "TenantRepositoryClassificationReadResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "read_model": {
+            "$ref": "#/components/schemas/TenantRepositoryClassificationReadModel"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "read_model"
+        ],
+        "title": "TenantRepositoryClassificationReadResponse",
+        "type": "object"
+      },
+      "TenantRepositoryClassificationRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "classification_digest": {
+            "default": "",
+            "title": "Classification Digest",
+            "type": "string"
+          },
+          "classification_kind": {
+            "enum": [
+              "engineering",
+              "tenant_ui"
+            ],
+            "title": "Classification Kind",
+            "type": "string"
+          },
+          "classification_revision": {
+            "minimum": 1.0,
+            "title": "Classification Revision",
+            "type": "integer"
+          },
+          "classified_at": {
+            "title": "Classified At",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "title": "Repository Owner Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "supersedes_record_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Record Id"
+          }
+        },
+        "required": [
+          "repository_id",
+          "repository_owner_id",
+          "repository",
+          "product",
+          "context",
+          "classification_kind",
+          "classification_revision",
+          "classified_at",
+          "source",
+          "reason"
+        ],
+        "title": "TenantRepositoryClassificationRecord",
+        "type": "object"
+      },
       "TrackedTargetLogDeploymentResponse": {
         "additionalProperties": false,
         "properties": {
@@ -51473,6 +51792,106 @@
         "summary": "Read VeriReel prod backup gate operation worker status"
       }
     },
+    "/v1/tenant-admission/repository-classifications/apply": {
+      "post": {
+        "operationId": "apply_tenant_repository_classification",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantRepositoryClassificationApplyEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantRepositoryClassificationApplyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Apply or dry-run a tenant repository classification record"
+      }
+    },
     "/v1/work-graph/github/issues": {
       "get": {
         "operationId": "read_work_graph_issue_inbox",
@@ -53050,6 +53469,105 @@
           }
         },
         "summary": "Read Launchplane work graph snapshot"
+      }
+    },
+    "/v1/work-graph/tenant-admission/repository-classification": {
+      "get": {
+        "operationId": "read_tenant_repository_classification",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repository_id",
+            "required": true,
+            "schema": {
+              "title": "Repository Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantRepositoryClassificationReadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read current tenant repository classification read model"
       }
     }
   },

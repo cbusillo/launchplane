@@ -72,6 +72,9 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingTls,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.tenant_merge_eligibility import (
+    TenantRepositoryClassificationRecord,
+)
 from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
@@ -108,6 +111,9 @@ from control_plane.storage.schema_invariants import (
     verify_postgres_schema_invariants,
 )
 from control_plane.storage.schema_migration import migrate_schema, schema_migration_action
+from control_plane.tenant_repository_classification import (
+    TenantRepositoryClassificationConflictError,
+)
 from tests.support.artifact_manifests import artifact_manifest_v2
 from tests.test_odoo_prod_retained_volume_backup_import_storage import (
     _retained_operation_for_restore_lane,
@@ -174,6 +180,31 @@ def _store_for_fresh_head_database() -> Iterator[PostgresRecordStore]:
             yield store
         finally:
             store.close()
+
+
+def _tenant_repository_classification_record(
+    *,
+    revision: int,
+    classification_kind: str = "tenant_ui",
+    classified_at: str = "2026-07-31T10:00:00Z",
+    reason: str = "postgres integration classification",
+    supersedes_record_id: str | None = None,
+) -> TenantRepositoryClassificationRecord:
+    return TenantRepositoryClassificationRecord.model_validate(
+        {
+            "repository_id": "901001",
+            "repository_owner_id": "902001",
+            "repository": "example/postgres-tenant-site",
+            "product": "postgres-tenant-site",
+            "context": "postgres-tenant-site",
+            "classification_kind": classification_kind,
+            "classification_revision": revision,
+            "classified_at": classified_at,
+            "source": "postgres-integration",
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
 
 
 def _bootstrap_operation(
@@ -1699,6 +1730,131 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(
             superseded_records, (initial_record.model_copy(update={"status": "superseded"}),)
         )
+
+    def test_tenant_repository_classification_compare_write_rolls_back_with_idempotency(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            record = _tenant_repository_classification_record(revision=1)
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:tenant-classification",
+                route_path="/v1/tenant-admission/repository-classifications/apply",
+                idempotency_key="postgres-tenant-classification-rollback",
+                request_fingerprint="postgres-tenant-classification-rollback-fingerprint",
+                lease_owner="trace-postgres-tenant-classification-rollback",
+                response_status_code=200,
+                response_trace_id="trace-postgres-tenant-classification-rollback",
+                response_payload={"status": "ok", "record_id": record.record_id},
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_sync_idempotency_row",
+                    side_effect=RuntimeError("injected completion failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected completion failure"),
+            ):
+                store.compare_and_write_tenant_repository_classification_record(
+                    record=record,
+                    expected_current_record_id="",
+                    mutation=mutation,
+                )
+
+            records = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+            idempotency_record = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+
+        self.assertEqual(records, ())
+        self.assertIsNone(idempotency_record)
+
+    def test_tenant_repository_classification_compare_write_serializes_concurrent_updates(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            revision_1 = _tenant_repository_classification_record(revision=1)
+            store.write_tenant_repository_classification_record(revision_1)
+            revision_2a = _tenant_repository_classification_record(
+                revision=2,
+                classification_kind="engineering",
+                classified_at="2026-07-31T10:05:00Z",
+                reason="postgres integration writer one",
+                supersedes_record_id=revision_1.record_id,
+            )
+            revision_2b = _tenant_repository_classification_record(
+                revision=2,
+                classification_kind="tenant_ui",
+                classified_at="2026-07-31T10:05:01Z",
+                reason="postgres integration writer two",
+                supersedes_record_id=revision_1.record_id,
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def apply_revision(
+                active_store: PostgresRecordStore,
+                record: TenantRepositoryClassificationRecord,
+                suffix: str,
+            ) -> str:
+                barrier.wait(timeout=5)
+                try:
+                    return active_store.compare_and_write_tenant_repository_classification_record(
+                        record=record,
+                        expected_current_record_id=revision_1.record_id,
+                        mutation=DbOnlyMutationRequest(
+                            scope="github-actions:tenant-classification",
+                            route_path=("/v1/tenant-admission/repository-classifications/apply"),
+                            idempotency_key=f"postgres-tenant-classification-{suffix}",
+                            request_fingerprint=f"postgres-tenant-fingerprint-{suffix}",
+                            lease_owner=f"trace-postgres-tenant-{suffix}",
+                            response_status_code=200,
+                            response_trace_id=f"trace-postgres-tenant-{suffix}",
+                            response_payload={"status": "ok", "suffix": suffix},
+                        ),
+                    ).status
+                except TenantRepositoryClassificationConflictError:
+                    return "classification_conflict"
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(
+                            lambda arguments: apply_revision(*arguments),
+                            (
+                                (store, revision_2a, "writer-1"),
+                                (second_store, revision_2b, "writer-2"),
+                            ),
+                        )
+                    )
+                records = store.list_tenant_repository_classification_records(
+                    repository_id=revision_1.repository_id
+                )
+                idempotency_records = tuple(
+                    record
+                    for suffix in ("writer-1", "writer-2")
+                    if (
+                        record := store.read_idempotency_record(
+                            scope="github-actions:tenant-classification",
+                            route_path=("/v1/tenant-admission/repository-classifications/apply"),
+                            idempotency_key=f"postgres-tenant-classification-{suffix}",
+                        )
+                    )
+                    is not None
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["classification_conflict", "written"])
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0].classification_revision, 2)
+        self.assertEqual(records[1], revision_1)
+        self.assertEqual(len(idempotency_records), 1)
+        self.assertEqual(idempotency_records[0].state, "completed")
 
     def test_concurrent_outbox_enqueue_reuses_one_delivery(self) -> None:
         with _store_for_fresh_head_database() as store:
