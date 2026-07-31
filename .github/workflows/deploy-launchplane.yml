@@ -226,6 +226,10 @@ jobs:
           : "${LAUNCHPLANE_DOKPLOY_TARGET_TYPE:?Missing LAUNCHPLANE_DOKPLOY_TARGET_TYPE variable}"
           : "${LAUNCHPLANE_DOKPLOY_TARGET_ID:?Missing LAUNCHPLANE_DOKPLOY_TARGET_ID variable}"
           : "${LAUNCHPLANE_DEPLOY_HEALTH_URLS:?Missing LAUNCHPLANE_DEPLOY_HEALTH_URLS variable}"
+          if [ -z "${LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET:-}" ]; then
+            echo "Missing LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET secret." >&2
+            exit 1
+          fi
           if [ "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" = "compose" ]; then
             : "${LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK:?Missing LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK variable}"
           fi
@@ -358,11 +362,6 @@ jobs:
             fi
           fi
           printf 'previous_image_reference=%s\n' "$previous_image_reference" >> "$GITHUB_OUTPUT"
-
-          if [ -z "${LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET:-}" ]; then
-            echo "Missing LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET secret." >&2
-            exit 1
-          fi
 
           service_env_json="$({
             jq -n \
