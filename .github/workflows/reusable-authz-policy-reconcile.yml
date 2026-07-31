@@ -8,6 +8,11 @@ name: Reusable Authz Policy Reconcile
         description: Review or apply the operator-managed desired rule set.
         required: true
         type: string
+      expected_managed_set_id:
+        description: Optional exact managed-set identity required from the protected configuration.
+        required: false
+        default: ""
+        type: string
       reviewed_plan_sha256:
         description: Plan SHA-256 returned by the reviewed dry run; required for apply.
         required: false
@@ -48,6 +53,7 @@ jobs:
         shell: bash
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_MANAGED_SET_ID: ${{ inputs.expected_managed_set_id }}
           MODE: ${{ inputs.mode }}
           REASON: ${{ inputs.reason }}
           RELATED_ISSUE: ${{ inputs.related_issue }}
@@ -122,6 +128,11 @@ jobs:
           managed_set_id = str(configuration.get("managed_set_id", "")).strip()
           if re.fullmatch(r"[a-z0-9][a-z0-9._:/-]{0,127}", managed_set_id) is None:
               raise SystemExit("Managed authz configuration requires a stable managed_set_id.")
+          expected_managed_set_id = os.environ.get("EXPECTED_MANAGED_SET_ID", "").strip()
+          if expected_managed_set_id and managed_set_id != expected_managed_set_id:
+              raise SystemExit(
+                  "Managed authz configuration managed_set_id does not match the selected managed set."
+              )
           if configuration.get("schema_migration", "reject") not in {
               "reject",
               "migrate_v1_to_v2",

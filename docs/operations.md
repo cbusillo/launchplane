@@ -455,6 +455,13 @@ secret instead. The JSON owns desired state only: `schema_version`, `product`,
 Dispatch-time mode, reason, issue reference, and reviewed plan digest are
 deliberately excluded from that secret.
 
+The reusable authz worker accepts an optional exact expected managed-set
+identity from a reviewed wrapper. When provided, the worker rejects protected
+configuration whose `managed_set_id` does not match before rendering or sending
+the reconciliation request. Land this compatibility input before advancing a
+pinned wrapper that depends on it; do not pass a new input to an older immutable
+worker revision.
+
 ### Reusable workflow SHA rollout for readiness-gated actions
 
 Operational-readiness actions require one exact managed rule for the current
