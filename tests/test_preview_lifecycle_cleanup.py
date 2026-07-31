@@ -3,6 +3,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from control_plane.contracts.manager_preview_approval import (
+    ManagerPreviewApprovalEventRecord,
+    ManagerPreviewApprovalEventWriteStatus,
+)
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -11,11 +15,33 @@ from control_plane.workflows.preview_lifecycle_cleanup import build_preview_life
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestroyResult
 
 
+class _ApprovalGuardStore(FilesystemRecordStore):
+    def list_manager_preview_approval_event_records(
+        self,
+        *,
+        product: str = "",
+        context: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        preview_id: str = "",
+        action: str = "",
+        limit: int | None = None,
+    ) -> tuple[ManagerPreviewApprovalEventRecord, ...]:
+        del product, context, repository, pr_number, preview_id, action, limit
+        raise AssertionError("Preview cleanup must not consult manager approval evidence.")
+
+    def write_manager_preview_approval_event_record(
+        self, record: ManagerPreviewApprovalEventRecord
+    ) -> ManagerPreviewApprovalEventWriteStatus:
+        del record
+        raise AssertionError("Preview cleanup must not mutate manager approval evidence.")
+
+
 class PreviewLifecycleCleanupTests(unittest.TestCase):
     def test_generic_web_cleanup_destroys_orphan_with_matching_preview_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
+            store = _ApprovalGuardStore(state_dir=root / "state")
             store.write_preview_record(
                 PreviewRecord(
                     preview_id="preview-syo-testing-sellyouroutboard-pr-42",

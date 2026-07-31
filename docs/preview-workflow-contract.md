@@ -157,6 +157,42 @@ Manual `workflow_dispatch` may request `refresh` or `destroy` when a product rep
 needs an operator retry path. Manual refresh still follows the same build,
 publish, and Launchplane-refresh handoff as a PR refresh.
 
+## Manager Preview Approval
+
+Manager approval is a Launchplane-owned interaction layered on the serving
+preview evidence. Product workflows do not parse approval comments, resolve a
+person, authorize an actor, compute fingerprints, or write GitHub status. The
+signed webhook handler does not check out or execute pull-request code.
+
+When an active managed policy grants `manager_preview_approval.write` for the
+product and preview context, Launchplane maintains one credential-owned PR
+comment containing the public preview URL, immutable serving identity, current
+decision, and these exact role-based commands:
+
+```text
+/preview approve <binding_sha256>
+/preview changes <binding_sha256> <reason>
+/preview revoke <binding_sha256> <reason>
+```
+
+The trusted status context is exactly `manager-preview-approval`. It is pending
+without an exact approval, successful only for the current head and serving
+generation, and non-successful for changes requested, revocation, stale or
+unavailable evidence, verification failure, destroy, PR close, preview-label
+removal, or authorization-policy drift. Required code-review approvals remain a
+separate repository rule and may remain zero.
+
+Preview refresh, destroy, and verification must never depend on manager
+approval. They persist their own lifecycle evidence first, then attempt status
+reconciliation. If GitHub is degraded, the lifecycle operation still completes
+and an authorized operator retries `POST /v1/manager-preview-approval/reconcile`
+with `repository` and `pr_number` after GitHub recovers.
+
+Rollback removes the repository's required `manager-preview-approval` status
+and removes or narrows the managed approval rule. This disables merge/promotion
+enforcement while preserving the append-only approval ledger and normal preview
+cleanup.
+
 ## Idempotency
 
 Every Launchplane mutation from a product preview workflow needs a stable

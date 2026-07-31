@@ -597,6 +597,19 @@ export type LaunchplaneProductProfileRecord = {
     updated_at: string;
 };
 
+export type ManagerPreviewApprovalDecision = {
+    approval_id: string;
+    current_binding_sha256: string;
+    evaluated_at: string;
+    event_id: string;
+    manager_github_id: number;
+    manager_login: string;
+    reason: string;
+    reason_code: 'approval_missing' | 'approval_valid' | 'changes_requested' | 'approval_revoked' | 'approval_stale' | 'preview_inactive' | 'serving_generation_missing' | 'serving_generation_mismatch' | 'generation_not_ready' | 'generation_verification_failed' | 'preview_identity_mismatch' | 'artifact_identity_missing' | 'runtime_identity_missing' | 'runtime_identity_mismatch' | 'policy_unavailable';
+    schema_version: number;
+    status: 'pending' | 'approved' | 'changes_requested' | 'revoked' | 'stale' | 'unavailable';
+};
+
 export type MergeTrainAdmissionDecision = {
     base_branch: string;
     controller_action: string;
@@ -1796,6 +1809,7 @@ export type ProductPromotionStatus = {
     driver_id: string;
     evidence_fingerprint: string;
     live_confirmations: ProductPromotionLiveConfirmations;
+    manager_preview_approval?: ManagerPreviewApprovalDecision | null;
     product: string;
     repository: string;
     schema_version: number;

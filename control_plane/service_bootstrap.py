@@ -11,6 +11,9 @@ import uvicorn
 
 from control_plane.drivers import native_routes
 from control_plane.every_code_github_webhook import handle_every_code_github_webhook_request
+from control_plane.manager_preview_approval_github_webhook import (
+    handle_manager_preview_approval_github_webhook_request,
+)
 from control_plane.http_app import (
     LaunchplaneAuthzPolicyRuntime,
     create_launchplane_fastapi_app,
@@ -194,6 +197,9 @@ def create_launchplane_service_application(
         work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
         work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
         every_code_github_webhook_handler=handle_every_code_github_webhook_request,
+        manager_preview_approval_github_webhook_handler=(
+            handle_manager_preview_approval_github_webhook_request
+        ),
     )
 
 

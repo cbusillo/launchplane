@@ -35,6 +35,13 @@ before those operations and are pinned to the same immutable standard. Artifact,
 cache, GitHub API, and CodeQL actions remain fully pinned because they execute
 remote code or move workflow data across trust boundaries.
 
+Manager preview approval is not emitted by pull-request Actions. Launchplane
+validates signed webhook input against its durable preview and policy records,
+then writes the `manager-preview-approval` status with a Launchplane-owned
+credential resolved outside PR code. Tenant workflows may request preview
+lifecycle operations, but they cannot mint a passing manager status or provide
+the status-writer token.
+
 ## Policy
 
 - A remote action source must be listed in

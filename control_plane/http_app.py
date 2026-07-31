@@ -147,6 +147,18 @@ from control_plane.contracts.idempotency_record import (
     build_launchplane_idempotency_record_id,
     complete_launchplane_mutation_reservation,
 )
+from control_plane.contracts.manager_preview_approval import (
+    MANAGER_PREVIEW_APPROVAL_READ_ACTION,
+)
+from control_plane.contracts.manager_preview_approval_projection import (
+    ManagerPreviewApprovalReconcileEnvelope,
+)
+from control_plane.manager_preview_approval_github_webhook import (
+    MANAGER_PREVIEW_APPROVAL_RECONCILE_ROUTE,
+    MANAGER_PREVIEW_APPROVAL_WEBHOOK_ROUTE,
+    reconcile_all_manager_preview_approvals_best_effort,
+    reconcile_manager_preview_approval_for_pr,
+)
 from control_plane.provider_operations import (
     DurableProviderMutationAdapter,
     DurableProviderOperationResult,
@@ -646,6 +658,9 @@ from control_plane.work_graph_service import (
 EveryCodeGitHubWebhookHandler = Callable[
     [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
 ]
+ManagerPreviewApprovalGitHubWebhookHandler = Callable[
+    [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
+]
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -691,6 +706,18 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
         "GitHub webhook",
         _GITHUB_WEBHOOK_MAX_BODY_BYTES,
         False,
+        True,
+    ),
+    MANAGER_PREVIEW_APPROVAL_WEBHOOK_ROUTE: (
+        "Manager preview approval GitHub webhook",
+        _GITHUB_WEBHOOK_MAX_BODY_BYTES,
+        False,
+        True,
+    ),
+    MANAGER_PREVIEW_APPROVAL_RECONCILE_ROUTE: (
+        "Manager preview approval reconciliation",
+        _PRODUCT_HEALTH_MONITORING_MAX_BODY_BYTES,
+        True,
         True,
     ),
     _PRODUCT_CONFIG_APPLY_ROUTE: (
@@ -3237,6 +3264,9 @@ def create_launchplane_fastapi_app(
         [str, dict[str, object]], object
     ] = post_discord_webhook,
     every_code_github_webhook_handler: EveryCodeGitHubWebhookHandler | None = None,
+    manager_preview_approval_github_webhook_handler: (
+        ManagerPreviewApprovalGitHubWebhookHandler | None
+    ) = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
         control_plane_root_path or FilePath(__file__).resolve().parent.parent
@@ -3814,6 +3844,94 @@ def create_launchplane_fastapi_app(
             trace_id,
         )
         return JSONResponse(status_code=status_code, content=payload)
+
+    async def handle_manager_preview_approval_github_webhook(
+        request: Request,
+        x_github_event: Annotated[str, Header(alias="X-GitHub-Event")] = "",
+        x_github_delivery: Annotated[str, Header(alias="X-GitHub-Delivery")] = "",
+        x_hub_signature_256: Annotated[str, Header(alias="X-Hub-Signature-256")] = "",
+        record_store: object = Depends(get_record_store),
+    ) -> JSONResponse:
+        trace_id = next_trace_id()
+        if manager_preview_approval_github_webhook_handler is None:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=(f"No Launchplane route for {MANAGER_PREVIEW_APPROVAL_WEBHOOK_ROUTE}."),
+            )
+        status_code, payload = manager_preview_approval_github_webhook_handler(
+            await request.body(),
+            x_github_event,
+            x_github_delivery,
+            x_hub_signature_256,
+            record_store,
+            resolved_control_plane_root,
+            trace_id,
+        )
+        return JSONResponse(status_code=status_code, content=payload)
+
+    async def reconcile_manager_preview_approval(
+        reconcile_request: ManagerPreviewApprovalReconcileEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> dict[str, object]:
+        trace_id = next_trace_id()
+        list_profiles = getattr(record_store, "list_product_profile_records", None)
+        if not callable(list_profiles):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="record_storage_unavailable",
+                message="Manager preview approval reconciliation requires product profile storage.",
+            )
+        profiles = tuple(
+            profile
+            for profile in list_profiles()
+            if profile.repository.strip().casefold() == reconcile_request.repository.casefold()
+        )
+        if len(profiles) != 1:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Manager preview approval product profile was not found.",
+            )
+        profile = profiles[0]
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=MANAGER_PREVIEW_APPROVAL_READ_ACTION,
+            product=profile.product,
+            context=profile.preview.context,
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot reconcile manager preview approval for this product.",
+            )
+        try:
+            result = reconcile_manager_preview_approval_for_pr(
+                repository=reconcile_request.repository,
+                pr_number=reconcile_request.pr_number,
+                record_store=cast(Any, record_store),
+                control_plane_root=resolved_control_plane_root,
+            )
+        except (
+            click.ClickException,
+            FileNotFoundError,
+            LookupError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="manager_preview_approval_unavailable",
+                message="Manager preview approval reconciliation could not complete.",
+            ) from error
+        return {"status": "ok", "trace_id": trace_id, "result": result}
 
     def read_every_code_work_request_worker_write_identity(
         authorization: Annotated[str, Header(alias="Authorization")] = "",
@@ -13112,6 +13230,10 @@ def create_launchplane_fastapi_app(
             record_id=route_result.authz_policy_record.record_id,
             revision=route_result.authz_policy_record.revision,
         )
+        reconcile_all_manager_preview_approvals_best_effort(
+            record_store=database_store,
+            control_plane_root=resolved_control_plane_root,
+        )
         return response
 
     async def read_active_authz_policy(
@@ -19232,6 +19354,35 @@ def create_launchplane_fastapi_app(
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            413: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+    app.add_api_route(
+        MANAGER_PREVIEW_APPROVAL_WEBHOOK_ROUTE,
+        handle_manager_preview_approval_github_webhook,
+        methods=["POST"],
+        status_code=202,
+        operation_id="handle_manager_preview_approval_github_webhook",
+        summary="Handle manager preview approval GitHub webhook",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            413: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+    app.add_api_route(
+        MANAGER_PREVIEW_APPROVAL_RECONCILE_ROUTE,
+        reconcile_manager_preview_approval,
+        methods=["POST"],
+        status_code=200,
+        operation_id="reconcile_manager_preview_approval",
+        summary="Reconcile manager preview approval projection",
+        responses={
+            403: {"model": LaunchplaneErrorResponse},
             404: {"model": LaunchplaneErrorResponse},
             413: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
