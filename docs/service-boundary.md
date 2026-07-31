@@ -651,6 +651,32 @@ ID/revision/digest, supersedes and inserts only when changed, completes replay
 evidence, and commits the transaction as one unit. No-op applies complete replay
 evidence without creating policy history.
 
+Manager approval of rendered previews is a separate Launchplane domain from
+Every Code preview-gate validation. `control_plane/manager_preview_approval.py`
+builds and evaluates exact preview bindings from the current preview record,
+serving generation, immutable artifact image digest, checked runtime identity,
+and active authorization policy. Manager-authored events require exactly one
+schema-v2 managed GitHub-human rule granting
+`manager_preview_approval.write`; that rule must include the actor's stable
+numeric GitHub id. The login is display evidence and may change without changing
+the authorized identity.
+
+The resulting `launchplane_manager_preview_approval_events` ledger is
+append-only in both filesystem rehearsal storage and PostgreSQL. Approval reads
+use `manager_preview_approval.read`, and the decision projection fails closed to
+pending, stale, or unavailable whenever current head, serving generation,
+artifact, manifest, runtime identity, verification, preview state, or policy
+does not exactly match the recorded event. This contract does not add a browser
+or GitHub mutation route by itself; GitHub comment handling, check projection,
+and promotion admission belong to the downstream interaction layer.
+
+People-based manager lookup remains private Every Code communication and
+planning context. It cannot populate, authorize, or override Launchplane runtime
+approval records. Tenant repositories own site code and thin workflow inputs;
+Launchplane owns authorization, durable approval evidence, and lifecycle
+invalidation. Preview destroy, PR close, label removal, and cleanup never call
+the approval decision as an admission gate.
+
 Schema-v1 migration and unmanaged-rule adoption are never implicit. The caller
 must request `schema_migration = migrate_v1_to_v2` and/or
 `unmanaged_adoption = adopt_matching` during both review and apply. Once a

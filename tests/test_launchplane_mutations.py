@@ -10,6 +10,7 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewMutationRequest,
 )
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview,
     apply_launchplane_generation_evidence,
@@ -164,6 +165,61 @@ class LaunchplaneMutationTests(unittest.TestCase):
         preview = store.previews["preview-site-testing-cbusillo-site-pr-42"]
         self.assertEqual(preview.state, "active")
         self.assertEqual(preview.serving_generation_id, result["generation_id"])
+
+    def test_generation_evidence_persists_checked_runtime_identity(self) -> None:
+        store = _BundledPreviewMutationStore()
+        runtime_identity = RuntimeIdentity(
+            product="site",
+            context="site-testing",
+            instance="pr-42",
+            environment_kind="preview",
+            deployment_record_id="deployment-pr-42",
+            artifact_id="artifact-preview-42",
+            source_git_ref="abc123",
+            image_reference=f"ghcr.io/cbusillo/site@sha256:{'a' * 64}",
+            preview_id="pr-42",
+        )
+
+        result = apply_launchplane_generation_evidence(
+            control_plane_root_path=Path("/launchplane"),
+            record_store=store,
+            preview_request=_preview_request(),
+            generation_request=_generation_request(runtime_identity=runtime_identity),
+        )
+
+        generation = store.generations[str(result["generation_id"])]
+        self.assertEqual(generation.runtime_identity, runtime_identity)
+        self.assertEqual(store.evidence_write_count, 1)
+
+    def test_generation_evidence_replay_preserves_checked_runtime_identity(self) -> None:
+        store = _BundledPreviewMutationStore()
+        runtime_identity = RuntimeIdentity(
+            product="site",
+            context="site-testing",
+            instance="pr-42",
+            environment_kind="preview",
+            deployment_record_id="deployment-pr-42",
+            artifact_id="artifact-preview-42",
+            source_git_ref="abc123",
+            image_reference=f"ghcr.io/cbusillo/site@sha256:{'a' * 64}",
+            preview_id="pr-42",
+        )
+        first = apply_launchplane_generation_evidence(
+            control_plane_root_path=Path("/launchplane"),
+            record_store=store,
+            preview_request=_preview_request(),
+            generation_request=_generation_request(runtime_identity=runtime_identity),
+        )
+
+        apply_launchplane_generation_evidence(
+            control_plane_root_path=Path("/launchplane"),
+            record_store=store,
+            preview_request=_preview_request(),
+            generation_request=_generation_request(),
+        )
+
+        generation = store.generations[str(first["generation_id"])]
+        self.assertEqual(generation.runtime_identity, runtime_identity)
 
     def test_generation_evidence_uses_bundled_store_write_when_available(self) -> None:
         store = _BundledPreviewMutationStore()

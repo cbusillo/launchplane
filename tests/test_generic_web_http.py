@@ -3351,6 +3351,17 @@ class GenericWebHttpTests(unittest.TestCase):
                 "application_name": "sellyouroutboard-pr-42",
                 "application_id": "app-preview",
                 "preview_url": "https://pr-42.example.test",
+                "runtime_identity": {
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard-testing",
+                    "instance": "pr-42",
+                    "environment_kind": "preview",
+                    "deployment_record_id": "deployment-pr-42",
+                    "artifact_id": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                    "source_git_ref": "abc123",
+                    "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                    "preview_id": "pr-42",
+                },
                 "smoke": {
                     "smoke_status": "fail",
                     "checked_at": "2026-05-03T15:04:55Z",
@@ -3374,6 +3385,7 @@ class GenericWebHttpTests(unittest.TestCase):
                         "preview_slug": "pr-42",
                         "preview_url": "https://pr-42.request.example.test",
                         "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                        "anchor_head_sha": "abc123",
                     }
                 ),
                 driver_result=driver_result,
@@ -3388,6 +3400,7 @@ class GenericWebHttpTests(unittest.TestCase):
         self.assertEqual(generation_request.verify_status, "fail")
         self.assertEqual(generation_request.failure_stage, "verify")
         self.assertEqual(generation_request.failure_summary, "Smoke failed on /api/health.")
+        self.assertEqual(generation_request.runtime_identity, driver_result.runtime_identity)
 
     def test_generic_web_preview_refresh_route_accepts_omitted_preview_url(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

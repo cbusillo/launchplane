@@ -11,6 +11,7 @@ from control_plane.contracts.preview_generation_record import (
 )
 from control_plane.contracts.preview_record import PreviewState
 from control_plane.contracts.promotion_record import ReleaseStatus
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 
 
 class PreviewMutationRequest(BaseModel):
@@ -76,6 +77,7 @@ class PreviewGenerationMutationRequest(BaseModel):
     overall_health_status: ReleaseStatus = "pending"
     failure_stage: str = ""
     failure_summary: str = ""
+    runtime_identity: RuntimeIdentity | None = None
 
     @model_validator(mode="after")
     def _validate_request(self) -> "PreviewGenerationMutationRequest":

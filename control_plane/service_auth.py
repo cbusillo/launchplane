@@ -419,6 +419,7 @@ class GitHubActionsPolicyRule(ManagedAuthzPolicyRule):
 class GitHubHumanPolicyRule(ManagedAuthzPolicyRule):
     model_config = ConfigDict(extra="forbid")
 
+    github_ids: tuple[int, ...] = ()
     logins: tuple[str, ...] = ()
     organizations: tuple[str, ...] = ()
     teams: tuple[str, ...] = ()
@@ -427,6 +428,13 @@ class GitHubHumanPolicyRule(ManagedAuthzPolicyRule):
     contexts: tuple[str, ...] = ()
     instances: AuthzInstanceSelectors = ()
     actions: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_github_ids(self) -> "GitHubHumanPolicyRule":
+        if any(github_id < 1 for github_id in self.github_ids):
+            raise ValueError("GitHub human policy rule github_ids must be positive.")
+        self.github_ids = tuple(dict.fromkeys(self.github_ids))
+        return self
 
     @staticmethod
     def _matches_any(value: str, allowed_values: tuple[str, ...]) -> bool:
@@ -451,6 +459,8 @@ class GitHubHumanPolicyRule(ManagedAuthzPolicyRule):
         target: AuthorizationTarget | None = None,
         schema_version: AuthzPolicySchemaVersion = 1,
     ) -> bool:
+        if self.github_ids and identity.github_id not in self.github_ids:
+            return False
         if self.logins and not self._matches_any(identity.login, self.logins):
             return False
         if self.organizations and not self._intersects(identity.organizations, self.organizations):
@@ -476,11 +486,14 @@ class GitHubHumanPolicyRule(ManagedAuthzPolicyRule):
     def matches_principal(
         self,
         *,
+        github_id: int,
         login: str,
         organizations: frozenset[str],
         teams: frozenset[str],
         role: Literal["read_only", "admin"],
     ) -> bool:
+        if self.github_ids and github_id not in self.github_ids:
+            return False
         if self.logins and not self._matches_any(login, self.logins):
             return False
         if self.organizations and not self._intersects(organizations, self.organizations):
@@ -860,6 +873,9 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 rule.pop("repository_id", None)
             if not rule.get("repository_owner_id"):
                 rule.pop("repository_owner_id", None)
+        for rule in payload.get("github_humans", ()):
+            if not rule.get("github_ids"):
+                rule.pop("github_ids", None)
         if self.schema_version == 1:
             for rule_collection_name in (
                 "github_actions",
@@ -957,20 +973,29 @@ class LaunchplaneAuthzPolicy(BaseModel):
     def human_role_for(
         self,
         *,
+        github_id: int = 0,
         login: str,
         organizations: frozenset[str],
         teams: frozenset[str],
     ) -> Literal["read_only", "admin"] | None:
         if any(
             rule.matches_principal(
-                login=login, organizations=organizations, teams=teams, role="admin"
+                github_id=github_id,
+                login=login,
+                organizations=organizations,
+                teams=teams,
+                role="admin",
             )
             for rule in self.github_humans
         ):
             return "admin"
         if any(
             rule.matches_principal(
-                login=login, organizations=organizations, teams=teams, role="read_only"
+                github_id=github_id,
+                login=login,
+                organizations=organizations,
+                teams=teams,
+                role="read_only",
             )
             for rule in self.github_humans
         ):

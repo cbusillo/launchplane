@@ -68,6 +68,10 @@ from control_plane.contracts.idempotency_record import (
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.manager_preview_approval import (
+    ManagerPreviewApprovalEventRecord,
+    ManagerPreviewApprovalEventWriteStatus,
+)
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchLandingPlanRecord,
@@ -135,6 +139,7 @@ from control_plane.contracts.private_health_endpoint_record import (
     PrivateHealthEndpointRecord,
     private_health_endpoint_record_sha256,
 )
+from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     route_binding_record_sha256,
@@ -554,6 +559,52 @@ class LaunchplanePreviewGenerationRow(Base):
     requested_at: Mapped[str] = mapped_column(String, nullable=False)
     finished_at: Mapped[str] = mapped_column(String, nullable=False)
     artifact_id: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneManagerPreviewApprovalEventRow(Base):
+    __tablename__ = "launchplane_manager_preview_approval_events"
+    __table_args__ = (
+        Index(
+            "launchplane_manager_preview_approval_events_subject_idx",
+            "product",
+            "context",
+            "repository",
+            "pr_number",
+            desc("occurred_at"),
+        ),
+        Index(
+            "launchplane_manager_preview_approval_events_preview_idx",
+            "preview_id",
+            "serving_generation_id",
+            desc("occurred_at"),
+        ),
+        Index(
+            "launchplane_manager_preview_approval_events_approval_idx",
+            "approval_id",
+            desc("occurred_at"),
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    approval_id: Mapped[str] = mapped_column(String, nullable=False)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    head_sha: Mapped[str] = mapped_column(String, nullable=False)
+    preview_id: Mapped[str] = mapped_column(String, nullable=False)
+    serving_generation_id: Mapped[str] = mapped_column(String, nullable=False)
+    artifact_id: Mapped[str] = mapped_column(String, nullable=False)
+    artifact_image_digest: Mapped[str] = mapped_column(String, nullable=False)
+    manifest_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    runtime_identity_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    manager_github_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    manager_login: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    policy_record_id: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    policy_sha256: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -7048,6 +7099,91 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def write_manager_preview_approval_event_record(
+        self, record: ManagerPreviewApprovalEventRecord
+    ) -> ManagerPreviewApprovalEventWriteStatus:
+        row = LaunchplaneManagerPreviewApprovalEventRow(
+            event_id=record.event_id,
+            approval_id=record.approval_id,
+            product=record.binding.product,
+            context=record.binding.context,
+            repository=record.binding.repository,
+            pr_number=record.binding.pr_number,
+            head_sha=record.binding.head_sha,
+            preview_id=record.binding.preview_id,
+            serving_generation_id=record.binding.serving_generation_id,
+            artifact_id=record.binding.artifact_id,
+            artifact_image_digest=record.binding.artifact_image_digest,
+            manifest_fingerprint=record.binding.manifest_fingerprint,
+            runtime_identity_sha256=record.binding.runtime_identity_sha256,
+            action=record.action,
+            manager_github_id=record.manager_github_id,
+            manager_login=record.manager_login,
+            policy_record_id=record.policy_record_id,
+            policy_sha256=record.policy_sha256,
+            occurred_at=record.occurred_at,
+            payload=self._payload_dict(record),
+        )
+        with self._session_factory() as session:
+            session.add(row)
+            try:
+                session.commit()
+                return "written"
+            except IntegrityError:
+                session.rollback()
+                existing_row = session.get(
+                    LaunchplaneManagerPreviewApprovalEventRow,
+                    record.event_id,
+                )
+                if existing_row is None:
+                    raise
+                existing = self._read_payload(
+                    model_type=ManagerPreviewApprovalEventRecord,
+                    payload=existing_row.payload,
+                )
+                if existing != record:
+                    raise ManagerPreviewApprovalEventConflictError(
+                        "Manager preview approval event replay changed the persisted payload."
+                    )
+                return "replayed"
+
+    def list_manager_preview_approval_event_records(
+        self,
+        *,
+        product: str = "",
+        context: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        preview_id: str = "",
+        action: str = "",
+        limit: int | None = None,
+    ) -> tuple[ManagerPreviewApprovalEventRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneManagerPreviewApprovalEventRow.product == product.lower())
+        if context:
+            filters.append(LaunchplaneManagerPreviewApprovalEventRow.context == context.lower())
+        if repository:
+            filters.append(
+                LaunchplaneManagerPreviewApprovalEventRow.repository == repository.lower()
+            )
+        if pr_number is not None:
+            filters.append(LaunchplaneManagerPreviewApprovalEventRow.pr_number == pr_number)
+        if preview_id:
+            filters.append(LaunchplaneManagerPreviewApprovalEventRow.preview_id == preview_id)
+        if action:
+            filters.append(LaunchplaneManagerPreviewApprovalEventRow.action == action)
+        return self._list_models(
+            model_type=ManagerPreviewApprovalEventRecord,
+            orm_model=LaunchplaneManagerPreviewApprovalEventRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneManagerPreviewApprovalEventRow.occurred_at.desc(),
+                LaunchplaneManagerPreviewApprovalEventRow.event_id.desc(),
+            ),
+            limit=limit,
+        )
+
     def write_preview_enablement_record(self, record: PreviewEnablementRecord) -> None:
         self._write_row(
             LaunchplanePreviewEnablementRow(
@@ -10780,6 +10916,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_records": 0,
             "preview_enablement": 0,
             "preview_generations": 0,
+            "manager_preview_approval_events": 0,
             "preview_desired_states": 0,
             "preview_inventory_scans": 0,
             "preview_lifecycle_cleanups": 0,
@@ -10837,6 +10974,10 @@ class PostgresRecordStore(HumanSessionStore):
         for generation_record in filesystem_store.list_preview_generation_records():
             self.write_preview_generation_record(generation_record)
             counts["preview_generations"] += 1
+        if hasattr(filesystem_store, "list_manager_preview_approval_event_records"):
+            for event_record in filesystem_store.list_manager_preview_approval_event_records():
+                self.write_manager_preview_approval_event_record(event_record)
+                counts["manager_preview_approval_events"] += 1
         if hasattr(filesystem_store, "list_preview_inventory_scan_records"):
             for scan_record in filesystem_store.list_preview_inventory_scan_records():
                 self.write_preview_inventory_scan_record(scan_record)
