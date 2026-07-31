@@ -182,6 +182,11 @@ unavailable evidence, verification failure, destroy, PR close, preview-label
 removal, or authorization-policy drift. Required code-review approvals remain a
 separate repository rule and may remain zero.
 
+When a recorded destroy or supersession ends the prior serving binding, a later
+verified replacement generation starts pending for its own exact fingerprint.
+The terminal event remains append-only audit evidence, but it does not carry a
+stale decision forward onto the replacement generation.
+
 Preview refresh, destroy, and verification must never depend on manager
 approval. They persist their own lifecycle evidence first, then attempt status
 reconciliation. If GitHub is degraded, the lifecycle operation still completes

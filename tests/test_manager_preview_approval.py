@@ -230,6 +230,24 @@ class ManagerPreviewApprovalTests(unittest.TestCase):
             decision = _decision(events=(approved, changes_requested, revoked, invalidated))
             self.assertEqual(decision.status, "stale")
 
+            late_approval = record_manager_preview_approval_event(
+                record_store=store,
+                identity=_manager_identity(),
+                policy_record=_policy_record(),
+                product=PRODUCT,
+                preview=_preview(),
+                generation=_generation(),
+                action="approved",
+                occurred_at="2026-07-30T12:05:00Z",
+                source_event_kind="github_issue_comment",
+                source_event_id="comment-104",
+            ).record
+            decision = _decision(
+                events=(approved, changes_requested, revoked, invalidated, late_approval)
+            )
+            self.assertEqual(decision.status, "stale")
+            self.assertEqual(decision.event_id, invalidated.event_id)
+
             superseded = build_manager_preview_approval_system_event(
                 binding=approved.binding,
                 action="superseded",
@@ -295,6 +313,53 @@ class ManagerPreviewApprovalTests(unittest.TestCase):
                         events=(approved,),
                     )
                     self.assertEqual(decision.status, "stale")
+
+    def test_terminal_prior_binding_yields_pending_for_replacement_preview(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            approved = _approved_event(store)
+            replacement_preview = _preview(
+                active_generation_id="generation-18",
+                serving_generation_id="generation-18",
+                latest_generation_id="generation-18",
+                latest_manifest_fingerprint="manifest-18",
+            )
+            replacement_generation = _generation(
+                generation_id="generation-18",
+                sequence=2,
+                resolved_manifest_fingerprint="manifest-18",
+                artifact_id="artifact-18",
+                runtime_identity=_runtime_identity(
+                    deployment_record_id="deployment-18",
+                    artifact_id="artifact-18",
+                    image_reference=f"ghcr.io/example/site@sha256:{'b' * 64}",
+                    preview_generation_id="generation-18",
+                ),
+            )
+
+            for action in ("invalidated", "superseded"):
+                with self.subTest(action=action):
+                    terminal = build_manager_preview_approval_system_event(
+                        binding=approved.binding,
+                        action=action,
+                        occurred_at="2026-07-30T11:59:00Z",
+                        source_event_kind="preview_lifecycle",
+                        source_event_id=f"generation-17:{action}",
+                        reason="The prior serving generation is no longer current.",
+                    )
+
+                    decision = _decision(
+                        preview=replacement_preview,
+                        generation=replacement_generation,
+                        events=(approved, terminal),
+                    )
+
+                    self.assertEqual(decision.status, "pending")
+                    self.assertEqual(decision.reason_code, "approval_missing")
+                    self.assertNotEqual(
+                        decision.current_binding_sha256,
+                        approved.binding.binding_sha256,
+                    )
 
     def test_policy_change_makes_prior_approval_stale(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

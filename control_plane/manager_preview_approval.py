@@ -20,6 +20,9 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity
 
 
+_TERMINAL_APPROVAL_ACTIONS = frozenset({"invalidated", "superseded"})
+
+
 class ManagerPreviewApprovalEvidenceError(ValueError):
     def __init__(self, *, code: ManagerPreviewApprovalReasonCode, message: str) -> None:
         super().__init__(message)
@@ -325,18 +328,47 @@ def evaluate_manager_preview_approval(
     )
     if not exact_events:
         if subject_events:
-            return _decision(
-                status="stale",
-                reason_code="approval_stale",
-                reason="Prior approval evidence does not match the current preview.",
-                binding=binding,
-                evaluated_at=evaluated_at,
+            latest_subject_event = max(
+                subject_events,
+                key=lambda event: (event.occurred_at, event.event_id),
             )
+            latest_binding_events = tuple(
+                event
+                for event in subject_events
+                if event.binding.binding_sha256 == latest_subject_event.binding.binding_sha256
+            )
+            if not any(
+                event.action in _TERMINAL_APPROVAL_ACTIONS for event in latest_binding_events
+            ):
+                return _decision(
+                    status="stale",
+                    reason_code="approval_stale",
+                    reason="Prior approval evidence does not match the current preview.",
+                    binding=binding,
+                    evaluated_at=evaluated_at,
+                )
         return _decision(
             status="pending",
             reason_code="approval_missing",
             reason="The current preview has not been approved by the manager.",
             binding=binding,
+            evaluated_at=evaluated_at,
+        )
+
+    terminal_events = tuple(
+        event for event in exact_events if event.action in _TERMINAL_APPROVAL_ACTIONS
+    )
+    if terminal_events:
+        latest_terminal_event = max(
+            terminal_events,
+            key=lambda event: (event.occurred_at, event.event_id),
+        )
+        return _decision(
+            status="stale",
+            reason_code="approval_stale",
+            reason="The current preview approval was superseded or invalidated.",
+            binding=binding,
+            event=latest_terminal_event,
             evaluated_at=evaluated_at,
         )
 
