@@ -309,6 +309,16 @@ def _container_references() -> Iterator[ContainerReference]:
 
 
 class GitHubActionsSecurityTests(TestCase):
+    def test_product_repo_config_authority_uses_called_workflow_revision(self) -> None:
+        workflow = Path(".github/workflows/reusable-product-repo-config-authority.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("launchplane-revision:", workflow)
+        self.assertIn("launchplane-revision must be a 40-character commit SHA", workflow)
+        self.assertIn("ref: ${{ inputs.launchplane-revision }}", workflow)
+        self.assertNotIn("ref: main", workflow)
+
     def test_action_reference_parser_covers_inline_step_syntax(self) -> None:
         match = USES_LINE_PATTERN.match(
             "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"

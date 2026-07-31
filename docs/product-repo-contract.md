@@ -147,16 +147,18 @@ Launchplane-owned reusable gate:
 jobs:
   launchplane-config-authority:
     uses: cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@<launchplane-sha>
+    with:
+      launchplane-revision: <launchplane-sha>
 ```
 
-The reusable workflow checks out the product repository and Launchplane's `main`
-audit tool, then runs the product-repo changed-file gate. Product repositories
-should not carry a pinned Launchplane tool checkout or run
-`uv run launchplane ...` themselves once they can call the reusable gate.
-The older pinned-checkout workflow remains a bounded compatibility bridge only:
-it may reference `${{ github.repository_owner }}/launchplane` and must pin `ref`
-to a 40-character commit SHA. Hard-coded owners, mutable branches, and
-non-checkout `repository` values are rejected by the product-repo profile.
+The reusable workflow validates `launchplane-revision` as a 40-character SHA,
+checks out the product repository and that exact Launchplane audit-tool commit,
+then runs the product-repo changed-file gate. The input must match the SHA in
+the reusable-workflow `uses` reference, and the dedicated workflow must contain
+exactly one such call. Product repositories should not carry a
+pinned Launchplane tool checkout or run `uv run launchplane ...` themselves.
+The dedicated workflow fails closed when the reusable call is absent, duplicated,
+mutable, mismatched, or mixed with another reusable workflow call.
 
 ## What Product Repos Own
 
@@ -186,6 +188,9 @@ non-checkout `repository` values are rejected by the product-repo profile.
   bot/dependency-type guard or a step output. Mutable action/image references,
   unrelated action inputs, and runtime identities disguised as scanner
   configuration remain rejected.
+- The reusable config-authority workflow validates and checks out the explicit
+  `launchplane-revision` SHA. Callers repeat the immutable `uses` SHA as that
+  input so the selected workflow and executed audit implementation stay bound.
 - A publish guard derived from `github.event.repository.default_branch` is a
   workflow mechanic; a checked-in literal branch remains runtime authority.
 - Direct `${{ inputs.* }}` forwarding inside action metadata is connector

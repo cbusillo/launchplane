@@ -162,6 +162,11 @@ GITHUB_INPUT_REFERENCE_PATTERN = re.compile(
 LAUNCHPLANE_REUSABLE_WORKFLOW_PATTERN = re.compile(
     r"^cbusillo/launchplane/\.github/workflows/[A-Za-z0-9_.-]+\.yml@(?:main|[0-9a-f]{40})$"
 )
+LAUNCHPLANE_CONFIG_AUTHORITY_WORKFLOW_PATH = ".github/workflows/launchplane-config-authority.yml"
+LAUNCHPLANE_CONFIG_AUTHORITY_REUSABLE_WORKFLOW_PATTERN = re.compile(
+    r"^cbusillo/launchplane/\.github/workflows/"
+    r"reusable-product-repo-config-authority\.yml@(?P<revision>[^\s]+)$"
+)
 LAUNCHPLANE_DEPENDENCY_HEALTH_ACTION_REFERENCE_PATTERN = re.compile(
     r"^cbusillo/launchplane/\.github/actions/dependency-health-trivy@[^\s]+$"
 )
@@ -1800,6 +1805,9 @@ def _mark_preexisting_changed_file_findings(
     remaining_counts = baseline_fingerprint_counts.copy()
     marked_findings: list[ConfigAuthorityFinding] = []
     for finding in findings:
+        if finding.key == "launchplane-config-authority-binding":
+            marked_findings.append(finding)
+            continue
         if remaining_counts[finding.fingerprint] > 0:
             marked_findings.append(_mark_preexisting_changed_file_finding(finding))
             remaining_counts[finding.fingerprint] -= 1
@@ -1932,6 +1940,17 @@ def _scan_source_text(
         path=source_file.relative_path,
         candidates=candidates,
     )
+    if (
+        source_file.relative_path == LAUNCHPLANE_CONFIG_AUTHORITY_WORKFLOW_PATH
+        and not allow_context.get("launchplane_config_authority_binding_valid")
+    ):
+        candidates.append(
+            (
+                0,
+                "launchplane-config-authority-binding",
+                allow_context.get("launchplane_config_authority_binding_evidence", "invalid"),
+            )
+        )
     findings = [
         _build_finding(
             source_file=source_file,
@@ -2152,6 +2171,8 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
     checkout_with_count = 0
     dependency_health_uses_indent: int | None = None
     dependency_health_with_count = 0
+    config_authority_uses_indent: int | None = None
+    config_authority_with_count = 0
     while index < len(lines):
         line_number = index + 1
         line = lines[index]
@@ -2160,18 +2181,12 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
             index += 1
             continue
         indent = _leading_space_count(line)
-        if (
-            checkout_uses_indent is not None
-            and indent < checkout_uses_indent
-            and not YAML_EMPTY_MAPPING_PATTERN.match(line)
-        ):
+        if checkout_uses_indent is not None and indent < checkout_uses_indent:
             checkout_uses_indent = None
-        if (
-            dependency_health_uses_indent is not None
-            and indent < dependency_health_uses_indent
-            and not YAML_EMPTY_MAPPING_PATTERN.match(line)
-        ):
+        if dependency_health_uses_indent is not None and indent < dependency_health_uses_indent:
             dependency_health_uses_indent = None
+        if config_authority_uses_indent is not None and indent < config_authority_uses_indent:
+            config_authority_uses_indent = None
         context_stack = _yaml_context_for_indent(context_stack, indent=indent)
         list_match = YAML_LIST_ITEM_PATTERN.match(line)
         if list_match is not None:
@@ -2196,6 +2211,10 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                     scalar_value
                 ):
                     dependency_health_uses_indent = indent + 2
+                if yaml_key == "uses" and _is_launchplane_config_authority_workflow_reference(
+                    scalar_value
+                ):
+                    config_authority_uses_indent = indent + 2
                 if yaml_key == "uses" and (
                     _is_yaml_reusable_workflow_reference(scalar_value)
                     or _is_launchplane_dependency_health_action_reference(scalar_value)
@@ -2227,6 +2246,14 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                 dependency_health_with_count += 1
                 yaml_key = f"dependency-health.with[{dependency_health_with_count}]"
                 dependency_health_uses_indent = None
+            elif (
+                yaml_key == "with"
+                and config_authority_uses_indent is not None
+                and indent == config_authority_uses_indent
+            ):
+                config_authority_with_count += 1
+                yaml_key = f"launchplane-config-authority.with[{config_authority_with_count}]"
+                config_authority_uses_indent = None
             context_stack.append((indent, yaml_key))
             index += 1
             continue
@@ -2250,6 +2277,10 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                 block_value
             ):
                 dependency_health_uses_indent = indent
+            if yaml_key == "uses" and _is_launchplane_config_authority_workflow_reference(
+                block_value
+            ):
+                config_authority_uses_indent = indent
             if (
                 yaml_key in IGNORED_YAML_SCALAR_KEYS
                 and not _is_yaml_reusable_workflow_reference(block_value)
@@ -2278,6 +2309,10 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                 scalar_value
             ):
                 dependency_health_uses_indent = indent
+            if yaml_key == "uses" and _is_launchplane_config_authority_workflow_reference(
+                scalar_value
+            ):
+                config_authority_uses_indent = indent
             if (
                 yaml_key in IGNORED_YAML_SCALAR_KEYS
                 and not _is_yaml_reusable_workflow_reference(scalar_value)
@@ -2311,6 +2346,9 @@ def _yaml_candidate_key(context_stack: Sequence[tuple[int, str]], key: str) -> s
     dependency_health_block = _yaml_dependency_health_with_block(context_stack)
     if dependency_health_block:
         return f"dependency-health.with[{dependency_health_block}].{key}"
+    config_authority_block = _yaml_config_authority_with_block(context_stack)
+    if config_authority_block:
+        return f"launchplane-config-authority.with[{config_authority_block}].{key}"
     return key
 
 
@@ -2379,6 +2417,15 @@ def _yaml_dependency_health_with_block(context_stack: Sequence[tuple[int, str]])
     return key.removeprefix("dependency-health.with[").removesuffix("]")
 
 
+def _yaml_config_authority_with_block(context_stack: Sequence[tuple[int, str]]) -> str:
+    if not context_stack:
+        return ""
+    key = context_stack[-1][1]
+    if not key.startswith("launchplane-config-authority.with[") or not key.endswith("]"):
+        return ""
+    return key.removeprefix("launchplane-config-authority.with[").removesuffix("]")
+
+
 def _yaml_block_scalar_lines(
     *, lines: Sequence[str], start_index: int, parent_indent: int
 ) -> tuple[list[str], int]:
@@ -2420,13 +2467,38 @@ def _allow_context_for_candidates(
     *, path: str, candidates: Sequence[tuple[int, str, object]]
 ) -> Mapping[str, object]:
     allow_context: dict[str, object] = {}
-    if path == ".github/workflows/launchplane-config-authority.yml":
-        allow_context["launchplane_tool_checkout_pinned_blocks"] = {
-            _checkout_candidate_block(key)
+    if path == LAUNCHPLANE_CONFIG_AUTHORITY_WORKFLOW_PATH:
+        reusable_workflow_references = [
+            _string_value(value).strip()
             for _, key, value in candidates
-            if key.startswith("checkout.ref[")
-            and GIT_COMMIT_SHA_PATTERN.fullmatch(_string_value(value).strip()) is not None
-        }
+            if key == "uses" and _is_yaml_reusable_workflow_reference(value)
+        ]
+        workflow_revisions = [
+            revision
+            for _, key, value in candidates
+            if key == "uses"
+            and (revision := _launchplane_config_authority_workflow_revision(value))
+        ]
+        input_revisions = [
+            _string_value(value).strip()
+            for _, key, value in candidates
+            if _is_launchplane_config_authority_revision_input_key(key)
+        ]
+        allow_context["launchplane_config_authority_binding_evidence"] = json.dumps(
+            {
+                "launchplane_revisions": input_revisions,
+                "uses": reusable_workflow_references,
+            },
+            sort_keys=True,
+        )
+        if (
+            len(reusable_workflow_references) == 1
+            and len(workflow_revisions) == 1
+            and len(input_revisions) == 1
+            and workflow_revisions[0] == input_revisions[0]
+        ):
+            allow_context["launchplane_config_authority_revision"] = workflow_revisions[0]
+            allow_context["launchplane_config_authority_binding_valid"] = True
     if path == ".github/workflows/cleanup-ghcr.yml":
         allow_context["cleanup_ghcr_launchplane_products"] = {
             _string_value(value).strip().rstrip(",")
@@ -2542,6 +2614,14 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
     if normalized.startswith(".github/workflows/") and _dependency_health_action_input_name(key):
         return True
     if normalized.startswith(".github/workflows/") and key == "TRIVY_IMAGE":
+        return True
+    if normalized == LAUNCHPLANE_CONFIG_AUTHORITY_WORKFLOW_PATH and (
+        key == "launchplane-revision" or _is_launchplane_config_authority_revision_input_key(key)
+    ):
+        return True
+    if normalized == LAUNCHPLANE_CONFIG_AUTHORITY_WORKFLOW_PATH and key == (
+        "launchplane-config-authority-binding"
+    ):
         return True
     if _is_click_option_metadata_key(key):
         return True
@@ -2754,6 +2834,19 @@ def _allow_reason(
         return ""
     if normalized.startswith(".github/workflows/") and key == "TRIVY_IMAGE":
         return ""
+    if normalized == LAUNCHPLANE_CONFIG_AUTHORITY_WORKFLOW_PATH and (
+        key == "launchplane-revision"
+        or _is_launchplane_config_authority_revision_input_key(key)
+        or (key == "uses" and _is_yaml_reusable_workflow_reference(value))
+        or key == "launchplane-config-authority-binding"
+    ):
+        if _is_launchplane_config_authority_connector(
+            key=key,
+            value=value,
+            allow_context=allow_context,
+        ):
+            return ALLOW_REASON_THIN_CONNECTOR_INPUT
+        return ""
     if normalized.startswith(".github/actions/") and _is_github_action_metadata_mechanic(
         path=normalized,
         key=key,
@@ -2764,13 +2857,6 @@ def _allow_reason(
         path=normalized,
         key=key,
         value=value,
-    ):
-        return ALLOW_REASON_THIN_CONNECTOR_INPUT
-    if normalized.startswith(".github/workflows/") and _is_launchplane_tool_checkout_reference(
-        path=normalized,
-        key=key,
-        value=value,
-        allow_context=allow_context,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if normalized.startswith(".github/workflows/") and _is_workflow_input_mechanic_default(
@@ -3434,20 +3520,44 @@ def _is_github_bracket_input_reference(value_text: str) -> bool:
     return bool(re.fullmatch(r"inputs\[['\"][A-Za-z0-9_.-]+['\"]\]", body))
 
 
-def _is_launchplane_tool_checkout_reference(
-    *, path: str, key: str, value: object, allow_context: Mapping[str, object]
-) -> bool:
-    if path != ".github/workflows/launchplane-config-authority.yml":
-        return False
-    key_text = _semantic_full_key_text(key)
-    checkout_block = _checkout_candidate_block(key)
-    pinned_blocks = allow_context.get("launchplane_tool_checkout_pinned_blocks")
-    value_text = _string_value(value).strip()
+def _is_launchplane_config_authority_workflow_reference(value: object) -> bool:
     return (
-        key_text == "CHECKOUT_REPOSITORY"
-        and value_text == "${{ github.repository_owner }}/launchplane"
-        and isinstance(pinned_blocks, set)
-        and checkout_block in pinned_blocks
+        LAUNCHPLANE_CONFIG_AUTHORITY_REUSABLE_WORKFLOW_PATTERN.fullmatch(
+            _string_value(value).strip()
+        )
+        is not None
+    )
+
+
+def _launchplane_config_authority_workflow_revision(value: object) -> str:
+    match = LAUNCHPLANE_CONFIG_AUTHORITY_REUSABLE_WORKFLOW_PATTERN.fullmatch(
+        _string_value(value).strip()
+    )
+    if match is None:
+        return ""
+    revision = match.group("revision")
+    return revision if GIT_COMMIT_SHA_PATTERN.fullmatch(revision) is not None else ""
+
+
+def _is_launchplane_config_authority_connector(
+    *,
+    key: str,
+    value: object,
+    allow_context: Mapping[str, object],
+) -> bool:
+    expected_revision = allow_context.get("launchplane_config_authority_revision")
+    if not isinstance(expected_revision, str) or not expected_revision:
+        return False
+    if key == "uses":
+        return _launchplane_config_authority_workflow_revision(value) == expected_revision
+    if not _is_launchplane_config_authority_revision_input_key(key):
+        return False
+    return _string_value(value).strip() == expected_revision
+
+
+def _is_launchplane_config_authority_revision_input_key(key: str) -> bool:
+    return key.startswith("launchplane-config-authority.with[") and key.endswith(
+        "].launchplane-revision"
     )
 
 
