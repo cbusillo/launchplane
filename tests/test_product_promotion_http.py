@@ -11,15 +11,32 @@ from unittest.mock import Mock, patch
 from pydantic import ValidationError
 
 from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.manager_preview_approval import (
+    MANAGER_PREVIEW_APPROVAL_READ_ACTION,
+    MANAGER_PREVIEW_APPROVAL_WRITE_ACTION,
+    ManagerPreviewApprovalEventRecord,
+    ManagerPreviewApprovalEventWriteStatus,
+)
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
+from control_plane.contracts.preview_generation_record import (
+    PreviewGenerationRecord,
+    PreviewPullRequestSummary,
+)
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
     ProductLaneProfile,
+    ProductPreviewProfile,
 )
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -28,7 +45,13 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
-from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
+from control_plane.manager_preview_approval import record_manager_preview_approval_event
+from control_plane.service_auth import (
+    GitHubActionsIdentity,
+    GitHubHumanIdentity,
+    GitHubHumanPolicyRule,
+    LaunchplaneAuthzPolicy,
+)
 from control_plane.product_promotion_http import (
     ProductPromotionDryRunEnvelope,
     ProductPromotionStatus,
@@ -97,6 +120,15 @@ class _PromotionStore(PostgresRecordStore):
             return self.summaries[(context_name, instance_name)]
         except KeyError as error:
             raise FileNotFoundError(instance_name) from error
+
+    def list_authz_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]:
+        del status, limit
+        return ()
 
 
 class _AcceptingVerifier:
@@ -227,6 +259,208 @@ def _status(
         action_allowed=lambda _action, _product, _context, _instances: True,
         workflow_credentials_ready=lambda _context: True,
         now=NOW,
+    )
+
+
+class _ManagerPromotionStore(_PromotionStore):
+    def __init__(self) -> None:
+        base = _store()
+        profile = base.profile.model_copy(
+            update={
+                "preview": ProductPreviewProfile(
+                    enabled=True,
+                    context="atlas-commerce",
+                    enable_label="launchplane-preview",
+                )
+            }
+        )
+        super().__init__(profile=profile, summaries=base.summaries)
+        self.policy: LaunchplaneAuthzPolicyRecord | None = _manager_policy_record()
+        self.preview = _manager_preview()
+        self.generation = _manager_generation()
+        self.events: dict[str, ManagerPreviewApprovalEventRecord] = {}
+
+    def list_authz_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]:
+        records = (
+            (self.policy,)
+            if self.policy is not None and (not status or self.policy.status == status)
+            else ()
+        )
+        return records[:limit] if limit is not None else records
+
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewRecord, ...]:
+        records = (
+            (self.preview,)
+            if (not context_name or self.preview.context == context_name)
+            and (not anchor_repo or self.preview.anchor_repo == anchor_repo)
+            and (anchor_pr_number is None or self.preview.anchor_pr_number == anchor_pr_number)
+            else ()
+        )
+        return records[:limit] if limit is not None else records
+
+    def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord:
+        if generation_id != self.generation.generation_id:
+            raise FileNotFoundError(generation_id)
+        return self.generation
+
+    def list_manager_preview_approval_event_records(
+        self,
+        *,
+        product: str = "",
+        context: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        preview_id: str = "",
+        action: str = "",
+        limit: int | None = None,
+    ) -> tuple[ManagerPreviewApprovalEventRecord, ...]:
+        records = tuple(
+            event
+            for event in self.events.values()
+            if (not product or event.binding.product == product)
+            and (not context or event.binding.context == context)
+            and (not repository or event.binding.repository == repository)
+            and (pr_number is None or event.binding.pr_number == pr_number)
+            and (not preview_id or event.binding.preview_id == preview_id)
+            and (not action or event.action == action)
+        )
+        records = tuple(sorted(records, key=lambda event: (event.occurred_at, event.event_id)))
+        return records[:limit] if limit is not None else records
+
+    def write_manager_preview_approval_event_record(
+        self, record: ManagerPreviewApprovalEventRecord
+    ) -> ManagerPreviewApprovalEventWriteStatus:
+        if record.event_id in self.events:
+            return "replayed"
+        self.events[record.event_id] = record
+        return "written"
+
+
+def _manager_policy_record(*, revision: int = 1) -> LaunchplaneAuthzPolicyRecord:
+    policy = LaunchplaneAuthzPolicy(
+        schema_version=2,
+        github_humans=(
+            GitHubHumanPolicyRule(
+                managed_set_id="manager.atlas-commerce",
+                managed_rule_id="preview-approval",
+                github_ids=(101,),
+                roles=("read_only",),
+                products=("atlas-commerce",),
+                contexts=("atlas-commerce",),
+                actions=(
+                    MANAGER_PREVIEW_APPROVAL_READ_ACTION,
+                    MANAGER_PREVIEW_APPROVAL_WRITE_ACTION,
+                ),
+            ),
+        ),
+    )
+    policy_sha256 = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(
+            revision=revision,
+            policy_sha256=policy_sha256,
+        ),
+        revision=revision,
+        status="active",
+        source="test:manager-preview-promotion",
+        updated_at="2026-07-15T08:55:00Z",
+        policy_sha256=policy_sha256,
+        policy=policy,
+    )
+
+
+def _manager_preview() -> PreviewRecord:
+    return PreviewRecord(
+        preview_id="preview-atlas-17",
+        context="atlas-commerce",
+        anchor_repo="atlas-commerce",
+        anchor_pr_number=17,
+        anchor_pr_url="https://github.com/example/atlas-commerce/pull/17",
+        preview_label="launchplane-preview",
+        canonical_url="https://pr-17.atlas.example.test/",
+        state="active",
+        created_at="2026-07-15T08:00:00Z",
+        updated_at="2026-07-15T08:40:00Z",
+        eligible_at="2026-07-15T08:00:00Z",
+        active_generation_id="generation-atlas-17",
+        serving_generation_id="generation-atlas-17",
+        latest_generation_id="generation-atlas-17",
+        latest_manifest_fingerprint="manifest-atlas-17",
+    )
+
+
+def _manager_generation() -> PreviewGenerationRecord:
+    runtime_identity = RuntimeIdentity(
+        product="atlas-commerce",
+        context="atlas-commerce",
+        instance="pr-17",
+        environment_kind="preview",
+        deployment_record_id="deployment-preview-atlas-17",
+        artifact_id="preview-artifact-atlas-17",
+        source_git_ref=TESTING_SOURCE_REF,
+        image_reference=TESTING_ARTIFACT,
+        preview_id="pr-17",
+        preview_generation_id="generation-atlas-17",
+        deployed_at="2026-07-15T08:35:00Z",
+    )
+    return PreviewGenerationRecord(
+        generation_id="generation-atlas-17",
+        preview_id="preview-atlas-17",
+        sequence=1,
+        state="ready",
+        requested_reason="Preview requested.",
+        requested_at="2026-07-15T08:00:00Z",
+        started_at="2026-07-15T08:05:00Z",
+        ready_at="2026-07-15T08:40:00Z",
+        finished_at="2026-07-15T08:40:00Z",
+        resolved_manifest_fingerprint="manifest-atlas-17",
+        artifact_id="preview-artifact-atlas-17",
+        anchor_summary=PreviewPullRequestSummary(
+            repo="atlas-commerce",
+            pr_number=17,
+            head_sha=TESTING_SOURCE_REF,
+            pr_url="https://github.com/example/atlas-commerce/pull/17",
+        ),
+        deploy_status="pass",
+        verify_status="pass",
+        overall_health_status="pass",
+        runtime_identity=runtime_identity,
+    )
+
+
+def _approve_manager_preview(store: _ManagerPromotionStore) -> None:
+    assert store.policy is not None
+    record_manager_preview_approval_event(
+        record_store=store,
+        identity=GitHubHumanIdentity(
+            login="manager",
+            github_id=101,
+            name="Example Manager",
+            email="",
+            organizations=frozenset(),
+            teams=frozenset(),
+            role="read_only",
+        ),
+        policy_record=store.policy,
+        product="atlas-commerce",
+        preview=store.preview,
+        generation=store.generation,
+        action="approved",
+        occurred_at="2026-07-15T08:56:00Z",
+        source_event_kind="github_issue_comment",
+        source_event_id="comment-approval-17",
     )
 
 
@@ -688,7 +922,189 @@ class ProductPromotionRequestTests(unittest.TestCase):
         self.assertEqual(delivered.run_id, 123)
 
 
+class ProductPromotionManagerApprovalTests(unittest.TestCase):
+    def test_pending_manager_approval_blocks_only_live_workflow(self) -> None:
+        store = _ManagerPromotionStore()
+
+        _, _, status = _status(store)
+
+        decision = status.manager_preview_approval
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision.status, "pending")
+        self.assertTrue(status.direct_dry_run.enabled)
+        self.assertTrue(status.workflow_dry_run.enabled)
+        self.assertFalse(status.workflow_live.enabled)
+        self.assertIn(
+            "Manager preview approval is not valid for the exact testing artifact",
+            status.workflow_live.disabled_reasons[-1],
+        )
+
+    def test_exact_approval_enables_live_and_policy_change_invalidates_it(self) -> None:
+        store = _ManagerPromotionStore()
+        _, _, pending = _status(store)
+        _approve_manager_preview(store)
+
+        _, _, approved = _status(store)
+        store.policy = _manager_policy_record(revision=2)
+        _, _, stale = _status(store)
+
+        approved_decision = approved.manager_preview_approval
+        stale_decision = stale.manager_preview_approval
+        self.assertIsNotNone(approved_decision)
+        self.assertIsNotNone(stale_decision)
+        assert approved_decision is not None
+        assert stale_decision is not None
+        self.assertEqual(approved_decision.status, "approved")
+        self.assertTrue(approved.workflow_live.enabled)
+        self.assertNotEqual(pending.evidence_fingerprint, approved.evidence_fingerprint)
+        self.assertEqual(stale_decision.status, "stale")
+        self.assertFalse(stale.workflow_live.enabled)
+        self.assertNotEqual(approved.evidence_fingerprint, stale.evidence_fingerprint)
+
+    def test_policy_removal_disables_enforcement_without_deleting_evidence(self) -> None:
+        store = _ManagerPromotionStore()
+        _approve_manager_preview(store)
+        event_ids = tuple(store.events)
+        store.policy = None
+
+        _, _, status = _status(store)
+
+        self.assertIsNone(status.manager_preview_approval)
+        self.assertTrue(status.workflow_live.enabled)
+        self.assertEqual(tuple(store.events), event_ids)
+
+    def test_evaluation_time_does_not_change_promotion_fingerprint(self) -> None:
+        store = _ManagerPromotionStore()
+        _approve_manager_preview(store)
+
+        _, _, first = build_product_promotion_status(
+            record_store=store,
+            product="atlas-commerce",
+            destination_environment="prod",
+            action_allowed=lambda _action, _product, _context, _instances: True,
+            workflow_credentials_ready=lambda _context: True,
+            now=NOW,
+        )
+        _, _, second = build_product_promotion_status(
+            record_store=store,
+            product="atlas-commerce",
+            destination_environment="prod",
+            action_allowed=lambda _action, _product, _context, _instances: True,
+            workflow_credentials_ready=lambda _context: True,
+            now=NOW + timedelta(seconds=1),
+        )
+
+        first_decision = first.manager_preview_approval
+        second_decision = second.manager_preview_approval
+        self.assertIsNotNone(first_decision)
+        self.assertIsNotNone(second_decision)
+        assert first_decision is not None
+        assert second_decision is not None
+        self.assertNotEqual(
+            first_decision.evaluated_at,
+            second_decision.evaluated_at,
+        )
+        self.assertEqual(first.evidence_fingerprint, second.evidence_fingerprint)
+
+
 class FastApiProductPromotionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_raw_live_execution_denies_pending_manager_approval_before_provider(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            self._seed_store(store)
+            profile = store.read_product_profile_record("atlas-commerce")
+            store.write_product_profile_record(
+                profile.model_copy(
+                    update={
+                        "preview": ProductPreviewProfile(
+                            enabled=True,
+                            context="atlas-commerce",
+                            enable_label="launchplane-preview",
+                        )
+                    }
+                )
+            )
+            store.write_preview_record(_manager_preview())
+            store.write_preview_generation_record(_manager_generation())
+            store.seed_authz_policy_if_absent(_manager_policy_record())
+            identity = GitHubActionsIdentity(
+                repository="example/atlas-commerce",
+                repository_owner="example",
+                workflow_ref=(
+                    "example/atlas-commerce/.github/workflows/promote-prod.yml@refs/heads/main"
+                ),
+                job_workflow_ref=(
+                    "example/atlas-commerce/.github/workflows/promote-prod.yml@refs/heads/main"
+                ),
+                ref="refs/heads/main",
+                ref_type="branch",
+                event_name="workflow_dispatch",
+                environment="",
+                subject="repo:example/atlas-commerce:ref:refs/heads/main",
+                sha="4" * 40,
+                raw_claims={},
+            )
+            authz_policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "example/atlas-commerce",
+                            "workflow_refs": [identity.workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["atlas-commerce"],
+                            "contexts": ["atlas-commerce"],
+                            "actions": [
+                                "generic_web_prod_promotion.execute",
+                                "generic_web_prod_promotion.execute_unreviewed",
+                            ],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_app(
+                control_plane_root_path=root,
+                verifier=_AcceptingVerifier(identity),
+                authz_policy=authz_policy,
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "atlas-commerce",
+                "promotion": {
+                    "schema_version": 1,
+                    "product": "atlas-commerce",
+                    "artifact_id": TESTING_ARTIFACT,
+                    "source_git_ref": TESTING_SOURCE_REF,
+                },
+            }
+
+            with patch(
+                "control_plane.http_routes.generic_web.default_generic_web_deploy_provider"
+            ) as provider_factory:
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/drivers/generic-web/prod-promotion",
+                    headers={
+                        "Authorization": "Bearer oidc-token",
+                        "Idempotency-Key": "pending-manager-approval",
+                    },
+                    payload=request_payload,
+                )
+            store.close()
+
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "manager_preview_approval_required",
+        )
+        provider_factory.assert_not_called()
+
     async def test_direct_dry_run_replay_and_workflow_dispatch_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

@@ -728,9 +728,11 @@ Validate the operator UI shell with browser navigation or `GET /ui`. Do not use
 `HEAD /ui` as the only availability check, because static app-shell fallback
 behavior can differ between request methods.
 
-`POST /v1/every-code/github-webhook` is the only unauthenticated write route.
-It trusts the request body through GitHub webhook HMAC verification instead of
-OIDC. Before buffering or HMAC processing, the ASGI boundary requires exactly
+`POST /v1/every-code/github-webhook` and
+`POST /v1/manager-preview-approval/github-webhook` are the only unauthenticated
+write routes. They trust request bodies through route-specific GitHub webhook
+HMAC verification instead of OIDC. Before buffering or HMAC processing, the
+ASGI boundary requires exactly
 one unsigned-decimal `Content-Length`, rejects transfer-encoded or missing-length
 requests, caps both declared and observed body bytes at 2 MiB, and rejects a
 declared/observed length mismatch. Contract failures return `400` or `413`
@@ -744,6 +746,23 @@ include `deduped` plus the delivery id in the response. Matching pull-request
 close deliveries can close every linked request referenced by the PR, including
 still-queued requests that never stored a result PR URL. The route is native
 FastAPI.
+
+The manager-preview webhook uses
+`LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`, accepts signed
+`issue_comment.created` and selected pull-request lifecycle deliveries, and
+re-fetches comments, actor numeric identity, current PR head, current serving
+preview, and active managed policy before writing evidence. Its GitHub comment
+and `manager-preview-approval` status writes use the Launchplane-managed token
+resolved for the product context; tenant workflow or PR code cannot supply that
+credential. GitHub projection failure is degraded output, not approval loss and
+not a reason to block destroy or cleanup.
+
+`POST /v1/manager-preview-approval/reconcile` is the authenticated retry path.
+It requires `manager_preview_approval.read` authorization for the resolved
+product/context, re-fetches current GitHub and Launchplane evidence, and rewrites
+the credential-owned comment and current-head status. Managed authz policy apply
+also attempts reconciliation for existing previews. Removing the managed
+approval rule is the rollback switch; records remain append-only.
 
 The Every Code worker read, native claim, and status routes also accept a
 dedicated local-worker bearer token. Configure

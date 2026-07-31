@@ -1788,6 +1788,26 @@ run` is the foreground loop intended for an external process supervisor, and
   authorization. Launchplane's active managed policy is the authority; GitHub
   interaction and promotion-check projection are separate downstream adapters,
   and tenant repositories own only their thin workflow integration.
+- Signed `issue_comment.created` delivery is the manager interaction adapter.
+  Launchplane re-fetches the comment actor and current pull-request head, then
+  accepts only an exact `/preview approve|changes|revoke <binding_sha256>`
+  command. Delivery replay returns the existing append-only event, while actor,
+  head, fingerprint, serving-generation, and policy mismatches write nothing.
+- `manager-preview-approval` is a GitHub status projection of this record, not
+  authority. The service updates only a marker comment owned by the authenticated
+  Launchplane credential and projects `pending`, `success`, `failure`, or
+  `error` on the current head. GitHub write failure never rewrites or deletes
+  approval evidence.
+- Preview refresh and verification routes reconcile the projection after their
+  durable record changes. Pull-request synchronize, reopen, close, preview-label
+  removal, isolated destroy, and managed-policy updates also re-project current
+  evidence. Destroy and cleanup proceed even when GitHub is unavailable; an
+  authenticated reconciliation request can retry the projection later.
+- Policy-scoped live promotion joins the testing artifact digest and source SHA
+  to exactly one active serving preview, includes the approval decision in the
+  promotion evidence fingerprint, and denies before provider mutation unless
+  the decision is `approved`. Removing the managed approval rule disables this
+  admission requirement without deleting event history.
 
 ## Launchplane Preview Enablement Record
 

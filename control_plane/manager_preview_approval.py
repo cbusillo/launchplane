@@ -59,6 +59,25 @@ class ManagerPreviewApprovalWriteResult(NamedTuple):
     record: ManagerPreviewApprovalEventRecord
 
 
+def manager_preview_approval_required(
+    *,
+    policy_record: LaunchplaneAuthzPolicyRecord,
+    product: str,
+    context: str,
+) -> bool:
+    if policy_record.status != "active" or policy_record.policy.schema_version != 2:
+        return False
+    return any(
+        rule.managed_set_id is not None
+        and rule.managed_rule_id is not None
+        and bool(rule.github_ids)
+        and MANAGER_PREVIEW_APPROVAL_WRITE_ACTION in rule.actions
+        and (not rule.products or product in rule.products)
+        and (not rule.contexts or context in rule.contexts)
+        for rule in policy_record.policy.github_humans
+    )
+
+
 def build_current_manager_preview_approval_binding(
     *,
     product: str,

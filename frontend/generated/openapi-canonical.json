@@ -6966,6 +6966,118 @@
         "title": "LaunchplaneRuntimeStatus",
         "type": "object"
       },
+      "ManagerPreviewApprovalDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "default": "",
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "current_binding_sha256": {
+            "default": "",
+            "title": "Current Binding Sha256",
+            "type": "string"
+          },
+          "evaluated_at": {
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "event_id": {
+            "default": "",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "manager_github_id": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Manager Github Id",
+            "type": "integer"
+          },
+          "manager_login": {
+            "default": "",
+            "title": "Manager Login",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "reason_code": {
+            "enum": [
+              "approval_missing",
+              "approval_valid",
+              "changes_requested",
+              "approval_revoked",
+              "approval_stale",
+              "preview_inactive",
+              "serving_generation_missing",
+              "serving_generation_mismatch",
+              "generation_not_ready",
+              "generation_verification_failed",
+              "preview_identity_mismatch",
+              "artifact_identity_missing",
+              "runtime_identity_missing",
+              "runtime_identity_mismatch",
+              "policy_unavailable"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "approved",
+              "changes_requested",
+              "revoked",
+              "stale",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "reason_code",
+          "reason",
+          "evaluated_at"
+        ],
+        "title": "ManagerPreviewApprovalDecision",
+        "type": "object"
+      },
+      "ManagerPreviewApprovalReconcileEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "pr_number": {
+            "minimum": 1.0,
+            "title": "Pr Number",
+            "type": "integer"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repository",
+          "pr_number"
+        ],
+        "title": "ManagerPreviewApprovalReconcileEnvelope",
+        "type": "object"
+      },
       "MergeTrainAdmissionDecision": {
         "additionalProperties": false,
         "properties": {
@@ -15679,6 +15791,17 @@
           },
           "live_confirmations": {
             "$ref": "#/components/schemas/ProductPromotionLiveConfirmations"
+          },
+          "manager_preview_approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagerPreviewApprovalDecision"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "product": {
             "title": "Product",
@@ -42555,6 +42678,216 @@
           }
         },
         "summary": "Plan or apply live target runtime"
+      }
+    },
+    "/v1/manager-preview-approval/github-webhook": {
+      "post": {
+        "operationId": "handle_manager_preview_approval_github_webhook",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-GitHub-Event",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Github-Event",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-GitHub-Delivery",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Github-Delivery",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Hub-Signature-256",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Hub-Signature-256",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Handle manager preview approval GitHub webhook"
+      }
+    },
+    "/v1/manager-preview-approval/reconcile": {
+      "post": {
+        "operationId": "reconcile_manager_preview_approval",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagerPreviewApprovalReconcileEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reconcile Manager Preview Approval",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Reconcile manager preview approval projection"
       }
     },
     "/v1/merge-train/policies/import": {

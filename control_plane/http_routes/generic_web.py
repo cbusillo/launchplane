@@ -102,6 +102,10 @@ from control_plane.http_routes.support import (
     AuthorizationAllows,
     HttpErrorFactory,
 )
+from control_plane.manager_preview_approval_github_webhook import (
+    invalidate_manager_preview_approval_for_pr_best_effort,
+    reconcile_manager_preview_approval_for_pr_best_effort,
+)
 from control_plane.product_promotion_http import (
     build_product_promotion_status,
     product_promotion_intent_matches,
@@ -139,6 +143,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewProfileStore,
     discover_generic_web_preview_desired_state,
+    preview_pr_number_from_slug,
 )
 from control_plane.workflows.odoo_generic_web_post_deploy import (
     generic_web_post_deploy_executor_for_driver_id,
@@ -474,6 +479,19 @@ def build_generic_web_write_route_handlers(
     *,
     dependencies: GenericWebWriteRouteDependencies,
 ) -> GenericWebWriteRouteHandlers:
+    def manager_preview_pr_number(
+        *,
+        profile: LaunchplaneProductProfileRecord,
+        anchor_pr_number: int | None,
+        preview_slug: str,
+    ) -> int | None:
+        if anchor_pr_number is not None:
+            return anchor_pr_number
+        return preview_pr_number_from_slug(
+            preview_slug=preview_slug,
+            slug_template=profile.preview.slug_template,
+        )
+
     def require_product_promotion_intent(
         *,
         record_store: object,
@@ -573,6 +591,44 @@ def build_generic_web_write_route_handlers(
                 trace_id=trace_id,
                 code="promotion_target_changed",
                 message="The production provider target changed before promotion execution.",
+            )
+
+    def require_current_manager_preview_approval(
+        *,
+        record_store: object,
+        profile: LaunchplaneProductProfileRecord,
+        lane: ProductLaneProfile,
+        trace_id: str,
+    ) -> None:
+        try:
+            current_profile, current_lane, status = build_product_promotion_status(
+                record_store=record_store,
+                product=profile.product,
+                destination_environment=lane.instance,
+                action_allowed=lambda _action, _product, _context, _instances: True,
+                workflow_credentials_ready=lambda _context: True,
+            )
+        except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="manager_preview_approval_unavailable",
+                message="Manager preview approval could not be evaluated for live promotion.",
+            ) from error
+        decision = status.manager_preview_approval
+        if (
+            current_profile != profile
+            or current_lane != lane
+            or (decision is not None and decision.status != "approved")
+        ):
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="manager_preview_approval_required",
+                message=(
+                    "Live promotion requires current manager approval for the exact testing "
+                    "artifact and serving preview."
+                ),
             )
 
     async def write_generic_web_rollback_plan(
@@ -1142,6 +1198,18 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
+        pr_number = manager_preview_pr_number(
+            profile=profile,
+            anchor_pr_number=refresh_request.refresh.anchor_pr_number,
+            preview_slug=refresh_request.refresh.preview_slug,
+        )
+        if pr_number is not None:
+            reconcile_manager_preview_approval_for_pr_best_effort(
+                repository=profile.repository,
+                pr_number=pr_number,
+                record_store=record_store,
+                control_plane_root=dependencies.control_plane_root,
+            )
         response = accepted_evidence_response(
             trace_id=trace_id,
             records=records,
@@ -1236,6 +1304,24 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
+        pr_number = manager_preview_pr_number(
+            profile=profile,
+            anchor_pr_number=destroy_request.destroy.anchor_pr_number,
+            preview_slug=destroy_request.destroy.preview_slug,
+        )
+        if pr_number is not None and result.get("destroy_status") == "pass":
+            invalidate_manager_preview_approval_for_pr_best_effort(
+                repository=profile.repository,
+                pr_number=pr_number,
+                reason="The serving preview was destroyed.",
+                source_event_kind="preview_destroy",
+                source_event_id=(
+                    f"{profile.product}:{profile.preview.context}:{pr_number}:"
+                    f"{str(result.get('destroy_finished_at') or '').strip()}"
+                ),
+                record_store=record_store,
+                control_plane_root=dependencies.control_plane_root,
+            )
         response = accepted_evidence_response(
             trace_id=trace_id,
             records=records,
@@ -1481,10 +1567,22 @@ def build_generic_web_write_route_handlers(
                 replayed_response.model_dump(mode="json")
             )
         if live_promotion:
+            require_current_manager_preview_approval(
+                record_store=record_store,
+                profile=profile,
+                lane=lane,
+                trace_id=trace_id,
+            )
 
             def validate_live_promotion(
                 resolved_deploy_target: GenericWebResolvedDeployTarget,
             ) -> None:
+                require_current_manager_preview_approval(
+                    record_store=record_store,
+                    profile=profile,
+                    lane=lane,
+                    trace_id=trace_id,
+                )
                 require_product_promotion_target_snapshot(
                     record_store=record_store,
                     lane=lane,
@@ -1898,6 +1996,12 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
+        reconcile_manager_preview_approval_for_pr_best_effort(
+            repository=profile.repository,
+            pr_number=verification_request.verification.anchor_pr_number,
+            record_store=record_store,
+            control_plane_root=dependencies.control_plane_root,
+        )
         response = accepted_evidence_response(
             trace_id=trace_id,
             records=generic_web_verification_response_records(result),

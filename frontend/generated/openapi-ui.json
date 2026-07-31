@@ -6551,6 +6551,98 @@
         "title": "LaunchplaneProductProfileRecord",
         "type": "object"
       },
+      "ManagerPreviewApprovalDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "default": "",
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "current_binding_sha256": {
+            "default": "",
+            "title": "Current Binding Sha256",
+            "type": "string"
+          },
+          "evaluated_at": {
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "event_id": {
+            "default": "",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "manager_github_id": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Manager Github Id",
+            "type": "integer"
+          },
+          "manager_login": {
+            "default": "",
+            "title": "Manager Login",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "reason_code": {
+            "enum": [
+              "approval_missing",
+              "approval_valid",
+              "changes_requested",
+              "approval_revoked",
+              "approval_stale",
+              "preview_inactive",
+              "serving_generation_missing",
+              "serving_generation_mismatch",
+              "generation_not_ready",
+              "generation_verification_failed",
+              "preview_identity_mismatch",
+              "artifact_identity_missing",
+              "runtime_identity_missing",
+              "runtime_identity_mismatch",
+              "policy_unavailable"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "approved",
+              "changes_requested",
+              "revoked",
+              "stale",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id",
+          "current_binding_sha256",
+          "evaluated_at",
+          "event_id",
+          "manager_github_id",
+          "manager_login",
+          "reason",
+          "reason_code",
+          "schema_version",
+          "status"
+        ],
+        "title": "ManagerPreviewApprovalDecision",
+        "type": "object"
+      },
       "MergeTrainAdmissionDecision": {
         "additionalProperties": false,
         "properties": {
@@ -13700,6 +13792,17 @@
           },
           "live_confirmations": {
             "$ref": "#/components/schemas/ProductPromotionLiveConfirmations"
+          },
+          "manager_preview_approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagerPreviewApprovalDecision"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "product": {
             "title": "Product",
