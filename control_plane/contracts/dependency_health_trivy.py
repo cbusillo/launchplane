@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 import hashlib
 import re
 
@@ -81,7 +82,9 @@ def dependency_health_snapshot_from_trivy_report(
     schema_version = report.get("SchemaVersion")
     if type(schema_version) is not int or schema_version != 2:
         raise ValueError("Trivy report SchemaVersion must be the integer 2")
-    generated_at = _required_string(report, "CreatedAt", label="Trivy report CreatedAt")
+    generated_at = _normalize_trivy_generated_at(
+        _required_string(report, "CreatedAt", label="Trivy report CreatedAt")
+    )
     _required_string(report, "ArtifactName", label="Trivy report ArtifactName")
     _required_string(report, "ArtifactType", label="Trivy report ArtifactType")
     if "Results" not in report:
@@ -257,6 +260,19 @@ def _normalize_trivy_severity(value: str) -> DependencyHealthSeverity:
         return _TRIVY_SEVERITY_MAP[normalized]
     except KeyError as error:
         raise ValueError(f"unsupported Trivy vulnerability severity: {normalized}") from error
+
+
+def _normalize_trivy_generated_at(value: str) -> str:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as error:
+        raise ValueError("Trivy report CreatedAt must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("Trivy report CreatedAt must include a UTC offset")
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _normalize_trivy_target(value: str) -> str:

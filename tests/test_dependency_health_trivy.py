@@ -190,6 +190,27 @@ class DependencyHealthTrivyAdapterTests(unittest.TestCase):
 
         self.assertEqual(snapshot.findings, ())
 
+    def test_adapter_normalizes_created_at_offset_to_utc(self) -> None:
+        report = _report([])
+        report["CreatedAt"] = "2026-07-31T14:28:11.136669-04:00"
+
+        snapshot = dependency_health_snapshot_from_trivy_report(
+            report=report,
+            provenance=_provenance(),
+        )
+
+        self.assertEqual(snapshot.generated_at, "2026-07-31T18:28:11.136669Z")
+
+    def test_adapter_rejects_created_at_without_offset(self) -> None:
+        report = _report([])
+        report["CreatedAt"] = "2026-07-31T18:28:11"
+
+        with self.assertRaisesRegex(ValueError, "must include a UTC offset"):
+            dependency_health_snapshot_from_trivy_report(
+                report=report,
+                provenance=_provenance(),
+            )
+
     def test_adapter_rejects_missing_results(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires Results"):
             dependency_health_snapshot_from_trivy_report(
