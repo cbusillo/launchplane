@@ -19,6 +19,7 @@ name: Manage Launchplane Authorization
         type: choice
         options:
           - primary
+          - manager-preview-approval
           - product-health-monitoring
           - odoo-route-binding
           - odoo-external-route-binding
@@ -50,7 +51,7 @@ permissions:
 jobs:
   reconcile-primary:
     if: ${{ inputs.managed_set == 'primary' }}
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
     with:
       mode: ${{ inputs.mode }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
@@ -59,9 +60,21 @@ jobs:
     secrets:
       managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}
 
+  reconcile-manager-preview-approval:
+    if: ${{ inputs.managed_set == 'manager-preview-approval' }}
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
+    with:
+      mode: ${{ inputs.mode }}
+      expected_managed_set_id: operator.manager-preview-approval
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+      related_issue: ${{ inputs.related_issue }}
+    secrets:
+      managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON }}
+
   reconcile-product-health-monitoring:
     if: ${{ inputs.managed_set == 'product-health-monitoring' }}
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
     with:
       mode: ${{ inputs.mode }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
@@ -72,7 +85,7 @@ jobs:
 
   reconcile-odoo-route-binding:
     if: ${{ inputs.managed_set == 'odoo-route-binding' }}
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
     with:
       mode: ${{ inputs.mode }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
@@ -83,7 +96,7 @@ jobs:
 
   reconcile-odoo-external-route-binding:
     if: ${{ inputs.managed_set == 'odoo-external-route-binding' }}
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
     with:
       mode: ${{ inputs.mode }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
@@ -94,7 +107,7 @@ jobs:
 
   reconcile-odoo-testing-ingress-route:
     if: ${{ inputs.managed_set == 'odoo-testing-ingress-route' }}
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
     with:
       mode: ${{ inputs.mode }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
@@ -105,7 +118,7 @@ jobs:
 
   reconcile-odoo-testing-route-binding-refresh:
     if: ${{ inputs.managed_set == 'odoo-testing-route-binding-refresh' }}
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
     with:
       mode: ${{ inputs.mode }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
@@ -116,7 +129,7 @@ jobs:
 
   reconcile-odoo-testing-target-replacement:
     if: ${{ inputs.managed_set == 'odoo-testing-target-replacement' }}
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
     with:
       mode: ${{ inputs.mode }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
@@ -127,7 +140,7 @@ jobs:
 
   reconcile-odoo-opw-preview-feedback:
     if: ${{ inputs.managed_set == 'odoo-opw-preview-feedback' }}
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
     with:
       mode: ${{ inputs.mode }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
@@ -138,7 +151,7 @@ jobs:
 
   reconcile-odoo-opw-production-enrollment:
     if: ${{ inputs.managed_set == 'odoo-opw-production-enrollment' }}
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
     with:
       mode: ${{ inputs.mode }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
@@ -149,7 +162,7 @@ jobs:
 
   reconcile-odoo-production-enrollment:
     if: ${{ inputs.managed_set == 'odoo-production-enrollment' }}
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
     with:
       mode: ${{ inputs.mode }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
@@ -160,7 +173,7 @@ jobs:
 
   reconcile-odoo-production-operation-read:
     if: ${{ inputs.managed_set == 'odoo-production-operation-read' }}
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
     with:
       mode: ${{ inputs.mode }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
@@ -171,7 +184,7 @@ jobs:
 
   reconcile-odoo-production-backup-restore:
     if: ${{ inputs.managed_set == 'odoo-production-backup-restore' }}
-    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
     with:
       mode: ${{ inputs.mode }}
       reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}

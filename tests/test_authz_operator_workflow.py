@@ -31,6 +31,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             managed_set_input["options"],
             [
                 "primary",
+                "manager-preview-approval",
                 "product-health-monitoring",
                 "odoo-route-binding",
                 "odoo-external-route-binding",
@@ -48,6 +49,10 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             "reconcile-primary": (
                 "${{ inputs.managed_set == 'primary' }}",
                 "${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-manager-preview-approval": (
+                "${{ inputs.managed_set == 'manager-preview-approval' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON }}",
             ),
             "reconcile-product-health-monitoring": (
                 "${{ inputs.managed_set == 'product-health-monitoring' }}",
@@ -101,7 +106,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                     self.dispatch_workflow.job_uses(job_name),
                     "cbusillo/launchplane/.github/workflows/"
                     "reusable-authz-policy-reconcile.yml@"
-                    "4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd",
+                    "39aecc250d6dee91204e24673725bd1ea1ca6bda",
                 )
                 self.assertEqual(
                     self.dispatch_workflow.job_permissions(job_name),
@@ -111,7 +116,13 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 self.assertEqual(dispatch_job["if"], condition)
                 dispatch_inputs = dispatch_job["with"]
                 assert isinstance(dispatch_inputs, dict)
-                self.assertNotIn("expected_managed_set_id", dispatch_inputs)
+                if job_name == "reconcile-manager-preview-approval":
+                    self.assertEqual(
+                        dispatch_inputs["expected_managed_set_id"],
+                        "operator.manager-preview-approval",
+                    )
+                else:
+                    self.assertNotIn("expected_managed_set_id", dispatch_inputs)
                 dispatch_secrets = dispatch_job["secrets"]
                 assert isinstance(dispatch_secrets, dict)
                 self.assertEqual(dispatch_secrets["managed_set_json"], expected_secret)
