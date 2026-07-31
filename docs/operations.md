@@ -69,9 +69,12 @@ manifest for every repository, lane, runner, and systemd service on the host;
 the executor cross-checks that manifest against local service discovery and
 persists only public hashes and counts. Missing or unauthorized GitHub sources,
 manifest/service disagreement, stale evidence, or changed recovery inputs block
-mutation. Every mutating action also requires the host-local durable audit spool
-described in `docs/runner-host-hygiene.md`; do not invoke the executor from an
-arbitrary checkout or bypass its planned/action-started/terminal evidence flow.
+mutation. The workflow derives the exact evidence repository set from runtime
+topology and mints a short-lived, read-only GitHub App installation token for
+each run; it does not fall back to a PAT or runner-registration credential.
+Every mutating action also requires the host-local durable audit spool described
+in `docs/runner-host-hygiene.md`; do not invoke the executor from an arbitrary
+checkout or bypass its planned/action-started/terminal evidence flow.
 
 After the provider-target audit is clean, use the manual
 `Product Environment Evidence` workflow to collect read-model evidence through

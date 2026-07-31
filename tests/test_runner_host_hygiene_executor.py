@@ -59,6 +59,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.runner_host_hygiene_audit_spool import (
     RunnerHostHygieneAuditSpool,
 )
+from tests.support.workflows import load_workflow
 
 
 _VOLUME_RM_PREFIX = (
@@ -484,9 +485,9 @@ class _PreActionCrashingCommandRunner(_CommandRunner):
 
 class RunnerHostHygieneWorkflowTests(unittest.TestCase):
     def test_workflow_runs_on_ops_lane_without_xargs_dependency(self) -> None:
-        workflow_text = Path(".github/workflows/runner-host-hygiene.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow_path = Path(".github/workflows/runner-host-hygiene.yml")
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        workflow = load_workflow(workflow_path)
 
         self.assertIn(
             "    runs-on:\n"
@@ -527,7 +528,40 @@ class RunnerHostHygieneWorkflowTests(unittest.TestCase):
         self.assertIn("--generated-run-cache-root", workflow_text)
         self.assertIn("--target-generated-cache-key", workflow_text)
         self.assertNotIn("LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN", workflow_text)
-        self.assertIn("LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_READ_TOKEN", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_READ_TOKEN", workflow_text)
+
+        token_step = workflow.step_named("runner-host-hygiene", "Mint GitHub read token")
+        self.assertIsNotNone(token_step)
+        assert token_step is not None
+        self.assertEqual(
+            token_step.uses,
+            "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
+        )
+        self.assertEqual(token_step.data.get("id"), "github-read-token")
+        self.assertEqual(
+            token_step.with_values.get("client-id"),
+            "${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_CLIENT_ID }}",
+        )
+        self.assertEqual(
+            token_step.with_values.get("private-key"),
+            "${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY }}",
+        )
+        self.assertEqual(token_step.with_values.get("owner"), "${{ github.repository_owner }}")
+        self.assertNotIn("repositories", token_step.with_values)
+        self.assertEqual(token_step.with_values.get("permission-actions"), "read")
+        self.assertEqual(token_step.with_values.get("permission-administration"), "read")
+        self.assertNotIn("skip-token-revoke", token_step.with_values)
+
+        installation_step = workflow.step_named(
+            "runner-host-hygiene", "Validate GitHub App installation scope"
+        )
+        self.assertIsNotNone(installation_step)
+        assert installation_step is not None
+        self.assertIn(
+            "control_plane.workflows.runner_host_github_app",
+            installation_step.run,
+        )
+        self.assertIn("GH_TOKEN: ${{ steps.github-read-token.outputs.token }}", workflow_text)
 
 
 class RunnerHostHygieneExecutorTests(unittest.TestCase):

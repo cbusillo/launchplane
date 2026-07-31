@@ -328,17 +328,35 @@ The workflow requires these repository variables:
   retained-space ceiling for the daemon-global default BuildKit cache. The
   executor rejects values below 8 GiB. Capacity remains runtime authority;
   production code contains no host-specific cache budget.
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_CLIENT_ID`, as the non-secret
+  client ID for the dedicated runner-host hygiene GitHub App.
 
-`LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_READ_TOKEN` is required for shared-host
-idle convergence. Scope it to every repository named by the runtime host
-binding manifest with read-only Actions and Administration permissions: Actions
-reads provide active workflow and job state, while Administration read is
-needed to list self-hosted runner registrations. A repository-level runner API
-that cannot see the named runner fails closed as `source_missing`; organization
-or enterprise registrations require an equivalent reader before they can be
-listed in the manifest. Generated-cache run-state reads use only Actions read.
-The credential grants no runner-registration write or repository-content write
-authority.
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY` is the repository
+secret for the dedicated runner-host hygiene GitHub App. Install the App only on
+repositories named by the runtime host binding manifest or generated-cache
+roots, with read-only Actions and Administration permissions. Actions reads
+provide active workflow and job state, while Administration read is needed to
+list self-hosted runner registrations; GitHub adds Metadata read implicitly.
+The workflow derives the exact repository list from runtime inputs, rejects
+cross-owner scopes that cannot be represented by one installation token, and
+mints a short-lived token through the commit-pinned official GitHub action. The
+App installation itself must contain exactly the runtime-derived repository
+set. The workflow validates that set through the installation API using only
+public-safe counts and digests; it does not pass repository names to the token
+action because the action logs explicit repository inputs. The token requests
+only Actions read and Administration read, and the action revokes it at job
+completion. There is no PAT, default `GITHUB_TOKEN`, or runner-registration-token
+fallback. Missing App configuration, missing or extra installation coverage, or
+an API that cannot see a named runner fails closed.
+Organization or enterprise registrations require an equivalent reader before
+they can be listed in the manifest. Generated-cache run-state reads use only
+Actions read. Neither the App nor its installation token grants
+runner-registration write or repository-content write authority.
+
+GitHub App installation tokens are intentionally short-lived. Keep the current
+scheduled action fan-out comfortably below the one-hour token lifetime; if
+maintenance grows toward that boundary, split it into independently tokenized
+jobs rather than adding a longer-lived credential or refresh fallback.
 
 The executor fails closed unless the process user matches the requested service
 user, the GitHub repository matches the requested repository scope, retained

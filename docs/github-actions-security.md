@@ -42,6 +42,15 @@ credential resolved outside PR code. Tenant workflows may request preview
 lifecycle operations, but they cannot mint a passing manager status or provide
 the status-writer token.
 
+The runner-host hygiene workflow's GitHub App token action receives a private
+key and can mint installation credentials, so its reviewed commit pin and input
+permissions are part of the credential boundary. The App is installed on the
+exact runtime repository set, the workflow verifies that installation through a
+redacted count/digest comparison, requests only Actions read and Administration
+read, and retains the action's default end-of-job token revocation. Repository
+names are not passed to the action because explicit repository inputs are
+written to the workflow log by the upstream implementation.
+
 ## Policy
 
 - A remote action source must be listed in
