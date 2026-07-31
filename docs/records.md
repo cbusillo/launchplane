@@ -1678,6 +1678,17 @@ run` is the foreground loop intended for an external process supervisor, and
   environment key for each managed secret binding, and the driver asserts those
   keys before invoking Odoo.
 
+## Tenant Repository Classification Record
+
+- Persisted as `launchplane_tenant_repository_classifications` records under DB authority.
+- Records classify GitHub repositories by numeric `repository_id` as either `engineering` (normal merge flow) or `tenant_ui` (manager preview approval required by default).
+- Each revision is immutable and identified by a deterministic record ID (`tenant-repository-classification-<repository_id>-r<revision>`) and payload SHA-256 digest.
+- Monotonically increasing revisions (`revision=1`, `revision=2`, ...) form an append-only classification ledger. Revision 1 must not specify `supersedes_record_id`; subsequent revisions must set `supersedes_record_id` equal to the active current record ID.
+- Classification writes use CAS (compare-and-swap) operator recovery: callers supply `expected_current_record_id` (empty when no record exists). Mismatches fail closed with HTTP 409 conflict, and sequence gaps or invalid supersedes links fail closed with HTTP 400. Exact same-payload replays are idempotent and return HTTP 200 replayed status.
+- Classification records are pure factual classification authority without heuristics, wildcard matching, or PR label fallbacks. Identity matches require exact `repository_id`, `repository_owner_id`, `repository` owner/name, `product`, and `context`.
+- Pure tenant merge eligibility evaluates candidates against this DB authority: engineering repos take the engineering fast path, while tenant UI repos require exact manager preview approval (or optional fast-path waiver/maintenance evidence bound to the exact head SHA and classification digest).
+- This record and pure evaluation remain separate from scheduler merge train admission (`merge_train_admission`).
+
 ## Runtime Key-Safety Policy Record
 
 - One record per imported runtime key-safety policy version under

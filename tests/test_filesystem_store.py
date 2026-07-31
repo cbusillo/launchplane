@@ -138,6 +138,8 @@ from control_plane.contracts.tenant_merge_eligibility import (
 )
 from control_plane.storage.filesystem import (
     FilesystemRecordStore,
+)
+from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationConflictError,
 )
 from control_plane.storage.postgres import PostgresRecordStore

@@ -191,7 +191,9 @@ from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationLookup,
     TenantRepositoryClassificationRecord,
 )
-from control_plane.storage.filesystem import TenantRepositoryClassificationConflictError
+from control_plane.tenant_repository_classification import (
+    TenantRepositoryClassificationConflictError,
+)
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
     build_cancelled_verireel_prod_backup_gate_record,

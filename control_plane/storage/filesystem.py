@@ -172,8 +172,9 @@ CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
 ProviderTargetCreateStatus = Literal["created", "exists"]
 
 
-class TenantRepositoryClassificationConflictError(ValueError):
-    """Raised when immutable repository classification history is replayed differently."""
+from control_plane.tenant_repository_classification import (
+    TenantRepositoryClassificationConflictError,
+)
 
 
 class _AuthorityBundleStageEntry(BaseModel):

@@ -2848,6 +2848,21 @@ driver results. Its descriptor remains discoverable. The older
 FastAPI for explicit operator workflows and diagnostics, but product repos
 should prefer the thin `prod-promotion-run` path.
 
+### Tenant Admission & Repository Classification API Boundary
+
+`GET /v1/work-graph/tenant-admission/repository-classification` and `POST /v1/tenant-admission/repository-classifications/apply` provide DB-backed authority for repository classification.
+
+- `GET /v1/work-graph/tenant-admission/repository-classification?repository_id=...`:
+  Returns the current classification read model (`missing` or `available`, active record, history count, generated_at). Requires `tenant_repository_classification.read` authorization against Launchplane service context (`launchplane`).
+- `POST /v1/tenant-admission/repository-classifications/apply`:
+  Accepts a strict envelope (`schema_version`, `mode: dry_run|apply`, `expected_current_record_id`, `record`).
+  Terminal agents are denied (HTTP 403). Requires `tenant_repository_classification.write` authorization against Launchplane service context (`launchplane`).
+  Apply mode requires a non-empty `Idempotency-Key` header and a database-backed record store capability (returns HTTP 503 `database_storage_required` if unsupported).
+  Validation uses CAS (compare-and-swap): first revision must be revision 1 with no `supersedes_record_id` and empty `expected_current_record_id`. Subsequent revisions must increment revision by 1, set `supersedes_record_id` to the active current record ID, and match `expected_current_record_id`. Mismatches fail closed with HTTP 409 conflict, and sequence gaps fail closed with HTTP 400.
+  Dry-run mode performs full CAS/sequence validation without persisting changes.
+  Pure tenant merge eligibility evaluation uses this DB authority without heuristics, PR label fallbacks, or wildcard matching. Repositories classified as `engineering` take the normal engineering fast path. Repositories classified as `tenant_ui` default to requiring exact manager preview approval (or optional fast-path waiver/maintenance evidence bound to the exact head SHA and classification digest).
+  This pure evaluator remains internal and separate from scheduler merge train admission (`merge_train_admission`).
+
 The CM tenant preview workflow uses tenant-product scope for both artifact
 publish input/evidence and preview lifecycle requests. Artifact publish still
 uses Odoo driver routes, but source-ref build metadata resolves through the

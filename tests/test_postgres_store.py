@@ -187,7 +187,9 @@ from control_plane.service_auth import (
 )
 from control_plane.service_human_auth import LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.filesystem import TenantRepositoryClassificationConflictError
+from control_plane.tenant_repository_classification import (
+    TenantRepositoryClassificationConflictError,
+)
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.postgres import (
     Base,

@@ -34,7 +34,6 @@ TenantMergeEligibilityReasonCode = Literal[
     "classification_missing",
     "classification_unknown",
     "classification_ambiguous",
-    "classification_stale",
     "classification_identity_drift",
 ]
 
@@ -187,11 +186,6 @@ class TenantAdmissionPathResult(BaseModel):
         if self.state == "satisfied" and (not self.evidence_id or not self.evidence_digest):
             raise ValueError("Satisfied path result requires evidence_id and evidence_digest")
         return self
-
-
-TenantEligibilityPathResult = TenantAdmissionPathResult
-TenantMergeEligibilityPathResult = TenantAdmissionPathResult
-TenantAdmissionEvidenceInput = TenantAdmissionPathResult
 
 
 class TenantMergeEligibilityEvidenceInputs(BaseModel):
@@ -570,8 +564,6 @@ def _determine_blocked_reason(
                     "evidence_identity_drift",
                     "evidence_head_mismatch",
                     "evidence_policy_drift",
-                    "evidence_denied",
-                    "evidence_unavailable",
                 }:
                     return eval_res.blocked_reason
 

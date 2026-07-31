@@ -181,11 +181,17 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/github/issues": "read_work_graph_issue_inbox",
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
+    "/v1/work-graph/tenant-admission/repository-classification": (
+        "read_tenant_repository_classification"
+    ),
 }
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/rank": "rank_work_graph_snapshot",
+    "/v1/tenant-admission/repository-classifications/apply": (
+        "apply_tenant_repository_classification"
+    ),
     "/v1/products/{product}/environments/{environment}/config/apply": (
         "apply_product_environment_config"
     ),
