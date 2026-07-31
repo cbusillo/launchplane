@@ -9,24 +9,15 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
 TenantRepositoryClassificationKind = Literal["engineering", "tenant_ui"]
 TenantRepositoryClassificationLookupStatus = Literal["available", "missing", "unknown"]
-TenantTrustedMaintenanceDecision = Literal["trusted_maintenance", "not_trusted"]
-TenantManagerPreviewApprovalStatus = Literal[
-    "pending",
-    "approved",
-    "changes_requested",
-    "revoked",
-    "stale",
-    "unavailable",
+TenantAdmissionPathKind = Literal[
+    "trusted_maintenance", "technical_human_waiver", "manager_preview_approval"
 ]
+TenantAdmissionPathState = Literal["satisfied", "pending", "denied", "stale", "unavailable"]
 TenantMergeEligibilityStatus = Literal["admitted", "blocked"]
 TenantMergeEligibilityEvidenceKind = Literal[
-    "none",
-    "trusted_maintenance",
-    "technical_human_waiver",
-    "manager_preview_approval",
+    "none", "trusted_maintenance", "technical_human_waiver", "manager_preview_approval"
 ]
 TenantMergeEligibilityReasonCode = Literal[
     "engineering_normal_flow",
@@ -34,14 +25,17 @@ TenantMergeEligibilityReasonCode = Literal[
     "technical_human_waiver_admitted",
     "manager_preview_approved",
     "manager_preview_required",
+    "evidence_denied",
+    "evidence_stale",
+    "evidence_unavailable",
+    "evidence_identity_drift",
+    "evidence_head_mismatch",
+    "evidence_policy_drift",
     "classification_missing",
     "classification_unknown",
     "classification_ambiguous",
     "classification_stale",
     "classification_identity_drift",
-    "evidence_stale",
-    "evidence_identity_drift",
-    "evidence_head_mismatch",
 ]
 
 _GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
@@ -52,6 +46,8 @@ class TenantMergeCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
     repository_id: str
     repository_owner_id: str
     repository: str
@@ -59,9 +55,11 @@ class TenantMergeCandidate(BaseModel):
     head_sha: str
 
     @model_validator(mode="after")
-    def _validate_candidate(self) -> "TenantMergeCandidate":
+    def _validate_candidate(self) -> TenantMergeCandidate:
         if self.schema_version != 1:
             raise ValueError("Unsupported tenant merge candidate schema version.")
+        self.product = _required_token(self.product, "product")
+        self.context = _required_token(self.context, "context")
         self.repository_id = _required_decimal_id(self.repository_id, "repository_id")
         self.repository_owner_id = _required_decimal_id(
             self.repository_owner_id, "repository_owner_id"
@@ -79,14 +77,18 @@ class TenantRepositoryClassificationRecord(BaseModel):
     repository_id: str
     repository_owner_id: str
     repository: str
+    product: str
+    context: str
     classification_kind: TenantRepositoryClassificationKind
     classification_revision: int = Field(ge=1)
     classified_at: str
-    current: bool = True
+    source: str
+    reason: str
+    supersedes_record_id: str | None = None
     classification_digest: str = ""
 
     @model_validator(mode="after")
-    def _validate_record(self) -> "TenantRepositoryClassificationRecord":
+    def _validate_record(self) -> TenantRepositoryClassificationRecord:
         if self.schema_version != 1:
             raise ValueError("Unsupported tenant repository classification schema version.")
         self.repository_id = _required_decimal_id(self.repository_id, "repository_id")
@@ -94,16 +96,25 @@ class TenantRepositoryClassificationRecord(BaseModel):
             self.repository_owner_id, "repository_owner_id"
         )
         self.repository = _normalize_repository(self.repository, "repository")
+        self.product = _required_token(self.product, "product")
+        self.context = _required_token(self.context, "context")
         self.classified_at = _normalize_utc_timestamp(self.classified_at, "classified_at")
+        self.source = _required_token(self.source, "source")
+        self.reason = _required_token(self.reason, "reason")
+        if self.supersedes_record_id is not None:
+            self.supersedes_record_id = _required_token(
+                self.supersedes_record_id, "supersedes_record_id"
+            )
 
         computed_record_id = build_tenant_repository_classification_record_id(
-            repository_id=self.repository_id
+            repository_id=self.repository_id,
+            classification_revision=self.classification_revision,
         )
         if self.record_id:
             self.record_id = _required_token(self.record_id, "record_id")
             if self.record_id != computed_record_id:
                 raise ValueError(
-                    "tenant repository classification record_id must be keyed by repository_id"
+                    "tenant repository classification record_id must include repository_id and classification_revision"
                 )
         else:
             self.record_id = computed_record_id
@@ -131,7 +142,7 @@ class TenantRepositoryClassificationLookup(BaseModel):
     detail: str = ""
 
     @model_validator(mode="after")
-    def _validate_lookup(self) -> "TenantRepositoryClassificationLookup":
+    def _validate_lookup(self) -> TenantRepositoryClassificationLookup:
         if self.schema_version != 1:
             raise ValueError("Unsupported tenant repository classification lookup schema version.")
         self.detail = self.detail.strip()
@@ -142,110 +153,75 @@ class TenantRepositoryClassificationLookup(BaseModel):
         return self
 
 
-class TenantTrustedMaintenanceEvidence(BaseModel):
+class TenantAdmissionPathResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    evidence_id: str
-    scope: TenantMergeCandidate
-    decision: TenantTrustedMaintenanceDecision
-    decided_at: str
-    current: bool = True
+    path_kind: TenantAdmissionPathKind
+    state: TenantAdmissionPathState
+    evidence_id: str = ""
     evidence_digest: str = ""
+    repository_id: str
+    repository_owner_id: str
+    repository: str
+    pull_request_number: int = Field(ge=1)
+    head_sha: str
+    classification_digest: str
 
     @model_validator(mode="after")
-    def _validate_evidence(self) -> "TenantTrustedMaintenanceEvidence":
+    def _validate_path_result(self) -> TenantAdmissionPathResult:
         if self.schema_version != 1:
-            raise ValueError("Unsupported trusted maintenance evidence schema version.")
-        self.evidence_id = _required_token(self.evidence_id, "evidence_id")
-        self.decided_at = _normalize_utc_timestamp(self.decided_at, "decided_at")
-        computed_digest = tenant_trusted_maintenance_evidence_digest(self)
+            raise ValueError("Unsupported tenant admission path result schema version.")
+        self.evidence_id = self.evidence_id.strip()
         if self.evidence_digest:
             self.evidence_digest = _normalize_sha256(self.evidence_digest, "evidence_digest")
-            if self.evidence_digest != computed_digest:
-                raise ValueError("trusted maintenance evidence_digest does not match payload")
-        else:
-            self.evidence_digest = computed_digest
-        return self
-
-
-class TenantTechnicalHumanWaiverEvidence(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    waiver_id: str
-    scope: TenantMergeCandidate
-    waiver_kind: Literal["technical_only"] = "technical_only"
-    created_by_subject_kind: Literal["github_human"] = "github_human"
-    selected_by_subject_kind: Literal["github_human"] = "github_human"
-    authorized_human_github_id: int = Field(ge=1)
-    authorized_human_login: str
-    authorized_at: str
-    current: bool = True
-    waiver_digest: str = ""
-
-    @model_validator(mode="after")
-    def _validate_waiver(self) -> "TenantTechnicalHumanWaiverEvidence":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported tenant technical human waiver schema version.")
-        self.waiver_id = _required_token(self.waiver_id, "waiver_id")
-        self.authorized_human_login = _required_token(
-            self.authorized_human_login, "authorized_human_login"
+        self.repository_id = _required_decimal_id(self.repository_id, "repository_id")
+        self.repository_owner_id = _required_decimal_id(
+            self.repository_owner_id, "repository_owner_id"
         )
-        self.authorized_at = _normalize_utc_timestamp(self.authorized_at, "authorized_at")
-        computed_digest = tenant_technical_human_waiver_digest(self)
-        if self.waiver_digest:
-            self.waiver_digest = _normalize_sha256(self.waiver_digest, "waiver_digest")
-            if self.waiver_digest != computed_digest:
-                raise ValueError("technical human waiver_digest does not match payload")
-        else:
-            self.waiver_digest = computed_digest
+        self.repository = _normalize_repository(self.repository, "repository")
+        self.head_sha = _normalize_git_sha(self.head_sha, "head_sha")
+        self.classification_digest = _normalize_sha256(
+            self.classification_digest, "classification_digest"
+        )
+        if self.state == "satisfied" and (not self.evidence_id or not self.evidence_digest):
+            raise ValueError("Satisfied path result requires evidence_id and evidence_digest")
         return self
 
 
-class TenantManagerPreviewApprovalEvidence(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    approval_id: str
-    scope: TenantMergeCandidate
-    status: TenantManagerPreviewApprovalStatus
-    binding_sha256: str
-    evaluated_at: str
-    current: bool = True
-    event_id: str = ""
-    approval_digest: str = ""
-
-    @model_validator(mode="after")
-    def _validate_approval(self) -> "TenantManagerPreviewApprovalEvidence":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported tenant manager preview approval evidence schema version.")
-        self.approval_id = _required_token(self.approval_id, "approval_id")
-        self.event_id = self.event_id.strip()
-        self.binding_sha256 = _normalize_sha256(self.binding_sha256, "binding_sha256")
-        self.evaluated_at = _normalize_utc_timestamp(self.evaluated_at, "evaluated_at")
-        computed_digest = tenant_manager_preview_approval_evidence_digest(self)
-        if self.approval_digest:
-            self.approval_digest = _normalize_sha256(self.approval_digest, "approval_digest")
-            if self.approval_digest != computed_digest:
-                raise ValueError("manager preview approval_digest does not match payload")
-        else:
-            self.approval_digest = computed_digest
-        return self
+TenantEligibilityPathResult = TenantAdmissionPathResult
+TenantMergeEligibilityPathResult = TenantAdmissionPathResult
+TenantAdmissionEvidenceInput = TenantAdmissionPathResult
 
 
 class TenantMergeEligibilityEvidenceInputs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    trusted_maintenance: TenantTrustedMaintenanceEvidence | None = None
-    technical_human_waiver: TenantTechnicalHumanWaiverEvidence | None = None
-    manager_preview_approval: TenantManagerPreviewApprovalEvidence | None = None
+    trusted_maintenance: TenantAdmissionPathResult | None = None
+    technical_human_waiver: TenantAdmissionPathResult | None = None
+    manager_preview_approval: TenantAdmissionPathResult | None = None
 
     @model_validator(mode="after")
-    def _validate_inputs(self) -> "TenantMergeEligibilityEvidenceInputs":
+    def _validate_inputs(self) -> TenantMergeEligibilityEvidenceInputs:
         if self.schema_version != 1:
             raise ValueError("Unsupported tenant merge eligibility evidence input schema version.")
+        if self.trusted_maintenance and self.trusted_maintenance.path_kind != "trusted_maintenance":
+            raise ValueError("trusted_maintenance slot must have path_kind 'trusted_maintenance'")
+        if (
+            self.technical_human_waiver
+            and self.technical_human_waiver.path_kind != "technical_human_waiver"
+        ):
+            raise ValueError(
+                "technical_human_waiver slot must have path_kind 'technical_human_waiver'"
+            )
+        if (
+            self.manager_preview_approval
+            and self.manager_preview_approval.path_kind != "manager_preview_approval"
+        ):
+            raise ValueError(
+                "manager_preview_approval slot must have path_kind 'manager_preview_approval'"
+            )
         return self
 
 
@@ -256,6 +232,8 @@ class TenantMergeEligibilityDecision(BaseModel):
     status: TenantMergeEligibilityStatus
     reason_code: TenantMergeEligibilityReasonCode
     detail: str
+    product: str
+    context: str
     repository_id: str
     repository_owner_id: str
     repository: str
@@ -271,10 +249,12 @@ class TenantMergeEligibilityDecision(BaseModel):
     decision_binding_sha256: str = ""
 
     @model_validator(mode="after")
-    def _validate_decision(self) -> "TenantMergeEligibilityDecision":
+    def _validate_decision(self) -> TenantMergeEligibilityDecision:
         if self.schema_version != 1:
             raise ValueError("Unsupported tenant merge eligibility decision schema version.")
         self.detail = _required_token(self.detail, "detail")
+        self.product = _required_token(self.product, "product")
+        self.context = _required_token(self.context, "context")
         self.repository_id = _required_decimal_id(self.repository_id, "repository_id")
         self.repository_owner_id = _required_decimal_id(
             self.repository_owner_id, "repository_owner_id"
@@ -289,16 +269,16 @@ class TenantMergeEligibilityDecision(BaseModel):
             )
         if self.evidence_digest:
             self.evidence_digest = _normalize_sha256(self.evidence_digest, "evidence_digest")
-        if self.status == "admitted" and not self.classification_kind:
-            raise ValueError("admitted tenant merge eligibility decisions require classification")
-        if self.status == "admitted" and not self.classification_digest:
-            raise ValueError(
-                "admitted tenant merge eligibility decisions require classification digest"
-            )
-        if self.status == "admitted" and self.classification_kind == "tenant_ui":
-            if self.evidence_kind == "none" or not self.evidence_id or not self.evidence_digest:
+        if self.status == "admitted":
+            if not self.classification_kind or not self.classification_digest:
+                raise ValueError(
+                    "admitted tenant merge eligibility decisions require classification"
+                )
+            if self.classification_kind == "tenant_ui" and (
+                self.evidence_kind == "none" or not self.evidence_id or not self.evidence_digest
+            ):
                 raise ValueError("tenant UI admissions require binding evidence")
-        if self.status == "blocked" and self.reason_code in {
+        elif self.reason_code in {
             "engineering_normal_flow",
             "trusted_maintenance_admitted",
             "technical_human_waiver_admitted",
@@ -321,30 +301,14 @@ class TenantMergeEligibilityDecision(BaseModel):
         return self.status == "admitted"
 
 
-def build_tenant_repository_classification_record_id(*, repository_id: str) -> str:
-    return (
-        f"tenant-repository-classification-{_required_decimal_id(repository_id, 'repository_id')}"
-    )
+def build_tenant_repository_classification_record_id(
+    *, repository_id: str, classification_revision: int
+) -> str:
+    return f"tenant-repository-classification-{_required_decimal_id(repository_id, 'repository_id')}-r{classification_revision}"
 
 
 def tenant_repository_classification_digest(record: TenantRepositoryClassificationRecord) -> str:
     return _model_sha256(record, exclude={"classification_digest"})
-
-
-def tenant_trusted_maintenance_evidence_digest(
-    evidence: TenantTrustedMaintenanceEvidence,
-) -> str:
-    return _model_sha256(evidence, exclude={"evidence_digest"})
-
-
-def tenant_technical_human_waiver_digest(evidence: TenantTechnicalHumanWaiverEvidence) -> str:
-    return _model_sha256(evidence, exclude={"waiver_digest"})
-
-
-def tenant_manager_preview_approval_evidence_digest(
-    evidence: TenantManagerPreviewApprovalEvidence,
-) -> str:
-    return _model_sha256(evidence, exclude={"approval_digest"})
 
 
 def tenant_merge_eligibility_decision_binding_sha256(
@@ -361,19 +325,15 @@ def evaluate_tenant_merge_eligibility(
     evidence_inputs: TenantMergeEligibilityEvidenceInputs | None = None,
 ) -> TenantMergeEligibilityDecision:
     normalized_evaluated_at = _normalize_utc_timestamp(evaluated_at, "evaluated_at")
-    selection = _select_current_classification(
-        candidate=candidate,
-        lookup=classification_lookup,
-    )
+    selection = _select_current_classification(candidate=candidate, lookup=classification_lookup)
     classification = selection.classification
     if classification is None:
-        reason_code, detail = selection.blocked_reason
         return _decision(
             candidate=candidate,
             classification=None,
             status="blocked",
-            reason_code=reason_code,
-            detail=detail,
+            reason_code=selection.blocked_reason[0],
+            detail=selection.blocked_reason[1],
             evaluated_at=normalized_evaluated_at,
         )
 
@@ -388,81 +348,55 @@ def evaluate_tenant_merge_eligibility(
         )
 
     evidence = evidence_inputs or TenantMergeEligibilityEvidenceInputs()
-    first_blocked_reason: tuple[TenantMergeEligibilityReasonCode, str] | None = None
-
-    trusted_maintenance_evidence = evidence.trusted_maintenance
-    trusted_maintenance = _evaluate_trusted_maintenance_evidence(
-        candidate=candidate,
-        evidence=trusted_maintenance_evidence,
+    paths = (
+        (
+            "trusted_maintenance",
+            evidence.trusted_maintenance,
+            "trusted_maintenance_admitted",
+            "Tenant UI merge is eligible through current trusted-maintenance evidence.",
+        ),
+        (
+            "technical_human_waiver",
+            evidence.technical_human_waiver,
+            "technical_human_waiver_admitted",
+            "Tenant UI merge is eligible through a current exact-head technical human waiver.",
+        ),
+        (
+            "manager_preview_approval",
+            evidence.manager_preview_approval,
+            "manager_preview_approved",
+            "Tenant UI merge is eligible through exact manager preview approval.",
+        ),
     )
-    if trusted_maintenance.admitted and trusted_maintenance_evidence is not None:
-        return _decision(
-            candidate=candidate,
-            classification=classification,
-            status="admitted",
-            reason_code="trusted_maintenance_admitted",
-            detail="Tenant UI merge is eligible through current trusted-maintenance evidence.",
-            evaluated_at=normalized_evaluated_at,
-            evidence_kind="trusted_maintenance",
-            evidence_id=trusted_maintenance_evidence.evidence_id,
-            evidence_digest=trusted_maintenance_evidence.evidence_digest,
+
+    for path_kind, path_result, admitting_reason, detail in paths:
+        if path_result is None:
+            continue
+        eval_res = _evaluate_path_result(
+            candidate=candidate, classification=classification, path_result=path_result
         )
-    first_blocked_reason = _first_blocked_reason(
-        first_blocked_reason, trusted_maintenance.blocked_reason
-    )
+        if eval_res.admitted:
+            return _decision(
+                candidate=candidate,
+                classification=classification,
+                status="admitted",
+                reason_code=admitting_reason,  # type: ignore
+                detail=detail,
+                evaluated_at=normalized_evaluated_at,
+                evidence_kind=path_kind,  # type: ignore
+                evidence_id=path_result.evidence_id,
+                evidence_digest=path_result.evidence_digest,
+            )
 
-    technical_human_waiver_evidence = evidence.technical_human_waiver
-    technical_waiver = _evaluate_technical_human_waiver(
-        candidate=candidate,
-        evidence=technical_human_waiver_evidence,
-    )
-    if technical_waiver.admitted and technical_human_waiver_evidence is not None:
-        return _decision(
-            candidate=candidate,
-            classification=classification,
-            status="admitted",
-            reason_code="technical_human_waiver_admitted",
-            detail="Tenant UI merge is eligible through a current exact-head technical human waiver.",
-            evaluated_at=normalized_evaluated_at,
-            evidence_kind="technical_human_waiver",
-            evidence_id=technical_human_waiver_evidence.waiver_id,
-            evidence_digest=technical_human_waiver_evidence.waiver_digest,
-        )
-    first_blocked_reason = _first_blocked_reason(
-        first_blocked_reason, technical_waiver.blocked_reason
-    )
-
-    manager_preview_approval_evidence = evidence.manager_preview_approval
-    manager_approval = _evaluate_manager_preview_approval(
-        candidate=candidate,
-        evidence=manager_preview_approval_evidence,
-    )
-    if manager_approval.admitted and manager_preview_approval_evidence is not None:
-        return _decision(
-            candidate=candidate,
-            classification=classification,
-            status="admitted",
-            reason_code="manager_preview_approved",
-            detail="Tenant UI merge is eligible through exact manager preview approval.",
-            evaluated_at=normalized_evaluated_at,
-            evidence_kind="manager_preview_approval",
-            evidence_id=manager_preview_approval_evidence.approval_id,
-            evidence_digest=manager_preview_approval_evidence.approval_digest,
-        )
-    first_blocked_reason = _first_blocked_reason(
-        first_blocked_reason, manager_approval.blocked_reason
-    )
-
-    reason_code, detail = first_blocked_reason or (
-        "manager_preview_required",
-        "Tenant UI repository requires manager preview approval before merge eligibility.",
+    blocked_code, blocked_detail = _determine_blocked_reason(
+        candidate=candidate, classification=classification, evidence=evidence
     )
     return _decision(
         candidate=candidate,
         classification=classification,
         status="blocked",
-        reason_code=reason_code,
-        detail=detail,
+        reason_code=blocked_code,
+        detail=blocked_detail,
         evaluated_at=normalized_evaluated_at,
     )
 
@@ -474,195 +408,177 @@ class _ClassificationSelection:
 
 
 @dataclass(frozen=True)
-class _EvidenceEvaluation:
+class _PathEvaluation:
     admitted: bool = False
     blocked_reason: tuple[TenantMergeEligibilityReasonCode, str] | None = None
 
 
 def _select_current_classification(
-    *,
-    candidate: TenantMergeCandidate,
-    lookup: TenantRepositoryClassificationLookup,
+    *, candidate: TenantMergeCandidate, lookup: TenantRepositoryClassificationLookup
 ) -> _ClassificationSelection:
     if lookup.status == "missing":
         return _ClassificationSelection(
-            classification=None,
-            blocked_reason=(
+            None,
+            (
                 "classification_missing",
                 "No repository classification record is available for this GitHub repository ID.",
             ),
         )
     if lookup.status == "unknown":
         return _ClassificationSelection(
-            classification=None,
-            blocked_reason=(
+            None,
+            (
                 "classification_unknown",
                 "Repository classification lookup returned an unknown state.",
             ),
         )
-
     if not lookup.records:
         return _ClassificationSelection(
-            classification=None,
-            blocked_reason=(
+            None,
+            (
                 "classification_missing",
                 "No repository classification record is available for this GitHub repository ID.",
             ),
         )
 
-    repository_id_matches = tuple(
-        record for record in lookup.records if record.repository_id == candidate.repository_id
+    matching_repo_records = tuple(
+        r for r in lookup.records if r.repository_id == candidate.repository_id
     )
-    if not repository_id_matches:
+    if not matching_repo_records:
         return _ClassificationSelection(
-            classification=None,
-            blocked_reason=(
+            None,
+            (
                 "classification_identity_drift",
-                "Repository classification records do not match the immutable GitHub repository ID.",
+                "Repository classification records do not match the GitHub repository ID.",
             ),
         )
 
-    current_matches = tuple(record for record in repository_id_matches if record.current)
-    if not current_matches:
+    max_rev = max(r.classification_revision for r in matching_repo_records)
+    highest_rev_records = tuple(
+        r for r in matching_repo_records if r.classification_revision == max_rev
+    )
+    if len(highest_rev_records) > 1:
         return _ClassificationSelection(
-            classification=None,
-            blocked_reason=(
-                "classification_stale",
-                "Repository classification records for this GitHub repository ID are stale.",
-            ),
-        )
-    if len(current_matches) != 1:
-        return _ClassificationSelection(
-            classification=None,
-            blocked_reason=(
+            None,
+            (
                 "classification_ambiguous",
-                "More than one current repository classification record matched this GitHub repository ID.",
+                "Multiple repository classification records exist for the highest revision.",
             ),
         )
 
-    classification = current_matches[0]
+    classification = highest_rev_records[0]
     if (
         classification.repository_owner_id != candidate.repository_owner_id
         or classification.repository != candidate.repository
+        or classification.product != candidate.product
+        or classification.context != candidate.context
     ):
         return _ClassificationSelection(
-            classification=None,
-            blocked_reason=(
+            None,
+            (
                 "classification_identity_drift",
-                "Repository classification identity no longer matches the PR repository identity.",
+                "Repository classification identity/product/context does not match candidate identity.",
             ),
         )
-    return _ClassificationSelection(
-        classification=classification,
-        blocked_reason=("classification_missing", ""),
-    )
+
+    return _ClassificationSelection(classification, ("classification_missing", ""))
 
 
-def _evaluate_trusted_maintenance_evidence(
+def _evaluate_path_result(
     *,
     candidate: TenantMergeCandidate,
-    evidence: TenantTrustedMaintenanceEvidence | None,
-) -> _EvidenceEvaluation:
-    if evidence is None:
-        return _EvidenceEvaluation()
-    blocked_reason = _evidence_scope_blocked_reason(
-        candidate=candidate,
-        scope=evidence.scope,
-        evidence_label="Trusted maintenance evidence",
-    )
-    if blocked_reason is not None:
-        return _EvidenceEvaluation(blocked_reason=blocked_reason)
-    if not evidence.current:
-        return _EvidenceEvaluation(
-            blocked_reason=(
-                "evidence_stale",
-                "Trusted maintenance evidence is not current for this PR head.",
-            )
-        )
-    if evidence.decision == "trusted_maintenance":
-        return _EvidenceEvaluation(admitted=True)
-    return _EvidenceEvaluation()
-
-
-def _evaluate_technical_human_waiver(
-    *,
-    candidate: TenantMergeCandidate,
-    evidence: TenantTechnicalHumanWaiverEvidence | None,
-) -> _EvidenceEvaluation:
-    if evidence is None:
-        return _EvidenceEvaluation()
-    blocked_reason = _evidence_scope_blocked_reason(
-        candidate=candidate,
-        scope=evidence.scope,
-        evidence_label="Technical human waiver",
-    )
-    if blocked_reason is not None:
-        return _EvidenceEvaluation(blocked_reason=blocked_reason)
-    if not evidence.current:
-        return _EvidenceEvaluation(
-            blocked_reason=(
-                "evidence_stale",
-                "Technical human waiver is not current for this PR head.",
-            )
-        )
-    return _EvidenceEvaluation(admitted=True)
-
-
-def _evaluate_manager_preview_approval(
-    *,
-    candidate: TenantMergeCandidate,
-    evidence: TenantManagerPreviewApprovalEvidence | None,
-) -> _EvidenceEvaluation:
-    if evidence is None:
-        return _EvidenceEvaluation()
-    blocked_reason = _evidence_scope_blocked_reason(
-        candidate=candidate,
-        scope=evidence.scope,
-        evidence_label="Manager preview approval",
-    )
-    if blocked_reason is not None:
-        return _EvidenceEvaluation(blocked_reason=blocked_reason)
-    if not evidence.current or evidence.status == "stale":
-        return _EvidenceEvaluation(
-            blocked_reason=(
-                "evidence_stale",
-                "Manager preview approval evidence is not current for this PR head.",
-            )
-        )
-    if evidence.status == "approved":
-        return _EvidenceEvaluation(admitted=True)
-    return _EvidenceEvaluation()
-
-
-def _evidence_scope_blocked_reason(
-    *,
-    candidate: TenantMergeCandidate,
-    scope: TenantMergeCandidate,
-    evidence_label: str,
-) -> tuple[TenantMergeEligibilityReasonCode, str] | None:
+    classification: TenantRepositoryClassificationRecord,
+    path_result: TenantAdmissionPathResult,
+) -> _PathEvaluation:
     if (
-        scope.repository_id != candidate.repository_id
-        or scope.repository_owner_id != candidate.repository_owner_id
-        or scope.repository != candidate.repository
-        or scope.pull_request_number != candidate.pull_request_number
+        path_result.repository_id != candidate.repository_id
+        or path_result.repository_owner_id != candidate.repository_owner_id
+        or path_result.repository != candidate.repository
+        or path_result.pull_request_number != candidate.pull_request_number
     ):
-        return (
-            "evidence_identity_drift",
-            f"{evidence_label} does not match the exact repository and pull request identity.",
+        return _PathEvaluation(
+            blocked_reason=(
+                "evidence_identity_drift",
+                f"{path_result.path_kind} evidence does not match repository or PR identity.",
+            )
         )
-    if scope.head_sha != candidate.head_sha:
-        return (
-            "evidence_head_mismatch",
-            f"{evidence_label} is bound to a different PR head SHA.",
+
+    if path_result.head_sha != candidate.head_sha:
+        return _PathEvaluation(
+            blocked_reason=(
+                "evidence_head_mismatch",
+                f"{path_result.path_kind} evidence is bound to a different PR head SHA.",
+            )
         )
-    return None
+
+    if path_result.classification_digest != classification.classification_digest:
+        return _PathEvaluation(
+            blocked_reason=(
+                "evidence_policy_drift",
+                f"{path_result.path_kind} evidence classification digest does not match active classification digest.",
+            )
+        )
+
+    if path_result.state == "satisfied":
+        return _PathEvaluation(admitted=True)
+    if path_result.state == "stale":
+        return _PathEvaluation(
+            blocked_reason=("evidence_stale", f"{path_result.path_kind} evidence state is stale.")
+        )
+    if path_result.state == "denied":
+        return _PathEvaluation(
+            blocked_reason=("evidence_denied", f"{path_result.path_kind} evidence state is denied.")
+        )
+    if path_result.state == "unavailable":
+        return _PathEvaluation(
+            blocked_reason=(
+                "evidence_unavailable",
+                f"{path_result.path_kind} evidence state is unavailable.",
+            )
+        )
+    return _PathEvaluation(
+        blocked_reason=(
+            "manager_preview_required",
+            "Manager preview approval is required before merge eligibility.",
+        )
+    )
 
 
-def _first_blocked_reason(
-    current: tuple[TenantMergeEligibilityReasonCode, str] | None,
-    candidate: tuple[TenantMergeEligibilityReasonCode, str] | None,
-) -> tuple[TenantMergeEligibilityReasonCode, str] | None:
-    return current or candidate
+def _determine_blocked_reason(
+    *,
+    candidate: TenantMergeCandidate,
+    classification: TenantRepositoryClassificationRecord,
+    evidence: TenantMergeEligibilityEvidenceInputs,
+) -> tuple[TenantMergeEligibilityReasonCode, str]:
+    if evidence.manager_preview_approval is not None:
+        eval_res = _evaluate_path_result(
+            candidate=candidate,
+            classification=classification,
+            path_result=evidence.manager_preview_approval,
+        )
+        if eval_res.blocked_reason is not None:
+            return eval_res.blocked_reason
+
+    for path_result in (evidence.technical_human_waiver, evidence.trusted_maintenance):
+        if path_result is not None:
+            eval_res = _evaluate_path_result(
+                candidate=candidate, classification=classification, path_result=path_result
+            )
+            if eval_res.blocked_reason is not None:
+                reason, _ = eval_res.blocked_reason
+                if reason in {
+                    "evidence_identity_drift",
+                    "evidence_head_mismatch",
+                    "evidence_policy_drift",
+                    "evidence_denied",
+                    "evidence_unavailable",
+                }:
+                    return eval_res.blocked_reason
+
+    return (
+        "manager_preview_required",
+        "Tenant UI repository requires manager preview approval before merge eligibility.",
+    )
 
 
 def _decision(
@@ -681,6 +597,8 @@ def _decision(
         status=status,
         reason_code=reason_code,
         detail=detail,
+        product=candidate.product,
+        context=candidate.context,
         repository_id=candidate.repository_id,
         repository_owner_id=candidate.repository_owner_id,
         repository=candidate.repository,
