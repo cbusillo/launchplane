@@ -147,12 +147,10 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         dispatch_inputs = workflow_dispatch["inputs"]
         assert isinstance(dispatch_inputs, dict)
         self.assertFalse(any(name.startswith("authz_grants_") for name in dispatch_inputs))
-        managed_set_input = dispatch_inputs["authz_managed_set"]
-        assert isinstance(managed_set_input, dict)
-        self.assertEqual(managed_set_input["default"], "primary")
-        self.assertEqual(
-            managed_set_input["options"],
-            ["primary", "authz-policy-reconcile"],
+        self.assertNotIn("authz_managed_set", dispatch_inputs)
+        self.assertNotIn(
+            "operator-authz-policy-reconcile-bootstrap",
+            self.deploy_workflow.jobs,
         )
         managed_job = self.deploy_workflow.job("operator-authz-managed")
         self.assertEqual(
@@ -161,7 +159,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             "4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd",
         )
         self.assertEqual(managed_job["needs"], "operator-authz-managed-validate")
-        self.assertIn("inputs.authz_managed_set == 'primary'", str(managed_job["if"]))
         self.assertEqual(
             self.deploy_workflow.job_permissions("operator-authz-managed"),
             {"contents": "read", "id-token": "write"},
@@ -179,31 +176,6 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             managed_inputs["reviewed_plan_sha256"],
             "${{ inputs.authz_managed_reviewed_plan_sha256 }}",
         )
-        bootstrap_job = self.deploy_workflow.job("operator-authz-policy-reconcile-bootstrap")
-        self.assertEqual(
-            self.deploy_workflow.job_uses("operator-authz-policy-reconcile-bootstrap"),
-            "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@"
-            "4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd",
-        )
-        self.assertEqual(bootstrap_job["needs"], "operator-authz-managed-validate")
-        self.assertIn(
-            "inputs.authz_managed_set == 'authz-policy-reconcile'",
-            str(bootstrap_job["if"]),
-        )
-        self.assertEqual(
-            self.deploy_workflow.job_permissions("operator-authz-policy-reconcile-bootstrap"),
-            {"contents": "read", "id-token": "write"},
-        )
-        bootstrap_secrets = bootstrap_job["secrets"]
-        assert isinstance(bootstrap_secrets, dict)
-        self.assertEqual(
-            bootstrap_secrets["managed_set_json"],
-            "${{ secrets.LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON }}",
-        )
-        bootstrap_inputs = bootstrap_job["with"]
-        assert isinstance(bootstrap_inputs, dict)
-        self.assertEqual(bootstrap_inputs["mode"], "${{ inputs.authz_managed_mode }}")
-        self.assertNotIn("expected_managed_set_id", bootstrap_inputs)
         validation_step = self.deploy_workflow.step_named(
             "operator-authz-managed-validate", "Validate managed authz isolation"
         )
