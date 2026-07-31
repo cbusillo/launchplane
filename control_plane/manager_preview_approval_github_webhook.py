@@ -12,6 +12,7 @@ from typing import Protocol, cast
 
 import click
 
+from control_plane.contracts.manager_preview_approval import ManagerPreviewApprovalBinding
 from control_plane.contracts.manager_preview_approval_projection import (
     ManagerPreviewApprovalCommand,
     ManagerPreviewApprovalCommandAction,
@@ -271,48 +272,23 @@ def invalidate_manager_preview_approval_for_pr(
     record_store: ManagerPreviewApprovalGitHubStore,
     control_plane_root: Path,
     occurred_at: str = "",
+    binding: ManagerPreviewApprovalBinding | None = None,
     dependencies: ManagerPreviewApprovalGitHubDependencies | None = None,
 ) -> dict[str, object]:
     resolved_dependencies = dependencies or ManagerPreviewApprovalGitHubDependencies()
     resolved_occurred_at = occurred_at.strip() or resolved_dependencies.now_timestamp()
-    profile = _product_profile(record_store, repository)
-    policy_record = read_active_authz_policy_record(record_store)
-    if not manager_preview_approval_required(
-        policy_record=policy_record,
-        product=profile.product,
-        context=profile.preview.context,
-    ):
-        return {"required": False, "event_status": "not_required"}
-    event_status: str
-    try:
-        preview, generation = _preview_and_generation(
-            record_store=record_store,
-            profile=profile,
-            repository=repository,
-            pr_number=pr_number,
-        )
-        binding = build_current_manager_preview_approval_binding(
-            product=profile.product,
-            preview=preview,
-            generation=generation,
-        )
-        event_status = record_store.write_manager_preview_approval_event_record(
-            build_manager_preview_approval_system_event(
-                binding=binding,
-                action="invalidated",
-                occurred_at=resolved_occurred_at,
-                source_event_kind=source_event_kind,
-                source_event_id=source_event_id,
-                reason=reason,
-            )
-        )
-    except (
-        FileNotFoundError,
-        LookupError,
-        ManagerPreviewApprovalEvidenceError,
-        ValueError,
-    ):
-        event_status = "unavailable"
+    event_result = record_manager_preview_approval_invalidation_for_pr(
+        repository=repository,
+        pr_number=pr_number,
+        reason=reason,
+        source_event_kind=source_event_kind,
+        source_event_id=source_event_id,
+        record_store=record_store,
+        occurred_at=resolved_occurred_at,
+        binding=binding,
+    )
+    if not event_result["required"]:
+        return event_result
     projection = reconcile_manager_preview_approval_for_pr(
         repository=repository,
         pr_number=pr_number,
@@ -321,7 +297,76 @@ def invalidate_manager_preview_approval_for_pr(
         evaluated_at=resolved_occurred_at,
         dependencies=resolved_dependencies,
     )
-    return {"required": True, "event_status": event_status, **projection}
+    return {**event_result, **projection}
+
+
+def record_manager_preview_approval_invalidation_for_pr(
+    *,
+    repository: str,
+    pr_number: int,
+    reason: str,
+    source_event_kind: str,
+    source_event_id: str,
+    record_store: ManagerPreviewApprovalGitHubStore,
+    occurred_at: str,
+    binding: ManagerPreviewApprovalBinding | None = None,
+) -> dict[str, object]:
+    try:
+        profile = _product_profile(record_store, repository)
+        policy_record = read_active_authz_policy_record(record_store)
+    except (FileNotFoundError, LookupError, ValueError):
+        return {"required": False, "event_status": "unavailable"}
+    if not manager_preview_approval_required(
+        policy_record=policy_record,
+        product=profile.product,
+        context=profile.preview.context,
+    ):
+        return {"required": False, "event_status": "not_required"}
+    try:
+        resolved_binding = binding or current_manager_preview_approval_binding_for_pr(
+            repository=repository,
+            pr_number=pr_number,
+            record_store=record_store,
+        )
+    except (
+        FileNotFoundError,
+        LookupError,
+        ManagerPreviewApprovalEvidenceError,
+        ValueError,
+    ):
+        return {"required": True, "event_status": "unavailable"}
+    event_status = record_store.write_manager_preview_approval_event_record(
+        build_manager_preview_approval_system_event(
+            binding=resolved_binding,
+            action="invalidated",
+            occurred_at=occurred_at,
+            source_event_kind=source_event_kind,
+            source_event_id=source_event_id,
+            reason=reason,
+        )
+    )
+    return {"required": True, "event_status": event_status}
+
+
+def current_manager_preview_approval_binding_for_pr(
+    *,
+    repository: str,
+    pr_number: int,
+    record_store: object,
+) -> ManagerPreviewApprovalBinding:
+    store = cast(ManagerPreviewApprovalGitHubStore, record_store)
+    profile = _product_profile(store, repository)
+    preview, generation = _preview_and_generation(
+        record_store=store,
+        profile=profile,
+        repository=repository,
+        pr_number=pr_number,
+    )
+    return build_current_manager_preview_approval_binding(
+        product=profile.product,
+        preview=preview,
+        generation=generation,
+    )
 
 
 def reconcile_manager_preview_approval_for_pr_best_effort(
@@ -373,6 +418,8 @@ def invalidate_manager_preview_approval_for_pr_best_effort(
     source_event_id: str,
     record_store: object,
     control_plane_root: Path,
+    occurred_at: str = "",
+    binding: ManagerPreviewApprovalBinding | None = None,
     dependencies: ManagerPreviewApprovalGitHubDependencies | None = None,
 ) -> bool:
     try:
@@ -384,6 +431,8 @@ def invalidate_manager_preview_approval_for_pr_best_effort(
             source_event_id=source_event_id,
             record_store=cast(ManagerPreviewApprovalGitHubStore, record_store),
             control_plane_root=control_plane_root,
+            occurred_at=occurred_at,
+            binding=binding,
             dependencies=dependencies,
         )
     except Exception:

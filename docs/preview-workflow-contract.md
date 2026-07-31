@@ -188,6 +188,20 @@ reconciliation. If GitHub is degraded, the lifecycle operation still completes
 and an authorized operator retries `POST /v1/manager-preview-approval/reconcile`
 with `repository` and `pr_number` after GitHub recovers.
 
+Generic-web routes write lifecycle records as part of refresh, destroy, and
+verification. Odoo preview apply finalizes the serving preview and generation
+evidence after the provider result is `pass` but before the durable provider
+reservation releases its target fence. The completed provider response stores
+those lifecycle record identities, so exact replay never synthesizes new
+evidence under changed profile authority. Successful completion, adoption, and
+current exact replay then retry manager projection without repeating the
+provider mutation. The service uses the issued plan as the stable generation
+identity and returns a non-passing conflict when a delayed refresh or destroy no
+longer owns the preview. Odoo destroy writes the approval invalidation event
+before its destroyed tombstone when a serving binding is available; this keeps
+the append-only event crash-durable while the GitHub call remains best-effort
+after the provider reservation completes.
+
 Rollback removes the repository's required `manager-preview-approval` status
 and removes or narrows the managed approval rule. This disables merge/promotion
 enforcement while preserving the append-only approval ledger and normal preview
@@ -279,9 +293,16 @@ provider inventory for refresh reuse and destroy planning, and it blocks destroy
 when the matching preview compose and hostname cannot be proven. After refresh,
 Launchplane owns `/launchplane/health`, `/web/health`, `/cm-website/health`, `/cell-mechanic`,
 artifact/revision evidence, and module install/update evidence. Product
-workflows should treat the Odoo refresh route's `refresh_status="pass"` as the
-ready-to-comment signal instead of independently deciding readiness from raw
-health checks. Refresh merges the artifact manifest's declared Odoo modules
+workflows should treat the Odoo refresh response's `result.status="pass"` (the
+reusable workflow aliases it to `refresh_status`) as the ready-to-comment signal
+instead of independently deciding readiness from raw health checks. A passing
+result persists the active preview, ready serving generation, immutable artifact
+identity, and verified runtime identity before manager approval projection. The
+service requires an exact lowercase 40-character source commit and lowercase
+64-character `sha256` image digest, injects its runtime identity into the preview
+environment, and requires `/launchplane/health` to echo the matching identity;
+callers cannot disable that verification on a refresh request.
+Refresh merges the artifact manifest's declared Odoo modules
 with Launchplane-required modules into both `ODOO_INSTALL_MODULES` and the
 explicit maintenance-only `ODOO_UPDATE_MODULES` input. It also merges the
 managed Launchplane and Enterprise addon roots into `ODOO_ADDONS_PATH` so a
@@ -307,11 +328,14 @@ match exactly, rejects missing, mismatched, or expired provenance, and rebuilds
 the plan from current Launchplane records and current provider discovery before
 the first provider effect. Any changed profile, runtime routing, template target,
 environment id, or discovered preview target makes the plan stale and requires
-new apply inputs. Completed exact retries replay the stored apply response, and
-uncertain operations reconcile against the originally issued plan instead of
+new apply inputs. Completed exact retries replay the stored apply response only
+while its stored lifecycle evidence remains the current preview owner. A changed
+product profile, missing legacy lifecycle evidence, newer serving generation, or
+newer destroy returns a conflict and does not publish ready/destroyed feedback.
+Uncertain operations reconcile against the originally issued plan instead of
 replanning into another effect. Blocked apply-inputs responses have no apply
-provenance and are not persisted as issued plans, so a later retry can re-evaluate
-recovered dependencies.
+provenance and are not persisted as issued plans, so a later retry can
+re-evaluate recovered dependencies.
 If a later browser or product-specific smoke workflow needs to publish common
 preview evidence, it should call
 `cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@main`

@@ -1,4 +1,5 @@
 import unittest
+import json
 from email.message import Message
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -17,6 +18,7 @@ from control_plane.contracts.product_profile_record import (
     ProductPreviewProfile,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
 from control_plane.contracts.odoo_preview_runtime_plan import (
@@ -2519,6 +2521,85 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         sleep.assert_not_called()
 
+    def test_smoke_check_requires_matching_runtime_identity(self) -> None:
+        clock = _FakeClock(start=0)
+        expected = RuntimeIdentity(
+            product="odoo-tenant-cm",
+            context="cm",
+            instance="cm-odoo-preview-pr-45",
+            environment_kind="preview",
+            deployment_record_id="idempotency-preview-45",
+            artifact_id="artifact-preview-45",
+            source_git_ref="a" * 40,
+            image_reference=f"ghcr.io/example/odoo@sha256:{'b' * 64}",
+            preview_id="preview-cm-pr-45",
+            preview_generation_id="preview-cm-pr-45-odoo-test",
+        )
+        body = json.dumps(
+            {"ok": True, "runtime_identity": expected.model_dump(mode="json")}
+        ).encode("utf-8")
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.urlopen",
+                return_value=_SmokeResponse(status=200, body=body),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.time.monotonic",
+                side_effect=clock.monotonic,
+            ),
+            patch("control_plane.workflows.odoo_preview_runtime.time.sleep") as sleep,
+        ):
+            _wait_for_smoke_check(
+                preview_url="https://pr-45.cm-preview.example.test/",
+                health_path="/launchplane/health",
+                timeout_seconds=10,
+                expected_runtime_identity=expected,
+            )
+
+        sleep.assert_not_called()
+
+    def test_smoke_check_rejects_mismatched_runtime_identity(self) -> None:
+        clock = _FakeClock(start=0)
+        expected = RuntimeIdentity(
+            product="odoo-tenant-cm",
+            context="cm",
+            instance="cm-odoo-preview-pr-45",
+            environment_kind="preview",
+            deployment_record_id="idempotency-preview-45",
+            artifact_id="artifact-preview-45",
+            source_git_ref="a" * 40,
+            preview_id="preview-cm-pr-45",
+            preview_generation_id="preview-cm-pr-45-generation-a",
+        )
+        observed = expected.model_copy(
+            update={"preview_generation_id": "preview-cm-pr-45-generation-b"}
+        )
+        body = json.dumps(
+            {"ok": True, "runtime_identity": observed.model_dump(mode="json")}
+        ).encode("utf-8")
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.urlopen",
+                return_value=_SmokeResponse(status=200, body=body),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.time.monotonic",
+                side_effect=clock.monotonic,
+            ),
+            patch("control_plane.workflows.odoo_preview_runtime.time.sleep") as sleep,
+            self.assertRaisesRegex(
+                click.ClickException,
+                "runtime identity verification failed.*preview_generation_id",
+            ),
+        ):
+            sleep.side_effect = clock.sleep
+            _wait_for_smoke_check(
+                preview_url="https://pr-45.cm-preview.example.test/",
+                health_path="/launchplane/health",
+                timeout_seconds=2,
+                expected_runtime_identity=expected,
+            )
+
     def test_smoke_check_raises_timeout_when_attempts_are_exhausted(self) -> None:
         clock = _FakeClock(start=0)
         with (
@@ -2556,9 +2637,16 @@ class _FakeClock:
 
 
 class _SmokeResponse:
-    def __init__(self, *, status: int, clear_status_on_exit: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        status: int,
+        clear_status_on_exit: bool = False,
+        body: bytes = b"ok",
+    ) -> None:
         self.status = status
         self._clear_status_on_exit = clear_status_on_exit
+        self._body = body
 
     def __enter__(self) -> "_SmokeResponse":
         return self
@@ -2568,9 +2656,8 @@ class _SmokeResponse:
             self.status = 0
         return None
 
-    @staticmethod
-    def read() -> bytes:
-        return b"ok"
+    def read(self) -> bytes:
+        return self._body
 
 
 if __name__ == "__main__":

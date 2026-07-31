@@ -455,8 +455,13 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         self.assertEqual(len(store.events), 2)
         self.assertEqual(github.statuses[-1]["state"], "failure")
 
-    def test_destroyed_preview_still_reprojects_non_success(self) -> None:
+    def test_destroyed_preview_records_invalidation_from_captured_binding(self) -> None:
         store = _Store()
+        binding = build_current_manager_preview_approval_binding(
+            product=PRODUCT,
+            preview=store.preview,
+            generation=store.generation,
+        )
         store.preview = store.preview.model_copy(update={"state": "destroyed"})
         github = _GitHubApi()
 
@@ -469,11 +474,16 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
             record_store=store,
             control_plane_root=Path("/tmp/launchplane"),
             occurred_at=NOW,
+            binding=binding,
             dependencies=_dependencies(github),
         )
 
-        self.assertEqual(result["event_status"], "unavailable")
+        self.assertEqual(result["event_status"], "written")
         self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(len(store.events), 1)
+        event = next(iter(store.events.values()))
+        self.assertEqual(event.action, "invalidated")
+        self.assertEqual(event.binding.binding_sha256, binding.binding_sha256)
         self.assertEqual(github.statuses[-1]["state"], "error")
 
 
