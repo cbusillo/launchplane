@@ -707,6 +707,15 @@ mutable reusable ref may appear only in a reviewed overlap plan when the active
 policy already authorizes that exact ref; narrowing removes it from the same
 stable managed rule after canary evidence.
 
+The standalone policy-admin worker owns its exact immutable grants in the
+separate `operator.authz-policy-reconcile` managed set. Rotate that authority by
+expanding through the currently authorized worker, advancing the wrapper pin,
+verifying the new identity, and then contracting the old rule. When the set is
+first established, the deploy workflow may carry a temporary authz-only
+selector that forwards the dedicated protected secret to the previous worker.
+That bridge does not deploy Launchplane, cannot accept deploy or rollback
+inputs, and is removed after the standalone wrapper succeeds.
+
 Production diagnostic and repair workers do not accept a service URL or OIDC
 audience from their callers. Thin dispatch workflows may forward only the typed
 operation inputs declared by the reusable worker; the worker resolves its

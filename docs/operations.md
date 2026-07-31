@@ -416,6 +416,9 @@ Operators mutate shared or production authz through the deployed service, not
 through direct DB commands or a local CLI from an arbitrary checkout. Store the
 complete desired rules for one `managed_set_id` in a protected repository
 secret. `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` owns the primary operator set;
+`LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON` owns the exact immutable
+policy-admin worker rules for the standalone authz wrapper and must declare the
+`operator.authz-policy-reconcile` managed-set identity;
 `LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` owns the generic
 GitHub-human manager preview approval writer set and must declare the exact
 `operator.manager-preview-approval` managed-set identity;
@@ -457,6 +460,16 @@ secret instead. The JSON owns desired state only: `schema_version`, `product`,
 `managed_set_id`, migration/adoption intent, and `desired_policy`.
 Dispatch-time mode, reason, issue reference, and reviewed plan digest are
 deliberately excluded from that secret.
+
+The policy-admin worker set is self-rotating. Before repinning the standalone
+wrapper, add a distinct exact rule for the next reusable-worker SHA through the
+currently authorized worker, apply the reviewed expansion, then advance the
+wrapper. A first-time recovery may temporarily expose
+`authz_managed_set = authz-policy-reconcile` in the deploy workflow's existing
+authz-only path so the previous immutable worker can add the standalone rule.
+That selector is a bootstrap bridge only: verify the new wrapper, then remove
+the selector in the next change. It must never replace or partially reconstruct
+`LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON`.
 
 The reusable authz worker accepts an optional exact expected managed-set
 identity from a reviewed wrapper. When provided, the worker rejects protected
