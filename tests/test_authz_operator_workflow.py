@@ -109,6 +109,9 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 )
                 dispatch_job = self.dispatch_workflow.job(job_name)
                 self.assertEqual(dispatch_job["if"], condition)
+                dispatch_inputs = dispatch_job["with"]
+                assert isinstance(dispatch_inputs, dict)
+                self.assertNotIn("expected_managed_set_id", dispatch_inputs)
                 dispatch_secrets = dispatch_job["secrets"]
                 assert isinstance(dispatch_secrets, dict)
                 self.assertEqual(dispatch_secrets["managed_set_json"], expected_secret)
@@ -163,6 +166,13 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         self.assertEqual(set(workflow_call), {"workflow_call"})
         workflow_call_contract = workflow_call["workflow_call"]
         assert isinstance(workflow_call_contract, dict)
+        workflow_call_inputs = workflow_call_contract["inputs"]
+        assert isinstance(workflow_call_inputs, dict)
+        expected_managed_set_id = workflow_call_inputs["expected_managed_set_id"]
+        assert isinstance(expected_managed_set_id, dict)
+        self.assertEqual(expected_managed_set_id["default"], "")
+        self.assertEqual(expected_managed_set_id["required"], False)
+        self.assertEqual(expected_managed_set_id["type"], "string")
         workflow_call_secrets = workflow_call_contract["secrets"]
         assert isinstance(workflow_call_secrets, dict)
         managed_set_secret = workflow_call_secrets["managed_set_json"]
@@ -264,6 +274,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                     "GITHUB_REF": "refs/heads/main",
                     "GITHUB_RUN_ATTEMPT": "1",
                     "GITHUB_RUN_ID": "1234",
+                    "EXPECTED_MANAGED_SET_ID": "operator.launchplane",
                     "LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON": json.dumps(configuration),
                     "MODE": "dry_run",
                     "REASON": "Review the managed Launchplane authority set.",
@@ -292,6 +303,48 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(request_summary["managed_set_id"], "operator.launchplane")
             self.assertNotIn("desired_policy", request_summary)
+
+    def test_render_step_rejects_unexpected_managed_set_id(self) -> None:
+        render_step = self.workflow.step_named(
+            "reconcile", "Validate and render managed authz request"
+        )
+        self.assertIsNotNone(render_step)
+        assert render_step is not None
+        configuration = {
+            "schema_version": 2,
+            "product": "launchplane",
+            "managed_set_id": "operator.primary",
+            "desired_policy": {"schema_version": 2},
+        }
+        with TemporaryDirectory() as temporary_directory:
+            result = subprocess.run(
+                ["bash", "-ceu", render_step.run],
+                check=False,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "DEFAULT_BRANCH": "main",
+                    "EXPECTED_MANAGED_SET_ID": "operator.manager-preview-approval",
+                    "GITHUB_EVENT_NAME": "workflow_dispatch",
+                    "GITHUB_OUTPUT": str(Path(temporary_directory) / "github-output"),
+                    "GITHUB_REF": "refs/heads/main",
+                    "GITHUB_RUN_ATTEMPT": "1",
+                    "GITHUB_RUN_ID": "1234",
+                    "LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON": json.dumps(configuration),
+                    "MODE": "dry_run",
+                    "REASON": "Review the manager preview authorization set.",
+                    "RELATED_ISSUE": "cbusillo/launchplane#1919",
+                    "REVIEWED_PLAN_SHA256": "",
+                    "RUNNER_TEMP": temporary_directory,
+                },
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "managed_set_id does not match the selected managed set",
+            result.stderr,
+        )
 
     def test_render_step_rejects_unreviewed_apply(self) -> None:
         render_step = self.workflow.step_named(
