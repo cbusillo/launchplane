@@ -21,6 +21,7 @@ from control_plane.workflows.product_onboarding import (
     apply_product_onboarding_manifest,
     build_product_profile_record,
 )
+from tests.support.workflows import load_workflow
 
 
 CLI_MAIN = cast(Command, main)
@@ -1751,6 +1752,45 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
         self.assertNotIn("omit_compose_external_network_env", workflow_text)
+
+    def test_deploy_launchplane_requires_manager_preview_webhook_secret(self) -> None:
+        workflow_path = Path(".github/workflows/deploy-launchplane.yml")
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        workflow = load_workflow(workflow_path)
+        validate_step = workflow.step_named("deploy", "Validate deploy configuration")
+        previous_runtime_step = workflow.step_named("deploy", "Read previous Launchplane runtime")
+        render_step = workflow.step_named("deploy", "Render Launchplane self deploy request")
+
+        self.assertIsNotNone(validate_step)
+        self.assertIsNotNone(previous_runtime_step)
+        self.assertIsNotNone(render_step)
+        assert validate_step is not None
+        assert previous_runtime_step is not None
+        assert render_step is not None
+        self.assertLess(validate_step.index, previous_runtime_step.index)
+        self.assertIn(
+            "Missing LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET secret.",
+            validate_step.run,
+        )
+        self.assertNotIn(
+            "Missing LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET secret.",
+            render_step.run,
+        )
+
+        self.assertIn(
+            "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET: "
+            "${{ secrets.LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "--arg manager_preview_webhook_secret "
+            '"${LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET:-}"',
+            workflow_text,
+        )
+        self.assertIn(
+            "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET: $manager_preview_webhook_secret",
+            workflow_text,
+        )
 
     def test_deploy_launchplane_omit_npmplus_env_removes_existing_keys(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
