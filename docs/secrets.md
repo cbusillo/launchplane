@@ -308,6 +308,9 @@ decryption key state denies the reveal or resolution.
   - service-ingress bearer secrets such as
     `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN` and
     `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`
+  - route-specific webhook ingress secrets such as
+    `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET` and
+    `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`
 - Treat these as DB-backed Launchplane-owned data instead of live service-host
   env once the shared store is available:
   - `DOKPLOY_HOST`

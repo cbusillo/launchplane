@@ -578,6 +578,9 @@ WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
         "LAUNCHPLANE_GITHUB_CLIENT_SECRET": frozenset(
             ("${{ secrets.LAUNCHPLANE_GITHUB_CLIENT_SECRET }}",)
         ),
+        "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET": frozenset(
+            ("${{ secrets.LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET }}",)
+        ),
         "LAUNCHPLANE_IMAGE_REPOSITORY": frozenset(("${{ vars.LAUNCHPLANE_IMAGE_REPOSITORY }}",)),
         "LAUNCHPLANE_NPMPLUS_BASE_URL": frozenset(("${{ vars.LAUNCHPLANE_NPMPLUS_BASE_URL }}",)),
         "LAUNCHPLANE_NPMPLUS_IDENTITY": frozenset(("${{ secrets.LAUNCHPLANE_NPMPLUS_IDENTITY }}",)),
@@ -760,6 +763,9 @@ WORKFLOW_SERVICE_ENV_PAYLOAD_PATH_VALUES = {
         "GH_TOKEN": frozenset(("$work_graph_gh_token",)),
         "LAUNCHPLANE_GITHUB_CLIENT_ID": frozenset(("$github_client_id",)),
         "LAUNCHPLANE_GITHUB_CLIENT_SECRET": frozenset(("$github_client_secret",)),
+        "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET": frozenset(
+            ("$manager_preview_webhook_secret",)
+        ),
         "LAUNCHPLANE_PUBLIC_URL": frozenset(("$public_url",)),
         "LAUNCHPLANE_SESSION_SECRET": frozenset(("$session_secret",)),
     },

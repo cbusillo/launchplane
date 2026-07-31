@@ -739,6 +739,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
         "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db.internal:5432/launchplane\n"
         "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
         "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
+        "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET=manager-secret\n"
     )
 
     def _policy(self) -> LaunchplaneAuthzPolicy:

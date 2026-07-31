@@ -20,6 +20,7 @@ from control_plane.dokploy import source as dokploy_source
 LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 _DATABASE_URL_ENV_KEY = "LAUNCHPLANE_DATABASE_URL"
 _MASTER_ENCRYPTION_KEY_ENV_KEY = "LAUNCHPLANE_MASTER_ENCRYPTION_KEY"
+_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET"
 _POLICY_ENV_KEYS = (
     "LAUNCHPLANE_POLICY_TOML",
     "LAUNCHPLANE_POLICY_B64",
@@ -35,6 +36,7 @@ LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
         "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS",
         "LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK",
         "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET",
+        _MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET_ENV_KEY,
         "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN",
         "LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR",
         "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
@@ -237,6 +239,11 @@ def _validate_bootstrap_target_env(env_map: dict[str, str]) -> None:
     if not env_map.get(_MASTER_ENCRYPTION_KEY_ENV_KEY, "").strip():
         blockers.append(
             "Launchplane self deploy target is missing LAUNCHPLANE_MASTER_ENCRYPTION_KEY."
+        )
+    if not env_map.get(_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET_ENV_KEY, "").strip():
+        blockers.append(
+            "Launchplane self deploy target is missing "
+            "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET."
         )
     if not any(env_map.get(env_key, "").strip() for env_key in _POLICY_ENV_KEYS):
         blockers.append("Launchplane self deploy target is missing LAUNCHPLANE_POLICY_*.")

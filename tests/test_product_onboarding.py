@@ -1752,6 +1752,28 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         self.assertNotIn("omit_compose_external_network_env", workflow_text)
 
+    def test_deploy_launchplane_requires_manager_preview_webhook_secret(self) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET: "
+            "${{ secrets.LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "Missing LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET secret.",
+            workflow_text,
+        )
+        self.assertIn(
+            "--arg manager_preview_webhook_secret "
+            '"${LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET:-}"',
+            workflow_text,
+        )
+        self.assertIn(
+            "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET: $manager_preview_webhook_secret",
+            workflow_text,
+        )
+
     def test_deploy_launchplane_omit_npmplus_env_removes_existing_keys(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
 
