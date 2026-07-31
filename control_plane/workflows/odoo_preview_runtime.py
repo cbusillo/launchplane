@@ -36,6 +36,10 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     merge_odoo_install_modules,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.runtime_identity import (
+    RuntimeIdentity,
+    health_payload_runtime_identity_status,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
@@ -1248,6 +1252,7 @@ def execute_odoo_preview_dokploy_apply(
     provider_operation_title: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     provider_lease_check: Callable[[], None] | None = None,
+    expected_runtime_identity: RuntimeIdentity | None = None,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     if plan.status != "ready":
@@ -1288,6 +1293,7 @@ def execute_odoo_preview_dokploy_apply(
         provider_operation_title=provider_operation_title,
         provider_effect_checkpoint=provider_effect_checkpoint,
         provider_lease_check=provider_lease_check,
+        expected_runtime_identity=expected_runtime_identity,
     )
 
 
@@ -1487,6 +1493,7 @@ def _execute_refresh(
     provider_operation_title: str,
     provider_effect_checkpoint: Callable[[str], None] | None,
     provider_lease_check: Callable[[], None] | None,
+    expected_runtime_identity: RuntimeIdentity | None,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     creating_compose = plan.compose_ref.startswith("${created.composeId:")
@@ -1645,6 +1652,7 @@ def _execute_refresh(
                 preview_url=plan.preview_url,
                 health_path=request.health_path,
                 timeout_seconds=request.timeout_seconds,
+                expected_runtime_identity=expected_runtime_identity,
             )
             steps.append(_step("smoke_check", plan.preview_url))
         return _apply_result(
@@ -1961,7 +1969,13 @@ def _rollback_created_runtime(
     return tuple(errors)
 
 
-def _wait_for_smoke_check(*, preview_url: str, health_path: str, timeout_seconds: int) -> None:
+def _wait_for_smoke_check(
+    *,
+    preview_url: str,
+    health_path: str,
+    timeout_seconds: int,
+    expected_runtime_identity: RuntimeIdentity | None = None,
+) -> None:
     parsed = urlparse(preview_url.rstrip("/"))
     smoke_url = parsed._replace(path=health_path, params="", query="", fragment="").geturl()
     request = Request(
@@ -1971,28 +1985,63 @@ def _wait_for_smoke_check(*, preview_url: str, health_path: str, timeout_seconds
     deadline = time.monotonic() + timeout_seconds
     last_http_status: int | None = None
     last_transport_error = ""
+    last_identity_error = ""
     while True:
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds <= 0:
             break
         try:
             with urlopen(request, timeout=min(15, remaining_seconds)) as response:
-                response.read()
+                body = response.read().decode("utf-8")
                 status = response.status
             if 200 <= status < 400:
-                return
+                last_http_status = None
+                last_transport_error = ""
+                if expected_runtime_identity is None:
+                    return
+                try:
+                    payload = json.loads(body)
+                except json.JSONDecodeError:
+                    last_identity_error = (
+                        "health endpoint did not return parseable JSON runtime identity evidence"
+                    )
+                else:
+                    if isinstance(payload, dict) and payload.get("ok") is False:
+                        last_identity_error = "health endpoint reported ok=false"
+                    else:
+                        runtime_status, detail, _observed = health_payload_runtime_identity_status(
+                            expected=expected_runtime_identity,
+                            payload=payload,
+                        )
+                        if runtime_status == "match":
+                            strict_mismatches = _runtime_identity_mismatched_fields(
+                                expected=expected_runtime_identity,
+                                observed=_observed,
+                            )
+                            if not strict_mismatches:
+                                return
+                            last_identity_error = (
+                                "Runtime identity mismatched fields: "
+                                + ", ".join(strict_mismatches)
+                            )
+                        else:
+                            last_identity_error = detail
         except HTTPError as exc:
             last_http_status = exc.code
             last_transport_error = ""
+            last_identity_error = ""
         except TimeoutError as exc:
             last_http_status = None
             last_transport_error = str(exc).strip() or "request timed out"
+            last_identity_error = ""
         except URLError as exc:
             last_http_status = None
             last_transport_error = str(exc.reason).strip() or str(exc).strip()
+            last_identity_error = ""
         except ValueError as exc:
             last_http_status = None
             last_transport_error = str(exc).strip()
+            last_identity_error = ""
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds <= 0:
             break
@@ -2000,12 +2049,30 @@ def _wait_for_smoke_check(*, preview_url: str, health_path: str, timeout_seconds
         time.sleep(sleep_seconds)
     if last_http_status is not None:
         raise click.ClickException(f"Odoo preview smoke check returned HTTP {last_http_status}.")
+    if last_identity_error:
+        raise click.ClickException(
+            "Odoo preview runtime identity verification failed: " + last_identity_error
+        )
     if last_transport_error:
         raise click.ClickException(
             f"Timed out waiting for Odoo preview smoke check {smoke_url}. "
             f"Last transport error: {last_transport_error}."
         )
     raise click.ClickException(f"Timed out waiting for Odoo preview smoke check {smoke_url}.")
+
+
+def _runtime_identity_mismatched_fields(
+    *,
+    expected: RuntimeIdentity,
+    observed: RuntimeIdentity | None,
+) -> tuple[str, ...]:
+    if observed is None:
+        return ("runtime_identity",)
+    return tuple(
+        field_name
+        for field_name in RuntimeIdentity.model_fields
+        if getattr(expected, field_name) != getattr(observed, field_name)
+    )
 
 
 def _step(name: OdooPreviewDokployOperationName, target: str) -> OdooPreviewDokployApplyStep:

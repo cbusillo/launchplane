@@ -25,13 +25,20 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_identity import parse_runtime_identity_payload
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
+from control_plane.manager_preview_approval import build_current_manager_preview_approval_binding
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_PLAN_TTL_SECONDS,
     OdooPreviewApplyEnvelope,
+    OdooPreviewPlanProvenanceError,
+    apply_odoo_preview_lifecycle_evidence,
+    build_odoo_preview_runtime_identity,
     issue_odoo_preview_apply_plan,
+    validate_odoo_preview_lifecycle_response_current,
+    validate_odoo_preview_profile_authority,
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -86,6 +93,13 @@ from tests.support.stores import (
 )
 
 
+_TEST_PREVIEW_HEAD_SHA = "c" * 40
+_TEST_PREVIEW_IMAGE_DIGEST = "a" * 64
+_TEST_PREVIEW_IMAGE_REFERENCE = (
+    f"ghcr.io/cbusillo/odoo-tenant-cm@sha256:{_TEST_PREVIEW_IMAGE_DIGEST}"
+)
+
+
 def _ready_odoo_preview_apply_payload(*, include_manifest: bool = False) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -105,7 +119,7 @@ def _ready_odoo_preview_apply_payload(*, include_manifest: bool = False) -> dict
                 "template_compose_id": "compose-cm-testing",
                 "summary": "ready isolated Odoo preview apply",
             },
-            "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
             "wait_for_deploy": True,
             "smoke_check": True,
         },
@@ -114,11 +128,11 @@ def _ready_odoo_preview_apply_payload(*, include_manifest: bool = False) -> dict
         apply = cast(dict[str, object], payload["apply"])
         apply["manifest"] = {
             "artifact_id": "artifact-cm-preview",
-            "source_commit": "abc123",
+            "source_commit": _TEST_PREVIEW_HEAD_SHA,
             "enterprise_base_digest": "sha256:enterprise",
             "image": {
                 "repository": "ghcr.io/cbusillo/odoo-tenant-cm",
-                "digest": "sha256:abc123",
+                "digest": f"sha256:{_TEST_PREVIEW_IMAGE_DIGEST}",
             },
         }
     return payload
@@ -1169,7 +1183,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             preview_url=dry_run_plan.preview_url,
             image_reference=apply_request.apply.image_reference,
             manifest=apply_request.apply.manifest,
-            source_git_ref="abc123" if dry_run_plan.operation == "refresh" else "",
+            source_git_ref=_TEST_PREVIEW_HEAD_SHA if dry_run_plan.operation == "refresh" else "",
             source="test-issued-plan",
         )
         return OdooPreviewApplyInputsResult(
@@ -1233,6 +1247,42 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         return plan_id
+
+    def _issued_preview_plan(
+        self,
+        *,
+        payload: dict[str, object],
+        plan_id: str,
+        issued_at: datetime,
+    ) -> OdooPreviewApplyInputsResult:
+        return issue_odoo_preview_apply_plan(
+            result=self._planned_preview_result(payload),
+            plan_id=plan_id,
+            issued_at=issued_at,
+        )
+
+    @staticmethod
+    def _provider_operation_record(
+        *,
+        plan_id: str,
+        recorded_at: str,
+    ) -> LaunchplaneIdempotencyRecord:
+        return LaunchplaneIdempotencyRecord(
+            record_id=f"idempotency-{plan_id}",
+            scope="test:odoo-preview-lifecycle",
+            route_path="/v1/drivers/odoo/preview-apply",
+            idempotency_key=plan_id,
+            request_fingerprint=f"fingerprint-{plan_id}",
+            response_status_code=202,
+            response_trace_id=f"trace-{plan_id}",
+            recorded_at=recorded_at,
+            response_payload={
+                "status": "accepted",
+                "trace_id": f"trace-{plan_id}",
+                "records": {},
+                "result": {"status": "pass"},
+            },
+        )
 
     async def test_odoo_preview_apply_inputs_derives_runtime_and_dry_run_plans(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1474,7 +1524,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         "inputs": {
                             "product": "odoo-tenant-cm",
                             "pr_number": 42,
-                            "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                            "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
                         },
                     },
                     idempotency_key="odoo-preview-inputs-test-file-miss",
@@ -1502,7 +1552,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 "inputs": {
                     "product": "odoo-tenant-cm",
                     "pr_number": 42,
-                    "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
                 },
             }
             planned_result = self._planned_preview_result(_ready_odoo_preview_apply_payload())
@@ -1841,7 +1891,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                                 "template_compose_id": "compose-cm-testing",
                                 "summary": "ready isolated Odoo preview apply",
                             },
-                            "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                            "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
                             "wait_for_deploy": False,
                             "smoke_check": False,
                         },
@@ -1955,14 +2005,14 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                                 "template_compose_id": "compose-cm-testing",
                                 "summary": "ready isolated Odoo preview apply",
                             },
-                            "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                            "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
                             "manifest": {
                                 "artifact_id": "artifact-cm-preview",
-                                "source_commit": "abc123",
+                                "source_commit": _TEST_PREVIEW_HEAD_SHA,
                                 "enterprise_base_digest": "sha256:enterprise",
                                 "image": {
                                     "repository": "ghcr.io/cbusillo/odoo-tenant-cm",
-                                    "digest": "sha256:abc123",
+                                    "digest": f"sha256:{_TEST_PREVIEW_IMAGE_DIGEST}",
                                 },
                             },
                             "environment_values": {
@@ -1985,7 +2035,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         applied_request = apply_driver.call_args.kwargs["request"]
         self.assertEqual(
             applied_request.image_reference,
-            "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            _TEST_PREVIEW_IMAGE_REFERENCE,
         )
         self.assertEqual(applied_request.dry_run_plan.environment_id, "env-cm-preview")
         self.assertEqual(
@@ -2024,6 +2074,278 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             applied_request.environment_values["ODOO_DB_PASSWORD"],
             "caller-secret-must-not-win",
         )
+        expected_runtime_identity = apply_driver.call_args.kwargs["expected_runtime_identity"]
+        self.assertIsNotNone(expected_runtime_identity)
+        observed_runtime_identity = parse_runtime_identity_payload(
+            applied_request.environment_values["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"]
+        )
+        self.assertEqual(observed_runtime_identity, expected_runtime_identity)
+        self.assertEqual(
+            applied_request.environment_values["LAUNCHPLANE_DEPLOYMENT_RECORD_ID"],
+            expected_runtime_identity.deployment_record_id,
+        )
+        self.assertEqual(expected_runtime_identity.source_git_ref, _TEST_PREVIEW_HEAD_SHA)
+        self.assertTrue(expected_runtime_identity.preview_generation_id)
+        provider_operation_record = store.read_idempotency_record(
+            scope=idempotency_scope(identity),
+            route_path="/v1/drivers/odoo/preview-apply",
+            idempotency_key=plan_id,
+        )
+        assert provider_operation_record is not None
+        self.assertEqual(
+            expected_runtime_identity.deployment_record_id,
+            provider_operation_record.record_id,
+        )
+
+    def test_odoo_preview_runtime_identity_rejects_non_exact_source_commit(self) -> None:
+        payload = _ready_odoo_preview_apply_payload(include_manifest=True)
+        apply_payload = cast(dict[str, object], payload["apply"])
+        manifest = cast(dict[str, object], apply_payload["manifest"])
+        manifest["source_commit"] = "abc123"
+        issued_plan = self._issued_preview_plan(
+            payload=payload,
+            plan_id="odoo-preview-plan-invalid-source",
+            issued_at=datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "source_git_ref must be an exact lowercase 40-character git commit",
+        ):
+            build_odoo_preview_runtime_identity(
+                profile=LaunchplaneProductProfileRecord.model_validate(
+                    _odoo_preview_profile_payload()
+                ),
+                issued_plan=issued_plan,
+                deployment_record_id="idempotency-invalid-source",
+            )
+
+    def test_odoo_preview_lifecycle_replay_preserves_destroy_and_generation_evidence(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._reservation_store(root)
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            refresh_plan = self._issued_preview_plan(
+                payload=_ready_odoo_preview_apply_payload(include_manifest=True),
+                plan_id="odoo-preview-plan-refresh-old",
+                issued_at=datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc),
+            )
+            refresh_operation = self._provider_operation_record(
+                plan_id="odoo-preview-plan-refresh-old",
+                recorded_at="2026-07-31T12:01:00Z",
+            )
+            refresh_runtime_identity = build_odoo_preview_runtime_identity(
+                profile=profile,
+                issued_plan=refresh_plan,
+                deployment_record_id=refresh_operation.record_id,
+            )
+            refresh_result: dict[str, object] = {
+                "status": "pass",
+                "operation": "refresh",
+                "product": "odoo-tenant-cm",
+                "repository": "cbusillo/odoo-tenant-cm",
+                "preview_slug": "pr-42",
+                "preview_url": "https://pr-42.cm-preview.example.test",
+                "domain_host": "pr-42.cm-preview.example.test",
+                "compose_name": "cm-odoo-preview-pr-42",
+            }
+
+            first_records = apply_odoo_preview_lifecycle_evidence(
+                control_plane_root_path=root,
+                record_store=store,
+                profile=profile,
+                issued_plan=refresh_plan,
+                driver_result=refresh_result,
+                runtime_identity=refresh_runtime_identity,
+            )
+            generation_id = str(first_records["generation_id"])
+            generation = store.read_preview_generation_record(generation_id)
+            store.write_preview_generation_record(
+                generation.model_copy(update={"ready_at": "2026-07-31T12:01:30Z"})
+            )
+
+            replay_records = apply_odoo_preview_lifecycle_evidence(
+                control_plane_root_path=root,
+                record_store=store,
+                profile=profile,
+                issued_plan=refresh_plan,
+                driver_result=refresh_result,
+                runtime_identity=refresh_runtime_identity,
+            )
+
+            self.assertEqual(replay_records["lifecycle_evidence_status"], "replayed")
+            generations = store.list_preview_generation_records(
+                preview_id=str(first_records["preview_id"])
+            )
+            self.assertEqual(len(generations), 1)
+            self.assertEqual(generations[0].ready_at, "2026-07-31T12:01:30Z")
+
+            destroy_plan = self._issued_preview_plan(
+                payload=_ready_odoo_preview_destroy_payload(),
+                plan_id="odoo-preview-plan-destroy-new",
+                issued_at=datetime(2026, 7, 31, 12, 2, tzinfo=timezone.utc),
+            )
+            destroy_result: dict[str, object] = {
+                "status": "pass",
+                "operation": "destroy",
+                "product": "odoo-tenant-cm",
+                "repository": "cbusillo/odoo-tenant-cm",
+                "preview_slug": "pr-42",
+                "preview_url": "https://pr-42.cm-preview.example.test",
+                "domain_host": "pr-42.cm-preview.example.test",
+                "compose_name": "cm-odoo-preview-pr-42",
+            }
+            destroy_callback_states: list[str] = []
+
+            def before_destroy() -> dict[str, object]:
+                current_preview = store.read_preview_record(str(first_records["preview_id"]))
+                destroy_callback_states.append(current_preview.state)
+                return {"manager_preview_invalidation_event_status": "written"}
+
+            destroy_records = apply_odoo_preview_lifecycle_evidence(
+                control_plane_root_path=root,
+                record_store=store,
+                profile=profile,
+                issued_plan=destroy_plan,
+                driver_result=destroy_result,
+                before_destroy=before_destroy,
+            )
+
+            delayed_replay = apply_odoo_preview_lifecycle_evidence(
+                control_plane_root_path=root,
+                record_store=store,
+                profile=profile,
+                issued_plan=refresh_plan,
+                driver_result=refresh_result,
+                runtime_identity=refresh_runtime_identity,
+            )
+            preview = store.read_preview_record(str(first_records["preview_id"]))
+            with self.assertRaises(OdooPreviewPlanProvenanceError) as error_context:
+                validate_odoo_preview_lifecycle_response_current(
+                    record_store=store,
+                    profile=profile,
+                    issued_plan=refresh_plan,
+                    records=first_records,
+                )
+
+        self.assertEqual(delayed_replay["lifecycle_evidence_status"], "stale")
+        self.assertEqual(destroy_callback_states, ["active"])
+        self.assertEqual(destroy_records["manager_preview_invalidation_event_status"], "written")
+        self.assertEqual(preview.state, "destroyed")
+        self.assertEqual(preview.serving_generation_id, "")
+        self.assertEqual(error_context.exception.code, "odoo_preview_operation_superseded")
+
+    def test_odoo_preview_profile_authority_rejects_changed_repository(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        issued_plan = self._issued_preview_plan(
+            payload=_ready_odoo_preview_apply_payload(include_manifest=True),
+            plan_id="odoo-preview-plan-profile-authority",
+            issued_at=datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc),
+        )
+        changed_profile = profile.model_copy(update={"repository": "cbusillo/replacement-tenant"})
+
+        with self.assertRaises(OdooPreviewPlanProvenanceError) as error_context:
+            validate_odoo_preview_profile_authority(
+                profile=changed_profile,
+                issued_plan=issued_plan,
+            )
+
+        self.assertEqual(error_context.exception.code, "odoo_preview_plan_stale")
+
+    def test_odoo_preview_lifecycle_ignores_old_destroy_after_newer_refresh(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = self._reservation_store(root)
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            refresh_result: dict[str, object] = {
+                "status": "pass",
+                "operation": "refresh",
+                "product": "odoo-tenant-cm",
+                "repository": "cbusillo/odoo-tenant-cm",
+                "preview_slug": "pr-42",
+                "preview_url": "https://pr-42.cm-preview.example.test",
+                "domain_host": "pr-42.cm-preview.example.test",
+                "compose_name": "cm-odoo-preview-pr-42",
+            }
+            destroy_result: dict[str, object] = {
+                **refresh_result,
+                "operation": "destroy",
+            }
+            refresh_old = self._issued_preview_plan(
+                payload=_ready_odoo_preview_apply_payload(include_manifest=True),
+                plan_id="odoo-preview-plan-refresh-first",
+                issued_at=datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc),
+            )
+            destroy_old = self._issued_preview_plan(
+                payload=_ready_odoo_preview_destroy_payload(),
+                plan_id="odoo-preview-plan-destroy-old",
+                issued_at=datetime(2026, 7, 31, 12, 2, tzinfo=timezone.utc),
+            )
+            refresh_new = self._issued_preview_plan(
+                payload=_ready_odoo_preview_apply_payload(include_manifest=True),
+                plan_id="odoo-preview-plan-refresh-new",
+                issued_at=datetime(2026, 7, 31, 12, 4, tzinfo=timezone.utc),
+            )
+            refresh_old_operation = self._provider_operation_record(
+                plan_id="odoo-preview-plan-refresh-first",
+                recorded_at="2026-07-31T12:01:00Z",
+            )
+            refresh_new_operation = self._provider_operation_record(
+                plan_id="odoo-preview-plan-refresh-new",
+                recorded_at="2026-07-31T12:05:00Z",
+            )
+            refresh_old_runtime_identity = build_odoo_preview_runtime_identity(
+                profile=profile,
+                issued_plan=refresh_old,
+                deployment_record_id=refresh_old_operation.record_id,
+            )
+            refresh_new_runtime_identity = build_odoo_preview_runtime_identity(
+                profile=profile,
+                issued_plan=refresh_new,
+                deployment_record_id=refresh_new_operation.record_id,
+            )
+
+            first_records = apply_odoo_preview_lifecycle_evidence(
+                control_plane_root_path=root,
+                record_store=store,
+                profile=profile,
+                issued_plan=refresh_old,
+                driver_result=refresh_result,
+                runtime_identity=refresh_old_runtime_identity,
+            )
+            apply_odoo_preview_lifecycle_evidence(
+                control_plane_root_path=root,
+                record_store=store,
+                profile=profile,
+                issued_plan=destroy_old,
+                driver_result=destroy_result,
+            )
+            new_records = apply_odoo_preview_lifecycle_evidence(
+                control_plane_root_path=root,
+                record_store=store,
+                profile=profile,
+                issued_plan=refresh_new,
+                driver_result=refresh_result,
+                runtime_identity=refresh_new_runtime_identity,
+            )
+            stale_records = apply_odoo_preview_lifecycle_evidence(
+                control_plane_root_path=root,
+                record_store=store,
+                profile=profile,
+                issued_plan=destroy_old,
+                driver_result=destroy_result,
+            )
+            preview = store.read_preview_record(str(first_records["preview_id"]))
+
+        self.assertEqual(stale_records["lifecycle_evidence_status"], "stale")
+        self.assertEqual(preview.state, "active")
+        self.assertEqual(preview.serving_generation_id, new_records["generation_id"])
 
     async def test_odoo_preview_apply_keeps_health_responsive_during_provider_wait(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2355,6 +2677,13 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         compose_name="cm-odoo-preview-pr-42",
                     ),
                 ) as apply_driver,
+                patch(
+                    "control_plane.http_app.record_manager_preview_approval_invalidation_for_pr",
+                    return_value={"required": True, "event_status": "written"},
+                ) as record_manager_invalidation,
+                patch(
+                    "control_plane.http_app.reconcile_manager_preview_approval_for_pr_best_effort"
+                ) as reconcile_manager_approval,
             ):
                 response = await _post_odoo_preview_apply(
                     app,
@@ -2380,13 +2709,39 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                     },
                     idempotency_key=plan_id,
                 )
+                replayed_response = await _post_odoo_preview_apply(
+                    app,
+                    _ready_odoo_preview_destroy_payload(),
+                    idempotency_key=plan_id,
+                )
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["result"]["status"], "pass")
+        self.assertEqual(replayed_response.status_code, 202)
+        self.assertTrue(replayed_response.json()["replayed"])
         apply_driver.assert_called_once()
         applied_request = apply_driver.call_args.kwargs["request"]
         self.assertEqual(applied_request.dry_run_plan.operation, "destroy")
         self.assertEqual(applied_request.image_reference, "")
+        self.assertEqual(reconcile_manager_approval.call_count, 2)
+        record_manager_invalidation.assert_called_once()
+        invalidation_call = record_manager_invalidation.call_args.kwargs
+        self.assertEqual(invalidation_call["repository"], "cbusillo/odoo-tenant-cm")
+        self.assertEqual(invalidation_call["pr_number"], 42)
+        self.assertEqual(invalidation_call["source_event_kind"], "preview_destroy")
+        self.assertEqual(
+            invalidation_call["source_event_id"],
+            f"odoo-preview-destroy:{plan_id}",
+        )
+        self.assertTrue(invalidation_call["occurred_at"])
+        self.assertEqual(
+            response.json()["records"]["manager_preview_invalidation_event_status"],
+            "written",
+        )
+        self.assertEqual(
+            replayed_response.json()["records"]["manager_preview_invalidation_event_status"],
+            "written",
+        )
 
     async def test_odoo_preview_destroy_supersedes_expired_reconciled_refresh(
         self,
@@ -2534,7 +2889,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         "template_compose_id": "compose-cm-testing",
                         "summary": "ready isolated Odoo preview apply",
                     },
-                    "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
                     "wait_for_deploy": False,
                     "smoke_check": False,
                 },
@@ -2545,37 +2900,44 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 payload=payload,
             )
 
-            with patch(
-                "control_plane.http_app.execute_odoo_preview_apply_result",
-                side_effect=(
-                    {
-                        "status": "blocked",
-                        "operation": "refresh",
-                        "product": "odoo-tenant-cm",
-                        "repository": "cbusillo/odoo-tenant-cm",
-                        "preview_slug": "pr-42",
-                        "preview_url": "https://pr-42.cm-preview.example.test",
-                        "domain_host": "pr-42.cm-preview.example.test",
-                        "compose_name": "cm-odoo-preview-pr-42",
-                        "error_message": "provider dependency is not ready",
-                    },
-                    {
-                        "status": "pass",
-                        "operation": "refresh",
-                        "product": "odoo-tenant-cm",
-                        "repository": "cbusillo/odoo-tenant-cm",
-                        "preview_slug": "pr-42",
-                        "preview_url": "https://pr-42.cm-preview.example.test",
-                        "domain_host": "pr-42.cm-preview.example.test",
-                        "compose_name": "cm-odoo-preview-pr-42",
-                    },
-                ),
-            ) as apply_driver:
+            with (
+                patch(
+                    "control_plane.http_app.execute_odoo_preview_apply_result",
+                    side_effect=(
+                        {
+                            "status": "blocked",
+                            "operation": "refresh",
+                            "product": "odoo-tenant-cm",
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "preview_slug": "pr-42",
+                            "preview_url": "https://pr-42.cm-preview.example.test",
+                            "domain_host": "pr-42.cm-preview.example.test",
+                            "compose_name": "cm-odoo-preview-pr-42",
+                            "error_message": "provider dependency is not ready",
+                        },
+                        {
+                            "status": "pass",
+                            "operation": "refresh",
+                            "product": "odoo-tenant-cm",
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "preview_slug": "pr-42",
+                            "preview_url": "https://pr-42.cm-preview.example.test",
+                            "domain_host": "pr-42.cm-preview.example.test",
+                            "compose_name": "cm-odoo-preview-pr-42",
+                        },
+                    ),
+                ) as apply_driver,
+                patch(
+                    "control_plane.http_app.reconcile_manager_preview_approval_for_pr_best_effort",
+                    return_value=True,
+                ) as reconcile_manager_approval,
+            ):
                 first_response = await _post_odoo_preview_apply(
                     app,
                     payload,
                     idempotency_key=plan_id,
                 )
+                reconcile_manager_approval.assert_not_called()
                 second_response = await _post_odoo_preview_apply(
                     app,
                     payload,
@@ -2587,10 +2949,14 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_response.status_code, 202)
         self.assertEqual(second_response.json()["result"]["status"], "pass")
         self.assertEqual(apply_driver.call_count, 2)
+        reconcile_manager_approval.assert_called_once()
 
     async def test_odoo_preview_apply_replays_non_blocked_idempotency(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
+            image_digest = "a" * 64
+            changed_image_digest = "b" * 64
+            head_sha = "c" * 40
             store = self._reservation_store(root)
             identity = self._identity(
                 repository="cbusillo/launchplane",
@@ -2629,34 +2995,53 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         "template_compose_id": "compose-cm-testing",
                         "summary": "ready isolated Odoo preview apply",
                     },
-                    "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    "image_reference": (f"ghcr.io/cbusillo/odoo-tenant-cm@sha256:{image_digest}"),
+                    "manifest": {
+                        "artifact_id": "artifact-cm-preview",
+                        "source_commit": head_sha,
+                        "enterprise_base_digest": "sha256:enterprise",
+                        "image": {
+                            "repository": "ghcr.io/cbusillo/odoo-tenant-cm",
+                            "digest": f"sha256:{image_digest}",
+                        },
+                    },
                     "wait_for_deploy": False,
                     "smoke_check": False,
                 },
             }
             changed_payload = json.loads(json.dumps(payload))
-            cast(dict[str, object], changed_payload["apply"])["image_reference"] = (
-                "ghcr.io/cbusillo/odoo-tenant-cm@sha256:def456"
+            changed_apply = cast(dict[str, object], changed_payload["apply"])
+            changed_apply["image_reference"] = (
+                f"ghcr.io/cbusillo/odoo-tenant-cm@sha256:{changed_image_digest}"
             )
+            changed_manifest = cast(dict[str, object], changed_apply["manifest"])
+            changed_manifest_image = cast(dict[str, object], changed_manifest["image"])
+            changed_manifest_image["digest"] = f"sha256:{changed_image_digest}"
             plan_id = self._store_issued_preview_plan(
                 store=store,
                 identity=identity,
                 payload=payload,
             )
 
-            with patch(
-                "control_plane.http_app.execute_odoo_preview_apply_result",
-                return_value={
-                    "status": "pass",
-                    "operation": "refresh",
-                    "product": "odoo-tenant-cm",
-                    "repository": "cbusillo/odoo-tenant-cm",
-                    "preview_slug": "pr-42",
-                    "preview_url": "https://pr-42.cm-preview.example.test",
-                    "domain_host": "pr-42.cm-preview.example.test",
-                    "compose_name": "cm-odoo-preview-pr-42",
-                },
-            ) as apply_driver:
+            with (
+                patch(
+                    "control_plane.http_app.execute_odoo_preview_apply_result",
+                    return_value={
+                        "status": "pass",
+                        "operation": "refresh",
+                        "product": "odoo-tenant-cm",
+                        "repository": "cbusillo/odoo-tenant-cm",
+                        "preview_slug": "pr-42",
+                        "preview_url": "https://pr-42.cm-preview.example.test",
+                        "domain_host": "pr-42.cm-preview.example.test",
+                        "compose_name": "cm-odoo-preview-pr-42",
+                    },
+                ) as apply_driver,
+                patch(
+                    "control_plane.http_app.reconcile_manager_preview_approval_for_pr_best_effort",
+                    side_effect=(False, True),
+                ) as reconcile_manager_approval,
+            ):
                 first_response = await _post_odoo_preview_apply(
                     app,
                     payload,
@@ -2681,6 +3066,45 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conflict_response.status_code, 409)
         self.assertEqual(conflict_response.json()["error"]["code"], "odoo_preview_plan_mismatch")
         apply_driver.assert_called_once()
+        self.assertEqual(reconcile_manager_approval.call_count, 2)
+        previews = store.list_preview_records(
+            context_name="cm",
+            anchor_repo="odoo-tenant-cm",
+            anchor_pr_number=42,
+        )
+        self.assertEqual(len(previews), 1)
+        preview = previews[0]
+        self.assertEqual(preview.state, "active")
+        self.assertEqual(preview.canonical_url, "https://pr-42.cm-preview.example.test")
+        generation = store.read_preview_generation_record(preview.serving_generation_id)
+        self.assertEqual(generation.state, "ready")
+        self.assertEqual(generation.anchor_summary.head_sha, head_sha)
+        self.assertEqual(generation.deploy_status, "pass")
+        self.assertEqual(generation.verify_status, "pass")
+        self.assertEqual(generation.overall_health_status, "pass")
+        assert generation.runtime_identity is not None
+        provider_operation_record = store.read_idempotency_record(
+            scope=idempotency_scope(identity),
+            route_path="/v1/drivers/odoo/preview-apply",
+            idempotency_key=plan_id,
+        )
+        assert provider_operation_record is not None
+        self.assertEqual(
+            generation.runtime_identity.deployment_record_id,
+            provider_operation_record.record_id,
+        )
+        self.assertEqual(
+            generation.runtime_identity.image_reference,
+            f"ghcr.io/cbusillo/odoo-tenant-cm@sha256:{image_digest}",
+        )
+        binding = build_current_manager_preview_approval_binding(
+            product="odoo-tenant-cm",
+            preview=preview,
+            generation=generation,
+        )
+        self.assertEqual(binding.head_sha, head_sha)
+        self.assertEqual(binding.preview_url, "https://pr-42.cm-preview.example.test")
+        self.assertEqual(binding.artifact_image_digest, f"sha256:{image_digest}")
 
     async def test_odoo_preview_apply_handler_file_miss_is_not_found(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2735,7 +3159,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                                 "template_compose_id": "compose-cm-testing",
                                 "summary": "ready isolated Odoo preview apply",
                             },
-                            "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                            "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
                         },
                     },
                     idempotency_key=plan_id,
@@ -2793,7 +3217,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                             "template_compose_id": "compose-cm-testing",
                             "summary": "ready isolated Odoo preview apply",
                         },
-                        "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                        "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
                     },
                 },
                 idempotency_key="odoo-preview-apply:odoo-tenant-cm:pr-42:refresh:abc123",
