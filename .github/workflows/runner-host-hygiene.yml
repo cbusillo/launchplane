@@ -71,7 +71,6 @@ name: Runner Host Hygiene
         type: boolean
 
 permissions:
-  actions: read
   contents: read
   id-token: write
 
@@ -145,6 +144,28 @@ jobs:
             exit 1
           fi
 
+      - name: Mint GitHub read token
+        id: github-read-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: >-
+            ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_CLIENT_ID }}
+          private-key: >-
+            ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-actions: read
+          permission-administration: read
+
+      - name: Validate GitHub App installation scope
+        shell: bash
+        env:
+          EXPECTED_OWNER: ${{ github.repository_owner }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GH_TOKEN: ${{ steps.github-read-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          uv run --no-project python -m control_plane.workflows.runner_host_github_app
+
       - name: Run approved runner host hygiene executor
         id: executor
         shell: bash
@@ -163,8 +184,7 @@ jobs:
           INPUT_TARGET_BUILDKIT_STATE_VOLUMES: >-
             ${{ inputs.target_buildkit_state_volumes }}
           INPUT_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
-          GH_TOKEN: >-
-            ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_READ_TOKEN }}
+          GH_TOKEN: ${{ steps.github-read-token.outputs.token }}
         run: |
           set -euo pipefail
 
