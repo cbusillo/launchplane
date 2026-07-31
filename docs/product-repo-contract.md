@@ -180,6 +180,16 @@ non-checkout `repository` values are rejected by the product-repo profile.
   artifact construction. Reports must be vulnerability-only and preserve full
   package and suppression evidence as required by the dependency-health
   contract.
+- The product-repo config-authority gate treats inputs structurally nested under
+  an immutable dependency-health action and a digest-pinned Trivy tool image as
+  scanner mechanics. Dependabot pull-request text must use the exact trusted
+  bot/dependency-type guard or a step output. Mutable action/image references,
+  unrelated action inputs, and runtime identities disguised as scanner
+  configuration remain rejected.
+- A publish guard derived from `github.event.repository.default_branch` is a
+  workflow mechanic; a checked-in literal branch remains runtime authority.
+- Direct `${{ inputs.* }}` forwarding inside action metadata is connector
+  plumbing; composed expressions and literal runtime identities remain audited.
 - Publishing an immutable image or artifact reference that Launchplane can
   deploy.
 - A minimal GitHub Actions trigger that authenticates to Launchplane with OIDC
