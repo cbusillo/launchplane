@@ -41,6 +41,10 @@ DependencyHealthReasonCode = Literal[
 DependencyHealthFindingIdentity = tuple[str, str, str, str]
 
 _ADVISORY_ID_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9._:+-]*$")
+_ADVISORY_REFERENCE_PATTERN = re.compile(
+    r"(?i)\b(?:GHSA-[0-9A-Z]{4}(?:-[0-9A-Z]{4}){2}|CVE-[0-9]{4}-[0-9]{4,}|"
+    r"PYSEC-[0-9]{4}-[0-9]+|OSV-[0-9A-Z._:+-]+)\b"
+)
 _ECOSYSTEM_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 _VISIBLE_TOKEN_PATTERN = re.compile(r"^[\x21-\x7e]+$")
 _BLOCKING_SEVERITIES: frozenset[DependencyHealthSeverity] = frozenset({"high", "critical"})
@@ -60,6 +64,12 @@ class DependencyHealthProvenanceMismatch(ValueError):
         super().__init__(
             f"dependency health snapshots have incompatible provenance fields: {joined_fields}"
         )
+
+
+def extract_dependency_health_advisory_ids(value: str) -> tuple[str, ...]:
+    return tuple(
+        sorted({match.group(0).upper() for match in _ADVISORY_REFERENCE_PATTERN.finditer(value)})
+    )
 
 
 class DependencyHealthFinding(BaseModel):
