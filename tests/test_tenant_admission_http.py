@@ -2038,7 +2038,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
             "Tenant technical human waiver request body is too large.",
         )
 
-    async def test_no_role_policy_waiver_status_or_controller_routes(self) -> None:
+    async def test_no_unified_controller_or_legacy_trusted_maintenance_route(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
@@ -2052,7 +2052,6 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
                 record_store_factory=lambda: store,
             )
             routes = [
-                ("GET", "/v1/work-graph/tenant-admission/status"),
                 ("POST", "/v1/work-graph/tenant-admission/controller/run-once"),
                 ("GET", "/v1/work-graph/tenant-admission/trusted-maintenance"),
             ]

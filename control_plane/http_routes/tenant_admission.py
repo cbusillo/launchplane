@@ -1,7 +1,9 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Literal, cast
 
+import click
 from fastapi import Depends, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,6 +26,7 @@ from control_plane.contracts.trusted_maintenance import (
     TRUSTED_MAINTENANCE_POLICY_READ_ACTION,
     TRUSTED_MAINTENANCE_POLICY_WRITE_ACTION,
 )
+from control_plane.contracts.tenant_merge_eligibility import TenantMergeCandidate
 from control_plane.repository_human_admission import (
     RepositoryHumanRolePolicyApplyEnvelope,
     RepositoryHumanRolePolicyApplyResult,
@@ -60,6 +63,23 @@ from control_plane.tenant_repository_classification import (
     get_tenant_repository_classification_read_model,
     require_tenant_repository_classification_read_store,
 )
+from control_plane.tenant_admission_projection import (
+    TENANT_ADMISSION_STATUS_RECONCILE_ACTION,
+    TenantAdmissionGitHubProjection,
+    TenantAdmissionProjectionError,
+    TenantAdmissionProjectionStaleCandidateError,
+    TenantAdmissionProjectionWriteResult,
+    TenantAdmissionStatusReconcileEnvelope,
+    build_tenant_admission_projection,
+    read_current_tenant_admission_candidate,
+    write_tenant_admission_projection,
+)
+from control_plane.tenant_admission_status import (
+    TENANT_ADMISSION_STATUS_READ_ACTION,
+    TenantAdmissionStatusReadModel,
+    get_tenant_admission_status,
+    require_tenant_admission_status_store,
+)
 from control_plane.trusted_maintenance import (
     TrustedMaintenancePolicyApplyEnvelope,
     TrustedMaintenancePolicyApplyResult,
@@ -87,6 +107,8 @@ REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE = (
 TRUSTED_MAINTENANCE_POLICY_READ_ROUTE = "/v1/work-graph/tenant-admission/trusted-maintenance-policy"
 TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE = "/v1/tenant-admission/trusted-maintenance-policies/apply"
 TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE = "/v1/tenant-admission/technical-human-waivers/apply"
+TENANT_ADMISSION_STATUS_READ_ROUTE = "/v1/work-graph/tenant-admission/status"
+TENANT_ADMISSION_STATUS_RECONCILE_ROUTE = "/v1/tenant-admission/status/reconcile"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +125,9 @@ class TenantAdmissionWriteRouteDependencies:
     authorization_allows: AuthorizationAllows
     http_error: HttpErrorFactory
     error_response_model: type[BaseModel]
+    control_plane_root: Path
+    github_token: Callable[..., str]
+    github_api: Callable[..., object]
 
 
 class TenantRepositoryClassificationReadResponse(BaseModel):
@@ -193,12 +218,93 @@ class TenantTechnicalHumanWaiverApplyResponse(BaseModel):
     )
 
 
+class TenantAdmissionStatusReadResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    read_model: TenantAdmissionStatusReadModel
+
+
+class TenantAdmissionStatusReconcileResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    read_model: TenantAdmissionStatusReadModel
+    projection: TenantAdmissionGitHubProjection
+    write_result: TenantAdmissionProjectionWriteResult
+
+
+class TenantAdmissionStatusReconcileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    result: TenantAdmissionStatusReconcileResult
+
+
 def register_tenant_admission_read_routes(
     app: ApiRouteRegistrar,
     *,
     dependencies: TenantAdmissionReadRouteDependencies,
 ) -> None:
     common = dependencies.common
+
+    def read_tenant_admission_status(
+        product: Annotated[str, Query(..., alias="product")],
+        context: Annotated[str, Query(..., alias="context")],
+        repository_id: Annotated[str, Query(..., alias="repository_id")],
+        repository_owner_id: Annotated[str, Query(..., alias="repository_owner_id")],
+        repository: Annotated[str, Query(..., alias="repository")],
+        pull_request_number: Annotated[int, Query(..., alias="pull_request_number", ge=1)],
+        head_sha: Annotated[str, Query(..., alias="head_sha")],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> TenantAdmissionStatusReadResponse:
+        trace_id = common.next_trace_id()
+        try:
+            candidate = TenantMergeCandidate(
+                product=product,
+                context=context,
+                repository_id=repository_id,
+                repository_owner_id=repository_owner_id,
+                repository=repository,
+                pull_request_number=pull_request_number,
+                head_sha=head_sha,
+            )
+        except ValueError as error:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=str(error),
+            ) from error
+        if not common.authorization_allows(
+            identity=identity,
+            action=TENANT_ADMISSION_STATUS_READ_ACTION,
+            product=candidate.product,
+            context=candidate.context,
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read tenant admission status for this context.",
+            )
+        try:
+            store = require_tenant_admission_status_store(record_store)
+            read_model = get_tenant_admission_status(store=store, candidate=candidate)
+        except TypeError as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="record_storage_unavailable",
+                message=str(error),
+            ) from error
+        return TenantAdmissionStatusReadResponse(
+            trace_id=trace_id,
+            read_model=read_model,
+        )
 
     def read_tenant_repository_classification(
         repository_id: Annotated[str, Query(..., alias="repository_id")],
@@ -366,6 +472,21 @@ def register_tenant_admission_read_routes(
         )
 
     app.add_api_route(
+        TENANT_ADMISSION_STATUS_READ_ROUTE,
+        read_tenant_admission_status,
+        methods=["GET"],
+        response_model=TenantAdmissionStatusReadResponse,
+        operation_id="read_tenant_admission_status",
+        summary="Read current exact-head tenant admission status",
+        responses={
+            400: {"model": common.error_response_model},
+            401: {"model": common.error_response_model},
+            403: {"model": common.error_response_model},
+            503: {"model": common.error_response_model},
+        },
+    )
+
+    app.add_api_route(
         TENANT_REPOSITORY_CLASSIFICATION_READ_ROUTE,
         read_tenant_repository_classification,
         methods=["GET"],
@@ -418,6 +539,111 @@ def register_tenant_admission_write_routes(
 ) -> None:
     def _human_waiver_idempotency_scope(identity: GitHubHumanIdentity) -> str:
         return f"github-human-id|{identity.github_id}"
+
+    async def reconcile_tenant_admission_status_route(
+        envelope: TenantAdmissionStatusReconcileEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_write_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+    ) -> TenantAdmissionStatusReconcileResponse:
+        trace_id = dependencies.next_trace_id()
+        candidate = envelope.candidate
+        if isinstance(identity, TerminalAgentIdentity):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Terminal agent credentials cannot reconcile tenant admission status.",
+            )
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action=TENANT_ADMISSION_STATUS_RECONCILE_ACTION,
+            product=candidate.product,
+            context=candidate.context,
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot reconcile tenant admission status for this context.",
+            )
+        try:
+            store = require_tenant_admission_status_store(record_store)
+        except TypeError as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="record_storage_unavailable",
+                message=str(error),
+            ) from error
+        token = dependencies.github_token(
+            control_plane_root=dependencies.control_plane_root,
+            context_name=candidate.context,
+        ).strip()
+        if not token:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_unavailable",
+                message="Tenant admission reconciliation cannot resolve a GitHub token.",
+            )
+        try:
+            pull_request_url = read_current_tenant_admission_candidate(
+                expected=candidate,
+                token=token,
+                api_request=dependencies.github_api,
+            )
+        except TenantAdmissionProjectionStaleCandidateError as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="tenant_admission_stale_candidate",
+                message=str(error),
+            ) from error
+        except (
+            TenantAdmissionProjectionError,
+            click.ClickException,
+            LookupError,
+            ValueError,
+        ) as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="tenant_admission_projection_unavailable",
+                message="Tenant admission GitHub facts could not be verified.",
+            ) from error
+        read_model = get_tenant_admission_status(store=store, candidate=candidate)
+        projection = build_tenant_admission_projection(
+            read_model=read_model,
+            candidate=candidate,
+            pull_request_url=pull_request_url,
+        )
+        try:
+            write_result = write_tenant_admission_projection(
+                projection=projection,
+                token=token,
+                api_request=dependencies.github_api,
+            )
+        except (
+            TenantAdmissionProjectionError,
+            click.ClickException,
+            LookupError,
+            ValueError,
+        ) as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="tenant_admission_projection_unavailable",
+                message="Tenant admission status projection could not be delivered.",
+            ) from error
+        return TenantAdmissionStatusReconcileResponse(
+            trace_id=trace_id,
+            result=TenantAdmissionStatusReconcileResult(
+                read_model=read_model,
+                projection=projection,
+                write_result=write_result,
+            ),
+        )
 
     def _map_waiver_apply_write_result(
         *,
@@ -1282,6 +1508,23 @@ def register_tenant_admission_write_routes(
             trace_id=trace_id,
             result=result,
         )
+
+    app.add_api_route(
+        TENANT_ADMISSION_STATUS_RECONCILE_ROUTE,
+        reconcile_tenant_admission_status_route,
+        methods=["POST"],
+        status_code=202,
+        response_model=TenantAdmissionStatusReconcileResponse,
+        operation_id="reconcile_tenant_admission_status",
+        summary="Recompute and project exact-head tenant admission status",
+        responses={
+            400: {"model": dependencies.error_response_model},
+            401: {"model": dependencies.error_response_model},
+            403: {"model": dependencies.error_response_model},
+            409: {"model": dependencies.error_response_model},
+            503: {"model": dependencies.error_response_model},
+        },
+    )
 
     app.add_api_route(
         TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE,

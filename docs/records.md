@@ -1681,13 +1681,13 @@ run` is the foreground loop intended for an external process supervisor, and
 ## Tenant Repository Classification Record
 
 - Persisted as `launchplane_tenant_repository_classifications` records under DB authority.
-- Records classify GitHub repositories by numeric `repository_id` as either `engineering` (normal merge flow) or `tenant_ui` (manager preview approval required by default).
+- Records classify GitHub repositories by numeric `repository_id` as either `engineering` (normal merge flow) or `tenant_ui` (one exact tenant-admission path is required).
 - Each revision is immutable and identified by a deterministic record ID (`tenant-repository-classification-<repository_id>-r<revision>`) and payload SHA-256 digest.
 - Monotonically increasing revisions (`revision=1`, `revision=2`, ...) form an append-only classification ledger. Revision 1 must not specify `supersedes_record_id`; subsequent revisions must set `supersedes_record_id` equal to the active current record ID.
 - Classification writes use CAS (compare-and-swap) operator recovery: callers supply `expected_current_record_id` (empty when no record exists). Mismatches fail closed with HTTP 409 conflict, and sequence gaps or invalid supersedes links fail closed with HTTP 400. Apply reserves durable DB idempotency, locks the repository classification stream, validates CAS, appends the revision, and completes the stored response in one PostgreSQL transaction. Exact same-key, same-payload retries replay that completed response; a different key must revalidate current state and cannot replay an already-applied revision. Dry-run results report `would_apply` or `would_replay` without writing.
 - Filesystem storage is rehearsal/import input only. Both filesystem and DB writers validate the append-only revision chain, and filesystem-to-DB import orders revisions oldest-first before accepting them as authority.
 - Classification records are pure factual classification authority without heuristics, wildcard matching, or PR label fallbacks. Identity matches require exact `repository_id`, `repository_owner_id`, `repository` owner/name, `product`, and `context`.
-- Pure tenant merge eligibility evaluates candidates against this DB authority: engineering repos take the engineering fast path, while tenant UI repos require exact manager preview approval (or optional fast-path waiver/maintenance evidence bound to the exact head SHA and classification digest).
+- Pure tenant merge eligibility evaluates candidates against this DB authority: engineering repos take the engineering fast path, while tenant UI repos require one satisfied exact-head path from manager preview approval, technical human waiver, or trusted-maintenance evidence.
 - This record and pure evaluation remain separate from scheduler merge train admission (`merge_train_admission`).
 
 ## Repository Human Admission Contracts
@@ -1862,13 +1862,33 @@ run` is the foreground loop intended for an external process supervisor, and
   no evidence; exact GitHub redelivery or existing signed replay-envelope
   tooling is the reconcile path. Responses do not expose policy actor IDs or
   logins.
-- Unified tenant-admission status/controller projection, merge-train wiring,
-  branch protection or rollout behavior, UI, provider mutations, blanket Bot
-  bypass, changed-file/name/branch/title/label heuristics, and checked-in real
-  repository policy values remain deferred. Until those follow-up pieces are
-  deliberately deployed and rollout supplies shared-authority records, existing
-  manager-preview and Every Code behavior remains unchanged for repositories
-  without active trusted-maintenance authority.
+- Unified tenant admission is a recomputed read model, not a fourth durable
+  approval record. It resolves the current numeric repository classification
+  and, for `tenant_ui`, evaluates the exact candidate against current manager
+  preview approval, technical human waiver, and trusted-maintenance evidence.
+  One satisfied path admits the candidate; missing, ambiguous, stale, denied,
+  expired, or unavailable authority cannot create success.
+- The public read model exposes only the candidate, classification binding,
+  decision, path states, generation time, and one category: `engineering`,
+  `pending`, `manager-approved`, `technical-waived`, `maintenance-admitted`,
+  `stale`, `denied`, or `unavailable`. It does not expose manager identities,
+  policy memberships, private provider topology, tokens, or secret values.
+- The classic GitHub `tenant-admission` commit status is a non-authoritative
+  projection of that recomputation. Reconciliation first re-fetches the open PR
+  and verifies its numeric base-repository ID, numeric owner ID, full name, and
+  exact head SHA. It then recomputes from DB records and writes or replays the
+  status on that exact SHA. GitHub read/write uncertainty returns retryable
+  failure and never manufactures a passing decision. Engineering candidates do
+  not require or receive this tenant-only projection.
+- Legacy manager-preview records that store only a bare repository name remain
+  compatible only when their bound PR URL is the canonical
+  `https://github.com/OWNER/REPO/pull/N` URL for the exact candidate. A different
+  owner, host, PR number, query, or fragment cannot satisfy tenant admission.
+- Merge-controller enforcement, branch protection, portfolio rollout, UI, and
+  real repository policy values remain separate follow-up work. Blanket Bot
+  bypass and changed-file, repository-name, branch, title, or label heuristics
+  are not supported. Preview refresh, verification, destroy, and cleanup remain
+  independent from every admission path and from GitHub projection delivery.
 
 ## Runtime Key-Safety Policy Record
 
