@@ -133,7 +133,7 @@ uv run launchplane dependency-health trivy-snapshot \
 
 Omit `--baseline-commit` for the baseline snapshot. The adapter normalizes
 Trivy language and operating-system findings, extracts advisory aliases from
-Trivy references, aggregates repeated package occurrences, and fails on
+Trivy `VendorIDs`, primary URLs, and references, aggregates repeated package occurrences, and fails on
 unknown severities or malformed report evidence. Unsafe or non-path Trivy
 targets receive deterministic `trivy-targets/` evidence paths rather than being
 silently discarded. Reports must be generated with `--list-all-pkgs`; the

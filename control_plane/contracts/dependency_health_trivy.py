@@ -210,18 +210,25 @@ def _trivy_advisory_aliases(
     *,
     advisory_id: str,
 ) -> tuple[str, ...]:
-    reference_text: list[str] = []
+    advisory_text: list[str] = []
+    vendor_ids = vulnerability.get("VendorIDs")
+    if vendor_ids is not None:
+        if not isinstance(vendor_ids, list) or not all(
+            isinstance(vendor_id, str) for vendor_id in vendor_ids
+        ):
+            raise ValueError("Trivy vulnerability VendorIDs must be an array of strings")
+        advisory_text.extend(vendor_ids)
     primary_url = vulnerability.get("PrimaryURL")
     if isinstance(primary_url, str):
-        reference_text.append(primary_url)
+        advisory_text.append(primary_url)
     references = vulnerability.get("References")
     if references is not None:
         if not isinstance(references, list) or not all(
             isinstance(reference, str) for reference in references
         ):
             raise ValueError("Trivy vulnerability References must be an array of strings")
-        reference_text.extend(references)
-    aliases = set(extract_dependency_health_advisory_ids("\n".join(reference_text)))
+        advisory_text.extend(references)
+    aliases = set(extract_dependency_health_advisory_ids("\n".join(advisory_text)))
     aliases.discard(advisory_id.strip().upper())
     return tuple(sorted(aliases))
 

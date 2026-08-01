@@ -152,9 +152,10 @@ jobs:
 ```
 
 The reusable workflow validates `launchplane-revision` as a 40-character SHA,
-checks out the product repository and that exact Launchplane audit-tool commit,
-then runs the product-repo changed-file gate. The input must match the SHA in
-the reusable-workflow `uses` reference, and the dedicated workflow must contain
+requires it to match GitHub's called-workflow commit SHA, checks out the product
+repository and that exact Launchplane audit-tool commit, then runs the product-repo
+changed-file gate. The input must match the SHA in the reusable-workflow `uses`
+reference, and the dedicated workflow must contain
 exactly one such call. Product repositories should not carry a
 pinned Launchplane tool checkout or run `uv run launchplane ...` themselves.
 The dedicated workflow fails closed when the reusable call is absent, duplicated,

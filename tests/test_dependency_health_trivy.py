@@ -48,6 +48,7 @@ def _vulnerability(
     version: str = "16.2.10",
     severity: str = "HIGH",
     references: list[str] | None = None,
+    vendor_ids: list[str] | None = None,
 ) -> dict[str, object]:
     return {
         "VulnerabilityID": advisory_id,
@@ -56,6 +57,7 @@ def _vulnerability(
         "Severity": severity,
         "PrimaryURL": f"https://avd.aquasec.com/nvd/{advisory_id.lower()}",
         "References": references or [],
+        "VendorIDs": vendor_ids or [],
     }
 
 
@@ -147,6 +149,31 @@ class DependencyHealthTrivyAdapterTests(unittest.TestCase):
             snapshot.findings[0].manifest_path,
             r"^trivy-targets/Node\.js-node-pkg-[0-9a-f]{16}\.json$",
         )
+
+    def test_adapter_extracts_aliases_from_vendor_ids(self) -> None:
+        snapshot = dependency_health_snapshot_from_trivy_report(
+            report=_report(
+                [
+                    _vulnerability(
+                        "CVE-2026-12345",
+                        vendor_ids=["GHSA-aaaa-bbbb-cccc"],
+                    )
+                ]
+            ),
+            provenance=_provenance(),
+        )
+
+        self.assertEqual(snapshot.findings[0].aliases, ("GHSA-AAAA-BBBB-CCCC",))
+
+    def test_adapter_rejects_malformed_vendor_ids(self) -> None:
+        vulnerability = _vulnerability("CVE-2026-12345")
+        vulnerability["VendorIDs"] = "GHSA-AAAA-BBBB-CCCC"
+
+        with self.assertRaisesRegex(ValueError, "VendorIDs must be an array of strings"):
+            dependency_health_snapshot_from_trivy_report(
+                report=_report([vulnerability]),
+                provenance=_provenance(),
+            )
 
     def test_adapter_does_not_treat_absolute_target_as_repo_relative(self) -> None:
         snapshot = dependency_health_snapshot_from_trivy_report(
@@ -367,11 +394,26 @@ class DependencyHealthTrivyCliTests(unittest.TestCase):
 
     def test_compare_cli_extracts_target_advisory_ids_from_text(self) -> None:
         baseline = dependency_health_snapshot_from_trivy_report(
-            report=_report([_vulnerability("GHSA-AAAA-BBBB-CCCC")]),
+            report=_report(
+                [
+                    _vulnerability(
+                        "CVE-2026-12345",
+                        vendor_ids=["GHSA-AAAA-BBBB-CCCC"],
+                    )
+                ]
+            ),
             provenance=_provenance(),
         )
         candidate = dependency_health_snapshot_from_trivy_report(
-            report=_report([_vulnerability("GHSA-AAAA-BBBB-CCCC", version="16.2.11")]),
+            report=_report(
+                [
+                    _vulnerability(
+                        "CVE-2026-12345",
+                        version="16.2.11",
+                        vendor_ids=["GHSA-AAAA-BBBB-CCCC"],
+                    )
+                ]
+            ),
             provenance=_provenance(
                 source_commit=CANDIDATE_COMMIT,
                 baseline_commit=BASE_COMMIT,
