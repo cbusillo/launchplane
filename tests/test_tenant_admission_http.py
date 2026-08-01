@@ -1,20 +1,39 @@
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 import unittest
 
 from control_plane.contracts.repository_human_admission import (
+    TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,
+    RepositoryHumanRolePolicyRecord,
     build_repository_human_role_policy_record_id,
 )
-from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
 from control_plane.contracts.tenant_merge_eligibility import (
+    TenantRepositoryClassificationRecord,
     build_tenant_repository_classification_record_id,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import LaunchplaneAuthzPolicy, TerminalAgentIdentity
+from control_plane.service_auth import (
+    GitHubHumanIdentity,
+    GitHubHumanPolicyRule,
+    LaunchplaneAuthzPolicy,
+    TerminalAgentIdentity,
+)
+from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
-from tests.http_app_test_support import _asgi_get, _asgi_request
+from tests.http_app_test_support import (
+    _asgi_get,
+    _asgi_request,
+    _browser_mutation_headers,
+    _github_oauth_config,
+)
 from tests.support.auth import _StubVerifier, _identity
 
 PRODUCT = "launchplane"
@@ -42,6 +61,7 @@ def _postgres_store(
         "repository_human_role_policy.read",
         "repository_human_role_policy.write",
     ),
+    authz_policy_record: LaunchplaneAuthzPolicyRecord | None = None,
 ) -> PostgresRecordStore:
     root.mkdir(parents=True, exist_ok=True)
     store = _TestPostgresRecordStore(
@@ -49,7 +69,8 @@ def _postgres_store(
     )
     store.ensure_schema()
     store.seed_authz_policy_if_absent(
-        LaunchplaneAuthzPolicyRecord(
+        authz_policy_record
+        or LaunchplaneAuthzPolicyRecord(
             record_id="test-tenant-admission-authz-policy",
             revision=1,
             status="active",
@@ -59,6 +80,200 @@ def _postgres_store(
         )
     )
     return store
+
+
+def _waiver_human_identity(
+    *, github_id: int = 301, login: str = "human-301"
+) -> GitHubHumanIdentity:
+    return GitHubHumanIdentity(
+        login=login,
+        github_id=github_id,
+        name="Human Owner",
+        email="human-owner@example.com",
+        organizations=frozenset(),
+        teams=frozenset(),
+        role="read_only",
+    )
+
+
+def _waiver_session_app(
+    store: object,
+    *,
+    identity: GitHubHumanIdentity | None = None,
+) -> tuple[Any, HumanSessionManager, Any]:
+    session_manager = HumanSessionManager(
+        config=_github_oauth_config(),
+        session_store=InMemoryHumanSessionStore(),
+    )
+    human_session = session_manager.issue(identity or _waiver_human_identity())
+    app = create_launchplane_fastapi_app(
+        verifier=_StubVerifier(_identity()),
+        authz_policy=_authz_policy(actions=()),
+        record_store_factory=lambda: store,
+        human_session_manager=session_manager,
+    )
+    return app, session_manager, human_session
+
+
+def _waiver_authz_policy_record(
+    *, github_ids: tuple[int, ...] = (301,)
+) -> LaunchplaneAuthzPolicyRecord:
+    policy = LaunchplaneAuthzPolicy(
+        schema_version=2,
+        github_humans=(
+            GitHubHumanPolicyRule(
+                managed_set_id="tenant-human.example",
+                managed_rule_id="technical-waiver",
+                github_ids=github_ids,
+                roles=("read_only",),
+                products=(PRODUCT,),
+                contexts=(CONTEXT,),
+                actions=(TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,),
+            ),
+        ),
+    )
+    digest = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+        revision=1,
+        status="active",
+        source="test:tenant-technical-human-waiver-authz",
+        updated_at="2026-07-31T00:00:00Z",
+        policy_sha256=digest,
+        policy=policy,
+    )
+
+
+def _waiver_classification_record(
+    *, kind: str = "tenant_ui"
+) -> TenantRepositoryClassificationRecord:
+    return TenantRepositoryClassificationRecord.model_validate(
+        {
+            "schema_version": 1,
+            "repository_id": REPOSITORY_ID,
+            "repository_owner_id": REPOSITORY_OWNER_ID,
+            "repository": REPOSITORY,
+            "product": PRODUCT,
+            "context": CONTEXT,
+            "classification_kind": kind,
+            "classification_revision": 1,
+            "classified_at": CLASSIFIED_AT,
+            "source": SOURCE,
+            "reason": REASON,
+        }
+    )
+
+
+def _waiver_role_policy_record(
+    *, repository_owner_github_ids: tuple[int, ...] = (301,)
+) -> RepositoryHumanRolePolicyRecord:
+    return RepositoryHumanRolePolicyRecord.model_validate(
+        {
+            "schema_version": 1,
+            "record_id": build_repository_human_role_policy_record_id(
+                repository_id=REPOSITORY_ID,
+                product=PRODUCT,
+                context=CONTEXT,
+                role_policy_revision=1,
+            ),
+            "repository_id": REPOSITORY_ID,
+            "repository_owner_id": REPOSITORY_OWNER_ID,
+            "repository": REPOSITORY,
+            "product": PRODUCT,
+            "context": CONTEXT,
+            "status": "active",
+            "role_policy_revision": 1,
+            "repository_owner_github_ids": repository_owner_github_ids,
+            "manager_primary_github_ids": [501],
+            "manager_backup_github_ids": [],
+            "manager_delegations": [],
+            "effective_at": CLASSIFIED_AT,
+            "source": SOURCE,
+            "reason": "current role policy",
+        }
+    )
+
+
+def _write_filesystem_authz_policy(
+    store: FilesystemRecordStore,
+    record: LaunchplaneAuthzPolicyRecord,
+) -> None:
+    record_dir = store.state_dir / "launchplane_authz_policies"
+    record_dir.mkdir(parents=True, exist_ok=True)
+    (record_dir / f"{record.record_id}.json").write_text(
+        json.dumps(record.model_dump(mode="json"), sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _seed_waiver_authority(
+    store: object,
+    *,
+    classification: TenantRepositoryClassificationRecord | None = None,
+    role_policy: RepositoryHumanRolePolicyRecord | None = None,
+    authz_policy: LaunchplaneAuthzPolicyRecord | None = None,
+) -> tuple[
+    TenantRepositoryClassificationRecord,
+    RepositoryHumanRolePolicyRecord,
+    LaunchplaneAuthzPolicyRecord,
+]:
+    classification_record = classification or _waiver_classification_record()
+    role_policy_record = role_policy or _waiver_role_policy_record()
+    authz_policy_record = authz_policy or _waiver_authz_policy_record()
+    store.write_tenant_repository_classification_record(classification_record)  # type: ignore[attr-defined]
+    store.write_repository_human_role_policy_record(role_policy_record)  # type: ignore[attr-defined]
+    if isinstance(store, PostgresRecordStore):
+        store.seed_authz_policy_if_absent(authz_policy_record)
+    elif isinstance(store, FilesystemRecordStore):
+        _write_filesystem_authz_policy(store, authz_policy_record)
+    else:
+        raise TypeError("unsupported waiver test store")
+    return classification_record, role_policy_record, authz_policy_record
+
+
+def _waiver_apply_payload(
+    *,
+    classification: TenantRepositoryClassificationRecord,
+    role_policy: RepositoryHumanRolePolicyRecord,
+    authz_policy: LaunchplaneAuthzPolicyRecord,
+    mode: str = "apply",
+    action: str = "created",
+    source_event_id: str = "comment-waiver-create",
+    reason: str = "Owner reviewed exact technical waiver.",
+    expected_current: dict[str, object] | None = None,
+    expires_at: str = "",
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "mode": mode,
+        "action": action,
+        "candidate": {
+            "product": PRODUCT,
+            "context": CONTEXT,
+            "repository_id": REPOSITORY_ID,
+            "repository_owner_id": REPOSITORY_OWNER_ID,
+            "repository": REPOSITORY,
+            "pull_request_number": 17,
+            "head_sha": "a" * 40,
+        },
+        "expected_authority": {
+            "schema_version": 1,
+            "classification_record_id": classification.record_id,
+            "classification_digest": classification.classification_digest,
+            "role_policy_record_id": role_policy.record_id,
+            "role_policy_digest": role_policy.role_policy_digest,
+            "authz_policy_record_id": authz_policy.record_id,
+            "authz_policy_digest": authz_policy.policy_sha256,
+        },
+        "source_event_kind": "github_issue_comment",
+        "source_event_id": source_event_id,
+        "reason": reason,
+    }
+    if expected_current is not None:
+        payload["expected_current"] = expected_current
+    if expires_at:
+        payload["expires_at"] = expires_at
+    return payload
 
 
 class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -1009,6 +1224,337 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(digest_drift.status_code, 409)
         self.assertEqual(digest_drift.json()["error"]["code"], "role_policy_conflict")
 
+    async def test_technical_human_waiver_dry_run_uses_browser_human_session_with_filesystem_store(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = FilesystemRecordStore(Path(tmp_dir))
+            classification, role_policy, authz_policy = _seed_waiver_authority(store)
+            app, session_manager, human_session = _waiver_session_app(store)
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers=_browser_mutation_headers(session_manager, human_session),
+                payload=_waiver_apply_payload(
+                    classification=classification,
+                    role_policy=role_policy,
+                    authz_policy=authz_policy,
+                    mode="dry_run",
+                ),
+            )
+            events = store.list_tenant_technical_human_waiver_event_records(
+                repository_id=REPOSITORY_ID,
+                product=PRODUCT,
+                context=CONTEXT,
+            )
+
+        self.assertEqual(response.status_code, 202)
+        data = response.json()
+        self.assertEqual(data["result"]["mode"], "dry_run")
+        self.assertEqual(data["result"]["status"], "would_apply")
+        self.assertTrue(data["result"]["dry_run"])
+        self.assertEqual(data["result"]["path_result"]["state"], "satisfied")
+        self.assertEqual(events, ())
+
+    async def test_technical_human_waiver_apply_requires_browser_human_and_csrf(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(
+                Path(tmp_dir),
+                authz_policy_record=_waiver_authz_policy_record(),
+            )
+            classification, role_policy, authz_policy = _seed_waiver_authority(store)
+            payload = _waiver_apply_payload(
+                classification=classification,
+                role_policy=role_policy,
+                authz_policy=authz_policy,
+            )
+            app, session_manager, human_session = _waiver_session_app(store)
+
+            success = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "waiver-browser-create",
+                },
+                payload=payload,
+            )
+            missing_csrf_session = session_manager.issue(_waiver_human_identity())
+            missing_csrf_headers = _browser_mutation_headers(
+                session_manager,
+                missing_csrf_session,
+            )
+            missing_csrf_headers.pop("X-CSRF-Token")
+            missing_csrf = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers={
+                    **missing_csrf_headers,
+                    "Idempotency-Key": "waiver-missing-csrf",
+                },
+                payload=payload,
+            )
+            bearer_only = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "waiver-bearer-only",
+                },
+                payload=payload,
+            )
+
+        self.assertEqual(success.status_code, 202)
+        self.assertEqual(success.json()["result"]["status"], "applied")
+        self.assertEqual(success.json()["result"]["path_result"]["state"], "satisfied")
+        self.assertEqual(missing_csrf.status_code, 403)
+        self.assertEqual(missing_csrf.json()["error"]["code"], "browser_mutation_denied")
+        self.assertEqual(bearer_only.status_code, 403)
+        self.assertEqual(bearer_only.json()["error"]["code"], "authorization_denied")
+
+    async def test_technical_human_waiver_apply_requires_real_postgresql_store(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            filesystem_store = FilesystemRecordStore(Path(tmp_dir) / "fs")
+            classification, role_policy, authz_policy = _seed_waiver_authority(filesystem_store)
+            app, session_manager, human_session = _waiver_session_app(filesystem_store)
+            filesystem_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "waiver-fs-apply",
+                },
+                payload=_waiver_apply_payload(
+                    classification=classification,
+                    role_policy=role_policy,
+                    authz_policy=authz_policy,
+                ),
+            )
+
+            sqlite_store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(tmp_dir) / 'launchplane.sqlite3'}"
+            )
+            sqlite_store.ensure_schema()
+            classification, role_policy, authz_policy = _seed_waiver_authority(sqlite_store)
+            app, session_manager, human_session = _waiver_session_app(sqlite_store)
+            sqlite_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "waiver-sqlite-apply",
+                },
+                payload=_waiver_apply_payload(
+                    classification=classification,
+                    role_policy=role_policy,
+                    authz_policy=authz_policy,
+                ),
+            )
+            sqlite_store.close()
+
+        self.assertEqual(filesystem_response.status_code, 503)
+        self.assertEqual(
+            filesystem_response.json()["error"]["code"],
+            "database_storage_required",
+        )
+        self.assertEqual(sqlite_response.status_code, 503)
+        self.assertEqual(
+            sqlite_response.json()["error"]["code"],
+            "database_storage_required",
+        )
+
+    async def test_technical_human_waiver_apply_replays_same_numeric_id_after_login_rename(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(
+                Path(tmp_dir),
+                authz_policy_record=_waiver_authz_policy_record(),
+            )
+            classification, role_policy, authz_policy = _seed_waiver_authority(store)
+            payload = _waiver_apply_payload(
+                classification=classification,
+                role_policy=role_policy,
+                authz_policy=authz_policy,
+            )
+            app, session_manager, human_session = _waiver_session_app(store)
+            first = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "waiver-login-rename",
+                },
+                payload=payload,
+            )
+            renamed_session = session_manager.issue(
+                _waiver_human_identity(github_id=301, login="renamed-human")
+            )
+            replay = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, renamed_session),
+                    "Idempotency-Key": "waiver-login-rename",
+                },
+                payload=payload,
+            )
+            changed_payload = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers={
+                    **_browser_mutation_headers(
+                        session_manager,
+                        session_manager.issue(_waiver_human_identity()),
+                    ),
+                    "Idempotency-Key": "waiver-login-rename",
+                },
+                payload=_waiver_apply_payload(
+                    classification=classification,
+                    role_policy=role_policy,
+                    authz_policy=authz_policy,
+                    reason="Changed body must not replay.",
+                ),
+            )
+            events = store.list_tenant_technical_human_waiver_event_records(
+                repository_id=REPOSITORY_ID,
+                product=PRODUCT,
+                context=CONTEXT,
+            )
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(replay.status_code, 202)
+        replay_data = replay.json()
+        self.assertTrue(replay_data["replayed"])
+        self.assertEqual(replay_data["original_trace_id"], first.json()["trace_id"])
+        self.assertEqual(changed_payload.status_code, 409)
+        self.assertEqual(changed_payload.json()["error"]["code"], "idempotency_key_reused")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].authorization.author_login, "human-301")
+
+    async def test_technical_human_waiver_apply_rejects_current_authority_drift(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(
+                Path(tmp_dir),
+                authz_policy_record=_waiver_authz_policy_record(),
+            )
+            classification, role_policy, authz_policy = _seed_waiver_authority(store)
+            app, session_manager, human_session = _waiver_session_app(store)
+            payload = _waiver_apply_payload(
+                classification=classification,
+                role_policy=role_policy,
+                authz_policy=authz_policy,
+            )
+            stale_authority = cast(dict[str, object], payload["expected_authority"])
+            stale_authority["classification_digest"] = "f" * 64
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "waiver-authority-drift",
+                },
+                payload=payload,
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "stale_authority")
+
+    async def test_technical_human_waiver_apply_create_and_revoke(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(
+                Path(tmp_dir),
+                authz_policy_record=_waiver_authz_policy_record(),
+            )
+            classification, role_policy, authz_policy = _seed_waiver_authority(store)
+            app, session_manager, human_session = _waiver_session_app(store)
+            create_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "waiver-create-revoke",
+                },
+                payload=_waiver_apply_payload(
+                    classification=classification,
+                    role_policy=role_policy,
+                    authz_policy=authz_policy,
+                    source_event_id="comment-create-revoke",
+                ),
+            )
+            create_result = create_response.json()["result"]
+            revoke_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "waiver-revoke",
+                },
+                payload=_waiver_apply_payload(
+                    classification=classification,
+                    role_policy=role_policy,
+                    authz_policy=authz_policy,
+                    action="revoked",
+                    source_event_id="comment-revoke",
+                    reason="Owner revoked exact waiver.",
+                    expected_current={
+                        "schema_version": 1,
+                        "waiver_id": create_result["waiver_id"],
+                        "event_digest": create_result["event_digest"],
+                    },
+                ),
+            )
+
+        self.assertEqual(create_response.status_code, 202)
+        self.assertEqual(create_result["path_result"]["state"], "satisfied")
+        self.assertEqual(revoke_response.status_code, 202)
+        revoke_result = revoke_response.json()["result"]
+        self.assertEqual(revoke_result["action"], "revoked")
+        self.assertEqual(revoke_result["path_result"]["state"], "denied")
+
+    async def test_technical_human_waiver_body_is_bounded_at_64_kib(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(
+                Path(tmp_dir),
+                authz_policy_record=_waiver_authz_policy_record(),
+            )
+            app, session_manager, human_session = _waiver_session_app(store)
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/technical-human-waivers/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": "waiver-body-limit",
+                },
+                raw_body=b"{" + (b" " * (64 * 1024)),
+            )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "Tenant technical human waiver request body is too large.",
+        )
+
     async def test_no_role_policy_waiver_status_or_controller_routes(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             store = _postgres_store(Path(tmp_dir))
@@ -1023,7 +1569,6 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
                 record_store_factory=lambda: store,
             )
             routes = [
-                ("POST", "/v1/tenant-admission/technical-human-waivers/apply"),
                 ("GET", "/v1/work-graph/tenant-admission/status"),
                 ("POST", "/v1/work-graph/tenant-admission/controller/run-once"),
                 ("GET", "/v1/work-graph/tenant-admission/trusted-maintenance"),

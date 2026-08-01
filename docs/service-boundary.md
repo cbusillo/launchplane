@@ -609,18 +609,23 @@ The cookie-capable mutation inventory is intentionally limited to:
 - `POST /v1/product-config/apply`
 - `POST /v1/merge-train/policies/import`
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
+- `POST /v1/tenant-admission/technical-human-waivers/apply`
 
 Every other authenticated mutation route intentionally rejects session-cookie
 authentication and continues to require its existing GitHub Actions OIDC,
 local-operator/admin bearer, Every Code worker, or webhook boundary. A valid
-`Authorization: Bearer` identity on the routes above also bypasses browser
-origin, fetch-metadata, and CSRF checks exactly as before; a cookie does not
-weaken or replace bearer verification. The operator UI therefore exposes only
-the cookie-capable writes. In particular, GitHub issue inbox reconciliation is
-displayed as unavailable because it remains a GitHub Actions OIDC service
-operation. Managed-secret root re-encryption is explicitly bearer-only even
-when a valid human session cookie is present; rotating the service root is not a
-browser mutation surface.
+`Authorization: Bearer` identity on the existing mixed-identity routes above
+also bypasses browser origin, fetch-metadata, and CSRF checks exactly as before;
+a cookie does not weaken or replace bearer verification. The tenant technical
+human waiver apply route is narrower: after the browser mutation boundary it
+requires a `GitHubHumanIdentity` with positive numeric `github_id` and rejects
+bearer-only/non-human identities. The operator UI exposes only the separately
+generated UI write slice; this inventory is a server-side cookie-capable surface
+list, not a promise of UI controls for every route. In particular, GitHub issue
+inbox reconciliation is displayed as unavailable because it remains a GitHub
+Actions OIDC service operation. Managed-secret root re-encryption is explicitly
+bearer-only even when a valid human session cookie is present; rotating the
+service root is not a browser mutation surface.
 
 Trusted Launchplane CLI clients that are explicitly given `--session-cookie`
 preserve compatibility by reading `/v1/auth/session` immediately before the
@@ -2905,11 +2910,62 @@ limited to current role-policy reads plus dry-run/apply writes.
   names, logins, changed files, paths, actor strings, or request-provided
   superseded history.
 
-This role-policy split does not add technical-human waiver HTTP routes,
-trusted-maintenance evidence, unified tenant-admission status, controller
-changes, or any Launchplane authorization-policy mutation from the role-policy
-route. Existing tenant merge/admission behavior remains unchanged until a later
-rollout wires role-policy authority into the evaluator.
+The role-policy route still does not add trusted-maintenance evidence, unified
+tenant-admission status, controller changes, or any Launchplane authorization-
+policy mutation.
+
+`POST /v1/tenant-admission/technical-human-waivers/apply` provides the focused
+human technical-waiver mutation boundary. The route accepts `mode: dry_run|apply`
+and `action: created|revoked` envelopes containing candidate, source event
+kind/id, reason, optional creation `expires_at`, expected current
+classification/role-policy/authz record IDs plus digests, and revoke-only
+expected current waiver ID plus event digest. The request never accepts
+`occurred_at`, author GitHub ID, or author login. Launchplane builds the binding,
+authorization provenance, event IDs, digests, and author display login from the
+browser session and current records.
+
+The route is browser-human-only. It first passes the normal browser session,
+origin, fetch-metadata, and single-use CSRF mutation boundary, then requires a
+`GitHubHumanIdentity` with `github_id > 0`. Local admins/operators, GitHub
+Actions, terminal agents, Every Code workers, bearer-only callers, and other
+non-human identities are rejected. Login is display/audit only; the route scopes
+idempotency as `github-human-id|<github_id>` and authorizes only when the active
+schema-v2 authz policy has exactly one managed
+`tenant_technical_human_waiver.write` GitHub-human rule whose `github_ids`
+explicitly contains that numeric caller ID. Login/org/team/role-only matching is
+insufficient. The caller must also be the current repository owner in exactly
+one active role-policy record for the candidate, and the current classification
+must exactly match the candidate and be `tenant_ui`.
+
+Dry-run uses the same pure read/planning helpers against rehearsal-capable stores
+and writes nothing. Apply requires JSON with one exact bounded `Content-Length`
+(maximum 64 KiB), a non-empty `Idempotency-Key` header, and a real PostgreSQL
+`PostgresRecordStore`; filesystem, SQLite-backed rehearsal stores, and
+unsupported stores return HTTP 503 `database_storage_required` for live apply.
+The PostgreSQL writer reserves idempotency, locks classification, role-policy,
+authz-policy, and waiver binding/history authority in deterministic order,
+re-reads and validates expected IDs/digests under lock, builds the event with the
+database/server timestamp as both `occurred_at` and `recorded_at`, validates
+create/revoke lifecycle and revoke CAS, appends the event, verifies the resulting
+tenant-admission path, stores the HTTP response, and commits once. Validation
+failures remove the reservation; completion failures roll back both event and
+reservation.
+
+Same key plus the same canonical request body replays the stored response with
+the original trace, while the same key plus a changed body returns HTTP 409
+`idempotency_key_reused`. A different key revalidates current authority and
+history, so classification, role-policy, authz-policy, head, revocation, or
+expiry drift cannot create a false success. Create may only produce a satisfied
+technical-waiver path. Revoke requires the exact current satisfied waiver and
+must produce a denied path. Exact create event replay is accepted only while the
+current lifecycle/CAS proves it is still safe; stale historical replay fails
+closed.
+
+This focused waiver slice does not add UI controls, GitHub provider calls,
+status/controller projection, trusted-maintenance evidence, rollout behavior,
+or authz-policy mutation. Existing tenant merge/admission behavior remains
+unchanged until later rollout work wires shared authority into admission
+decisions.
 
 The CM tenant preview workflow uses tenant-product scope for both artifact
 publish input/evidence and preview lifecycle requests. Artifact publish still

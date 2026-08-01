@@ -1694,8 +1694,24 @@ run` is the foreground loop intended for an external process supervisor, and
 
 - Repository human role-policy contracts bind one revision to exact numeric GitHub repository and owner IDs plus repository, product, and context. They name repository-owner humans, primary managers, optional backup managers, and direct time-bounded manager delegations without hard-coding people in code or checked-in configuration.
 - A delegation is valid only while its current role-policy revision is active and effective, its grantor remains a primary or backup manager, and its start, expiration, and revocation timestamps permit it. Silence or elapsed review time never creates approval authority.
-- Technical human waiver events are append-only create/revoke evidence. Creation requires a GitHub human who is both a current repository owner in the exact role policy and allowed by exactly one managed `tenant_technical_human_waiver.write` authorization rule.
-- Waiver evidence binds repository, product, context, pull request, exact head SHA, classification revision/digest, role-policy revision/digest, active authorization-policy revision/digest, human numeric identity, source event, reason, occurrence time, and optional expiration. New commits or any bound policy/classification drift make prior evidence stale; revocation wins a same-timestamp tie.
+- Technical human waiver events are append-only create/revoke evidence. Creation
+  requires a browser-authenticated GitHub human session whose numeric
+  `github_id` is positive, whose ID is a current repository owner in exactly one
+  active role policy for the candidate repository/product/context, and whose ID
+  is explicitly present in exactly one managed schema-v2
+  `tenant_technical_human_waiver.write` GitHub-human authorization rule. Login,
+  org, team, role-only, local-admin/operator, GitHub Actions, terminal-agent, and
+  Every Code identities are never write authority for this record type.
+- Waiver evidence binds repository, product, context, pull request, exact head
+  SHA, classification revision/digest, role-policy revision/digest, active
+  authorization-policy revision/digest, human numeric identity, display login,
+  source event, reason, authoritative database/server occurrence time,
+  `recorded_at`, and optional creation expiration. Apply callers cannot provide
+  `occurred_at`, author ID, or author login; Launchplane builds the binding,
+  authorization provenance, event IDs, and digests inside the domain builder.
+  `recorded_at` equals the authoritative occurrence time. New commits or any
+  bound policy/classification/authz drift make prior evidence stale; revocation
+  wins a same-timestamp tie.
 - The role-policy read model is keyed by immutable `repository_id`, `product`,
   and `context`. It returns `missing`, `available`, or fail-closed
   `ambiguous` state plus the active current record when exactly one current tip
@@ -1718,9 +1734,10 @@ run` is the foreground loop intended for an external process supervisor, and
 - Role-policy apply fails closed on missing, ambiguous, stale, scope-drifted,
   conflicting, inactive, or sequence-invalid candidates. Request-provided
   superseded records are ignored; the database writer derives supersession from
-  the locked current stream. This split does not add technical-human waiver HTTP
-  mutation routes, trusted-maintenance evidence, unified status, controller
-  changes, or Launchplane authz-policy mutation from role-policy routes.
+  the locked current stream. The separate technical-human waiver apply route does
+  not add trusted-maintenance evidence, unified status, controller changes,
+  rollout decisions, UI controls, GitHub provider calls, or Launchplane
+  authz-policy mutation.
 - Filesystem storage can rehearse role-policy revision history and technical
   human waiver event history locally. Shared PostgreSQL storage now persists
   `launchplane_repository_human_role_policies` and
@@ -1728,12 +1745,25 @@ run` is the foreground loop intended for an external process supervisor, and
   promoted filter/audit columns, serialized role-policy stream writes, one
   active role-policy tip per repository/product/context, and append-only waiver
   event replay/conflict semantics.
+- `POST /v1/tenant-admission/technical-human-waivers/apply` accepts strict
+  `mode: dry_run|apply` and `action: created|revoked` envelopes with candidate,
+  expected classification/role-policy/authz record IDs plus digests, source event
+  kind/id, reason, optional creation expiration, and revoke-only expected current
+  waiver ID plus event digest. Dry-run uses the pure read/planning helpers and
+  may run against rehearsal stores without writing. Apply is PostgreSQL-only,
+  requires a non-empty `Idempotency-Key`, scopes idempotency by numeric GitHub ID
+  (`github-human-id|<id>`), locks classification, role-policy, authz-policy, and
+  waiver binding/history authority in deterministic order, revalidates all
+  expected IDs/digests and lifecycle CAS under lock, appends the event, verifies
+  the resulting path, stores the HTTP response, and commits once. Same key plus
+  same canonical body replays the stored response with the original trace; same
+  key plus a changed body returns conflict; a different key revalidates current
+  authority and history.
 - Manager-preview authorization can carry the same role-policy provenance for primary, backup, or delegated managers. Legacy approval records remain readable, but they cannot satisfy an evaluation once a repository role policy is explicitly enforced.
-- Technical-human waiver HTTP mutation, trusted-maintenance evidence, unified
-  status, controller rollout, and enforced tenant-admission decisions remain
-  deferred. Until those follow-up pieces are deployed and rollout supplies a
-  shared-authority role policy, existing manager-preview behavior remains
-  unchanged.
+- Trusted-maintenance evidence, unified status/controller projection, rollout,
+  and enforced tenant-admission decisions remain deferred. Until those follow-up
+  pieces are deployed and rollout supplies shared-authority records, existing
+  manager-preview behavior remains unchanged.
 
 ## Runtime Key-Safety Policy Record
 
