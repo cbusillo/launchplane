@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "f9c1d3e5a7b9"
+EXPECTED_ALEMBIC_HEAD_REVISION = "a0d2f4b6c8e1"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -194,6 +194,46 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_tenant_repository_classifications",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_repository_human_role_policies",
+        "role_policy_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_repository_human_role_policies",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_tenant_technical_human_waiver_events",
+        "pull_request_number",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_tenant_technical_human_waiver_events",
+        "classification_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_tenant_technical_human_waiver_events",
+        "role_policy_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_tenant_technical_human_waiver_events",
+        "authz_policy_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_tenant_technical_human_waiver_events",
+        "author_github_id",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_tenant_technical_human_waiver_events",
         "payload",
         ("jsonb",),
     ),
@@ -413,6 +453,44 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_tenant_repo_class_current_idx",
         ("repository_id", "classification_revision"),
     ),
+    CriticalIndex(
+        "launchplane_repository_human_role_policies",
+        "launchplane_repo_human_role_revision_uidx",
+        ("repository_id", "product", "context", "role_policy_revision"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_repository_human_role_policies",
+        "launchplane_repo_human_role_active_uidx",
+        ("repository_id", "product", "context"),
+        unique=True,
+        predicate_expression="status='active'",
+    ),
+    CriticalIndex(
+        "launchplane_repository_human_role_policies",
+        "launchplane_repo_human_role_current_idx",
+        ("repository_id", "product", "context", "status", "role_policy_revision"),
+    ),
+    CriticalIndex(
+        "launchplane_tenant_technical_human_waiver_events",
+        "launchplane_tenant_human_waiver_exact_head_idx",
+        ("repository_id", "pull_request_number", "head_sha", "occurred_at", "event_id"),
+    ),
+    CriticalIndex(
+        "launchplane_tenant_technical_human_waiver_events",
+        "launchplane_tenant_human_waiver_binding_idx",
+        ("binding_sha256", "occurred_at", "event_id"),
+    ),
+    CriticalIndex(
+        "launchplane_tenant_technical_human_waiver_events",
+        "launchplane_tenant_human_waiver_waiver_idx",
+        ("waiver_id", "occurred_at", "event_id"),
+    ),
+    CriticalIndex(
+        "launchplane_tenant_technical_human_waiver_events",
+        "launchplane_tenant_human_waiver_policy_idx",
+        ("role_policy_record_id", "authz_policy_record_id", "occurred_at"),
+    ),
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
@@ -427,6 +505,14 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_tenant_repository_classifications",
         ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_repository_human_role_policies",
+        ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_tenant_technical_human_waiver_events",
+        ("event_id",),
     ),
 )
 

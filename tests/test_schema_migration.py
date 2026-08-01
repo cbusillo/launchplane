@@ -799,6 +799,206 @@ class SchemaMigrationTests(unittest.TestCase):
             ("repository_id", "classification_revision"),
         )
 
+    def test_repository_human_admission_migration_upgrades_and_downgrades(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = _alembic_config(database_url)
+
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                inspector = inspect(engine)
+                table_names = set(inspector.get_table_names())
+                role_columns = {
+                    column["name"]
+                    for column in inspector.get_columns(
+                        "launchplane_repository_human_role_policies"
+                    )
+                }
+                waiver_columns = {
+                    column["name"]
+                    for column in inspector.get_columns(
+                        "launchplane_tenant_technical_human_waiver_events"
+                    )
+                }
+                role_indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes(
+                        "launchplane_repository_human_role_policies"
+                    )
+                }
+                waiver_indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes(
+                        "launchplane_tenant_technical_human_waiver_events"
+                    )
+                }
+                role_primary_key = inspector.get_pk_constraint(
+                    "launchplane_repository_human_role_policies"
+                )
+                waiver_primary_key = inspector.get_pk_constraint(
+                    "launchplane_tenant_technical_human_waiver_events"
+                )
+            finally:
+                engine.dispose()
+
+            command.downgrade(config, "f9c1d3e5a7b9")
+            engine = create_engine(database_url)
+            try:
+                downgraded_table_names = set(inspect(engine).get_table_names())
+            finally:
+                engine.dispose()
+
+        self.assertIn("launchplane_repository_human_role_policies", table_names)
+        self.assertIn("launchplane_tenant_technical_human_waiver_events", table_names)
+        self.assertGreaterEqual(
+            role_columns,
+            {
+                "record_id",
+                "repository_id",
+                "repository_owner_id",
+                "repository",
+                "product",
+                "context",
+                "status",
+                "role_policy_revision",
+                "supersedes_record_id",
+                "role_policy_digest",
+                "payload",
+            },
+        )
+        self.assertGreaterEqual(
+            waiver_columns,
+            {
+                "event_id",
+                "repository_id",
+                "repository_owner_id",
+                "repository",
+                "product",
+                "context",
+                "waiver_id",
+                "binding_sha256",
+                "pull_request_number",
+                "head_sha",
+                "classification_digest",
+                "role_policy_record_id",
+                "authz_policy_record_id",
+                "action",
+                "author_github_id",
+                "occurred_at",
+                "event_digest",
+                "payload",
+            },
+        )
+        self.assertEqual(role_primary_key["constrained_columns"], ["record_id"])
+        self.assertEqual(waiver_primary_key["constrained_columns"], ["event_id"])
+        self.assertTrue(role_indexes["launchplane_repo_human_role_revision_uidx"]["unique"])
+        self.assertTrue(role_indexes["launchplane_repo_human_role_active_uidx"]["unique"])
+        self.assertEqual(
+            role_indexes["launchplane_repo_human_role_revision_uidx"]["column_names"],
+            ["repository_id", "product", "context", "role_policy_revision"],
+        )
+        self.assertEqual(
+            role_indexes["launchplane_repo_human_role_active_uidx"]["column_names"],
+            ["repository_id", "product", "context"],
+        )
+        self.assertEqual(
+            waiver_indexes["launchplane_tenant_human_waiver_exact_head_idx"][
+                "column_names"
+            ],
+            ["repository_id", "pull_request_number", "head_sha", "occurred_at", "event_id"],
+        )
+        self.assertEqual(
+            waiver_indexes["launchplane_tenant_human_waiver_binding_idx"][
+                "column_names"
+            ],
+            ["binding_sha256", "occurred_at", "event_id"],
+        )
+        self.assertNotIn(
+            "launchplane_repository_human_role_policies",
+            downgraded_table_names,
+        )
+        self.assertNotIn(
+            "launchplane_tenant_technical_human_waiver_events",
+            downgraded_table_names,
+        )
+
+    def test_repository_human_admission_schema_invariants_are_expected(self) -> None:
+        column_types = {
+            (column.table_name, column.column_name): column.accepted_type_tokens
+            for column in CRITICAL_POSTGRES_COLUMN_TYPES
+        }
+        indexes = {(index.table_name, index.index_name): index for index in CRITICAL_SCHEMA_INDEXES}
+        primary_keys = {
+            primary_key.table_name: primary_key.column_names
+            for primary_key in CRITICAL_PRIMARY_KEYS
+        }
+
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "a0d2f4b6c8e1")
+        self.assertEqual(
+            column_types[("launchplane_repository_human_role_policies", "payload")],
+            ("jsonb",),
+        )
+        self.assertEqual(
+            column_types[
+                ("launchplane_repository_human_role_policies", "role_policy_revision")
+            ],
+            ("bigint", "int8"),
+        )
+        self.assertEqual(
+            column_types[
+                ("launchplane_tenant_technical_human_waiver_events", "payload")
+            ],
+            ("jsonb",),
+        )
+        self.assertEqual(
+            column_types[
+                (
+                    "launchplane_tenant_technical_human_waiver_events",
+                    "author_github_id",
+                )
+            ],
+            ("bigint", "int8"),
+        )
+        self.assertEqual(
+            primary_keys["launchplane_repository_human_role_policies"],
+            ("record_id",),
+        )
+        self.assertEqual(
+            primary_keys["launchplane_tenant_technical_human_waiver_events"],
+            ("event_id",),
+        )
+        self.assertEqual(
+            indexes[
+                (
+                    "launchplane_repository_human_role_policies",
+                    "launchplane_repo_human_role_revision_uidx",
+                )
+            ].column_names,
+            ("repository_id", "product", "context", "role_policy_revision"),
+        )
+        self.assertEqual(
+            indexes[
+                (
+                    "launchplane_repository_human_role_policies",
+                    "launchplane_repo_human_role_active_uidx",
+                )
+            ].predicate_expression,
+            "status='active'",
+        )
+        self.assertEqual(
+            indexes[
+                (
+                    "launchplane_tenant_technical_human_waiver_events",
+                    "launchplane_tenant_human_waiver_exact_head_idx",
+                )
+            ].column_names,
+            ("repository_id", "pull_request_number", "head_sha", "occurred_at", "event_id"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

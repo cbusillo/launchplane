@@ -75,7 +75,18 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationRecord,
 )
+from control_plane.contracts.repository_human_admission import (
+    RepositoryHumanRolePolicyProvenance,
+    RepositoryHumanRolePolicyRecord,
+    TenantTechnicalHumanWaiverAuthorization,
+    TenantTechnicalHumanWaiverBinding,
+    TenantTechnicalHumanWaiverEventRecord,
+)
 from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
+from control_plane.repository_human_admission import (
+    RepositoryHumanRolePolicyConflictError,
+    TenantTechnicalHumanWaiverEventConflictError,
+)
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
     ProviderMutationOutcome,
@@ -205,6 +216,102 @@ def _tenant_repository_classification_record(
             "supersedes_record_id": supersedes_record_id,
         }
     )
+
+
+def _repository_human_role_policy_record(
+    *,
+    revision: int,
+    repository_owner_github_ids: tuple[int, ...] = (903001,),
+    effective_at: str = "2026-08-01T10:00:00Z",
+    reason: str = "postgres integration role policy",
+    supersedes_record_id: str | None = None,
+) -> RepositoryHumanRolePolicyRecord:
+    return RepositoryHumanRolePolicyRecord.model_validate(
+        {
+            "repository_id": "901001",
+            "repository_owner_id": "902001",
+            "repository": "example/postgres-tenant-site",
+            "product": "postgres-tenant-site",
+            "context": "postgres-tenant-site",
+            "role_policy_revision": revision,
+            "repository_owner_github_ids": repository_owner_github_ids,
+            "manager_primary_github_ids": (904001,),
+            "effective_at": effective_at,
+            "source": "postgres-integration",
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
+
+
+def _tenant_technical_human_waiver_event_record(
+    *,
+    source_event_id: str = "comment-1001",
+    action: str = "created",
+    occurred_at: str = "2026-08-01T10:15:00Z",
+    expires_at: str = "2026-08-01T11:15:00Z",
+) -> TenantTechnicalHumanWaiverEventRecord:
+    repository_id = "901001"
+    repository_owner_id = "902001"
+    repository = "example/postgres-tenant-site"
+    product = "postgres-tenant-site"
+    context = "postgres-tenant-site"
+    role_policy_record_id = "repository-human-role-policy-901001-abc123-r1"
+    role_policy_digest = "c" * 64
+    authz_policy_digest = "d" * 64
+    binding = TenantTechnicalHumanWaiverBinding(
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        repository=repository,
+        product=product,
+        context=context,
+        pull_request_number=42,
+        head_sha="a" * 40,
+        classification_revision=1,
+        classification_digest="b" * 64,
+        role_policy_record_id=role_policy_record_id,
+        role_policy_revision=1,
+        role_policy_digest=role_policy_digest,
+        authz_policy_record_id="authz-policy-r1",
+        authz_policy_revision=1,
+        authz_policy_digest=authz_policy_digest,
+    )
+    authorization = TenantTechnicalHumanWaiverAuthorization(
+        author_github_id=903001,
+        author_login="postgres-human",
+        managed_set_id="tenant-human.postgres",
+        managed_rule_id="technical-waiver",
+        authz_policy_record_id="authz-policy-r1",
+        authz_policy_revision=1,
+        authz_policy_digest=authz_policy_digest,
+        authz_policy_source="postgres-integration-authz",
+        role_policy_provenance=RepositoryHumanRolePolicyProvenance(
+            repository_id=repository_id,
+            repository_owner_id=repository_owner_id,
+            repository=repository,
+            product=product,
+            context=context,
+            role_policy_record_id=role_policy_record_id,
+            role_policy_revision=1,
+            role_policy_digest=role_policy_digest,
+            role_policy_source="postgres-integration",
+            authority_kind="repository_owner",
+            evaluated_at=occurred_at,
+        ),
+        authorized_at=occurred_at,
+    )
+    payload: dict[str, object] = {
+        "binding": binding,
+        "action": action,
+        "occurred_at": occurred_at,
+        "source_event_kind": "github_issue_comment",
+        "source_event_id": source_event_id,
+        "reason": "Owner approved technical handling.",
+        "authorization": authorization,
+    }
+    if expires_at:
+        payload["expires_at"] = expires_at
+    return TenantTechnicalHumanWaiverEventRecord.model_validate(payload)
 
 
 def _bootstrap_operation(
@@ -578,6 +685,55 @@ def _manager_preview_approval_event() -> ManagerPreviewApprovalEventRecord:
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_repository_human_admission_schema_has_postgres_types_and_partial_index(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            engine = create_engine(store.database_url)
+            try:
+                inspector = inspect(engine)
+                role_columns = {
+                    column["name"]: str(column["type"]).lower()
+                    for column in inspector.get_columns(
+                        "launchplane_repository_human_role_policies"
+                    )
+                }
+                waiver_columns = {
+                    column["name"]: str(column["type"]).lower()
+                    for column in inspector.get_columns(
+                        "launchplane_tenant_technical_human_waiver_events"
+                    )
+                }
+                role_indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes(
+                        "launchplane_repository_human_role_policies"
+                    )
+                }
+                with engine.connect() as connection:
+                    index_definitions = {
+                        row.indexname: row.indexdef
+                        for row in connection.execute(
+                            text(
+                                "select indexname, indexdef from pg_indexes "
+                                "where schemaname = current_schema() "
+                                "and tablename = 'launchplane_repository_human_role_policies'"
+                            )
+                        ).all()
+                    }
+            finally:
+                engine.dispose()
+
+        self.assertEqual(role_columns["payload"], "jsonb")
+        self.assertIn("bigint", role_columns["role_policy_revision"])
+        self.assertEqual(waiver_columns["payload"], "jsonb")
+        self.assertIn("bigint", waiver_columns["author_github_id"])
+        self.assertTrue(role_indexes["launchplane_repo_human_role_active_uidx"]["unique"])
+        self.assertIn(
+            "WHERE ((status)::text = 'active'::text)",
+            index_definitions["launchplane_repo_human_role_active_uidx"],
+        )
+
     def test_manager_preview_approval_events_persist_append_only(self) -> None:
         with _store_for_fresh_head_database() as store:
             event = _manager_preview_approval_event()
@@ -1855,6 +2011,133 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(records[1], revision_1)
         self.assertEqual(len(idempotency_records), 1)
         self.assertEqual(idempotency_records[0].state, "completed")
+
+    def test_repository_human_role_policy_exact_concurrent_revision_replays(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            revision_1 = _repository_human_role_policy_record(revision=1)
+            store.write_repository_human_role_policy_record(revision_1)
+            revision_2 = _repository_human_role_policy_record(
+                revision=2,
+                repository_owner_github_ids=(903002,),
+                effective_at="2026-08-01T10:05:00Z",
+                reason="postgres integration exact replay",
+                supersedes_record_id=revision_1.record_id,
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def write_revision(active_store: PostgresRecordStore) -> str:
+                barrier.wait(timeout=5)
+                return active_store.write_repository_human_role_policy_record(revision_2)
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(write_revision, (store, second_store))
+                    )
+                active_records = store.list_repository_human_role_policy_records(
+                    repository_id=revision_1.repository_id,
+                    product=revision_1.product,
+                    context=revision_1.context,
+                    status="active",
+                )
+                all_records = store.list_repository_human_role_policy_records(
+                    repository_id=revision_1.repository_id,
+                    product=revision_1.product,
+                    context=revision_1.context,
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["replayed", "written"])
+        self.assertEqual(active_records, (revision_2,))
+        self.assertEqual(len(all_records), 2)
+
+    def test_repository_human_role_policy_concurrent_revision_conflicts(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            revision_1 = _repository_human_role_policy_record(revision=1)
+            store.write_repository_human_role_policy_record(revision_1)
+            revision_2a = _repository_human_role_policy_record(
+                revision=2,
+                repository_owner_github_ids=(903002,),
+                effective_at="2026-08-01T10:05:00Z",
+                reason="postgres integration writer one",
+                supersedes_record_id=revision_1.record_id,
+            )
+            revision_2b = _repository_human_role_policy_record(
+                revision=2,
+                repository_owner_github_ids=(903003,),
+                effective_at="2026-08-01T10:05:01Z",
+                reason="postgres integration writer two",
+                supersedes_record_id=revision_1.record_id,
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def write_revision(
+                active_store: PostgresRecordStore,
+                record: RepositoryHumanRolePolicyRecord,
+            ) -> str:
+                barrier.wait(timeout=5)
+                try:
+                    return active_store.write_repository_human_role_policy_record(record)
+                except RepositoryHumanRolePolicyConflictError:
+                    return "role_policy_conflict"
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(
+                            lambda arguments: write_revision(*arguments),
+                            ((store, revision_2a), (second_store, revision_2b)),
+                        )
+                    )
+                active_records = store.list_repository_human_role_policy_records(
+                    repository_id=revision_1.repository_id,
+                    product=revision_1.product,
+                    context=revision_1.context,
+                    status="active",
+                )
+                all_records = store.list_repository_human_role_policy_records(
+                    repository_id=revision_1.repository_id,
+                    product=revision_1.product,
+                    context=revision_1.context,
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["role_policy_conflict", "written"])
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].role_policy_revision, 2)
+        self.assertEqual(len(all_records), 2)
+
+    def test_tenant_technical_human_waiver_exact_concurrent_event_replays(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            event = _tenant_technical_human_waiver_event_record()
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def write_event(active_store: PostgresRecordStore) -> str:
+                barrier.wait(timeout=5)
+                try:
+                    return active_store.write_tenant_technical_human_waiver_event_record(
+                        event
+                    )
+                except TenantTechnicalHumanWaiverEventConflictError:
+                    return "waiver_conflict"
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(executor.map(write_event, (store, second_store)))
+                rows = store.list_tenant_technical_human_waiver_event_records(
+                    repository_id=event.binding.repository_id,
+                    binding_sha256=event.binding.binding_sha256,
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["replayed", "written"])
+        self.assertEqual(rows, (event,))
 
     def test_concurrent_outbox_enqueue_reuses_one_delivery(self) -> None:
         with _store_for_fresh_head_database() as store:
