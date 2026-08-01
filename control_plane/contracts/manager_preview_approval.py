@@ -12,6 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.artifact_dependency_provenance import (
     normalize_artifact_sha256_digest,
 )
+from control_plane.contracts.repository_human_admission import (
+    RepositoryHumanRolePolicyProvenance,
+)
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 
 
@@ -119,7 +122,7 @@ class ManagerPreviewApprovalBinding(BaseModel):
         ]
         if runtime_identity.environment_kind.strip().lower() != "preview":
             mismatches.append("environment_kind")
-        if not runtime_identity.preview_id.strip():
+        if runtime_identity.preview_id.strip() != self.preview_id:
             mismatches.append("preview_id")
         if (
             runtime_identity.preview_generation_id.strip()
@@ -172,6 +175,7 @@ class ManagerPreviewApprovalAuthorization(BaseModel):
     policy_schema_version: Literal[2] = 2
     policy_sha256: str
     policy_source: str
+    role_policy_provenance: RepositoryHumanRolePolicyProvenance | None = None
     authorized_at: str
 
     @model_validator(mode="after")
@@ -225,6 +229,15 @@ class ManagerPreviewApprovalEventRecord(BaseModel):
             if self.authorization.authorized_at != self.occurred_at:
                 raise ValueError(
                     "manager preview approval authorization and event timestamps must match"
+                )
+            provenance = self.authorization.role_policy_provenance
+            if provenance is not None and (
+                provenance.repository != self.binding.repository
+                or provenance.product != self.binding.product
+                or provenance.context != self.binding.context
+            ):
+                raise ValueError(
+                    "manager preview approval role policy provenance does not match binding"
                 )
         elif self.action in _SYSTEM_ACTIONS and self.authorization is not None:
             raise ValueError(

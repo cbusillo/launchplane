@@ -72,7 +72,26 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingTls,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.tenant_merge_eligibility import (
+    TenantRepositoryClassificationRecord,
+)
+from control_plane.contracts.repository_human_admission import (
+    RepositoryHumanRolePolicyProvenance,
+    RepositoryHumanRolePolicyRecord,
+    TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,
+    TenantTechnicalHumanWaiverAuthorization,
+    TenantTechnicalHumanWaiverBinding,
+    TenantTechnicalHumanWaiverEventRecord,
+)
 from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
+from control_plane.repository_human_admission import (
+    RepositoryHumanRolePolicyConflictError,
+    TenantTechnicalHumanWaiverApplyEnvelope,
+    TenantTechnicalHumanWaiverExpectedAuthority,
+    TenantTechnicalHumanWaiverRevokeCurrentError,
+    TenantTechnicalHumanWaiverEventConflictError,
+    TenantTechnicalHumanWaiverStaleAuthorityError,
+)
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
     ProviderMutationOutcome,
@@ -91,6 +110,8 @@ from control_plane.odoo_stable_lane import (
 )
 from control_plane.service_auth import (
     GitHubActionsPolicyRule,
+    GitHubHumanIdentity,
+    GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
     LocalAdminPolicyRule,
 )
@@ -108,6 +129,9 @@ from control_plane.storage.schema_invariants import (
     verify_postgres_schema_invariants,
 )
 from control_plane.storage.schema_migration import migrate_schema, schema_migration_action
+from control_plane.tenant_repository_classification import (
+    TenantRepositoryClassificationConflictError,
+)
 from tests.support.artifact_manifests import artifact_manifest_v2
 from tests.test_odoo_prod_retained_volume_backup_import_storage import (
     _retained_operation_for_restore_lane,
@@ -174,6 +198,260 @@ def _store_for_fresh_head_database() -> Iterator[PostgresRecordStore]:
             yield store
         finally:
             store.close()
+
+
+def _tenant_repository_classification_record(
+    *,
+    revision: int,
+    product: str = "postgres-tenant-site",
+    context: str = "postgres-tenant-site",
+    classification_kind: str = "tenant_ui",
+    classified_at: str = "2026-07-31T10:00:00Z",
+    reason: str = "postgres integration classification",
+    supersedes_record_id: str | None = None,
+) -> TenantRepositoryClassificationRecord:
+    return TenantRepositoryClassificationRecord.model_validate(
+        {
+            "repository_id": "901001",
+            "repository_owner_id": "902001",
+            "repository": "example/postgres-tenant-site",
+            "product": product,
+            "context": context,
+            "classification_kind": classification_kind,
+            "classification_revision": revision,
+            "classified_at": classified_at,
+            "source": "postgres-integration",
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
+
+
+def _repository_human_role_policy_record(
+    *,
+    revision: int,
+    repository_owner_github_ids: tuple[int, ...] = (903001,),
+    effective_at: str = "2026-08-01T10:00:00Z",
+    reason: str = "postgres integration role policy",
+    supersedes_record_id: str | None = None,
+) -> RepositoryHumanRolePolicyRecord:
+    return RepositoryHumanRolePolicyRecord.model_validate(
+        {
+            "repository_id": "901001",
+            "repository_owner_id": "902001",
+            "repository": "example/postgres-tenant-site",
+            "product": "postgres-tenant-site",
+            "context": "postgres-tenant-site",
+            "role_policy_revision": revision,
+            "repository_owner_github_ids": repository_owner_github_ids,
+            "manager_primary_github_ids": (904001,),
+            "effective_at": effective_at,
+            "source": "postgres-integration",
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
+
+
+def _tenant_technical_human_waiver_event_record(
+    *,
+    source_event_id: str = "comment-1001",
+    action: str = "created",
+    occurred_at: str = "2026-08-01T10:15:00Z",
+    expires_at: str = "2026-08-01T11:15:00Z",
+) -> TenantTechnicalHumanWaiverEventRecord:
+    repository_id = "901001"
+    repository_owner_id = "902001"
+    repository = "example/postgres-tenant-site"
+    product = "postgres-tenant-site"
+    context = "postgres-tenant-site"
+    role_policy_record_id = "repository-human-role-policy-901001-abc123-r1"
+    role_policy_digest = "c" * 64
+    authz_policy_digest = "d" * 64
+    binding = TenantTechnicalHumanWaiverBinding(
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        repository=repository,
+        product=product,
+        context=context,
+        pull_request_number=42,
+        head_sha="a" * 40,
+        classification_revision=1,
+        classification_digest="b" * 64,
+        role_policy_record_id=role_policy_record_id,
+        role_policy_revision=1,
+        role_policy_digest=role_policy_digest,
+        authz_policy_record_id="authz-policy-r1",
+        authz_policy_revision=1,
+        authz_policy_digest=authz_policy_digest,
+    )
+    authorization = TenantTechnicalHumanWaiverAuthorization(
+        author_github_id=903001,
+        author_login="postgres-human",
+        managed_set_id="tenant-human.postgres",
+        managed_rule_id="technical-waiver",
+        authz_policy_record_id="authz-policy-r1",
+        authz_policy_revision=1,
+        authz_policy_digest=authz_policy_digest,
+        authz_policy_source="postgres-integration-authz",
+        role_policy_provenance=RepositoryHumanRolePolicyProvenance(
+            repository_id=repository_id,
+            repository_owner_id=repository_owner_id,
+            repository=repository,
+            product=product,
+            context=context,
+            role_policy_record_id=role_policy_record_id,
+            role_policy_revision=1,
+            role_policy_digest=role_policy_digest,
+            role_policy_source="postgres-integration",
+            authority_kind="repository_owner",
+            evaluated_at=occurred_at,
+        ),
+        authorized_at=occurred_at,
+    )
+    payload: dict[str, object] = {
+        "binding": binding,
+        "action": action,
+        "occurred_at": occurred_at,
+        "source_event_kind": "github_issue_comment",
+        "source_event_id": source_event_id,
+        "reason": "Owner approved technical handling.",
+        "authorization": authorization,
+    }
+    if expires_at:
+        payload["expires_at"] = expires_at
+    return TenantTechnicalHumanWaiverEventRecord.model_validate(payload)
+
+
+def _tenant_technical_human_waiver_authz_policy_record(
+    *,
+    github_ids: tuple[int, ...] = (903001,),
+) -> LaunchplaneAuthzPolicyRecord:
+    policy = LaunchplaneAuthzPolicy(
+        schema_version=2,
+        github_humans=(
+            GitHubHumanPolicyRule(
+                managed_set_id="tenant-human.postgres",
+                managed_rule_id="technical-waiver",
+                github_ids=github_ids,
+                roles=("read_only",),
+                products=("postgres-tenant-site",),
+                contexts=("postgres-tenant-site",),
+                actions=(TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,),
+            ),
+        ),
+    )
+    digest = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+        revision=1,
+        status="active",
+        source="postgres-integration-authz",
+        updated_at="2026-07-01T00:00:00Z",
+        policy_sha256=digest,
+        policy=policy,
+    )
+
+
+def _tenant_technical_human_waiver_identity(
+    *,
+    github_id: int = 903001,
+    login: str = "postgres-human",
+) -> GitHubHumanIdentity:
+    return GitHubHumanIdentity(
+        login=login,
+        github_id=github_id,
+        name="Postgres Human",
+        email="postgres-human@example.test",
+        organizations=frozenset(),
+        teams=frozenset(),
+        role="read_only",
+    )
+
+
+def _seed_tenant_technical_human_waiver_authority(
+    store: PostgresRecordStore,
+    *,
+    classification: TenantRepositoryClassificationRecord | None = None,
+    role_policy: RepositoryHumanRolePolicyRecord | None = None,
+    authz_policy: LaunchplaneAuthzPolicyRecord | None = None,
+) -> tuple[
+    TenantRepositoryClassificationRecord,
+    RepositoryHumanRolePolicyRecord,
+    LaunchplaneAuthzPolicyRecord,
+]:
+    classification_record = classification or _tenant_repository_classification_record(
+        revision=1,
+        classified_at="2026-07-01T00:00:00Z",
+    )
+    role_policy_record = role_policy or _repository_human_role_policy_record(
+        revision=1,
+        effective_at="2026-07-01T00:00:00Z",
+    )
+    authz_policy_record = authz_policy or _tenant_technical_human_waiver_authz_policy_record()
+    store.write_tenant_repository_classification_record(classification_record)
+    store.write_repository_human_role_policy_record(role_policy_record)
+    store.seed_authz_policy_if_absent(authz_policy_record)
+    return classification_record, role_policy_record, authz_policy_record
+
+
+def _tenant_technical_human_waiver_envelope(
+    *,
+    classification: TenantRepositoryClassificationRecord,
+    role_policy: RepositoryHumanRolePolicyRecord,
+    authz_policy: LaunchplaneAuthzPolicyRecord,
+    action: str = "created",
+    source_event_id: str = "comment-waiver-create",
+    expected_current: dict[str, object] | None = None,
+    reason: str = "Owner reviewed exact technical waiver.",
+) -> TenantTechnicalHumanWaiverApplyEnvelope:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "mode": "apply",
+        "action": action,
+        "candidate": {
+            "product": "postgres-tenant-site",
+            "context": "postgres-tenant-site",
+            "repository_id": "901001",
+            "repository_owner_id": "902001",
+            "repository": "example/postgres-tenant-site",
+            "pull_request_number": 42,
+            "head_sha": "a" * 40,
+        },
+        "expected_authority": TenantTechnicalHumanWaiverExpectedAuthority(
+            classification_record_id=classification.record_id,
+            classification_digest=classification.classification_digest,
+            role_policy_record_id=role_policy.record_id,
+            role_policy_digest=role_policy.role_policy_digest,
+            authz_policy_record_id=authz_policy.record_id,
+            authz_policy_digest=authz_policy.policy_sha256,
+        ).model_dump(mode="json"),
+        "source_event_kind": "github_issue_comment",
+        "source_event_id": source_event_id,
+        "reason": reason,
+    }
+    if expected_current is not None:
+        payload["expected_current"] = expected_current
+    return TenantTechnicalHumanWaiverApplyEnvelope.model_validate(payload)
+
+
+def _tenant_technical_human_waiver_mutation(
+    *,
+    idempotency_key: str,
+    request_fingerprint: str,
+    response_trace_id: str,
+    scope: str = "github-human-id|903001",
+) -> DbOnlyMutationRequest:
+    return DbOnlyMutationRequest(
+        scope=scope,
+        route_path="/v1/tenant-admission/technical-human-waivers/apply",
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        lease_owner=response_trace_id,
+        response_status_code=202,
+        response_trace_id=response_trace_id,
+        response_payload={"status": "ok", "trace_id": response_trace_id},
+    )
 
 
 def _bootstrap_operation(
@@ -547,6 +825,38 @@ def _manager_preview_approval_event() -> ManagerPreviewApprovalEventRecord:
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_repository_human_admission_schema_has_postgres_types_and_partial_index(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            engine = create_engine(store.database_url)
+            try:
+                inspector = inspect(engine)
+                role_columns = {
+                    column["name"]: str(column["type"]).lower()
+                    for column in inspector.get_columns(
+                        "launchplane_repository_human_role_policies"
+                    )
+                }
+                waiver_columns = {
+                    column["name"]: str(column["type"]).lower()
+                    for column in inspector.get_columns(
+                        "launchplane_tenant_technical_human_waiver_events"
+                    )
+                }
+                role_indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes("launchplane_repository_human_role_policies")
+                }
+            finally:
+                engine.dispose()
+
+        self.assertEqual(role_columns["payload"], "jsonb")
+        self.assertIn("bigint", role_columns["role_policy_revision"])
+        self.assertEqual(waiver_columns["payload"], "jsonb")
+        self.assertIn("bigint", waiver_columns["author_github_id"])
+        self.assertTrue(role_indexes["launchplane_repo_human_role_active_uidx"]["unique"])
+
     def test_manager_preview_approval_events_persist_append_only(self) -> None:
         with _store_for_fresh_head_database() as store:
             event = _manager_preview_approval_event()
@@ -1699,6 +2009,777 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(
             superseded_records, (initial_record.model_copy(update={"status": "superseded"}),)
         )
+
+    def test_tenant_repository_classification_compare_write_rolls_back_with_idempotency(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            record = _tenant_repository_classification_record(revision=1)
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:tenant-classification",
+                route_path="/v1/tenant-admission/repository-classifications/apply",
+                idempotency_key="postgres-tenant-classification-rollback",
+                request_fingerprint="postgres-tenant-classification-rollback-fingerprint",
+                lease_owner="trace-postgres-tenant-classification-rollback",
+                response_status_code=200,
+                response_trace_id="trace-postgres-tenant-classification-rollback",
+                response_payload={"status": "ok", "record_id": record.record_id},
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_sync_idempotency_row",
+                    side_effect=RuntimeError("injected completion failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected completion failure"),
+            ):
+                store.compare_and_write_tenant_repository_classification_record(
+                    record=record,
+                    expected_current_record_id="",
+                    mutation=mutation,
+                )
+
+            records = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+            idempotency_record = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+
+        self.assertEqual(records, ())
+        self.assertIsNone(idempotency_record)
+
+    def test_tenant_repository_classification_compare_write_serializes_concurrent_updates(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            revision_1 = _tenant_repository_classification_record(revision=1)
+            store.write_tenant_repository_classification_record(revision_1)
+            revision_2a = _tenant_repository_classification_record(
+                revision=2,
+                classification_kind="engineering",
+                classified_at="2026-07-31T10:05:00Z",
+                reason="postgres integration writer one",
+                supersedes_record_id=revision_1.record_id,
+            )
+            revision_2b = _tenant_repository_classification_record(
+                revision=2,
+                classification_kind="tenant_ui",
+                classified_at="2026-07-31T10:05:01Z",
+                reason="postgres integration writer two",
+                supersedes_record_id=revision_1.record_id,
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def apply_revision(
+                active_store: PostgresRecordStore,
+                record: TenantRepositoryClassificationRecord,
+                suffix: str,
+            ) -> str:
+                barrier.wait(timeout=5)
+                try:
+                    return active_store.compare_and_write_tenant_repository_classification_record(
+                        record=record,
+                        expected_current_record_id=revision_1.record_id,
+                        mutation=DbOnlyMutationRequest(
+                            scope="github-actions:tenant-classification",
+                            route_path=("/v1/tenant-admission/repository-classifications/apply"),
+                            idempotency_key=f"postgres-tenant-classification-{suffix}",
+                            request_fingerprint=f"postgres-tenant-fingerprint-{suffix}",
+                            lease_owner=f"trace-postgres-tenant-{suffix}",
+                            response_status_code=200,
+                            response_trace_id=f"trace-postgres-tenant-{suffix}",
+                            response_payload={"status": "ok", "suffix": suffix},
+                        ),
+                    ).status
+                except TenantRepositoryClassificationConflictError:
+                    return "classification_conflict"
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(
+                            lambda arguments: apply_revision(*arguments),
+                            (
+                                (store, revision_2a, "writer-1"),
+                                (second_store, revision_2b, "writer-2"),
+                            ),
+                        )
+                    )
+                records = store.list_tenant_repository_classification_records(
+                    repository_id=revision_1.repository_id
+                )
+                idempotency_records = tuple(
+                    record
+                    for suffix in ("writer-1", "writer-2")
+                    if (
+                        record := store.read_idempotency_record(
+                            scope="github-actions:tenant-classification",
+                            route_path=("/v1/tenant-admission/repository-classifications/apply"),
+                            idempotency_key=f"postgres-tenant-classification-{suffix}",
+                        )
+                    )
+                    is not None
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["classification_conflict", "written"])
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0].classification_revision, 2)
+        self.assertEqual(records[1], revision_1)
+        self.assertEqual(len(idempotency_records), 1)
+        self.assertEqual(idempotency_records[0].state, "completed")
+
+    def test_repository_human_role_policy_compare_write_rolls_back_with_idempotency(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            record = _repository_human_role_policy_record(revision=1)
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:repository-human-role-policy",
+                route_path="/v1/tenant-admission/repository-human-role-policies/apply",
+                idempotency_key="postgres-role-policy-rollback",
+                request_fingerprint="postgres-role-policy-rollback-fingerprint",
+                lease_owner="trace-postgres-role-policy-rollback",
+                response_status_code=202,
+                response_trace_id="trace-postgres-role-policy-rollback",
+                response_payload={"status": "ok", "record_id": record.record_id},
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_sync_idempotency_row",
+                    side_effect=RuntimeError("injected completion failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected completion failure"),
+            ):
+                store.compare_and_write_repository_human_role_policy_record(
+                    record=record,
+                    expected_current_record_id="",
+                    expected_current_role_policy_digest="",
+                    mutation=mutation,
+                )
+
+            records = store.list_repository_human_role_policy_records(
+                repository_id=record.repository_id,
+                product=record.product,
+                context=record.context,
+            )
+            idempotency_record = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+
+        self.assertEqual(records, ())
+        self.assertIsNone(idempotency_record)
+
+    def test_repository_human_role_policy_compare_write_replays_revision_two_with_new_key(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            revision_1 = _repository_human_role_policy_record(revision=1)
+            store.write_repository_human_role_policy_record(revision_1)
+            revision_2 = _repository_human_role_policy_record(
+                revision=2,
+                repository_owner_github_ids=(903002,),
+                effective_at="2026-08-01T10:05:00Z",
+                reason="postgres integration revision two replay",
+                supersedes_record_id=revision_1.record_id,
+            )
+
+            def mutation(*, suffix: str) -> DbOnlyMutationRequest:
+                return DbOnlyMutationRequest(
+                    scope="github-actions:repository-human-role-policy",
+                    route_path="/v1/tenant-admission/repository-human-role-policies/apply",
+                    idempotency_key=f"postgres-role-policy-revision-2-{suffix}",
+                    request_fingerprint=f"postgres-role-policy-revision-2-{suffix}-fingerprint",
+                    lease_owner=f"trace-postgres-role-policy-revision-2-{suffix}",
+                    response_status_code=202,
+                    response_trace_id=f"trace-postgres-role-policy-revision-2-{suffix}",
+                    response_payload={"status": "ok", "suffix": suffix},
+                    replay_response_payload={"status": "ok", "result": "replayed"},
+                )
+
+            written = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_2,
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
+                mutation=mutation(suffix="write"),
+            )
+            replayed = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_2,
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
+                mutation=mutation(suffix="replay"),
+            )
+            records = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+
+        self.assertEqual(written.status, "written")
+        self.assertEqual(replayed.status, "exact_replay")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0], revision_2)
+        self.assertEqual(records[1].record_id, revision_1.record_id)
+        self.assertEqual(records[1].status, "superseded")
+
+    def test_repository_human_role_policy_compare_write_serializes_concurrent_updates(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            revision_1 = _repository_human_role_policy_record(revision=1)
+            store.write_repository_human_role_policy_record(revision_1)
+            revision_2a = _repository_human_role_policy_record(
+                revision=2,
+                repository_owner_github_ids=(903002,),
+                effective_at="2026-08-01T10:05:00Z",
+                reason="postgres integration compare writer one",
+                supersedes_record_id=revision_1.record_id,
+            )
+            revision_2b = _repository_human_role_policy_record(
+                revision=2,
+                repository_owner_github_ids=(903003,),
+                effective_at="2026-08-01T10:05:01Z",
+                reason="postgres integration compare writer two",
+                supersedes_record_id=revision_1.record_id,
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def apply_revision(
+                active_store: PostgresRecordStore,
+                record: RepositoryHumanRolePolicyRecord,
+                suffix: str,
+            ) -> str:
+                barrier.wait(timeout=5)
+                try:
+                    return active_store.compare_and_write_repository_human_role_policy_record(
+                        record=record,
+                        expected_current_record_id=revision_1.record_id,
+                        expected_current_role_policy_digest=revision_1.role_policy_digest,
+                        mutation=DbOnlyMutationRequest(
+                            scope="github-actions:repository-human-role-policy",
+                            route_path=(
+                                "/v1/tenant-admission/repository-human-role-policies/apply"
+                            ),
+                            idempotency_key=f"postgres-role-policy-{suffix}",
+                            request_fingerprint=f"postgres-role-policy-fingerprint-{suffix}",
+                            lease_owner=f"trace-postgres-role-policy-{suffix}",
+                            response_status_code=202,
+                            response_trace_id=f"trace-postgres-role-policy-{suffix}",
+                            response_payload={"status": "ok", "suffix": suffix},
+                        ),
+                    ).status
+                except RepositoryHumanRolePolicyConflictError:
+                    return "role_policy_conflict"
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(
+                            lambda arguments: apply_revision(*arguments),
+                            (
+                                (store, revision_2a, "writer-1"),
+                                (second_store, revision_2b, "writer-2"),
+                            ),
+                        )
+                    )
+                records = store.list_repository_human_role_policy_records(
+                    repository_id=revision_1.repository_id,
+                    product=revision_1.product,
+                    context=revision_1.context,
+                )
+                idempotency_records = tuple(
+                    record
+                    for suffix in ("writer-1", "writer-2")
+                    if (
+                        record := store.read_idempotency_record(
+                            scope="github-actions:repository-human-role-policy",
+                            route_path=(
+                                "/v1/tenant-admission/repository-human-role-policies/apply"
+                            ),
+                            idempotency_key=f"postgres-role-policy-{suffix}",
+                        )
+                    )
+                    is not None
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["role_policy_conflict", "written"])
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0].role_policy_revision, 2)
+        self.assertEqual(records[1].status, "superseded")
+        self.assertEqual(records[1].record_id, revision_1.record_id)
+        self.assertEqual(len(idempotency_records), 1)
+        self.assertEqual(idempotency_records[0].state, "completed")
+
+    def test_repository_human_role_policy_exact_concurrent_revision_replays(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            revision_1 = _repository_human_role_policy_record(revision=1)
+            store.write_repository_human_role_policy_record(revision_1)
+            revision_2 = _repository_human_role_policy_record(
+                revision=2,
+                repository_owner_github_ids=(903002,),
+                effective_at="2026-08-01T10:05:00Z",
+                reason="postgres integration exact replay",
+                supersedes_record_id=revision_1.record_id,
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def write_revision(active_store: PostgresRecordStore) -> str:
+                barrier.wait(timeout=5)
+                return active_store.write_repository_human_role_policy_record(revision_2)
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(executor.map(write_revision, (store, second_store)))
+                active_records = store.list_repository_human_role_policy_records(
+                    repository_id=revision_1.repository_id,
+                    product=revision_1.product,
+                    context=revision_1.context,
+                    status="active",
+                )
+                all_records = store.list_repository_human_role_policy_records(
+                    repository_id=revision_1.repository_id,
+                    product=revision_1.product,
+                    context=revision_1.context,
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["replayed", "written"])
+        self.assertEqual(active_records, (revision_2,))
+        self.assertEqual(len(all_records), 2)
+
+    def test_repository_human_role_policy_concurrent_revision_conflicts(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            revision_1 = _repository_human_role_policy_record(revision=1)
+            store.write_repository_human_role_policy_record(revision_1)
+            revision_2a = _repository_human_role_policy_record(
+                revision=2,
+                repository_owner_github_ids=(903002,),
+                effective_at="2026-08-01T10:05:00Z",
+                reason="postgres integration writer one",
+                supersedes_record_id=revision_1.record_id,
+            )
+            revision_2b = _repository_human_role_policy_record(
+                revision=2,
+                repository_owner_github_ids=(903003,),
+                effective_at="2026-08-01T10:05:01Z",
+                reason="postgres integration writer two",
+                supersedes_record_id=revision_1.record_id,
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def write_revision(
+                active_store: PostgresRecordStore,
+                record: RepositoryHumanRolePolicyRecord,
+            ) -> str:
+                barrier.wait(timeout=5)
+                try:
+                    return active_store.write_repository_human_role_policy_record(record)
+                except RepositoryHumanRolePolicyConflictError:
+                    return "role_policy_conflict"
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(
+                            lambda arguments: write_revision(*arguments),
+                            ((store, revision_2a), (second_store, revision_2b)),
+                        )
+                    )
+                active_records = store.list_repository_human_role_policy_records(
+                    repository_id=revision_1.repository_id,
+                    product=revision_1.product,
+                    context=revision_1.context,
+                    status="active",
+                )
+                all_records = store.list_repository_human_role_policy_records(
+                    repository_id=revision_1.repository_id,
+                    product=revision_1.product,
+                    context=revision_1.context,
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["role_policy_conflict", "written"])
+        self.assertEqual(len(active_records), 1)
+        self.assertEqual(active_records[0].role_policy_revision, 2)
+        self.assertEqual(len(all_records), 2)
+
+    def test_tenant_technical_human_waiver_exact_concurrent_event_replays(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            event = _tenant_technical_human_waiver_event_record()
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def write_event(active_store: PostgresRecordStore) -> str:
+                barrier.wait(timeout=5)
+                try:
+                    return active_store.write_tenant_technical_human_waiver_event_record(event)
+                except TenantTechnicalHumanWaiverEventConflictError:
+                    return "waiver_conflict"
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(executor.map(write_event, (store, second_store)))
+                rows = store.list_tenant_technical_human_waiver_event_records(
+                    repository_id=event.binding.repository_id,
+                    binding_sha256=event.binding.binding_sha256,
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["replayed", "written"])
+        self.assertEqual(rows, (event,))
+
+    def test_tenant_technical_human_waiver_compare_write_replay_and_conflict(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            classification, role_policy, authz_policy = (
+                _seed_tenant_technical_human_waiver_authority(store)
+            )
+            envelope = _tenant_technical_human_waiver_envelope(
+                classification=classification,
+                role_policy=role_policy,
+                authz_policy=authz_policy,
+            )
+            mutation = _tenant_technical_human_waiver_mutation(
+                idempotency_key="postgres-waiver-create",
+                request_fingerprint="postgres-waiver-create-fingerprint",
+                response_trace_id="trace-postgres-waiver-create",
+            )
+
+            written = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(),
+                envelope=envelope,
+                mutation=mutation,
+            )
+            replay = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(login="postgres-human-renamed"),
+                envelope=envelope,
+                mutation=mutation,
+            )
+            conflict = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(),
+                envelope=envelope,
+                mutation=_tenant_technical_human_waiver_mutation(
+                    idempotency_key=mutation.idempotency_key,
+                    request_fingerprint="postgres-waiver-changed-fingerprint",
+                    response_trace_id="trace-postgres-waiver-conflict",
+                ),
+            )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="901001",
+                product="postgres-tenant-site",
+                context="postgres-tenant-site",
+            )
+            idempotency_record = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+
+        self.assertEqual(written.status, "written")
+        self.assertIsNotNone(written.result)
+        self.assertIsNotNone(written.event_record)
+        assert written.result is not None
+        assert written.event_record is not None
+        self.assertEqual(written.result.path_result.state, "satisfied")
+        self.assertEqual(written.event_record.recorded_at, written.event_record.occurred_at)
+        self.assertEqual(replay.status, "replayed")
+        self.assertIsNotNone(replay.idempotency_record)
+        assert replay.idempotency_record is not None
+        self.assertEqual(replay.idempotency_record.response_trace_id, mutation.response_trace_id)
+        self.assertEqual(conflict.status, "idempotency_conflict")
+        self.assertEqual(records, (written.event_record,))
+        self.assertIsNotNone(idempotency_record)
+        assert idempotency_record is not None
+        self.assertEqual(idempotency_record.state, "completed")
+
+    def test_tenant_technical_human_waiver_compare_write_rolls_back_with_idempotency(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            classification, role_policy, authz_policy = (
+                _seed_tenant_technical_human_waiver_authority(store)
+            )
+            mutation = _tenant_technical_human_waiver_mutation(
+                idempotency_key="postgres-waiver-rollback",
+                request_fingerprint="postgres-waiver-rollback-fingerprint",
+                response_trace_id="trace-postgres-waiver-rollback",
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_sync_idempotency_row",
+                    side_effect=RuntimeError("injected completion failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected completion failure"),
+            ):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=_tenant_technical_human_waiver_envelope(
+                        classification=classification,
+                        role_policy=role_policy,
+                        authz_policy=authz_policy,
+                    ),
+                    mutation=mutation,
+                )
+
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="901001",
+                product="postgres-tenant-site",
+                context="postgres-tenant-site",
+            )
+            idempotency_record = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+
+        self.assertEqual(records, ())
+        self.assertIsNone(idempotency_record)
+
+    def test_tenant_technical_human_waiver_compare_write_create_and_revoke_cas(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            classification, role_policy, authz_policy = (
+                _seed_tenant_technical_human_waiver_authority(store)
+            )
+            created = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(),
+                envelope=_tenant_technical_human_waiver_envelope(
+                    classification=classification,
+                    role_policy=role_policy,
+                    authz_policy=authz_policy,
+                    source_event_id="comment-postgres-create-revoke",
+                ),
+                mutation=_tenant_technical_human_waiver_mutation(
+                    idempotency_key="postgres-waiver-create-revoke",
+                    request_fingerprint="postgres-waiver-create-revoke-fingerprint",
+                    response_trace_id="trace-postgres-waiver-create-revoke",
+                ),
+            )
+            assert created.event_record is not None
+            revoked = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(),
+                envelope=_tenant_technical_human_waiver_envelope(
+                    classification=classification,
+                    role_policy=role_policy,
+                    authz_policy=authz_policy,
+                    action="revoked",
+                    source_event_id="comment-postgres-revoke",
+                    reason="Owner revoked exact technical waiver.",
+                    expected_current={
+                        "schema_version": 1,
+                        "waiver_id": created.event_record.waiver_id,
+                        "event_digest": created.event_record.event_digest,
+                    },
+                ),
+                mutation=_tenant_technical_human_waiver_mutation(
+                    idempotency_key="postgres-waiver-revoke",
+                    request_fingerprint="postgres-waiver-revoke-fingerprint",
+                    response_trace_id="trace-postgres-waiver-revoke",
+                ),
+            )
+            with self.assertRaises(TenantTechnicalHumanWaiverRevokeCurrentError):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=_tenant_technical_human_waiver_envelope(
+                        classification=classification,
+                        role_policy=role_policy,
+                        authz_policy=authz_policy,
+                        action="revoked",
+                        source_event_id="comment-postgres-revoke-stale",
+                        expected_current={
+                            "schema_version": 1,
+                            "waiver_id": created.event_record.waiver_id,
+                            "event_digest": created.event_record.event_digest,
+                        },
+                    ),
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="postgres-waiver-revoke-stale",
+                        request_fingerprint="postgres-waiver-revoke-stale-fingerprint",
+                        response_trace_id="trace-postgres-waiver-revoke-stale",
+                    ),
+                )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="901001",
+                product="postgres-tenant-site",
+                context="postgres-tenant-site",
+            )
+
+        self.assertEqual(created.status, "written")
+        self.assertEqual(revoked.status, "written")
+        self.assertIsNotNone(revoked.result)
+        assert revoked.result is not None
+        self.assertEqual(revoked.result.path_result.state, "denied")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(sorted(record.action for record in records), ["created", "revoked"])
+
+    def test_tenant_technical_human_waiver_compare_write_rejects_authority_drift(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            role_policy = _repository_human_role_policy_record(
+                revision=1,
+                repository_owner_github_ids=(903002,),
+                effective_at="2026-07-01T00:00:00Z",
+            )
+            classification, role_policy, authz_policy = (
+                _seed_tenant_technical_human_waiver_authority(
+                    store,
+                    role_policy=role_policy,
+                )
+            )
+            with self.assertRaises(TenantTechnicalHumanWaiverStaleAuthorityError):
+                stale_envelope = _tenant_technical_human_waiver_envelope(
+                    classification=classification,
+                    role_policy=role_policy,
+                    authz_policy=authz_policy,
+                )
+                stale_envelope.expected_authority.classification_digest = "f" * 64
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(github_id=903002),
+                    envelope=stale_envelope,
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="postgres-waiver-authority-drift",
+                        request_fingerprint="postgres-waiver-authority-drift-fingerprint",
+                        response_trace_id="trace-postgres-waiver-authority-drift",
+                        scope="github-human-id|903002",
+                    ),
+                )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="901001",
+                product="postgres-tenant-site",
+                context="postgres-tenant-site",
+            )
+            failed_idempotency = store.read_idempotency_record(
+                scope="github-human-id|903002",
+                route_path="/v1/tenant-admission/technical-human-waivers/apply",
+                idempotency_key="postgres-waiver-authority-drift",
+            )
+
+        self.assertEqual(records, ())
+        self.assertIsNone(failed_idempotency)
+
+    def test_tenant_technical_human_waiver_compare_write_rejects_superseded_classification(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            classification, role_policy, authz_policy = (
+                _seed_tenant_technical_human_waiver_authority(store)
+            )
+            store.write_tenant_repository_classification_record(
+                _tenant_repository_classification_record(
+                    revision=2,
+                    product="replacement-product",
+                    context="replacement-context",
+                    classification_kind="engineering",
+                    classified_at="2026-07-02T00:00:00Z",
+                    supersedes_record_id=classification.record_id,
+                )
+            )
+            mutation = _tenant_technical_human_waiver_mutation(
+                idempotency_key="postgres-waiver-superseded-classification",
+                request_fingerprint="postgres-waiver-superseded-classification-fingerprint",
+                response_trace_id="trace-postgres-waiver-superseded-classification",
+            )
+
+            with self.assertRaisesRegex(
+                TenantTechnicalHumanWaiverStaleAuthorityError,
+                "classification does not match candidate",
+            ):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=_tenant_technical_human_waiver_envelope(
+                        classification=classification,
+                        role_policy=role_policy,
+                        authz_policy=authz_policy,
+                    ),
+                    mutation=mutation,
+                )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="901001",
+                product="postgres-tenant-site",
+                context="postgres-tenant-site",
+            )
+            failed_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+
+        self.assertEqual(records, ())
+        self.assertIsNone(failed_idempotency)
+
+    def test_tenant_technical_human_waiver_compare_write_serializes_no_row_race(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            classification, role_policy, authz_policy = (
+                _seed_tenant_technical_human_waiver_authority(store)
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def write_waiver(active_store: PostgresRecordStore, suffix: str) -> str:
+                barrier.wait(timeout=5)
+                try:
+                    result = active_store.compare_and_write_tenant_technical_human_waiver_event(
+                        identity=_tenant_technical_human_waiver_identity(),
+                        envelope=_tenant_technical_human_waiver_envelope(
+                            classification=classification,
+                            role_policy=role_policy,
+                            authz_policy=authz_policy,
+                            source_event_id=f"comment-postgres-race-{suffix}",
+                        ),
+                        mutation=_tenant_technical_human_waiver_mutation(
+                            idempotency_key=f"postgres-waiver-race-{suffix}",
+                            request_fingerprint=f"postgres-waiver-race-{suffix}-fingerprint",
+                            response_trace_id=f"trace-postgres-waiver-race-{suffix}",
+                        ),
+                    )
+                    return result.status
+                except TenantTechnicalHumanWaiverEventConflictError:
+                    return "waiver_conflict"
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(
+                            lambda arguments: write_waiver(*arguments),
+                            ((store, "a"), (second_store, "b")),
+                        )
+                    )
+                records = store.list_tenant_technical_human_waiver_event_records(
+                    repository_id="901001",
+                    product="postgres-tenant-site",
+                    context="postgres-tenant-site",
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(statuses.count("written"), 1)
+        self.assertEqual(statuses.count("waiver_conflict"), 1)
+        self.assertEqual(len(records), 1)
 
     def test_concurrent_outbox_enqueue_reuses_one_delivery(self) -> None:
         with _store_for_fresh_head_database() as store:

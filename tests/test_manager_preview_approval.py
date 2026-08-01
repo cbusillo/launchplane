@@ -14,6 +14,10 @@ from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalDecision,
     ManagerPreviewApprovalEventRecord,
 )
+from control_plane.contracts.repository_human_admission import (
+    RepositoryHumanManagerDelegation,
+    RepositoryHumanRolePolicyRecord,
+)
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -136,7 +140,7 @@ class ManagerPreviewApprovalTests(unittest.TestCase):
         mismatch_cases = {
             "source": _runtime_identity(source_git_ref="2" * 40),
             "environment": _runtime_identity(environment_kind="stable"),
-            "preview_id": _runtime_identity(preview_id=""),
+            "preview_id": _runtime_identity(preview_id="preview-18"),
             "generation": _runtime_identity(preview_generation_id="generation-18"),
         }
         for label, runtime_identity in mismatch_cases.items():
@@ -147,6 +151,14 @@ class ManagerPreviewApprovalTests(unittest.TestCase):
                         preview=_preview(),
                         generation=_generation(runtime_identity=runtime_identity),
                     )
+
+    def test_requires_runtime_identity_preview_id_to_match_binding_preview_id(self) -> None:
+        with self.assertRaisesRegex(ValueError, "runtime identity"):
+            build_current_manager_preview_approval_binding(
+                product=PRODUCT,
+                preview=_preview(),
+                generation=_generation(runtime_identity=_runtime_identity(preview_id="preview-18")),
+            )
 
     def test_filesystem_replays_identical_event_and_rejects_conflicting_payload(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -375,6 +387,134 @@ class ManagerPreviewApprovalTests(unittest.TestCase):
             self.assertEqual(decision.status, "stale")
             self.assertEqual(decision.reason_code, "approval_stale")
 
+            wrong_scope = _decision(
+                events=(approved,),
+                role_policy_record=_role_policy(
+                    manager_primary_ids=(101,),
+                    context="staging",
+                ),
+            )
+            self.assertEqual(wrong_scope.status, "stale")
+
+    def test_future_dated_approval_event_is_ignored(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            future_approved = record_manager_preview_approval_event(
+                record_store=store,
+                identity=_manager_identity(),
+                policy_record=_policy_record(),
+                product=PRODUCT,
+                preview=_preview(),
+                generation=_generation(),
+                action="approved",
+                occurred_at="2026-07-30T12:11:00Z",
+                source_event_kind="github_issue_comment",
+                source_event_id="comment-104",
+            ).record
+
+            decision = _decision(events=(future_approved,))
+
+            self.assertEqual(decision.status, "pending")
+            self.assertEqual(decision.reason_code, "approval_missing")
+
+            with self.assertRaisesRegex(ValueError, "recorded before it occurred"):
+                record_manager_preview_approval_event(
+                    record_store=store,
+                    identity=_manager_identity(),
+                    policy_record=_policy_record(),
+                    product=PRODUCT,
+                    preview=_preview(),
+                    generation=_generation(),
+                    action="approved",
+                    occurred_at="2026-07-30T12:11:00Z",
+                    recorded_at="2026-07-30T12:10:00Z",
+                    source_event_kind="github_issue_comment",
+                    source_event_id="comment-future-rejected",
+                )
+
+    def test_role_aware_manager_approval_requires_current_delegation(self) -> None:
+        active_delegation = RepositoryHumanManagerDelegation(
+            delegated_manager_github_id=101,
+            delegated_by_github_id=202,
+            starts_at="2026-07-30T11:00:00Z",
+            expires_at="2026-07-30T13:00:00Z",
+            source_event_kind="github_issue_comment",
+            source_event_id="delegation-101",
+            reason="Manager coverage.",
+        )
+        role_policy = _role_policy(manager_delegations=(active_delegation,))
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            approved = record_manager_preview_approval_event(
+                record_store=store,
+                identity=_manager_identity(),
+                policy_record=_policy_record(),
+                product=PRODUCT,
+                preview=_preview(),
+                generation=_generation(),
+                action="approved",
+                occurred_at=OCCURRED_AT,
+                source_event_kind="github_issue_comment",
+                source_event_id="comment-101",
+                role_policy_record=role_policy,
+                repository_id="1001",
+                repository_owner_id="2001",
+            ).record
+
+            active_decision = _decision(events=(approved,), role_policy_record=role_policy)
+            self.assertEqual(active_decision.status, "approved")
+            assert approved.authorization is not None
+            assert approved.authorization.role_policy_provenance is not None
+            self.assertEqual(
+                approved.authorization.role_policy_provenance.authority_kind,
+                "manager_delegated",
+            )
+
+            revoked_policy = _role_policy(
+                manager_delegations=(
+                    active_delegation.model_copy(update={"revoked_at": "2026-07-30T12:01:00Z"}),
+                )
+            )
+            stale_decision = _decision(events=(approved,), role_policy_record=revoked_policy)
+            self.assertEqual(stale_decision.status, "stale")
+            self.assertEqual(stale_decision.reason_code, "approval_stale")
+
+    def test_role_policy_rejects_legacy_approval_without_provenance(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            legacy_approval = _approved_event(store)
+
+            decision = _decision(
+                events=(legacy_approval,),
+                role_policy_record=_role_policy(manager_primary_ids=(101,)),
+            )
+
+            self.assertEqual(decision.status, "stale")
+            self.assertEqual(decision.reason_code, "approval_stale")
+
+    def test_same_timestamp_revocation_wins_over_approval(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            approved = _approved_event(store)
+            revoked = record_manager_preview_approval_event(
+                record_store=store,
+                identity=_manager_identity(),
+                policy_record=_policy_record(),
+                product=PRODUCT,
+                preview=_preview(),
+                generation=_generation(),
+                action="revoked",
+                occurred_at=OCCURRED_AT,
+                source_event_kind="github_issue_comment",
+                source_event_id="comment-revoked-same-time",
+                reason="Manager revoked approval.",
+            ).record
+
+            decision = _decision(events=(approved, revoked))
+
+            self.assertEqual(decision.status, "revoked")
+            self.assertEqual(decision.reason_code, "approval_revoked")
+
     def test_missing_policy_makes_approval_unavailable(self) -> None:
         decision = evaluate_manager_preview_approval(
             product=PRODUCT,
@@ -442,6 +582,7 @@ def _decision(
     preview: PreviewRecord | None = None,
     generation: PreviewGenerationRecord | None = None,
     policy_record: LaunchplaneAuthzPolicyRecord | None = None,
+    role_policy_record: RepositoryHumanRolePolicyRecord | None = None,
     events: tuple[ManagerPreviewApprovalEventRecord, ...],
 ) -> ManagerPreviewApprovalDecision:
     return evaluate_manager_preview_approval(
@@ -451,6 +592,7 @@ def _decision(
         policy_record=policy_record or _policy_record(),
         events=events,
         evaluated_at="2026-07-30T12:10:00Z",
+        role_policy_record=role_policy_record,
     )
 
 
@@ -501,6 +643,30 @@ def _policy_record(
         updated_at=OCCURRED_AT,
         policy_sha256=policy_sha256,
         policy=policy,
+    )
+
+
+def _role_policy(
+    *,
+    manager_primary_ids: tuple[int, ...] = (202,),
+    manager_backup_ids: tuple[int, ...] = (),
+    manager_delegations: tuple[RepositoryHumanManagerDelegation, ...] = (),
+    context: str = CONTEXT,
+) -> RepositoryHumanRolePolicyRecord:
+    return RepositoryHumanRolePolicyRecord(
+        repository_id="1001",
+        repository_owner_id="2001",
+        repository=REPOSITORY,
+        product=PRODUCT,
+        context=context,
+        role_policy_revision=1,
+        repository_owner_github_ids=(301,),
+        manager_primary_github_ids=manager_primary_ids,
+        manager_backup_github_ids=manager_backup_ids,
+        manager_delegations=manager_delegations,
+        effective_at="2026-07-30T11:00:00Z",
+        source="test:manager-preview-role-policy",
+        reason="test manager role policy",
     )
 
 

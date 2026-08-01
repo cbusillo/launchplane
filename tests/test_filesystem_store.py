@@ -115,6 +115,13 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.repository_human_admission import (
+    RepositoryHumanRolePolicyProvenance,
+    RepositoryHumanRolePolicyRecord,
+    TenantTechnicalHumanWaiverAuthorization,
+    TenantTechnicalHumanWaiverBinding,
+    TenantTechnicalHumanWaiverEventRecord,
+)
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
@@ -133,14 +140,306 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationPolicy
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationRequest
 from control_plane.contracts.runner_lane_registration import plan_runner_lane_registration
-from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.contracts.tenant_merge_eligibility import (
+    TenantRepositoryClassificationRecord,
+)
+from control_plane.contracts.trusted_maintenance import (
+    TrustedMaintenanceActorRule,
+    TrustedMaintenanceAllowedEvent,
+    TrustedMaintenanceEvidenceBinding,
+    TrustedMaintenanceEvidenceRecord,
+    TrustedMaintenancePolicyRecord,
+)
+from control_plane.storage.filesystem import (
+    FilesystemRecordStore,
+)
+from control_plane.tenant_repository_classification import (
+    TenantRepositoryClassificationConflictError,
+    TenantRepositoryClassificationSequenceError,
+)
+from control_plane.repository_human_admission import (
+    RepositoryHumanRolePolicyConflictError,
+    RepositoryHumanRolePolicySequenceError,
+    TenantTechnicalHumanWaiverEventConflictError,
+)
+from control_plane.trusted_maintenance import (
+    TrustedMaintenanceEvidenceConflictError,
+    TrustedMaintenancePolicyConflictError,
+    TrustedMaintenancePolicySequenceError,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from tests.support.artifact_manifests import artifact_manifest_v2
 
 
+class _FailingRolePolicyFilesystemRecordStore(FilesystemRecordStore):
+    def __init__(self, state_dir: Path, *, fail_step: str) -> None:
+        super().__init__(state_dir)
+        self.fail_step = fail_step
+
+    def _after_product_authority_bundle_step(self, step_name: str) -> None:
+        if step_name == self.fail_step:
+            raise RuntimeError(f"injected failure after {step_name}")
+
+
+class _FailingTrustedMaintenancePolicyFilesystemRecordStore(FilesystemRecordStore):
+    def __init__(self, state_dir: Path, *, fail_step: str) -> None:
+        super().__init__(state_dir)
+        self.fail_step = fail_step
+
+    def _after_product_authority_bundle_step(self, step_name: str) -> None:
+        if step_name == self.fail_step:
+            raise RuntimeError(f"injected failure after {step_name}")
+
+
 def _artifact_identity(artifact_id: str) -> ArtifactIdentityReference:
     return ArtifactIdentityReference(artifact_id=artifact_id)
+
+
+def _tenant_repository_classification_record(
+    *,
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
+    repository: str = "example/example-product",
+    product: str = "example-product",
+    context: str = "example-product",
+    classification_kind: str = "tenant_ui",
+    classification_revision: int = 1,
+    classified_at: str = "2026-07-31T10:00:00Z",
+    source: str = "test-source",
+    reason: str = "test-classification",
+    supersedes_record_id: str | None = None,
+) -> TenantRepositoryClassificationRecord:
+    return TenantRepositoryClassificationRecord.model_validate(
+        {
+            "repository_id": repository_id,
+            "repository_owner_id": repository_owner_id,
+            "repository": repository,
+            "product": product,
+            "context": context,
+            "classification_kind": classification_kind,
+            "classification_revision": classification_revision,
+            "classified_at": classified_at,
+            "source": source,
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
+
+
+def _repository_human_role_policy_record(
+    *,
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
+    repository: str = "example/example-product",
+    product: str = "example-product",
+    context: str = "example-product",
+    status: str = "active",
+    role_policy_revision: int = 1,
+    repository_owner_github_ids: tuple[int, ...] = (301,),
+    manager_primary_github_ids: tuple[int, ...] = (501,),
+    effective_at: str = "2026-07-31T10:00:00Z",
+    source: str = "test-source",
+    reason: str = "test-role-policy",
+    supersedes_record_id: str | None = None,
+) -> RepositoryHumanRolePolicyRecord:
+    return RepositoryHumanRolePolicyRecord.model_validate(
+        {
+            "repository_id": repository_id,
+            "repository_owner_id": repository_owner_id,
+            "repository": repository,
+            "product": product,
+            "context": context,
+            "status": status,
+            "role_policy_revision": role_policy_revision,
+            "repository_owner_github_ids": repository_owner_github_ids,
+            "manager_primary_github_ids": manager_primary_github_ids,
+            "effective_at": effective_at,
+            "source": source,
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
+
+
+def _tenant_technical_human_waiver_event_record(
+    *,
+    source_event_id: str = "comment-1001",
+    action: str = "created",
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
+    repository: str = "example/example-product",
+    product: str = "example-product",
+    context: str = "example-product",
+    pull_request_number: int = 17,
+    head_sha: str = "a" * 40,
+    role_policy_record_id: str = "repository-human-role-policy-1001-abc123-r1",
+    role_policy_revision: int = 1,
+    author_github_id: int = 301,
+    occurred_at: str = "2026-07-31T10:15:00Z",
+    expires_at: str = "2026-07-31T11:15:00Z",
+) -> TenantTechnicalHumanWaiverEventRecord:
+    classification_digest = "b" * 64
+    role_policy_digest = "c" * 64
+    authz_policy_digest = "d" * 64
+    binding = TenantTechnicalHumanWaiverBinding(
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        repository=repository,
+        product=product,
+        context=context,
+        pull_request_number=pull_request_number,
+        head_sha=head_sha,
+        classification_revision=1,
+        classification_digest=classification_digest,
+        role_policy_record_id=role_policy_record_id,
+        role_policy_revision=role_policy_revision,
+        role_policy_digest=role_policy_digest,
+        authz_policy_record_id="authz-policy-r1",
+        authz_policy_revision=1,
+        authz_policy_digest=authz_policy_digest,
+    )
+    provenance = RepositoryHumanRolePolicyProvenance(
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        repository=repository,
+        product=product,
+        context=context,
+        role_policy_record_id=role_policy_record_id,
+        role_policy_revision=role_policy_revision,
+        role_policy_digest=role_policy_digest,
+        role_policy_source="test-source",
+        authority_kind="repository_owner",
+        evaluated_at=occurred_at,
+    )
+    authorization = TenantTechnicalHumanWaiverAuthorization(
+        author_github_id=author_github_id,
+        author_login=f"human-{author_github_id}",
+        managed_set_id="tenant-human.example",
+        managed_rule_id="technical-waiver",
+        authz_policy_record_id="authz-policy-r1",
+        authz_policy_revision=1,
+        authz_policy_digest=authz_policy_digest,
+        authz_policy_source="test-authz",
+        role_policy_provenance=provenance,
+        authorized_at=occurred_at,
+    )
+    event_payload: dict[str, object] = {
+        "binding": binding,
+        "action": action,
+        "occurred_at": occurred_at,
+        "source_event_kind": "github_issue_comment",
+        "source_event_id": source_event_id,
+        "reason": "Owner approved technical handling.",
+        "authorization": authorization,
+    }
+    if expires_at:
+        event_payload["expires_at"] = expires_at
+    return TenantTechnicalHumanWaiverEventRecord.model_validate(event_payload)
+
+
+def _trusted_maintenance_policy_record(
+    *,
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
+    repository: str = "example/example-product",
+    product: str = "example-product",
+    context: str = "example-product",
+    status: str = "active",
+    policy_revision: int = 1,
+    actor_github_id: int = 701,
+    sender_github_ids: tuple[int, ...] = (701,),
+    effective_at: str = "2026-07-31T10:00:00Z",
+    source: str = "test-source",
+    reason: str = "test-trusted-maintenance-policy",
+    supersedes_record_id: str | None = None,
+) -> TrustedMaintenancePolicyRecord:
+    actor_rule = TrustedMaintenanceActorRule(
+        actor_github_id=actor_github_id,
+        actor_login=f"bot-{actor_github_id}",
+        sender_github_ids=sender_github_ids,
+        sender_logins=tuple(f"sender-{sender_id}" for sender_id in sender_github_ids),
+        allowed_events=(
+            TrustedMaintenanceAllowedEvent(
+                event_name="pull_request",
+                actions=("opened", "synchronize"),
+            ),
+        ),
+    )
+    return TrustedMaintenancePolicyRecord.model_validate(
+        {
+            "repository_id": repository_id,
+            "repository_owner_id": repository_owner_id,
+            "repository": repository,
+            "product": product,
+            "context": context,
+            "status": status,
+            "policy_revision": policy_revision,
+            "actor_rules": (actor_rule,),
+            "effective_at": effective_at,
+            "source": source,
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
+
+
+def _trusted_maintenance_evidence_record(
+    *,
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
+    repository: str = "example/example-product",
+    product: str = "example-product",
+    context: str = "example-product",
+    pull_request_number: int = 17,
+    head_sha: str = "a" * 40,
+    policy_record_id: str = "trusted-maintenance-policy-1001-abc123-r1",
+    policy_revision: int = 1,
+    matched_actor_rule_id: str = "trusted-maintenance-actor-rule-abc123",
+    pr_author_github_id: int = 701,
+    sender_github_id: int = 701,
+    event_name: str = "pull_request",
+    event_action: str = "synchronize",
+    delivery_id: str = "delivery-1001",
+    occurred_at: str = "2026-07-31T10:15:00Z",
+    expires_at: str = "",
+) -> TrustedMaintenanceEvidenceRecord:
+    classification_digest = "b" * 64
+    policy_digest = "c" * 64
+    binding = TrustedMaintenanceEvidenceBinding(
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        repository=repository,
+        product=product,
+        context=context,
+        pull_request_number=pull_request_number,
+        head_sha=head_sha,
+        classification_record_id="tenant-repository-classification-1001-r1",
+        classification_revision=1,
+        classification_digest=classification_digest,
+        policy_record_id=policy_record_id,
+        policy_revision=policy_revision,
+        policy_digest=policy_digest,
+        matched_actor_rule_id=matched_actor_rule_id,
+        pr_author_github_id=pr_author_github_id,
+        pr_author_login=f"bot-{pr_author_github_id}",
+        sender_github_id=sender_github_id,
+        sender_login=f"sender-{sender_github_id}",
+        head_repository_id=repository_id,
+        head_repository_owner_id=repository_owner_id,
+        head_repository=repository,
+        event_name=event_name,
+        event_action=event_action,
+        source="signed-event-fixture",
+        delivery_id=delivery_id,
+    )
+    event_payload: dict[str, object] = {
+        "binding": binding,
+        "occurred_at": occurred_at,
+    }
+    if expires_at:
+        event_payload["expires_at"] = expires_at
+    return TrustedMaintenanceEvidenceRecord.model_validate(event_payload)
 
 
 def _resolved_target() -> ResolvedTargetEvidence:
@@ -486,6 +785,518 @@ def _merge_train_stack_collapse_plan_record(
 
 
 class FilesystemRecordStoreTests(unittest.TestCase):
+    def test_tenant_repository_classifications_are_immutable_revision_history(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            revision_1 = _tenant_repository_classification_record(classification_revision=1)
+            revision_2 = _tenant_repository_classification_record(
+                classification_kind="engineering",
+                classification_revision=2,
+                classified_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+
+            first_write = store.write_tenant_repository_classification_record(revision_1)
+            second_write = store.write_tenant_repository_classification_record(revision_2)
+            replay = store.write_tenant_repository_classification_record(revision_2)
+            loaded = store.read_tenant_repository_classification_record(revision_1.record_id)
+            listed = store.list_tenant_repository_classification_records(
+                repository_id=revision_1.repository_id
+            )
+            limited = store.list_tenant_repository_classification_records(
+                repository_id=revision_1.repository_id,
+                limit=1,
+            )
+            lookup = store.latest_tenant_repository_classification_lookup(
+                repository_id=revision_1.repository_id
+            )
+
+        self.assertEqual(first_write, "written")
+        self.assertEqual(second_write, "written")
+        self.assertEqual(replay, "replayed")
+        self.assertEqual(loaded, revision_1)
+        self.assertEqual([record.classification_revision for record in listed], [2, 1])
+        self.assertEqual(limited, (revision_2,))
+        self.assertEqual(lookup.status, "available")
+        self.assertEqual(lookup.records, (revision_2,))
+
+    def test_tenant_repository_classification_rejects_conflicting_replay(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            record = _tenant_repository_classification_record()
+            conflicting_record = _tenant_repository_classification_record(
+                reason="changed-test-classification"
+            )
+
+            store.write_tenant_repository_classification_record(record)
+
+            with self.assertRaises(TenantRepositoryClassificationConflictError):
+                store.write_tenant_repository_classification_record(conflicting_record)
+
+            listed = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+
+        self.assertEqual(listed, (record,))
+
+    def test_tenant_repository_classification_rejects_invalid_first_revision(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+
+            with self.assertRaises(TenantRepositoryClassificationSequenceError):
+                store.write_tenant_repository_classification_record(
+                    _tenant_repository_classification_record(classification_revision=2)
+                )
+
+    def test_latest_tenant_repository_classification_lookup_preserves_corrupt_ambiguity(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            record_dir = state_dir / "launchplane_tenant_repository_classifications"
+            record_dir.mkdir(parents=True)
+            record = _tenant_repository_classification_record(classification_revision=3)
+            payload = json.dumps(record.model_dump(mode="json"), sort_keys=True)
+            (record_dir / f"{record.record_id}.json").write_text(payload, encoding="utf-8")
+            (record_dir / "corrupt-duplicate-source.json").write_text(
+                payload,
+                encoding="utf-8",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+
+            lookup = store.latest_tenant_repository_classification_lookup(
+                repository_id=record.repository_id
+            )
+
+        self.assertEqual(lookup.status, "available")
+        self.assertEqual(len(lookup.records), 2)
+        self.assertEqual({item.record_id for item in lookup.records}, {record.record_id})
+
+    def test_repository_human_role_policies_are_single_active_revision_history(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            revision_1 = _repository_human_role_policy_record()
+            revision_2 = _repository_human_role_policy_record(
+                role_policy_revision=2,
+                repository_owner_github_ids=(302,),
+                effective_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+
+            first_write = store.write_repository_human_role_policy_record(revision_1)
+            second_write = store.write_repository_human_role_policy_record(revision_2)
+            replay = store.write_repository_human_role_policy_record(revision_2)
+            historical_replay = store.write_repository_human_role_policy_record(revision_1)
+            loaded_superseded = store.read_repository_human_role_policy_record(revision_1.record_id)
+            loaded_active = store.read_repository_human_role_policy_record(revision_2.record_id)
+            listed = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                repository_owner_id=revision_1.repository_owner_id,
+                repository=revision_1.repository,
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+            active = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                status="active",
+            )
+            superseded = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                status="superseded",
+            )
+            limited = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                limit=1,
+            )
+            wrong_scope = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                product="other-product",
+            )
+            mixed_case_repository = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                repository="Example/Example-Product",
+            )
+
+        self.assertEqual(first_write, "written")
+        self.assertEqual(second_write, "written")
+        self.assertEqual(replay, "replayed")
+        self.assertEqual(historical_replay, "replayed")
+        self.assertEqual(loaded_superseded.status, "superseded")
+        self.assertEqual(
+            loaded_superseded.role_policy_digest,
+            revision_1.role_policy_digest,
+        )
+        self.assertEqual(loaded_active, revision_2)
+        self.assertEqual([record.role_policy_revision for record in listed], [2, 1])
+        self.assertEqual(active, (revision_2,))
+        self.assertEqual(superseded, (loaded_superseded,))
+        self.assertEqual(limited, (revision_2,))
+        self.assertEqual(wrong_scope, ())
+        self.assertEqual(mixed_case_repository, (revision_2, loaded_superseded))
+
+    def test_repository_human_role_policy_rejects_replay_sequence_and_active_drift(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            record = _repository_human_role_policy_record()
+            store.write_repository_human_role_policy_record(record)
+
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                store.write_repository_human_role_policy_record(
+                    _repository_human_role_policy_record(reason="changed-role-policy")
+                )
+            with self.assertRaises(RepositoryHumanRolePolicySequenceError):
+                store.write_repository_human_role_policy_record(
+                    _repository_human_role_policy_record(
+                        role_policy_revision=3,
+                        supersedes_record_id=record.record_id,
+                    )
+                )
+            with self.assertRaises(RepositoryHumanRolePolicySequenceError):
+                store.write_repository_human_role_policy_record(
+                    _repository_human_role_policy_record(
+                        role_policy_revision=2,
+                        supersedes_record_id="wrong-record-id",
+                    )
+                )
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                store.write_repository_human_role_policy_record(
+                    _repository_human_role_policy_record(
+                        repository_owner_id="2999",
+                        role_policy_revision=2,
+                        supersedes_record_id=record.record_id,
+                    )
+                )
+
+            self.assertEqual(
+                store.list_repository_human_role_policy_records(repository_id=record.repository_id),
+                (record,),
+            )
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            with self.assertRaises(RepositoryHumanRolePolicySequenceError):
+                store.write_repository_human_role_policy_record(
+                    _repository_human_role_policy_record(role_policy_revision=2)
+                )
+
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            record_dir = state_dir / "launchplane_repository_human_role_policies"
+            record_dir.mkdir(parents=True)
+            revision_1 = _repository_human_role_policy_record()
+            revision_2 = _repository_human_role_policy_record(
+                role_policy_revision=2,
+                supersedes_record_id=revision_1.record_id,
+            )
+            for record in (revision_1, revision_2):
+                (record_dir / f"{record.record_id}.json").write_text(
+                    json.dumps(record.model_dump(mode="json"), sort_keys=True),
+                    encoding="utf-8",
+                )
+            store = FilesystemRecordStore(state_dir=state_dir)
+
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                store.write_repository_human_role_policy_record(
+                    _repository_human_role_policy_record(
+                        role_policy_revision=3,
+                        supersedes_record_id=revision_2.record_id,
+                    )
+                )
+
+    def test_repository_human_role_policy_replacement_recovers_after_partial_publish(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            revision_1 = _repository_human_role_policy_record()
+            revision_2 = _repository_human_role_policy_record(
+                role_policy_revision=2,
+                repository_owner_github_ids=(302,),
+                effective_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+            store.write_repository_human_role_policy_record(revision_1)
+            failing_store = _FailingRolePolicyFilesystemRecordStore(
+                state_dir,
+                fail_step="supersede_repository_human_role_policy",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "supersede_repository_human_role_policy"):
+                failing_store.write_repository_human_role_policy_record(revision_2)
+
+            self.assertTrue((state_dir / ".product_authority_bundle_stages").exists())
+            recovered_store = FilesystemRecordStore(state_dir=state_dir)
+            records = recovered_store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id
+            )
+
+        self.assertEqual([record.role_policy_revision for record in records], [2, 1])
+        self.assertEqual([record.status for record in records], ["active", "superseded"])
+        self.assertEqual(records[1].role_policy_digest, revision_1.role_policy_digest)
+        self.assertEqual(records[0], revision_2)
+
+    def test_tenant_technical_human_waiver_events_are_append_only_and_filterable(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            created = _tenant_technical_human_waiver_event_record()
+            conflicting_created = _tenant_technical_human_waiver_event_record(
+                occurred_at="2026-07-31T10:16:00Z",
+                expires_at="2026-07-31T11:16:00Z",
+            )
+            revoked = _tenant_technical_human_waiver_event_record(
+                source_event_id="comment-1002",
+                action="revoked",
+                occurred_at="2026-07-31T10:30:00Z",
+                expires_at="",
+            )
+            other_repository = _tenant_technical_human_waiver_event_record(
+                source_event_id="comment-other",
+                repository_id="1002",
+                repository_owner_id="2002",
+                repository="example/other-product",
+                product="other-product",
+                context="other-product",
+            )
+
+            first_write = store.write_tenant_technical_human_waiver_event_record(created)
+            replay = store.write_tenant_technical_human_waiver_event_record(created)
+            with self.assertRaises(TenantTechnicalHumanWaiverEventConflictError):
+                store.write_tenant_technical_human_waiver_event_record(conflicting_created)
+            revoked_write = store.write_tenant_technical_human_waiver_event_record(revoked)
+            store.write_tenant_technical_human_waiver_event_record(other_repository)
+            loaded = store.read_tenant_technical_human_waiver_event_record(created.event_id)
+            listed = store.list_tenant_technical_human_waiver_event_records(
+                repository_id=created.binding.repository_id,
+            )
+            exact_created = store.list_tenant_technical_human_waiver_event_records(
+                repository_id=created.binding.repository_id,
+                repository_owner_id=created.binding.repository_owner_id,
+                repository="Example/Example-Product",
+                product=created.binding.product,
+                context=created.binding.context,
+                binding_sha256=created.binding.binding_sha256,
+                pull_request_number=created.binding.pull_request_number,
+                head_sha=created.binding.head_sha,
+                classification_digest=created.binding.classification_digest,
+                role_policy_record_id=created.binding.role_policy_record_id,
+                role_policy_digest=created.binding.role_policy_digest,
+                authz_policy_record_id=created.binding.authz_policy_record_id,
+                authz_policy_digest=created.binding.authz_policy_digest,
+                action="created",
+                author_github_id=created.authorization.author_github_id,
+            )
+            waiver_events = store.list_tenant_technical_human_waiver_event_records(
+                waiver_id=created.waiver_id,
+                limit=1,
+            )
+            wrong_head = store.list_tenant_technical_human_waiver_event_records(
+                repository_id=created.binding.repository_id,
+                head_sha="b" * 40,
+            )
+
+        self.assertEqual(first_write, "written")
+        self.assertEqual(replay, "replayed")
+        self.assertEqual(revoked_write, "written")
+        self.assertEqual(loaded, created)
+        self.assertEqual(listed, (revoked, created))
+        self.assertEqual(exact_created, (created,))
+        self.assertEqual(waiver_events, (revoked,))
+        self.assertEqual(wrong_head, ())
+
+    def test_trusted_maintenance_policies_are_single_active_revision_history(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            revision_1 = _trusted_maintenance_policy_record()
+            revision_2 = _trusted_maintenance_policy_record(
+                policy_revision=2,
+                actor_github_id=702,
+                effective_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+
+            first_write = store.write_trusted_maintenance_policy_record(revision_1)
+            second_write = store.write_trusted_maintenance_policy_record(revision_2)
+            replay = store.write_trusted_maintenance_policy_record(revision_2)
+            historical_replay = store.write_trusted_maintenance_policy_record(revision_1)
+            loaded_superseded = store.read_trusted_maintenance_policy_record(revision_1.record_id)
+            loaded_active = store.read_trusted_maintenance_policy_record(revision_2.record_id)
+            listed = store.list_trusted_maintenance_policy_records(
+                repository_id=revision_1.repository_id,
+                repository_owner_id=revision_1.repository_owner_id,
+                repository="Example/Example-Product",
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+            active = store.list_trusted_maintenance_policy_records(
+                repository_id=revision_1.repository_id,
+                status="active",
+            )
+            superseded = store.list_trusted_maintenance_policy_records(
+                repository_id=revision_1.repository_id,
+                status="superseded",
+            )
+            limited = store.list_trusted_maintenance_policy_records(
+                repository_id=revision_1.repository_id,
+                limit=1,
+            )
+
+        self.assertEqual(first_write, "written")
+        self.assertEqual(second_write, "written")
+        self.assertEqual(replay, "replayed")
+        self.assertEqual(historical_replay, "replayed")
+        self.assertEqual(loaded_superseded.status, "superseded")
+        self.assertEqual(loaded_superseded.policy_digest, revision_1.policy_digest)
+        self.assertEqual(loaded_active, revision_2)
+        self.assertEqual([record.policy_revision for record in listed], [2, 1])
+        self.assertEqual(active, (revision_2,))
+        self.assertEqual(superseded, (loaded_superseded,))
+        self.assertEqual(limited, (revision_2,))
+
+    def test_trusted_maintenance_policy_rejects_replay_sequence_and_active_drift(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            record = _trusted_maintenance_policy_record()
+            store.write_trusted_maintenance_policy_record(record)
+
+            with self.assertRaises(TrustedMaintenancePolicyConflictError):
+                store.write_trusted_maintenance_policy_record(
+                    _trusted_maintenance_policy_record(reason="changed-policy")
+                )
+            with self.assertRaises(TrustedMaintenancePolicySequenceError):
+                store.write_trusted_maintenance_policy_record(
+                    _trusted_maintenance_policy_record(
+                        policy_revision=3,
+                        supersedes_record_id=record.record_id,
+                    )
+                )
+            with self.assertRaises(TrustedMaintenancePolicySequenceError):
+                store.write_trusted_maintenance_policy_record(
+                    _trusted_maintenance_policy_record(
+                        policy_revision=2,
+                        supersedes_record_id="wrong-record-id",
+                    )
+                )
+            with self.assertRaises(TrustedMaintenancePolicyConflictError):
+                store.write_trusted_maintenance_policy_record(
+                    _trusted_maintenance_policy_record(
+                        repository_owner_id="2999",
+                        policy_revision=2,
+                        supersedes_record_id=record.record_id,
+                    )
+                )
+
+            self.assertEqual(
+                store.list_trusted_maintenance_policy_records(repository_id=record.repository_id),
+                (record,),
+            )
+
+    def test_trusted_maintenance_policy_replacement_recovers_after_partial_publish(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            revision_1 = _trusted_maintenance_policy_record()
+            revision_2 = _trusted_maintenance_policy_record(
+                policy_revision=2,
+                actor_github_id=702,
+                effective_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+            store.write_trusted_maintenance_policy_record(revision_1)
+            failing_store = _FailingTrustedMaintenancePolicyFilesystemRecordStore(
+                state_dir,
+                fail_step="supersede_trusted_maintenance_policy",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "supersede_trusted_maintenance_policy"):
+                failing_store.write_trusted_maintenance_policy_record(revision_2)
+
+            self.assertTrue((state_dir / ".product_authority_bundle_stages").exists())
+            recovered_store = FilesystemRecordStore(state_dir=state_dir)
+            records = recovered_store.list_trusted_maintenance_policy_records(
+                repository_id=revision_1.repository_id
+            )
+
+        self.assertEqual([record.policy_revision for record in records], [2, 1])
+        self.assertEqual([record.status for record in records], ["active", "superseded"])
+        self.assertEqual(records[1].policy_digest, revision_1.policy_digest)
+        self.assertEqual(records[0], revision_2)
+
+    def test_trusted_maintenance_evidence_is_append_only_and_filterable(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            evidence = _trusted_maintenance_evidence_record()
+            conflicting = _trusted_maintenance_evidence_record(
+                head_sha="b" * 40,
+            )
+            other_repository = _trusted_maintenance_evidence_record(
+                repository_id="1002",
+                repository_owner_id="2002",
+                repository="example/other-product",
+                product="other-product",
+                context="other-product",
+                delivery_id="delivery-other",
+            )
+
+            first_write = store.write_trusted_maintenance_evidence_record(evidence)
+            replay = store.write_trusted_maintenance_evidence_record(evidence)
+            with self.assertRaises(TrustedMaintenanceEvidenceConflictError):
+                store.write_trusted_maintenance_evidence_record(conflicting)
+            store.write_trusted_maintenance_evidence_record(other_repository)
+            loaded = store.read_trusted_maintenance_evidence_record(evidence.evidence_id)
+            listed = store.list_trusted_maintenance_evidence_records(
+                repository_id=evidence.binding.repository_id,
+            )
+            exact = store.list_trusted_maintenance_evidence_records(
+                repository_id=evidence.binding.repository_id,
+                repository_owner_id=evidence.binding.repository_owner_id,
+                repository="Example/Example-Product",
+                product=evidence.binding.product,
+                context=evidence.binding.context,
+                binding_sha256=evidence.binding.binding_sha256,
+                pull_request_number=evidence.binding.pull_request_number,
+                head_sha=evidence.binding.head_sha,
+                classification_digest=evidence.binding.classification_digest,
+                policy_record_id=evidence.binding.policy_record_id,
+                policy_digest=evidence.binding.policy_digest,
+                matched_actor_rule_id=evidence.binding.matched_actor_rule_id,
+                pr_author_github_id=evidence.binding.pr_author_github_id,
+                sender_github_id=evidence.binding.sender_github_id,
+                event_name=evidence.binding.event_name,
+                event_action=evidence.binding.event_action,
+                delivery_id=evidence.binding.delivery_id,
+            )
+            wrong_head = store.list_trusted_maintenance_evidence_records(
+                repository_id=evidence.binding.repository_id,
+                head_sha="b" * 40,
+            )
+
+        self.assertEqual(first_write, "written")
+        self.assertEqual(replay, "replayed")
+        self.assertEqual(loaded, evidence)
+        self.assertEqual(listed, (evidence,))
+        self.assertEqual(exact, (evidence,))
+        self.assertEqual(wrong_head, ())
+
     def test_write_read_and_list_edge_endpoint_records_escape_endpoint_key_paths(
         self,
     ) -> None:
