@@ -610,6 +610,7 @@ The cookie-capable mutation inventory is intentionally limited to:
 - `POST /v1/merge-train/policies/import`
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
 - `POST /v1/tenant-admission/technical-human-waivers/apply`
+- `POST /v1/tenant-admission/trusted-maintenance-policies/apply`
 
 Every other authenticated mutation route intentionally rejects session-cookie
 authentication and continues to require its existing GitHub Actions OIDC,
@@ -760,6 +761,31 @@ include `deduped` plus the delivery id in the response. Matching pull-request
 close deliveries can close every linked request referenced by the PR, including
 still-queued requests that never stored a result PR URL. The route is native
 FastAPI.
+
+Both existing signed webhook surfaces also invoke the common
+trusted-maintenance capture handler after signature verification and payload
+decoding for `pull_request` deliveries. This reuse intentionally adds no new
+route, secret, durable raw webhook receipt, or runtime configuration. Invalid
+signatures, missing delivery IDs, and malformed payloads stop at the existing
+ingress boundary and never reach the trusted-maintenance handler. Unsupported
+or nonmatching deliveries remain accepted/skipped so unrelated Every Code and
+manager-preview behavior stays compatible.
+
+Trusted-maintenance capture treats the signed payload as a structural pre-filter
+only. It can use the signed numeric repository tuple, PR number, sender
+ID/type/login, PR author ID/type/login, and head SHA to decide whether a current
+repository-wide `tenant_ui` classification and exact trusted-maintenance rule
+candidate exist. Repositories without active authority, or deliveries without an
+exact signed numeric actor/sender/event/action candidate, are accepted/skipped
+before any GitHub API call. Relevant deliveries resolve the GitHub token from the
+DB-authoritative classification product/context, re-fetch the current PR, and
+write evidence only when the re-fetched base repository tuple, open state,
+author identity, head SHA, and same-repository head tuple exactly match the
+signed delivery and policy rule. Transient token, GitHub API, or PostgreSQL
+uncertainty on such a relevant delivery returns retryable `503` with no
+evidence; exact GitHub redelivery or the existing signed replay-envelope tooling
+is the reconcile path. Evidence conflicts return `409`. Responses expose only
+capture status, not policy actor IDs or logins.
 
 The manager-preview webhook uses
 `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`, accepts signed
@@ -2967,20 +2993,53 @@ or authz-policy mutation. Existing tenant merge/admission behavior remains
 unchanged until later rollout work wires shared authority into admission
 decisions.
 
-Trusted-maintenance currently has only contracts, pure evaluator behavior,
-filesystem rehearsal storage, PostgreSQL storage, migration, and schema
-invariants. It is a dedicated repository automation policy/evidence authority,
-not a human role-policy shortcut and not a generic Launchplane authz-policy
-reuse. Policy revisions and evidence are keyed to immutable numeric repository,
-actor, sender, and exact-head provenance; display logins are audit only, and no
-route may infer trust from repository names, branches, refs, files, labels,
-commit metadata, PR text, login strings, or blanket bot status. This slice does
-use source/delivery identity for deterministic replay, validates complete policy
-history before selecting current authority, performs policy CAS inside the
-storage transaction, and re-derives evidence expiration from policy TTL. It
-does not add HTTP routes, signed webhook ingress, OpenAPI, unified tenant-admission
-status, controller or merge-train wiring, rollout behavior, UI, provider calls,
-policy mutation authorization, or checked-in real repository policy values.
+`GET /v1/work-graph/tenant-admission/trusted-maintenance-policy` and
+`POST /v1/tenant-admission/trusted-maintenance-policies/apply` provide the
+focused trusted-maintenance policy read/apply boundary. The policy contract is a
+dedicated repository automation authority, not a human role-policy shortcut and
+not a generic Launchplane authz-policy reuse. Policy revisions and evidence are
+keyed to immutable numeric repository, actor, sender, and exact-head provenance;
+display logins are audit only, and no route may infer trust from repository
+names, branches, refs, files, labels, commit metadata, PR text, login strings,
+or blanket bot status.
+
+- `GET /v1/work-graph/tenant-admission/trusted-maintenance-policy?repository_id=...&product=...&context=...`:
+  Returns the current trusted-maintenance policy read model keyed by immutable
+  repository ID, product, and context. The model reports `missing`, `available`,
+  or fail-closed `ambiguous`; `available` includes the unique active current
+  record, history count, and `generated_at`. Requires
+  `trusted_maintenance_policy.read` authorization against the submitted
+  product/context and an explicit `AuthorizationTarget(scope="context")`.
+- `POST /v1/tenant-admission/trusted-maintenance-policies/apply`:
+  Accepts a strict envelope (`schema_version`, `mode: dry_run|apply`,
+  `expected_current_record_id`, `expected_current_policy_digest`, `record`). The
+  route is browser-GitHub-human-only and rejects terminal agents, local
+  operators/admin bearers, GitHub Actions, Every Code workers, bearer-only
+  callers, and other non-human identities. It requires
+  `trusted_maintenance_policy.write` authorization against the submitted
+  product/context and an explicit `AuthorizationTarget(scope="context")`; this
+  action is intentionally separate from `repository_human_role_policy.write`.
+  Apply mode requires JSON with one exact bounded `Content-Length` (maximum
+  64 KiB), a non-empty `Idempotency-Key`, and a real PostgreSQL
+  `PostgresRecordStore`. Filesystem, SQLite-backed rehearsal stores, and
+  unsupported stores return HTTP 503 `database_storage_required` for live apply.
+  Dry-run mode validates through rehearsal/read stores and writes nothing.
+  Launchplane reserves durable DB-only idempotency, locks the policy stream,
+  validates the expected current tip record ID and digest, supersedes the active
+  tip, inserts the candidate, completes the stored response, and commits once.
+  Exact same-key/same-request retries replay the stored response; same-key
+  changed requests return `idempotency_key_reused`; stale CAS returns conflict.
+  The route is included in the shared exact-length JSON body guard, so the
+  64 KiB limit is enforced before FastAPI/Pydantic parsing.
+
+Trusted-maintenance capture now enters from both existing signed webhook
+surfaces, but unified tenant-admission status/controller projection,
+merge-train wiring, branch protection and rollout behavior, UI, provider
+mutations, checked-in real repository or actor policy values, and changed-file,
+name, branch, title, or label heuristics remain deferred. Repositories without
+active trusted-maintenance authority do not incur GitHub re-fetches or new
+failures, so existing manager-preview and Every Code behavior remains unchanged
+until rollout deliberately supplies shared authority records.
 
 The CM tenant preview workflow uses tenant-product scope for both artifact
 publish input/evidence and preview lifecycle requests. Artifact publish still

@@ -132,11 +132,22 @@ from control_plane.storage.schema_migration import migrate_schema, schema_migrat
 from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationConflictError,
 )
+from control_plane.trusted_maintenance import (
+    TrustedMaintenanceEvidenceConflictError,
+    TrustedMaintenanceExpectedAuthority,
+    TrustedMaintenanceGitHubEventFacts,
+)
 from tests.support.artifact_manifests import artifact_manifest_v2
 from tests.test_odoo_prod_retained_volume_backup_import_storage import (
     _retained_operation_for_restore_lane,
 )
 from tests.test_odoo_stable_operation_worker import _restore_operation
+from tests.test_trusted_maintenance import (
+    _candidate as _trusted_maintenance_candidate,
+    _classification as _trusted_maintenance_classification,
+    _event_facts as _trusted_maintenance_event_facts,
+    _policy as _trusted_maintenance_policy,
+)
 
 POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
 LOCK_WAIT_TIMEOUT = "1000ms"
@@ -2780,6 +2791,86 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(statuses.count("written"), 1)
         self.assertEqual(statuses.count("waiver_conflict"), 1)
         self.assertEqual(len(records), 1)
+
+    def test_trusted_maintenance_capture_serializes_signed_body_replay(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            classification = _trusted_maintenance_classification()
+            policy = _trusted_maintenance_policy(evidence_ttl_seconds=3600)
+            candidate = _trusted_maintenance_candidate()
+            expected_authority = TrustedMaintenanceExpectedAuthority(
+                classification_record_id=classification.record_id,
+                classification_revision=classification.classification_revision,
+                classification_digest=classification.classification_digest,
+                policy_record_id=policy.record_id,
+                policy_revision=policy.policy_revision,
+                policy_digest=policy.policy_digest,
+            )
+            store.write_tenant_repository_classification_record(classification)
+            store.write_trusted_maintenance_policy_record(policy)
+            database_url = store.database_url
+            barrier = threading.Barrier(2)
+            event_facts = (
+                _trusted_maintenance_event_facts(
+                    delivery_id="postgres-delivery-a",
+                    signed_payload_sha256="d" * 64,
+                ),
+                _trusted_maintenance_event_facts(
+                    delivery_id="postgres-delivery-b",
+                    signed_payload_sha256="d" * 64,
+                    pr_author_login="renamed-automation",
+                    sender_login="renamed-sender",
+                ),
+            )
+
+            def capture_once(facts: TrustedMaintenanceGitHubEventFacts) -> str:
+                active_store = PostgresRecordStore(database_url=database_url)
+                try:
+                    barrier.wait(timeout=5)
+                    return active_store.capture_trusted_maintenance_evidence_transactionally(
+                        candidate=candidate,
+                        expected_authority=expected_authority,
+                        event_facts=facts,
+                    )
+                finally:
+                    active_store.close()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = tuple(executor.map(capture_once, event_facts))
+
+            records = store.list_trusted_maintenance_evidence_records(
+                repository_id=candidate.repository_id,
+                pull_request_number=candidate.pull_request_number,
+                head_sha=candidate.head_sha,
+            )
+            self.assertEqual(set(results), {"written", "replayed"})
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].binding.signed_payload_sha256, "d" * 64)
+            self.assertIn(
+                records[0].binding.delivery_id,
+                {"postgres-delivery-a", "postgres-delivery-b"},
+            )
+
+            conflicting_facts = _trusted_maintenance_event_facts(
+                delivery_id="postgres-delivery-c",
+                signed_payload_sha256="d" * 64,
+                event_action="opened",
+            )
+            with self.assertRaises(TrustedMaintenanceEvidenceConflictError):
+                store.capture_trusted_maintenance_evidence_transactionally(
+                    candidate=candidate,
+                    expected_authority=expected_authority,
+                    event_facts=conflicting_facts,
+                )
+            self.assertEqual(
+                len(
+                    store.list_trusted_maintenance_evidence_records(
+                        repository_id=candidate.repository_id,
+                        pull_request_number=candidate.pull_request_number,
+                        head_sha=candidate.head_sha,
+                    )
+                ),
+                1,
+            )
 
     def test_concurrent_outbox_enqueue_reuses_one_delivery(self) -> None:
         with _store_for_fresh_head_database() as store:

@@ -299,6 +299,7 @@ class TrustedMaintenanceTests(unittest.TestCase):
             event_facts=_event_facts(
                 pr_author_login="renamed-automation",
                 sender_login="renamed-sender",
+                delivery_id="changed-unsigned-delivery-header",
             ),
             occurred_at="2026-07-31T10:16:00Z",
         )
@@ -315,6 +316,10 @@ class TrustedMaintenanceTests(unittest.TestCase):
         self.assertEqual(
             captured.binding.binding_sha256,
             replayed_with_new_audit_facts.binding.binding_sha256,
+        )
+        self.assertNotEqual(
+            captured.binding.delivery_id,
+            replayed_with_new_audit_facts.binding.delivery_id,
         )
         self.assertNotEqual(captured.evidence_digest, replayed_with_new_audit_facts.evidence_digest)
         with self.assertRaises(TrustedMaintenanceEvidenceConflictError):
@@ -580,6 +585,7 @@ def _event_facts(
     event_name: str = "pull_request",
     event_action: str = "synchronize",
     delivery_id: str = "delivery-1001",
+    signed_payload_sha256: str = "d" * 64,
 ) -> TrustedMaintenanceGitHubEventFacts:
     return TrustedMaintenanceGitHubEventFacts(
         pr_author_github_id=pr_author_github_id,
@@ -595,6 +601,7 @@ def _event_facts(
         event_action=event_action,
         source="github-webhook",
         delivery_id=delivery_id,
+        signed_payload_sha256=signed_payload_sha256,
     )
 
 

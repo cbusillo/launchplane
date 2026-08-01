@@ -16,6 +16,7 @@ from control_plane.contracts.trusted_maintenance import (
     TrustedMaintenanceEvidenceBinding,
     TrustedMaintenanceEvidenceRecord,
     TrustedMaintenancePolicyRecord,
+    _normalize_sha256,
     _normalize_utc_timestamp,
     _parse_utc_timestamp,
     _required_decimal_id,
@@ -206,13 +207,33 @@ class TrustedMaintenancePolicyApplyResult(BaseModel):
         return self
 
 
+class TrustedMaintenancePolicyApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: TrustedMaintenancePolicyApplyMode = "apply"
+    expected_current_record_id: str = ""
+    expected_current_policy_digest: str = ""
+    record: TrustedMaintenancePolicyRecord
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "TrustedMaintenancePolicyApplyEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported trusted-maintenance policy apply schema version.")
+        self.expected_current_record_id = self.expected_current_record_id.strip()
+        self.expected_current_policy_digest = self.expected_current_policy_digest.strip().lower()
+        return self
+
+
 class TrustedMaintenanceExpectedAuthority(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
     classification_record_id: str
+    classification_revision: int = Field(ge=1)
     classification_digest: str
     policy_record_id: str
+    policy_revision: int = Field(ge=1)
     policy_digest: str
 
     @model_validator(mode="after")
@@ -249,6 +270,7 @@ class TrustedMaintenanceGitHubEventFacts(BaseModel):
     event_action: str
     source: str
     delivery_id: str
+    signed_payload_sha256: str
 
     @model_validator(mode="after")
     def _validate_event_facts(self) -> "TrustedMaintenanceGitHubEventFacts":
@@ -271,6 +293,10 @@ class TrustedMaintenanceGitHubEventFacts(BaseModel):
         self.event_action = _required_token(self.event_action, "event_action")
         self.source = _required_token(self.source, "source")
         self.delivery_id = _required_token(self.delivery_id, "delivery_id")
+        self.signed_payload_sha256 = _normalize_sha256(
+            self.signed_payload_sha256,
+            "signed_payload_sha256",
+        )
         return self
 
 
@@ -716,6 +742,7 @@ def capture_trusted_maintenance_evidence(
         event_action=event_facts.event_action,
         source=event_facts.source,
         delivery_id=event_facts.delivery_id,
+        signed_payload_sha256=event_facts.signed_payload_sha256,
     )
     record = TrustedMaintenanceEvidenceRecord(
         binding=binding,
@@ -939,6 +966,7 @@ def _current_tenant_ui_classification(
         )
     if expected_authority is not None and (
         current_record.record_id != expected_authority.classification_record_id
+        or current_record.classification_revision != expected_authority.classification_revision
         or current_record.classification_digest != expected_authority.classification_digest
     ):
         raise TrustedMaintenanceAuthorityError(
@@ -987,6 +1015,7 @@ def _current_trusted_maintenance_policy(
         raise TrustedMaintenanceAuthorityError("Trusted-maintenance policy is not effective yet.")
     if expected_authority is not None and (
         current_record.record_id != expected_authority.policy_record_id
+        or current_record.policy_revision != expected_authority.policy_revision
         or current_record.policy_digest != expected_authority.policy_digest
     ):
         raise TrustedMaintenanceAuthorityError(

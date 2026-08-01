@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from click import ClickException, Command
 from click.testing import CliRunner
@@ -30,6 +30,9 @@ from control_plane.every_code_webhooks import sync_every_code_webhooks
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.trusted_maintenance_github_webhook import (
+    TrustedMaintenanceGitHubWebhookResult,
+)
 from tests.support.auth import _StubVerifier, _identity
 from tests.support.http import request as http_request
 
@@ -653,6 +656,62 @@ class EveryCodeGitHubWebhookRequestTests(unittest.TestCase):
         self.assertEqual(request.trigger_label, "every-code")
         self.assertEqual(request.trigger_actor, "cbusillo")
         self.assertEqual(request.github_delivery_id, "delivery-1")
+
+    def test_signed_pull_request_delegates_to_trusted_maintenance_after_signature(
+        self,
+    ) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_pull_request_closed_payload()
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+            patch(
+                "control_plane.every_code_github_webhook.handle_trusted_maintenance_github_webhook",
+                return_value=TrustedMaintenanceGitHubWebhookResult(
+                    status="skipped",
+                    reason="test",
+                ),
+            ) as trusted_handler,
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_every_code_github_webhook_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-trusted-every-code",
+                    "X-Hub-Signature-256": _github_webhook_signature(
+                        webhook_payload,
+                        secret,
+                    ),
+                },
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        trusted_handler.assert_called_once_with(
+            event_name="pull_request",
+            delivery_id="delivery-trusted-every-code",
+            signed_payload_sha256=hashlib.sha256(
+                json.dumps(webhook_payload).encode("utf-8")
+            ).hexdigest(),
+            payload=webhook_payload,
+            record_store=ANY,
+            control_plane_root=Path(temporary_directory_name),
+            dependencies=ANY,
+        )
 
     def test_webhook_dependencies_inject_signature_time_anchor_and_token(self) -> None:
         verification_calls: list[tuple[bytes, str, str]] = []
@@ -2503,6 +2562,44 @@ class EveryCodeGitHubWebhookRequestTests(unittest.TestCase):
 
         self.assertEqual(status_code, 401)
         self.assertEqual(payload["error"]["code"], "webhook_signature_invalid")
+
+    def test_invalid_pull_request_signature_never_delegates_to_trusted_maintenance(
+        self,
+    ) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_pull_request_closed_payload()
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+            patch(
+                "control_plane.every_code_github_webhook.handle_trusted_maintenance_github_webhook"
+            ) as trusted_handler,
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-invalid-trusted-every-code",
+                    "X-Hub-Signature-256": "sha256=invalid",
+                },
+            )
+
+        self.assertEqual(status_code, 401)
+        self.assertEqual(payload["error"]["code"], "webhook_signature_invalid")
+        trusted_handler.assert_not_called()
 
     def test_every_code_github_webhook_rejects_invalid_json_payload(self) -> None:
         secret = "launchplane-every-code-webhook-secret"

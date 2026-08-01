@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import os
@@ -39,6 +40,11 @@ from control_plane.manager_preview_approval_projection import (
     write_manager_preview_approval_projection,
 )
 from control_plane.service_auth import GitHubHumanIdentity
+from control_plane.trusted_maintenance_github_webhook import (
+    TrustedMaintenanceGitHubWebhookDependencies,
+    TrustedMaintenanceGitHubWebhookResult,
+    handle_trusted_maintenance_github_webhook,
+)
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
@@ -93,6 +99,7 @@ class ManagerPreviewApprovalGitHubDependencies:
     now_timestamp: Callable[[], str] = _utc_now_timestamp
     github_api: GitHubApiRequest = github_api_request
     github_token: _GitHubTokenResolver = resolve_launchplane_github_token
+    trusted_maintenance: TrustedMaintenanceGitHubWebhookDependencies | None = None
 
 
 def parse_manager_preview_approval_command(
@@ -181,13 +188,32 @@ def handle_manager_preview_approval_github_webhook_request(
                 dependencies=resolved_dependencies,
             )
         if normalized_event_name == "pull_request":
-            return _handle_pull_request(
+            trusted_maintenance_result = handle_trusted_maintenance_github_webhook(
+                event_name=normalized_event_name,
+                delivery_id=normalized_delivery_id,
+                signed_payload_sha256=hashlib.sha256(payload_bytes).hexdigest(),
+                payload=payload,
+                record_store=record_store,
+                control_plane_root=control_plane_root,
+                dependencies=_trusted_maintenance_dependencies(resolved_dependencies),
+            )
+            terminal_response = _trusted_maintenance_terminal_response(
+                trace_id=trace_id,
+                result=trusted_maintenance_result,
+            )
+            if terminal_response is not None:
+                return terminal_response
+            status_code, response_payload = _handle_pull_request(
                 payload=payload,
                 delivery_id=normalized_delivery_id,
                 trace_id=trace_id,
                 record_store=store,
                 control_plane_root=control_plane_root,
                 dependencies=resolved_dependencies,
+            )
+            return status_code, _merge_trusted_maintenance_response(
+                response_payload,
+                trusted_maintenance_result,
             )
         return 202, _accepted(trace_id, skipped=True, reason="unsupported_event")
     except ManagerPreviewApprovalEventConflictError:
@@ -260,6 +286,56 @@ def reconcile_manager_preview_approval_for_pr(
         "fingerprint": projection.binding_sha256,
         **result,
     }
+
+
+def _trusted_maintenance_dependencies(
+    dependencies: ManagerPreviewApprovalGitHubDependencies,
+) -> TrustedMaintenanceGitHubWebhookDependencies:
+    return dependencies.trusted_maintenance or TrustedMaintenanceGitHubWebhookDependencies(
+        github_token=dependencies.github_token,
+        github_api=dependencies.github_api,
+    )
+
+
+def _trusted_maintenance_terminal_response(
+    *,
+    trace_id: str,
+    result: TrustedMaintenanceGitHubWebhookResult,
+) -> tuple[int, dict[str, object]] | None:
+    if result.status == "conflict":
+        return _error_response(
+            trace_id,
+            409,
+            "trusted_maintenance_evidence_conflict",
+            "Trusted-maintenance evidence conflicts with an existing signed delivery.",
+        )
+    if result.status == "retryable_error":
+        return _error_response(
+            trace_id,
+            503,
+            "trusted_maintenance_unavailable",
+            "Trusted-maintenance evidence capture is temporarily unavailable.",
+        )
+    return None
+
+
+def _merge_trusted_maintenance_response(
+    payload: dict[str, object],
+    result: TrustedMaintenanceGitHubWebhookResult,
+) -> dict[str, object]:
+    if result.status not in {"captured", "replayed"}:
+        return payload
+    merged_payload = dict(payload)
+    result_payload = merged_payload.get("result")
+    if not isinstance(result_payload, dict):
+        result_payload = {}
+    merged_payload["result"] = dict(result_payload) | {
+        "trusted_maintenance": {
+            "status": result.status,
+            "evidence_status": result.evidence_status,
+        }
+    }
+    return merged_payload
 
 
 def invalidate_manager_preview_approval_for_pr(
