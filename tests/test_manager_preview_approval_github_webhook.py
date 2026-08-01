@@ -146,8 +146,12 @@ class _Store:
 class _GitHubApi:
     def __init__(self) -> None:
         self.comment_body = ""
+        self.comment_id = 501
+        self.comment_created_at = NOW
         self.comment_actor_id = 101
         self.comment_actor_login = "manager"
+        self.head_sha = HEAD_SHA
+        self.pr_state = "open"
         self.projection_actor_id = 9001
         self.comments: list[dict[str, object]] = []
         self.statuses: list[dict[str, object]] = []
@@ -171,10 +175,11 @@ class _GitHubApi:
             raise click.ClickException("GitHub projection is temporarily unavailable.")
         if path == "/user":
             return {"id": self.projection_actor_id, "login": "launchplane"}
-        if path == f"/repos/{REPOSITORY}/issues/comments/501" and method == "GET":
+        if path == f"/repos/{REPOSITORY}/issues/comments/{self.comment_id}" and method == "GET":
             return {
-                "id": 501,
+                "id": self.comment_id,
                 "body": self.comment_body,
+                "created_at": self.comment_created_at,
                 "user": {
                     "id": self.comment_actor_id,
                     "login": self.comment_actor_login,
@@ -184,9 +189,9 @@ class _GitHubApi:
         if path == f"/repos/{REPOSITORY}/pulls/{PR_NUMBER}":
             return {
                 "number": PR_NUMBER,
-                "state": "open",
+                "state": self.pr_state,
                 "html_url": f"https://github.com/{REPOSITORY}/pull/{PR_NUMBER}",
-                "head": {"sha": HEAD_SHA},
+                "head": {"sha": self.head_sha},
             }
         if path == f"/users/{self.comment_actor_login}":
             return {
@@ -212,7 +217,7 @@ class _GitHubApi:
             comment = next(comment for comment in self.comments if comment["id"] == comment_id)
             comment["body"] = body["body"]
             return comment
-        if path == f"/repos/{REPOSITORY}/statuses/{HEAD_SHA}" and method == "POST":
+        if path == f"/repos/{REPOSITORY}/statuses/{self.head_sha}" and method == "POST":
             assert isinstance(body, dict)
             self.statuses.append(body)
             return {"id": len(self.statuses), **body}
@@ -310,7 +315,7 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
             store,
             Path("/tmp/launchplane"),
             "trace-2",
-            dependencies=dependencies,
+            dependencies=_dependencies(github, now="2026-07-31T12:05:00Z"),
         )
 
         self.assertEqual(first_status, 202)
@@ -324,6 +329,240 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         self.assertEqual(replay_result["event_status"], "replayed")
         self.assertEqual(len(store.events), 1)
         self.assertEqual(github.statuses[-1]["state"], "success")
+
+    def test_exact_current_command_replaces_stale_prior_binding(self) -> None:
+        store = _Store()
+        github = _GitHubApi()
+        dependencies = _dependencies(github)
+        prior_fingerprint = build_current_manager_preview_approval_binding(
+            product=PRODUCT,
+            preview=store.preview,
+            generation=store.generation,
+        ).binding_sha256
+        github.comment_body = f"/preview approve {prior_fingerprint}"
+        payload = json.dumps(_issue_comment_payload()).encode()
+        handle_manager_preview_approval_github_webhook_request(
+            payload,
+            "issue_comment",
+            "delivery-prior",
+            "sha256=test",
+            store,
+            Path("/tmp/launchplane"),
+            "trace-prior",
+            dependencies=dependencies,
+        )
+        current_head_sha = "2" * 40
+        _replace_serving_generation(store, head_sha=current_head_sha)
+        github.head_sha = current_head_sha
+        github.comment_id = 502
+        github.comment_created_at = NOW
+        current_fingerprint = build_current_manager_preview_approval_binding(
+            product=PRODUCT,
+            preview=store.preview,
+            generation=store.generation,
+        ).binding_sha256
+        github.comment_body = f"/preview approve {current_fingerprint}"
+        current_payload = json.dumps(_issue_comment_payload(comment_id=502)).encode()
+
+        status, response = handle_manager_preview_approval_github_webhook_request(
+            current_payload,
+            "issue_comment",
+            "delivery-current",
+            "sha256=test",
+            store,
+            Path("/tmp/launchplane"),
+            "trace-current",
+            dependencies=dependencies,
+        )
+
+        self.assertEqual(status, 202)
+        result = response["result"]
+        assert isinstance(result, dict)
+        self.assertEqual(result["event_status"], "written")
+        self.assertEqual(result["approval_status"], "approved")
+        self.assertEqual(len(store.events), 2)
+        self.assertEqual(github.statuses[-1]["state"], "success")
+
+        replay_status, replay_response = handle_manager_preview_approval_github_webhook_request(
+            current_payload,
+            "issue_comment",
+            "delivery-current",
+            "sha256=test",
+            store,
+            Path("/tmp/launchplane"),
+            "trace-current-replay",
+            dependencies=dependencies,
+        )
+
+        self.assertEqual(replay_status, 202)
+        replay_result = replay_response["result"]
+        assert isinstance(replay_result, dict)
+        self.assertEqual(replay_result["event_status"], "replayed")
+        self.assertEqual(replay_result["approval_status"], "approved")
+        self.assertEqual(len(store.events), 2)
+
+    def test_exact_current_command_replaces_policy_stale_approval(self) -> None:
+        store = _Store()
+        github = _GitHubApi()
+        fingerprint = build_current_manager_preview_approval_binding(
+            product=PRODUCT,
+            preview=store.preview,
+            generation=store.generation,
+        ).binding_sha256
+        github.comment_body = f"/preview approve {fingerprint}"
+        github.comment_created_at = "2026-07-31T11:50:00Z"
+        handle_manager_preview_approval_github_webhook_request(
+            json.dumps(_issue_comment_payload()).encode(),
+            "issue_comment",
+            "delivery-policy-1",
+            "sha256=test",
+            store,
+            Path("/tmp/launchplane"),
+            "trace-policy-1",
+            dependencies=_dependencies(github, now="2026-07-31T11:50:00Z"),
+        )
+        store.policy = _policy_record(
+            revision=2,
+            extra_actions=("product_profile.read",),
+        )
+        github.comment_id = 502
+        github.comment_created_at = "2026-07-31T12:00:00Z"
+
+        status, response = handle_manager_preview_approval_github_webhook_request(
+            json.dumps(_issue_comment_payload(comment_id=502)).encode(),
+            "issue_comment",
+            "delivery-policy-2",
+            "sha256=test",
+            store,
+            Path("/tmp/launchplane"),
+            "trace-policy-2",
+            dependencies=_dependencies(github, now="2026-07-31T12:00:00Z"),
+        )
+
+        self.assertEqual(status, 202)
+        result = response["result"]
+        assert isinstance(result, dict)
+        self.assertEqual(result["event_status"], "written")
+        self.assertEqual(result["approval_status"], "approved")
+        self.assertEqual(len(store.events), 2)
+        self.assertEqual(github.statuses[-1]["state"], "success")
+        latest_event = max(
+            store.events.values(),
+            key=lambda event: (event.occurred_at, event.event_id),
+        )
+        assert latest_event.authorization is not None
+        self.assertEqual(latest_event.authorization.policy_revision, 2)
+
+    def test_binding_change_during_command_evaluation_rejects_stale_fingerprint(self) -> None:
+        class _SameHeadBindingRaceStore(_Store):
+            def __init__(self) -> None:
+                super().__init__()
+                self.replace_after_read = True
+
+            def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord:
+                generation = super().read_preview_generation_record(generation_id)
+                if self.replace_after_read:
+                    self.replace_after_read = False
+                    _replace_serving_generation(self, head_sha=HEAD_SHA)
+                return generation
+
+        store = _SameHeadBindingRaceStore()
+        github = _GitHubApi()
+        prior_fingerprint = build_current_manager_preview_approval_binding(
+            product=PRODUCT,
+            preview=store.preview,
+            generation=store.generation,
+        ).binding_sha256
+        github.comment_body = f"/preview approve {prior_fingerprint}"
+
+        status, response = handle_manager_preview_approval_github_webhook_request(
+            json.dumps(_issue_comment_payload()).encode(),
+            "issue_comment",
+            "delivery-binding-race",
+            "sha256=test",
+            store,
+            Path("/tmp/launchplane"),
+            "trace-binding-race",
+            dependencies=_dependencies(github),
+        )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(response["reason"], "stale_fingerprint")
+        self.assertEqual(store.events, {})
+        self.assertEqual(github.statuses[-1]["state"], "pending")
+
+    def test_exact_terminal_binding_remains_stale(self) -> None:
+        for action in ("invalidated", "superseded"):
+            with self.subTest(action=action):
+                store = _Store()
+                binding = build_current_manager_preview_approval_binding(
+                    product=PRODUCT,
+                    preview=store.preview,
+                    generation=store.generation,
+                )
+                store.write_manager_preview_approval_event_record(
+                    build_manager_preview_approval_system_event(
+                        binding=binding,
+                        action=action,
+                        occurred_at="2026-07-31T11:45:00Z",
+                        source_event_kind="preview_lifecycle",
+                        source_event_id=f"generation-17:{action}",
+                        reason="The exact serving preview binding is terminal.",
+                    )
+                )
+                github = _GitHubApi()
+                github.comment_body = f"/preview approve {binding.binding_sha256}"
+
+                status, response = handle_manager_preview_approval_github_webhook_request(
+                    json.dumps(_issue_comment_payload()).encode(),
+                    "issue_comment",
+                    f"delivery-{action}",
+                    "sha256=test",
+                    store,
+                    Path("/tmp/launchplane"),
+                    f"trace-{action}",
+                    dependencies=_dependencies(github),
+                )
+
+                self.assertEqual(status, 202)
+                self.assertEqual(response["reason"], "preview_evidence_not_current")
+                self.assertEqual(len(store.events), 1)
+                self.assertEqual(github.statuses[-1]["state"], "failure")
+
+    def test_closed_pr_and_mismatched_head_reject_exact_current_command(self) -> None:
+        for stale_source in ("closed_pr", "mismatched_head"):
+            with self.subTest(stale_source=stale_source):
+                store = _Store()
+                github = _GitHubApi()
+                binding = build_current_manager_preview_approval_binding(
+                    product=PRODUCT,
+                    preview=store.preview,
+                    generation=store.generation,
+                )
+                github.comment_body = f"/preview approve {binding.binding_sha256}"
+                if stale_source == "closed_pr":
+                    github.pr_state = "closed"
+                else:
+                    github.head_sha = "2" * 40
+
+                status, response = handle_manager_preview_approval_github_webhook_request(
+                    json.dumps(_issue_comment_payload()).encode(),
+                    "issue_comment",
+                    f"delivery-{stale_source}",
+                    "sha256=test",
+                    store,
+                    Path("/tmp/launchplane"),
+                    f"trace-{stale_source}",
+                    dependencies=_dependencies(github),
+                )
+
+                self.assertEqual(status, 202)
+                self.assertIn(
+                    response["reason"],
+                    {"preview_evidence_not_current", "stale_head"},
+                )
+                self.assertEqual(store.events, {})
+                self.assertEqual(github.statuses[-1]["state"], "failure")
 
     def test_stale_fingerprint_and_unauthorized_actor_do_not_write_evidence(self) -> None:
         store = _Store()
@@ -589,17 +828,21 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         self.assertIn(str(result["fingerprint"]), str(github.comments[-1]["body"]))
 
 
-def _dependencies(github: _GitHubApi) -> ManagerPreviewApprovalGitHubDependencies:
+def _dependencies(
+    github: _GitHubApi,
+    *,
+    now: str = NOW,
+) -> ManagerPreviewApprovalGitHubDependencies:
     return ManagerPreviewApprovalGitHubDependencies(
         webhook_secret=lambda: "secret",
         verify_signature=lambda **_kwargs: None,
-        now_timestamp=lambda: NOW,
+        now_timestamp=lambda: now,
         github_api=github,
         github_token=lambda **_kwargs: "managed-token",
     )
 
 
-def _issue_comment_payload() -> dict[str, object]:
+def _issue_comment_payload(*, comment_id: int = 501) -> dict[str, object]:
     return {
         "action": "created",
         "repository": {"full_name": REPOSITORY},
@@ -607,8 +850,45 @@ def _issue_comment_payload() -> dict[str, object]:
             "number": PR_NUMBER,
             "pull_request": {"url": f"https://api.github.com/repos/{REPOSITORY}/pulls/{PR_NUMBER}"},
         },
-        "comment": {"id": 501},
+        "comment": {"id": comment_id},
     }
+
+
+def _replace_serving_generation(store: _Store, *, head_sha: str) -> None:
+    assert store.generation.runtime_identity is not None
+    store.preview = store.preview.model_copy(
+        update={
+            "updated_at": "2026-07-31T11:50:00Z",
+            "active_generation_id": "generation-18",
+            "serving_generation_id": "generation-18",
+            "latest_generation_id": "generation-18",
+            "latest_manifest_fingerprint": "manifest-18",
+        }
+    )
+    store.generation = store.generation.model_copy(
+        update={
+            "generation_id": "generation-18",
+            "sequence": 2,
+            "requested_at": "2026-07-31T11:46:00Z",
+            "started_at": "2026-07-31T11:47:00Z",
+            "ready_at": "2026-07-31T11:50:00Z",
+            "finished_at": "2026-07-31T11:50:00Z",
+            "resolved_manifest_fingerprint": "manifest-18",
+            "artifact_id": "artifact-18",
+            "anchor_summary": store.generation.anchor_summary.model_copy(
+                update={"head_sha": head_sha}
+            ),
+            "runtime_identity": store.generation.runtime_identity.model_copy(
+                update={
+                    "deployment_record_id": "deployment-18",
+                    "artifact_id": "artifact-18",
+                    "source_git_ref": head_sha,
+                    "image_reference": f"ghcr.io/example/site@sha256:{'b' * 64}",
+                    "preview_generation_id": "generation-18",
+                }
+            ),
+        }
+    )
 
 
 def _profile() -> LaunchplaneProductProfileRecord:
@@ -630,7 +910,11 @@ def _profile() -> LaunchplaneProductProfileRecord:
     )
 
 
-def _policy_record() -> LaunchplaneAuthzPolicyRecord:
+def _policy_record(
+    *,
+    revision: int = 1,
+    extra_actions: tuple[str, ...] = (),
+) -> LaunchplaneAuthzPolicyRecord:
     policy = LaunchplaneAuthzPolicy(
         schema_version=2,
         github_humans=(
@@ -644,6 +928,7 @@ def _policy_record() -> LaunchplaneAuthzPolicyRecord:
                 actions=(
                     MANAGER_PREVIEW_APPROVAL_READ_ACTION,
                     MANAGER_PREVIEW_APPROVAL_WRITE_ACTION,
+                    *extra_actions,
                 ),
             ),
         ),
@@ -651,10 +936,10 @@ def _policy_record() -> LaunchplaneAuthzPolicyRecord:
     policy_sha256 = authz_policy_sha256(policy)
     return LaunchplaneAuthzPolicyRecord(
         record_id=build_authz_policy_record_id(
-            revision=1,
+            revision=revision,
             policy_sha256=policy_sha256,
         ),
-        revision=1,
+        revision=revision,
         status="active",
         source="test:manager-preview-approval",
         updated_at=NOW,

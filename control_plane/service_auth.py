@@ -1003,6 +1003,35 @@ class LaunchplaneAuthzPolicy(BaseModel):
         return None
 
 
+def matching_github_human_policy_rules(
+    *,
+    policy: LaunchplaneAuthzPolicy,
+    identity: GitHubHumanIdentity,
+    action: str,
+    product: str,
+    context: str,
+    target: AuthorizationTarget | None = None,
+    managed_only: bool = False,
+) -> tuple[GitHubHumanPolicyRule, ...]:
+    resolved_target = target or AuthorizationTarget(scope="context")
+    if identity.role == "read_only" and not limited_remote_user_action_allowed(action):
+        return ()
+    return tuple(
+        rule
+        for rule in policy.github_humans
+        if (not managed_only or rule.managed_set_id is not None)
+        and (not managed_only or rule.managed_rule_id is not None)
+        and rule.allows(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+            target=resolved_target,
+            schema_version=policy.schema_version,
+        )
+    )
+
+
 def migrate_authz_policy_to_schema_v2(
     policy: LaunchplaneAuthzPolicy,
 ) -> LaunchplaneAuthzPolicy:

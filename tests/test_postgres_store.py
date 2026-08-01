@@ -11,7 +11,7 @@ from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from click.testing import CliRunner
 from sqlalchemy import create_engine, inspect, insert, text, update
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.sql.schema import Index
 
 from control_plane.cli import main
@@ -175,24 +175,65 @@ from control_plane.contracts.secret_record import (
     SecretRecord,
     SecretVersion,
 )
+from control_plane.contracts.tenant_merge_eligibility import (
+    TenantRepositoryClassificationRecord,
+)
+from control_plane.contracts.repository_human_admission import (
+    RepositoryHumanRolePolicyProvenance,
+    RepositoryHumanRolePolicyRecord,
+    TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,
+    TenantTechnicalHumanWaiverAuthorization,
+    TenantTechnicalHumanWaiverBinding,
+    TenantTechnicalHumanWaiverEventRecord,
+)
+from control_plane.contracts.trusted_maintenance import (
+    TrustedMaintenanceActorRule,
+    TrustedMaintenanceAllowedEvent,
+    TrustedMaintenanceEvidenceBinding,
+    TrustedMaintenanceEvidenceRecord,
+    TrustedMaintenancePolicyRecord,
+)
+from control_plane.repository_human_admission import (
+    RepositoryHumanRolePolicyConflictError,
+    RepositoryHumanRolePolicySequenceError,
+    TenantTechnicalHumanWaiverApplyEnvelope,
+    TenantTechnicalHumanWaiverAuthorizationError,
+    TenantTechnicalHumanWaiverExpectedAuthority,
+    TenantTechnicalHumanWaiverRevokeCurrentError,
+    TenantTechnicalHumanWaiverEventConflictError,
+    TenantTechnicalHumanWaiverStaleAuthorityError,
+)
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
     GitHubHumanIdentity,
+    GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
     agent_authz_audit,
 )
 from control_plane.service_human_auth import LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.tenant_repository_classification import (
+    TenantRepositoryClassificationConflictError,
+    TenantRepositoryClassificationSequenceError,
+)
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.postgres import (
     Base,
     DbOnlyMutationRequest,
     LaunchplaneIdempotencyRow,
     LaunchplaneProductProfileRow,
+    LaunchplaneTenantTechnicalHumanWaiverEventRow,
+    LaunchplaneTenantRepositoryClassificationRow,
+    LaunchplaneTrustedMaintenanceEvidenceRow,
     MutationReservationResult,
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
+)
+from control_plane.trusted_maintenance import (
+    TrustedMaintenanceEvidenceConflictError,
+    TrustedMaintenancePolicyConflictError,
+    TrustedMaintenancePolicySequenceError,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
@@ -203,6 +244,252 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
+
+
+def _tenant_repository_classification_record(
+    *,
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
+    repository: str = "example/example-product",
+    product: str = "example-product",
+    context: str = "example-product",
+    classification_kind: str = "tenant_ui",
+    classification_revision: int = 1,
+    classified_at: str = "2026-07-31T10:00:00Z",
+    source: str = "test-source",
+    reason: str = "test-classification",
+    supersedes_record_id: str | None = None,
+) -> TenantRepositoryClassificationRecord:
+    return TenantRepositoryClassificationRecord.model_validate(
+        {
+            "repository_id": repository_id,
+            "repository_owner_id": repository_owner_id,
+            "repository": repository,
+            "product": product,
+            "context": context,
+            "classification_kind": classification_kind,
+            "classification_revision": classification_revision,
+            "classified_at": classified_at,
+            "source": source,
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
+
+
+def _repository_human_role_policy_record(
+    *,
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
+    repository: str = "example/example-product",
+    product: str = "example-product",
+    context: str = "example-product",
+    status: str = "active",
+    role_policy_revision: int = 1,
+    repository_owner_github_ids: tuple[int, ...] = (301,),
+    manager_primary_github_ids: tuple[int, ...] = (501,),
+    effective_at: str = "2026-07-31T10:00:00Z",
+    source: str = "test-source",
+    reason: str = "test-role-policy",
+    supersedes_record_id: str | None = None,
+) -> RepositoryHumanRolePolicyRecord:
+    return RepositoryHumanRolePolicyRecord.model_validate(
+        {
+            "repository_id": repository_id,
+            "repository_owner_id": repository_owner_id,
+            "repository": repository,
+            "product": product,
+            "context": context,
+            "status": status,
+            "role_policy_revision": role_policy_revision,
+            "repository_owner_github_ids": repository_owner_github_ids,
+            "manager_primary_github_ids": manager_primary_github_ids,
+            "effective_at": effective_at,
+            "source": source,
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
+
+
+def _tenant_technical_human_waiver_event_record(
+    *,
+    source_event_id: str = "comment-1001",
+    action: str = "created",
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
+    repository: str = "example/example-product",
+    product: str = "example-product",
+    context: str = "example-product",
+    pull_request_number: int = 17,
+    head_sha: str = "a" * 40,
+    role_policy_record_id: str = "repository-human-role-policy-1001-abc123-r1",
+    role_policy_revision: int = 1,
+    author_github_id: int = 301,
+    occurred_at: str = "2026-07-31T10:15:00Z",
+    expires_at: str = "2026-07-31T11:15:00Z",
+) -> TenantTechnicalHumanWaiverEventRecord:
+    classification_digest = "b" * 64
+    role_policy_digest = "c" * 64
+    authz_policy_digest = "d" * 64
+    binding = TenantTechnicalHumanWaiverBinding(
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        repository=repository,
+        product=product,
+        context=context,
+        pull_request_number=pull_request_number,
+        head_sha=head_sha,
+        classification_revision=1,
+        classification_digest=classification_digest,
+        role_policy_record_id=role_policy_record_id,
+        role_policy_revision=role_policy_revision,
+        role_policy_digest=role_policy_digest,
+        authz_policy_record_id="authz-policy-r1",
+        authz_policy_revision=1,
+        authz_policy_digest=authz_policy_digest,
+    )
+    provenance = RepositoryHumanRolePolicyProvenance(
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        repository=repository,
+        product=product,
+        context=context,
+        role_policy_record_id=role_policy_record_id,
+        role_policy_revision=role_policy_revision,
+        role_policy_digest=role_policy_digest,
+        role_policy_source="test-source",
+        authority_kind="repository_owner",
+        evaluated_at=occurred_at,
+    )
+    authorization = TenantTechnicalHumanWaiverAuthorization(
+        author_github_id=author_github_id,
+        author_login=f"human-{author_github_id}",
+        managed_set_id="tenant-human.example",
+        managed_rule_id="technical-waiver",
+        authz_policy_record_id="authz-policy-r1",
+        authz_policy_revision=1,
+        authz_policy_digest=authz_policy_digest,
+        authz_policy_source="test-authz",
+        role_policy_provenance=provenance,
+        authorized_at=occurred_at,
+    )
+    payload: dict[str, object] = {
+        "binding": binding,
+        "action": action,
+        "occurred_at": occurred_at,
+        "source_event_kind": "github_issue_comment",
+        "source_event_id": source_event_id,
+        "reason": "Owner approved technical handling.",
+        "authorization": authorization,
+    }
+    if expires_at:
+        payload["expires_at"] = expires_at
+    return TenantTechnicalHumanWaiverEventRecord.model_validate(payload)
+
+
+def _trusted_maintenance_policy_record(
+    *,
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
+    repository: str = "example/example-product",
+    product: str = "example-product",
+    context: str = "example-product",
+    status: str = "active",
+    policy_revision: int = 1,
+    actor_github_id: int = 701,
+    sender_github_ids: tuple[int, ...] = (701,),
+    effective_at: str = "2026-07-31T10:00:00Z",
+    source: str = "test-source",
+    reason: str = "test-trusted-maintenance-policy",
+    supersedes_record_id: str | None = None,
+) -> TrustedMaintenancePolicyRecord:
+    actor_rule = TrustedMaintenanceActorRule(
+        actor_github_id=actor_github_id,
+        actor_login=f"bot-{actor_github_id}",
+        sender_github_ids=sender_github_ids,
+        sender_logins=tuple(f"sender-{sender_id}" for sender_id in sender_github_ids),
+        allowed_events=(
+            TrustedMaintenanceAllowedEvent(
+                event_name="pull_request",
+                actions=("opened", "synchronize"),
+            ),
+        ),
+    )
+    return TrustedMaintenancePolicyRecord.model_validate(
+        {
+            "repository_id": repository_id,
+            "repository_owner_id": repository_owner_id,
+            "repository": repository,
+            "product": product,
+            "context": context,
+            "status": status,
+            "policy_revision": policy_revision,
+            "actor_rules": (actor_rule,),
+            "effective_at": effective_at,
+            "source": source,
+            "reason": reason,
+            "supersedes_record_id": supersedes_record_id,
+        }
+    )
+
+
+def _trusted_maintenance_evidence_record(
+    *,
+    repository_id: str = "1001",
+    repository_owner_id: str = "2001",
+    repository: str = "example/example-product",
+    product: str = "example-product",
+    context: str = "example-product",
+    pull_request_number: int = 17,
+    head_sha: str = "a" * 40,
+    policy_record_id: str = "trusted-maintenance-policy-1001-abc123-r1",
+    policy_revision: int = 1,
+    matched_actor_rule_id: str = "trusted-maintenance-actor-rule-abc123",
+    pr_author_github_id: int = 701,
+    sender_github_id: int = 701,
+    event_name: str = "pull_request",
+    event_action: str = "synchronize",
+    delivery_id: str = "delivery-1001",
+    occurred_at: str = "2026-07-31T10:15:00Z",
+    expires_at: str = "",
+) -> TrustedMaintenanceEvidenceRecord:
+    classification_digest = "b" * 64
+    policy_digest = "c" * 64
+    binding = TrustedMaintenanceEvidenceBinding(
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        repository=repository,
+        product=product,
+        context=context,
+        pull_request_number=pull_request_number,
+        head_sha=head_sha,
+        classification_record_id="tenant-repository-classification-1001-r1",
+        classification_revision=1,
+        classification_digest=classification_digest,
+        policy_record_id=policy_record_id,
+        policy_revision=policy_revision,
+        policy_digest=policy_digest,
+        matched_actor_rule_id=matched_actor_rule_id,
+        pr_author_github_id=pr_author_github_id,
+        pr_author_login=f"bot-{pr_author_github_id}",
+        sender_github_id=sender_github_id,
+        sender_login=f"sender-{sender_github_id}",
+        head_repository_id=repository_id,
+        head_repository_owner_id=repository_owner_id,
+        head_repository=repository,
+        event_name=event_name,
+        event_action=event_action,
+        source="signed-event-fixture",
+        delivery_id=delivery_id,
+    )
+    payload: dict[str, object] = {
+        "binding": binding,
+        "occurred_at": occurred_at,
+    }
+    if expires_at:
+        payload["expires_at"] = expires_at
+    return TrustedMaintenanceEvidenceRecord.model_validate(payload)
 
 
 def _product_profile_record(
@@ -247,6 +534,152 @@ def _product_profile_db_only_mutation(
         response_trace_id="trace-product-preview-tls",
         response_payload={"status": "accepted", "trace_id": "trace-product-preview-tls"},
     )
+
+
+def _role_policy_db_only_mutation(
+    *,
+    idempotency_key: str = "role-policy:test:apply:1",
+    request_fingerprint: str = "role-policy-fingerprint",
+    response_trace_id: str = "trace-role-policy",
+) -> DbOnlyMutationRequest:
+    return DbOnlyMutationRequest(
+        scope="github-actions:repository-human-role-policy",
+        route_path="/v1/tenant-admission/repository-human-role-policies/apply",
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        lease_owner=response_trace_id,
+        response_status_code=202,
+        response_trace_id=response_trace_id,
+        response_payload={"status": "accepted", "trace_id": response_trace_id},
+    )
+
+
+def _tenant_technical_human_waiver_authz_policy_record(
+    *,
+    github_ids: tuple[int, ...] = (301,),
+) -> LaunchplaneAuthzPolicyRecord:
+    policy = LaunchplaneAuthzPolicy(
+        schema_version=2,
+        github_humans=(
+            GitHubHumanPolicyRule(
+                managed_set_id="tenant-human.example",
+                managed_rule_id="technical-waiver",
+                github_ids=github_ids,
+                roles=("read_only",),
+                products=("example-product",),
+                contexts=("example-product",),
+                actions=(TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,),
+            ),
+        ),
+    )
+    digest = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+        revision=1,
+        status="active",
+        source="test:tenant-technical-human-waiver-authz",
+        updated_at="2026-07-31T10:00:00Z",
+        policy_sha256=digest,
+        policy=policy,
+    )
+
+
+def _tenant_technical_human_waiver_envelope(
+    *,
+    action: str = "created",
+    source_event_id: str = "comment-create",
+    expected_current: dict[str, object] | None = None,
+    reason: str = "Owner reviewed exact technical waiver.",
+    classification: TenantRepositoryClassificationRecord | None = None,
+    role_policy: RepositoryHumanRolePolicyRecord | None = None,
+    authz_policy: LaunchplaneAuthzPolicyRecord | None = None,
+) -> TenantTechnicalHumanWaiverApplyEnvelope:
+    classification_record = classification or _tenant_repository_classification_record()
+    role_policy_record = role_policy or _repository_human_role_policy_record()
+    authz_policy_record = authz_policy or _tenant_technical_human_waiver_authz_policy_record()
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "mode": "apply",
+        "action": action,
+        "candidate": {
+            "product": "example-product",
+            "context": "example-product",
+            "repository_id": "1001",
+            "repository_owner_id": "2001",
+            "repository": "example/example-product",
+            "pull_request_number": 17,
+            "head_sha": "a" * 40,
+        },
+        "expected_authority": TenantTechnicalHumanWaiverExpectedAuthority(
+            classification_record_id=classification_record.record_id,
+            classification_digest=classification_record.classification_digest,
+            role_policy_record_id=role_policy_record.record_id,
+            role_policy_digest=role_policy_record.role_policy_digest,
+            authz_policy_record_id=authz_policy_record.record_id,
+            authz_policy_digest=authz_policy_record.policy_sha256,
+        ).model_dump(mode="json"),
+        "source_event_kind": "github_issue_comment",
+        "source_event_id": source_event_id,
+        "reason": reason,
+    }
+    if expected_current is not None:
+        payload["expected_current"] = expected_current
+    return TenantTechnicalHumanWaiverApplyEnvelope.model_validate(payload)
+
+
+def _tenant_technical_human_waiver_mutation(
+    *,
+    idempotency_key: str = "tenant-waiver-create",
+    request_fingerprint: str = "tenant-waiver-fingerprint",
+    response_trace_id: str = "trace-tenant-waiver",
+    scope: str = "github-human-id|301",
+) -> DbOnlyMutationRequest:
+    return DbOnlyMutationRequest(
+        scope=scope,
+        route_path="/v1/tenant-admission/technical-human-waivers/apply",
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        lease_owner=response_trace_id,
+        response_status_code=202,
+        response_trace_id=response_trace_id,
+        response_payload={"status": "ok", "trace_id": response_trace_id},
+    )
+
+
+def _tenant_technical_human_waiver_identity(
+    *,
+    github_id: int = 301,
+    login: str = "human-301",
+) -> GitHubHumanIdentity:
+    return GitHubHumanIdentity(
+        login=login,
+        github_id=github_id,
+        name="Human Example",
+        email="human@example.com",
+        organizations=frozenset(),
+        teams=frozenset(),
+        role="read_only",
+    )
+
+
+def _seed_tenant_technical_human_waiver_authority(
+    store: PostgresRecordStore,
+    *,
+    classification: TenantRepositoryClassificationRecord | None = None,
+    role_policy: RepositoryHumanRolePolicyRecord | None = None,
+    authz_policy: LaunchplaneAuthzPolicyRecord | None = None,
+) -> tuple[
+    TenantRepositoryClassificationRecord,
+    RepositoryHumanRolePolicyRecord,
+    LaunchplaneAuthzPolicyRecord,
+]:
+    classification_record = classification or _tenant_repository_classification_record()
+    role_policy_record = role_policy or _repository_human_role_policy_record()
+    authz_policy_record = authz_policy or _tenant_technical_human_waiver_authz_policy_record()
+    store.write_tenant_repository_classification_record(classification_record)
+    store.write_repository_human_role_policy_record(role_policy_record)
+    store.seed_authz_policy_if_absent(authz_policy_record)
+    return classification_record, role_policy_record, authz_policy_record
 
 
 def _mutation_reservation(
@@ -1204,6 +1637,1495 @@ class PostgresRecordStoreTests(unittest.TestCase):
         )
 
         self.assertEqual(too_long_index_names, ())
+
+    def test_tenant_repository_classifications_are_immutable_revision_history(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            revision_1 = _tenant_repository_classification_record(classification_revision=1)
+            revision_2 = _tenant_repository_classification_record(
+                classification_kind="engineering",
+                classification_revision=2,
+                classified_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+
+            first_write = store.write_tenant_repository_classification_record(revision_1)
+            second_write = store.write_tenant_repository_classification_record(revision_2)
+            replay = store.write_tenant_repository_classification_record(revision_2)
+            loaded = store.read_tenant_repository_classification_record(revision_1.record_id)
+            listed = store.list_tenant_repository_classification_records(
+                repository_id=revision_1.repository_id
+            )
+            limited = store.list_tenant_repository_classification_records(
+                repository_id=revision_1.repository_id,
+                limit=1,
+            )
+            lookup = store.latest_tenant_repository_classification_lookup(
+                repository_id=revision_1.repository_id
+            )
+            missing_lookup = store.latest_tenant_repository_classification_lookup(
+                repository_id="9999"
+            )
+            store.close()
+
+        self.assertEqual(first_write, "written")
+        self.assertEqual(second_write, "written")
+        self.assertEqual(replay, "replayed")
+        self.assertEqual(loaded, revision_1)
+        self.assertEqual([record.classification_revision for record in listed], [2, 1])
+        self.assertEqual(limited, (revision_2,))
+        self.assertEqual(lookup.status, "available")
+        self.assertEqual(lookup.records, (revision_2,))
+        self.assertEqual(missing_lookup.status, "missing")
+        self.assertEqual(missing_lookup.records, ())
+
+    def test_tenant_repository_classification_compare_write_is_atomic_and_replays(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _tenant_repository_classification_record()
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:tenant-classification",
+                route_path="/v1/tenant-admission/repository-classifications/apply",
+                idempotency_key="tenant-classification-atomic",
+                request_fingerprint="tenant-classification-fingerprint",
+                lease_owner="trace-tenant-classification",
+                response_status_code=200,
+                response_trace_id="trace-tenant-classification",
+                response_payload={"status": "ok", "record_id": record.record_id},
+            )
+
+            first_result = store.compare_and_write_tenant_repository_classification_record(
+                record=record,
+                expected_current_record_id="",
+                mutation=mutation,
+            )
+            replay_result = store.compare_and_write_tenant_repository_classification_record(
+                record=record,
+                expected_current_record_id="",
+                mutation=mutation,
+            )
+            stored_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            records = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+            store.close()
+
+        self.assertEqual(first_result.status, "written")
+        self.assertEqual(replay_result.status, "replayed")
+        self.assertEqual(records, (record,))
+        self.assertIsNotNone(stored_idempotency)
+        assert stored_idempotency is not None
+        self.assertEqual(stored_idempotency.state, "completed")
+        self.assertEqual(stored_idempotency.response_payload, mutation.response_payload)
+
+    def test_tenant_repository_classification_compare_write_rolls_back_on_completion_failure(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _tenant_repository_classification_record()
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:tenant-classification",
+                route_path="/v1/tenant-admission/repository-classifications/apply",
+                idempotency_key="tenant-classification-rollback",
+                request_fingerprint="tenant-classification-rollback-fingerprint",
+                lease_owner="trace-tenant-classification-rollback",
+                response_status_code=200,
+                response_trace_id="trace-tenant-classification-rollback",
+                response_payload={"status": "ok", "record_id": record.record_id},
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_sync_idempotency_row",
+                    side_effect=RuntimeError("injected completion failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected completion failure"),
+            ):
+                store.compare_and_write_tenant_repository_classification_record(
+                    record=record,
+                    expected_current_record_id="",
+                    mutation=mutation,
+                )
+
+            stored_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            records = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+            store.close()
+
+        self.assertIsNone(stored_idempotency)
+        self.assertEqual(records, ())
+
+    def test_tenant_repository_classification_rejects_conflicting_replay(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _tenant_repository_classification_record()
+            conflicting_record = _tenant_repository_classification_record(
+                reason="changed-test-classification"
+            )
+
+            store.write_tenant_repository_classification_record(record)
+
+            with self.assertRaises(TenantRepositoryClassificationConflictError):
+                store.write_tenant_repository_classification_record(conflicting_record)
+
+            listed = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+            store.close()
+
+        self.assertEqual(listed, (record,))
+
+    def test_tenant_repository_classification_rejects_invalid_first_revision(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+
+            with self.assertRaises(TenantRepositoryClassificationSequenceError):
+                store.write_tenant_repository_classification_record(
+                    _tenant_repository_classification_record(classification_revision=2)
+                )
+            store.close()
+
+    def test_tenant_repository_classification_unique_repository_revision(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _tenant_repository_classification_record()
+            raw_conflict = _tenant_repository_classification_record(
+                repository="example/other-product",
+                product="other-product",
+                context="other-product",
+            )
+
+            store.write_tenant_repository_classification_record(record)
+            with self.assertRaises(IntegrityError):
+                with store._session_factory() as session:
+                    row = LaunchplaneTenantRepositoryClassificationRow(
+                        record_id="tenant-repository-classification-raw-conflict",
+                        repository_id=record.repository_id,
+                        repository_owner_id=raw_conflict.repository_owner_id,
+                        repository=raw_conflict.repository,
+                        product=raw_conflict.product,
+                        context=raw_conflict.context,
+                        classification_kind=raw_conflict.classification_kind,
+                        classification_revision=raw_conflict.classification_revision,
+                        classified_at=raw_conflict.classified_at,
+                        classification_digest=raw_conflict.classification_digest,
+                        payload=raw_conflict.model_dump(mode="json"),
+                    )
+                    session.add(row)
+                    session.commit()
+
+            listed = store.list_tenant_repository_classification_records(
+                repository_id=record.repository_id
+            )
+            store.close()
+
+        self.assertEqual(listed, (record,))
+
+    def test_repository_human_role_policies_are_single_active_revision_history(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            revision_1 = _repository_human_role_policy_record()
+            revision_2 = _repository_human_role_policy_record(
+                role_policy_revision=2,
+                repository_owner_github_ids=(302,),
+                effective_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+
+            first_write = store.write_repository_human_role_policy_record(revision_1)
+            second_write = store.write_repository_human_role_policy_record(revision_2)
+            replay = store.write_repository_human_role_policy_record(revision_2)
+            historical_replay = store.write_repository_human_role_policy_record(revision_1)
+            loaded_superseded = store.read_repository_human_role_policy_record(revision_1.record_id)
+            loaded_active = store.read_repository_human_role_policy_record(revision_2.record_id)
+            listed = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                repository_owner_id=revision_1.repository_owner_id,
+                repository=revision_1.repository,
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+            active = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                status="active",
+            )
+            superseded = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                status="superseded",
+            )
+            limited = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                limit=1,
+            )
+            wrong_scope = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                product="other-product",
+            )
+            mixed_case_repository = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                repository="Example/Example-Product",
+            )
+            store.close()
+
+        self.assertEqual(first_write, "written")
+        self.assertEqual(second_write, "written")
+        self.assertEqual(replay, "replayed")
+        self.assertEqual(historical_replay, "replayed")
+        self.assertEqual(loaded_superseded.status, "superseded")
+        self.assertEqual(loaded_superseded.role_policy_digest, revision_1.role_policy_digest)
+        self.assertEqual(loaded_active, revision_2)
+        self.assertEqual([record.role_policy_revision for record in listed], [2, 1])
+        self.assertEqual(active, (revision_2,))
+        self.assertEqual(superseded, (loaded_superseded,))
+        self.assertEqual(limited, (revision_2,))
+        self.assertEqual(wrong_scope, ())
+        self.assertEqual(mixed_case_repository, (revision_2, loaded_superseded))
+
+    def test_repository_human_role_policy_rejects_replay_sequence_and_scope_drift(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _repository_human_role_policy_record()
+            store.write_repository_human_role_policy_record(record)
+
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                store.write_repository_human_role_policy_record(
+                    _repository_human_role_policy_record(reason="changed-role-policy")
+                )
+            with self.assertRaises(RepositoryHumanRolePolicySequenceError):
+                store.write_repository_human_role_policy_record(
+                    _repository_human_role_policy_record(
+                        role_policy_revision=3,
+                        supersedes_record_id=record.record_id,
+                    )
+                )
+            with self.assertRaises(RepositoryHumanRolePolicySequenceError):
+                store.write_repository_human_role_policy_record(
+                    _repository_human_role_policy_record(
+                        role_policy_revision=2,
+                        supersedes_record_id="wrong-record-id",
+                    )
+                )
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                store.write_repository_human_role_policy_record(
+                    _repository_human_role_policy_record(
+                        repository_owner_id="2999",
+                        role_policy_revision=2,
+                        supersedes_record_id=record.record_id,
+                    )
+                )
+            listed = store.list_repository_human_role_policy_records(
+                repository_id=record.repository_id
+            )
+            store.close()
+
+        self.assertEqual(listed, (record,))
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            with self.assertRaises(RepositoryHumanRolePolicySequenceError):
+                store.write_repository_human_role_policy_record(
+                    _repository_human_role_policy_record(role_policy_revision=2)
+                )
+            store.close()
+
+    def test_repository_human_role_policy_compare_write_is_atomic_and_replays(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            revision_1 = _repository_human_role_policy_record()
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:repository-human-role-policy",
+                route_path="/v1/tenant-admission/repository-human-role-policies/apply",
+                idempotency_key="role-policy-atomic",
+                request_fingerprint="role-policy-fingerprint",
+                lease_owner="trace-role-policy",
+                response_status_code=202,
+                response_trace_id="trace-role-policy",
+                response_payload={"status": "ok", "record_id": revision_1.record_id},
+                replay_response_payload={
+                    "status": "ok",
+                    "record_id": revision_1.record_id,
+                    "result": "replayed",
+                },
+            )
+
+            first_result = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_1,
+                expected_current_record_id="",
+                expected_current_role_policy_digest="",
+                mutation=mutation,
+            )
+            same_key_result = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_1,
+                expected_current_record_id="",
+                expected_current_role_policy_digest="",
+                mutation=mutation,
+            )
+            exact_replay_mutation = DbOnlyMutationRequest(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key="role-policy-exact-replay",
+                request_fingerprint="role-policy-exact-replay-fingerprint",
+                lease_owner="trace-role-policy-exact-replay",
+                response_status_code=202,
+                response_trace_id="trace-role-policy-exact-replay",
+                response_payload={"status": "ok", "record_id": revision_1.record_id},
+                replay_response_payload={
+                    "status": "ok",
+                    "record_id": revision_1.record_id,
+                    "result": "replayed",
+                },
+            )
+            exact_replay_result = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_1,
+                expected_current_record_id="",
+                expected_current_role_policy_digest="",
+                mutation=exact_replay_mutation,
+            )
+            conflict_result = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_1,
+                expected_current_record_id="",
+                expected_current_role_policy_digest="",
+                mutation=DbOnlyMutationRequest(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    request_fingerprint="changed-role-policy-fingerprint",
+                    lease_owner="trace-role-policy-conflict",
+                    response_status_code=202,
+                    response_trace_id="trace-role-policy-conflict",
+                    response_payload={"status": "ok"},
+                ),
+            )
+            records = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+            exact_replay_idempotency = store.read_idempotency_record(
+                scope=exact_replay_mutation.scope,
+                route_path=exact_replay_mutation.route_path,
+                idempotency_key=exact_replay_mutation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(first_result.status, "written")
+        self.assertEqual(same_key_result.status, "replayed")
+        self.assertEqual(exact_replay_result.status, "exact_replay")
+        self.assertEqual(conflict_result.status, "idempotency_conflict")
+        self.assertEqual(records, (revision_1,))
+        self.assertIsNotNone(exact_replay_idempotency)
+        assert exact_replay_idempotency is not None
+        self.assertEqual(
+            exact_replay_idempotency.response_payload,
+            exact_replay_mutation.replay_response_payload,
+        )
+
+    def test_repository_human_role_policy_compare_write_validates_expected_tip(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            revision_1 = _repository_human_role_policy_record()
+            revision_2 = _repository_human_role_policy_record(
+                role_policy_revision=2,
+                repository_owner_github_ids=(302,),
+                effective_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+            store.write_repository_human_role_policy_record(revision_1)
+
+            with self.assertRaisesRegex(ValueError, "expected current record ID and digest"):
+                store.compare_and_write_repository_human_role_policy_record(
+                    record=revision_2,
+                    expected_current_record_id=revision_1.record_id,
+                    expected_current_role_policy_digest="",
+                    mutation=_role_policy_db_only_mutation(
+                        idempotency_key="role-policy-missing-digest"
+                    ),
+                )
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                store.compare_and_write_repository_human_role_policy_record(
+                    record=revision_2,
+                    expected_current_record_id="wrong-record-id",
+                    expected_current_role_policy_digest=revision_1.role_policy_digest,
+                    mutation=_role_policy_db_only_mutation(idempotency_key="role-policy-stale"),
+                )
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                store.compare_and_write_repository_human_role_policy_record(
+                    record=revision_2,
+                    expected_current_record_id=revision_1.record_id,
+                    expected_current_role_policy_digest="f" * 64,
+                    mutation=_role_policy_db_only_mutation(idempotency_key="role-policy-drift"),
+                )
+            records = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+            failed_reservation = store.read_idempotency_record(
+                scope="github-actions:repository-human-role-policy",
+                route_path="/v1/tenant-admission/repository-human-role-policies/apply",
+                idempotency_key="role-policy-drift",
+            )
+            store.close()
+
+        self.assertEqual(records, (revision_1,))
+        self.assertIsNone(failed_reservation)
+
+    def test_repository_human_role_policy_compare_write_replays_revision_two_with_new_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            revision_1 = _repository_human_role_policy_record()
+            revision_2 = _repository_human_role_policy_record(
+                role_policy_revision=2,
+                repository_owner_github_ids=(302,),
+                effective_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+            store.write_repository_human_role_policy_record(revision_1)
+            written = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_2,
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
+                mutation=_role_policy_db_only_mutation(idempotency_key="role-policy-revision-2"),
+            )
+            replayed = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_2,
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
+                mutation=_role_policy_db_only_mutation(
+                    idempotency_key="role-policy-revision-2-replay",
+                    request_fingerprint="role-policy-revision-2-replay-fingerprint",
+                    response_trace_id="trace-role-policy-revision-2-replay",
+                ),
+            )
+            records = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+            store.close()
+
+        self.assertEqual(written.status, "written")
+        self.assertEqual(replayed.status, "exact_replay")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0], revision_2)
+        self.assertEqual(records[1].record_id, revision_1.record_id)
+        self.assertEqual(records[1].status, "superseded")
+
+    def test_repository_human_role_policy_compare_write_rolls_back_on_completion_failure(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _repository_human_role_policy_record()
+            mutation = _role_policy_db_only_mutation(
+                idempotency_key="role-policy-rollback",
+                response_trace_id="trace-role-policy-rollback",
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_sync_idempotency_row",
+                    side_effect=RuntimeError("injected completion failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected completion failure"),
+            ):
+                store.compare_and_write_repository_human_role_policy_record(
+                    record=record,
+                    expected_current_record_id="",
+                    expected_current_role_policy_digest="",
+                    mutation=mutation,
+                )
+
+            stored_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            records = store.list_repository_human_role_policy_records(
+                repository_id=record.repository_id,
+                product=record.product,
+                context=record.context,
+            )
+            store.close()
+
+        self.assertIsNone(stored_idempotency)
+        self.assertEqual(records, ())
+
+    def test_repository_human_role_policy_database_uniqueness(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _repository_human_role_policy_record()
+            raw_duplicate_revision = _repository_human_role_policy_record(
+                repository_owner_id="2999",
+                repository="example/other-product",
+                reason="raw duplicate stream revision",
+            )
+            raw_second_active = _repository_human_role_policy_record(
+                role_policy_revision=2,
+                reason="raw second active",
+                supersedes_record_id=record.record_id,
+            )
+            store.write_repository_human_role_policy_record(record)
+
+            with self.assertRaises(IntegrityError):
+                with store._session_factory() as session:
+                    duplicate_revision_row = store._repository_human_role_policy_row(
+                        raw_duplicate_revision
+                    )
+                    duplicate_revision_row.record_id = "raw-duplicate-role-policy"
+                    session.add(duplicate_revision_row)
+                    session.commit()
+            with self.assertRaises(IntegrityError):
+                with store._session_factory() as session:
+                    session.add(store._repository_human_role_policy_row(raw_second_active))
+                    session.commit()
+
+            active = store.list_repository_human_role_policy_records(
+                repository_id=record.repository_id,
+                status="active",
+            )
+            store.close()
+
+        self.assertEqual(active, (record,))
+
+    def test_trusted_maintenance_policies_are_single_active_revision_history(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            revision_1 = _trusted_maintenance_policy_record()
+            revision_2 = _trusted_maintenance_policy_record(
+                policy_revision=2,
+                actor_github_id=702,
+                effective_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+
+            first_write = store.write_trusted_maintenance_policy_record(revision_1)
+            second_write = store.write_trusted_maintenance_policy_record(revision_2)
+            replay = store.write_trusted_maintenance_policy_record(revision_2)
+            historical_replay = store.write_trusted_maintenance_policy_record(revision_1)
+            loaded_superseded = store.read_trusted_maintenance_policy_record(revision_1.record_id)
+            loaded_active = store.read_trusted_maintenance_policy_record(revision_2.record_id)
+            listed = store.list_trusted_maintenance_policy_records(
+                repository_id=revision_1.repository_id,
+                repository_owner_id=revision_1.repository_owner_id,
+                repository="Example/Example-Product",
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+            active = store.list_trusted_maintenance_policy_records(
+                repository_id=revision_1.repository_id,
+                status="active",
+            )
+            superseded = store.list_trusted_maintenance_policy_records(
+                repository_id=revision_1.repository_id,
+                status="superseded",
+            )
+            limited = store.list_trusted_maintenance_policy_records(
+                repository_id=revision_1.repository_id,
+                limit=1,
+            )
+            store.close()
+
+        self.assertEqual(first_write, "written")
+        self.assertEqual(second_write, "written")
+        self.assertEqual(replay, "replayed")
+        self.assertEqual(historical_replay, "replayed")
+        self.assertEqual(loaded_superseded.status, "superseded")
+        self.assertEqual(loaded_superseded.policy_digest, revision_1.policy_digest)
+        self.assertEqual(loaded_active, revision_2)
+        self.assertEqual([record.policy_revision for record in listed], [2, 1])
+        self.assertEqual(active, (revision_2,))
+        self.assertEqual(superseded, (loaded_superseded,))
+        self.assertEqual(limited, (revision_2,))
+
+    def test_trusted_maintenance_policy_rejects_replay_sequence_and_scope_drift(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _trusted_maintenance_policy_record()
+            store.write_trusted_maintenance_policy_record(record)
+
+            with self.assertRaises(TrustedMaintenancePolicyConflictError):
+                store.write_trusted_maintenance_policy_record(
+                    _trusted_maintenance_policy_record(reason="changed-policy")
+                )
+            with self.assertRaises(TrustedMaintenancePolicySequenceError):
+                store.write_trusted_maintenance_policy_record(
+                    _trusted_maintenance_policy_record(
+                        policy_revision=3,
+                        supersedes_record_id=record.record_id,
+                    )
+                )
+            with self.assertRaises(TrustedMaintenancePolicySequenceError):
+                store.write_trusted_maintenance_policy_record(
+                    _trusted_maintenance_policy_record(
+                        policy_revision=2,
+                        supersedes_record_id="wrong-record-id",
+                    )
+                )
+            with self.assertRaises(TrustedMaintenancePolicyConflictError):
+                store.write_trusted_maintenance_policy_record(
+                    _trusted_maintenance_policy_record(
+                        repository_owner_id="2999",
+                        policy_revision=2,
+                        supersedes_record_id=record.record_id,
+                    )
+                )
+            listed = store.list_trusted_maintenance_policy_records(
+                repository_id=record.repository_id
+            )
+            store.close()
+
+        self.assertEqual(listed, (record,))
+
+    def test_trusted_maintenance_policy_database_uniqueness(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _trusted_maintenance_policy_record()
+            raw_duplicate_revision = _trusted_maintenance_policy_record(
+                repository_owner_id="2999",
+                repository="example/other-product",
+                reason="raw duplicate stream revision",
+            )
+            raw_second_active = _trusted_maintenance_policy_record(
+                policy_revision=2,
+                reason="raw second active",
+                supersedes_record_id=record.record_id,
+            )
+            store.write_trusted_maintenance_policy_record(record)
+
+            with self.assertRaises(IntegrityError):
+                with store._session_factory() as session:
+                    duplicate_revision_row = store._trusted_maintenance_policy_row(
+                        raw_duplicate_revision
+                    )
+                    duplicate_revision_row.record_id = "raw-duplicate-trusted-maintenance-policy"
+                    session.add(duplicate_revision_row)
+                    session.commit()
+            with self.assertRaises(IntegrityError):
+                with store._session_factory() as session:
+                    session.add(store._trusted_maintenance_policy_row(raw_second_active))
+                    session.commit()
+
+            active = store.list_trusted_maintenance_policy_records(
+                repository_id=record.repository_id,
+                status="active",
+            )
+            store.close()
+
+        self.assertEqual(active, (record,))
+
+    def test_trusted_maintenance_evidence_is_append_only_and_filterable(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            evidence = _trusted_maintenance_evidence_record()
+            conflicting = _trusted_maintenance_evidence_record(
+                head_sha="b" * 40,
+            )
+            other_repository = _trusted_maintenance_evidence_record(
+                repository_id="1002",
+                repository_owner_id="2002",
+                repository="example/other-product",
+                product="other-product",
+                context="other-product",
+                delivery_id="delivery-other",
+            )
+
+            first_write = store.write_trusted_maintenance_evidence_record(evidence)
+            replay = store.write_trusted_maintenance_evidence_record(evidence)
+            with self.assertRaises(TrustedMaintenanceEvidenceConflictError):
+                store.write_trusted_maintenance_evidence_record(conflicting)
+            store.write_trusted_maintenance_evidence_record(other_repository)
+            loaded = store.read_trusted_maintenance_evidence_record(evidence.evidence_id)
+            listed = store.list_trusted_maintenance_evidence_records(
+                repository_id=evidence.binding.repository_id,
+            )
+            exact = store.list_trusted_maintenance_evidence_records(
+                repository_id=evidence.binding.repository_id,
+                repository_owner_id=evidence.binding.repository_owner_id,
+                repository="Example/Example-Product",
+                product=evidence.binding.product,
+                context=evidence.binding.context,
+                binding_sha256=evidence.binding.binding_sha256,
+                pull_request_number=evidence.binding.pull_request_number,
+                head_sha=evidence.binding.head_sha,
+                classification_digest=evidence.binding.classification_digest,
+                policy_record_id=evidence.binding.policy_record_id,
+                policy_digest=evidence.binding.policy_digest,
+                matched_actor_rule_id=evidence.binding.matched_actor_rule_id,
+                pr_author_github_id=evidence.binding.pr_author_github_id,
+                sender_github_id=evidence.binding.sender_github_id,
+                event_name=evidence.binding.event_name,
+                event_action=evidence.binding.event_action,
+                delivery_id=evidence.binding.delivery_id,
+            )
+            wrong_head = store.list_trusted_maintenance_evidence_records(
+                repository_id=evidence.binding.repository_id,
+                head_sha="b" * 40,
+            )
+            store.close()
+
+        self.assertEqual(first_write, "written")
+        self.assertEqual(replay, "replayed")
+        self.assertEqual(loaded, evidence)
+        self.assertEqual(listed, (evidence,))
+        self.assertEqual(exact, (evidence,))
+        self.assertEqual(wrong_head, ())
+
+    def test_trusted_maintenance_evidence_database_checks(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _trusted_maintenance_evidence_record()
+            build_row = store._trusted_maintenance_evidence_row
+
+            def invalid_row(
+                evidence: TrustedMaintenanceEvidenceRecord,
+            ) -> LaunchplaneTrustedMaintenanceEvidenceRow:
+                row = build_row(evidence)
+                row.evidence_id = "raw-invalid-trusted-maintenance-evidence"
+                row.sender_github_id = 0
+                return row
+
+            with patch.object(
+                store,
+                "_trusted_maintenance_evidence_row",
+                side_effect=invalid_row,
+            ):
+                with self.assertRaises(IntegrityError):
+                    store.write_trusted_maintenance_evidence_record(record)
+            store.close()
+
+    def test_trusted_maintenance_evidence_database_requires_same_head_repository(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _trusted_maintenance_evidence_record()
+            row = store._trusted_maintenance_evidence_row(record)
+            row.evidence_id = "raw-fork-head-evidence"
+            row.head_repository_id = "9999"
+
+            with self.assertRaises(IntegrityError):
+                with store._session_factory() as session:
+                    session.add(row)
+                    session.commit()
+            store.close()
+
+    def test_trusted_maintenance_direct_policy_write_serializes_replay_race(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            record = _trusted_maintenance_policy_record()
+
+            def write_once() -> str:
+                active_store = PostgresRecordStore(database_url=database_url)
+                try:
+                    return active_store.write_trusted_maintenance_policy_record(record)
+                finally:
+                    active_store.close()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = tuple(executor.map(lambda _: write_once(), range(2)))
+            records = store.list_trusted_maintenance_policy_records(
+                repository_id=record.repository_id,
+                product=record.product,
+                context=record.context,
+            )
+            store.close()
+
+        self.assertEqual(set(results), {"written", "replayed"})
+        self.assertEqual(records, (record,))
+
+    def test_trusted_maintenance_compare_write_serializes_stale_cas_race(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            revision_1 = _trusted_maintenance_policy_record()
+            revision_2_a = _trusted_maintenance_policy_record(
+                policy_revision=2,
+                actor_github_id=702,
+                supersedes_record_id=revision_1.record_id,
+            )
+            revision_2_b = _trusted_maintenance_policy_record(
+                policy_revision=2,
+                actor_github_id=703,
+                supersedes_record_id=revision_1.record_id,
+            )
+            store.compare_and_write_trusted_maintenance_policy_record(
+                revision_1,
+                expected_current_record_id="",
+                expected_current_policy_digest="",
+            )
+
+            def write_revision(record: TrustedMaintenancePolicyRecord) -> str:
+                active_store = PostgresRecordStore(database_url=database_url)
+                try:
+                    return active_store.compare_and_write_trusted_maintenance_policy_record(
+                        record,
+                        expected_current_record_id=revision_1.record_id,
+                        expected_current_policy_digest=revision_1.policy_digest,
+                    )
+                except TrustedMaintenancePolicyConflictError:
+                    return "conflict"
+                finally:
+                    active_store.close()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = tuple(executor.map(write_revision, (revision_2_a, revision_2_b)))
+            records = store.list_trusted_maintenance_policy_records(
+                repository_id=revision_1.repository_id,
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+            store.close()
+
+        self.assertEqual(set(results), {"written", "conflict"})
+        self.assertEqual([record.policy_revision for record in records], [2, 1])
+        self.assertEqual([record.status for record in records], ["active", "superseded"])
+
+    def test_tenant_technical_human_waiver_events_are_append_only_and_filterable(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            created = _tenant_technical_human_waiver_event_record()
+            conflicting_created = _tenant_technical_human_waiver_event_record(
+                occurred_at="2026-07-31T10:16:00Z",
+                expires_at="2026-07-31T11:16:00Z",
+            )
+            revoked = _tenant_technical_human_waiver_event_record(
+                source_event_id="comment-1002",
+                action="revoked",
+                occurred_at="2026-07-31T10:30:00Z",
+                expires_at="",
+            )
+            other_repository = _tenant_technical_human_waiver_event_record(
+                source_event_id="comment-other",
+                repository_id="1002",
+                repository_owner_id="2002",
+                repository="example/other-product",
+                product="other-product",
+                context="other-product",
+            )
+
+            first_write = store.write_tenant_technical_human_waiver_event_record(created)
+            replay = store.write_tenant_technical_human_waiver_event_record(created)
+            with self.assertRaises(TenantTechnicalHumanWaiverEventConflictError):
+                store.write_tenant_technical_human_waiver_event_record(conflicting_created)
+            revoked_write = store.write_tenant_technical_human_waiver_event_record(revoked)
+            store.write_tenant_technical_human_waiver_event_record(other_repository)
+            loaded = store.read_tenant_technical_human_waiver_event_record(created.event_id)
+            listed = store.list_tenant_technical_human_waiver_event_records(
+                repository_id=created.binding.repository_id,
+            )
+            exact_created = store.list_tenant_technical_human_waiver_event_records(
+                repository_id=created.binding.repository_id,
+                repository_owner_id=created.binding.repository_owner_id,
+                repository="Example/Example-Product",
+                product=created.binding.product,
+                context=created.binding.context,
+                binding_sha256=created.binding.binding_sha256,
+                pull_request_number=created.binding.pull_request_number,
+                head_sha=created.binding.head_sha,
+                classification_digest=created.binding.classification_digest,
+                role_policy_record_id=created.binding.role_policy_record_id,
+                role_policy_digest=created.binding.role_policy_digest,
+                authz_policy_record_id=created.binding.authz_policy_record_id,
+                authz_policy_digest=created.binding.authz_policy_digest,
+                action="created",
+                author_github_id=created.authorization.author_github_id,
+            )
+            waiver_events = store.list_tenant_technical_human_waiver_event_records(
+                waiver_id=created.waiver_id,
+                limit=1,
+            )
+            wrong_head = store.list_tenant_technical_human_waiver_event_records(
+                repository_id=created.binding.repository_id,
+                head_sha="b" * 40,
+            )
+            store.close()
+
+        self.assertEqual(first_write, "written")
+        self.assertEqual(replay, "replayed")
+        self.assertEqual(revoked_write, "written")
+        self.assertEqual(loaded, created)
+        self.assertEqual(listed, (revoked, created))
+        self.assertEqual(exact_created, (created,))
+        self.assertEqual(waiver_events, (revoked,))
+        self.assertEqual(wrong_head, ())
+
+    def test_tenant_technical_human_waiver_event_database_checks(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _tenant_technical_human_waiver_event_record()
+            build_row = store._tenant_technical_human_waiver_event_row
+
+            def invalid_row(
+                event: TenantTechnicalHumanWaiverEventRecord,
+            ) -> LaunchplaneTenantTechnicalHumanWaiverEventRow:
+                row = build_row(event)
+                row.event_id = "raw-invalid-waiver-event"
+                row.action = "mutated"
+                return row
+
+            with patch.object(
+                store,
+                "_tenant_technical_human_waiver_event_row",
+                side_effect=invalid_row,
+            ):
+                with self.assertRaises(IntegrityError):
+                    store.write_tenant_technical_human_waiver_event_record(record)
+            store.close()
+
+    def test_tenant_technical_human_waiver_compare_write_create_replay_and_conflict(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            _seed_tenant_technical_human_waiver_authority(store)
+            envelope = _tenant_technical_human_waiver_envelope()
+            mutation = _tenant_technical_human_waiver_mutation()
+
+            first_result = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(),
+                envelope=envelope,
+                mutation=mutation,
+            )
+            same_key_result = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(login="renamed-human"),
+                envelope=envelope,
+                mutation=mutation,
+            )
+            conflict_result = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(),
+                envelope=envelope,
+                mutation=_tenant_technical_human_waiver_mutation(
+                    request_fingerprint="changed-waiver-fingerprint"
+                ),
+            )
+            event_records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            stored_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(first_result.status, "written")
+        self.assertIsNotNone(first_result.result)
+        self.assertIsNotNone(first_result.event_record)
+        assert first_result.result is not None
+        assert first_result.event_record is not None
+        self.assertEqual(first_result.result.status, "applied")
+        self.assertEqual(first_result.result.path_result.state, "satisfied")
+        self.assertEqual(
+            first_result.event_record.recorded_at, first_result.event_record.occurred_at
+        )
+        self.assertEqual(first_result.result.recorded_at, first_result.result.occurred_at)
+        self.assertEqual(same_key_result.status, "replayed")
+        self.assertIsNotNone(same_key_result.idempotency_record)
+        assert same_key_result.idempotency_record is not None
+        self.assertEqual(
+            same_key_result.idempotency_record.response_trace_id,
+            mutation.response_trace_id,
+        )
+        self.assertEqual(conflict_result.status, "idempotency_conflict")
+        self.assertEqual(event_records, (first_result.event_record,))
+        self.assertIsNotNone(stored_idempotency)
+        assert stored_idempotency is not None
+        self.assertEqual(stored_idempotency.response_payload["result"]["status"], "applied")
+
+    def test_tenant_technical_human_waiver_compare_write_exact_create_replay_with_new_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            _seed_tenant_technical_human_waiver_authority(store)
+            envelope = _tenant_technical_human_waiver_envelope()
+            timestamp = "2026-08-01T12:00:00Z"
+
+            with patch.object(store, "_database_mutation_timestamp", return_value=timestamp):
+                written = store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=envelope,
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-create-fixed",
+                        request_fingerprint="tenant-waiver-create-fixed-fingerprint",
+                        response_trace_id="trace-waiver-create-fixed",
+                    ),
+                )
+                replayed = store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=envelope,
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-create-fixed-replay",
+                        request_fingerprint="tenant-waiver-create-fixed-replay-fingerprint",
+                        response_trace_id="trace-waiver-create-fixed-replay",
+                    ),
+                )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            store.close()
+
+        self.assertEqual(written.status, "written")
+        self.assertEqual(replayed.status, "exact_replay")
+        self.assertIsNotNone(written.event_record)
+        self.assertIsNotNone(replayed.event_record)
+        assert written.event_record is not None
+        assert replayed.event_record is not None
+        self.assertEqual(written.event_record, replayed.event_record)
+        self.assertEqual(records, (written.event_record,))
+
+    def test_tenant_technical_human_waiver_compare_write_rejects_stale_create_replay(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            _seed_tenant_technical_human_waiver_authority(store)
+            envelope = _tenant_technical_human_waiver_envelope()
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=(
+                    "2026-08-01T12:00:00Z",
+                    "2026-08-01T12:00:00Z",
+                    "2026-08-01T12:00:01Z",
+                    "2026-08-01T12:00:02Z",
+                    "2026-08-01T12:00:02Z",
+                ),
+            ):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=envelope,
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-create-original",
+                        request_fingerprint="tenant-waiver-create-original-fingerprint",
+                        response_trace_id="trace-waiver-create-original",
+                    ),
+                )
+                with self.assertRaises(TenantTechnicalHumanWaiverEventConflictError):
+                    store.compare_and_write_tenant_technical_human_waiver_event(
+                        identity=_tenant_technical_human_waiver_identity(),
+                        envelope=envelope,
+                        mutation=_tenant_technical_human_waiver_mutation(
+                            idempotency_key="tenant-waiver-create-stale",
+                            request_fingerprint="tenant-waiver-create-stale-fingerprint",
+                            response_trace_id="trace-waiver-create-stale",
+                        ),
+                    )
+
+            stale_reservation = store.read_idempotency_record(
+                scope="github-human-id|301",
+                route_path="/v1/tenant-admission/technical-human-waivers/apply",
+                idempotency_key="tenant-waiver-create-stale",
+            )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            store.close()
+
+        self.assertIsNone(stale_reservation)
+        self.assertEqual(len(records), 1)
+
+    def test_tenant_technical_human_waiver_compare_write_revokes_with_expected_current(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            _seed_tenant_technical_human_waiver_authority(store)
+            created = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(),
+                envelope=_tenant_technical_human_waiver_envelope(
+                    source_event_id="comment-create-revoke"
+                ),
+                mutation=_tenant_technical_human_waiver_mutation(
+                    idempotency_key="tenant-waiver-create-revoke",
+                    request_fingerprint="tenant-waiver-create-revoke-fingerprint",
+                    response_trace_id="trace-waiver-create-revoke",
+                ),
+            )
+            assert created.event_record is not None
+            revoke_envelope = _tenant_technical_human_waiver_envelope(
+                action="revoked",
+                source_event_id="comment-revoke",
+                expected_current={
+                    "waiver_id": created.event_record.waiver_id,
+                    "event_digest": created.event_record.event_digest,
+                },
+                reason="Owner revoked exact waiver.",
+            )
+            revoked = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(),
+                envelope=revoke_envelope,
+                mutation=_tenant_technical_human_waiver_mutation(
+                    idempotency_key="tenant-waiver-revoke",
+                    request_fingerprint="tenant-waiver-revoke-fingerprint",
+                    response_trace_id="trace-waiver-revoke",
+                ),
+            )
+            with self.assertRaises(TenantTechnicalHumanWaiverRevokeCurrentError):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=_tenant_technical_human_waiver_envelope(
+                        action="revoked",
+                        source_event_id="comment-revoke-stale-cas",
+                        expected_current={
+                            "waiver_id": created.event_record.waiver_id,
+                            "event_digest": created.event_record.event_digest,
+                        },
+                        reason="Owner retried stale revoke.",
+                    ),
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-revoke-stale-cas",
+                        request_fingerprint="tenant-waiver-revoke-stale-cas-fingerprint",
+                        response_trace_id="trace-waiver-revoke-stale-cas",
+                    ),
+                )
+            with self.assertRaises(TenantTechnicalHumanWaiverRevokeCurrentError):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=revoke_envelope,
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-revoke-stale-event",
+                        request_fingerprint="tenant-waiver-revoke-stale-event-fingerprint",
+                        response_trace_id="trace-waiver-revoke-stale-event",
+                    ),
+                )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            stale_revoke_reservation = store.read_idempotency_record(
+                scope="github-human-id|301",
+                route_path="/v1/tenant-admission/technical-human-waivers/apply",
+                idempotency_key="tenant-waiver-revoke-stale-event",
+            )
+            store.close()
+
+        self.assertEqual(revoked.status, "written")
+        self.assertIsNotNone(revoked.result)
+        self.assertIsNotNone(revoked.event_record)
+        assert revoked.result is not None
+        assert revoked.event_record is not None
+        self.assertEqual(revoked.result.path_result.state, "denied")
+        self.assertEqual(tuple(record.action for record in records), ("revoked", "created"))
+        self.assertIsNone(stale_revoke_reservation)
+
+    def test_tenant_technical_human_waiver_compare_write_validates_current_authority(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            role_policy = _repository_human_role_policy_record(repository_owner_github_ids=(302,))
+            _seed_tenant_technical_human_waiver_authority(
+                store,
+                role_policy=role_policy,
+            )
+
+            with self.assertRaises(TenantTechnicalHumanWaiverAuthorizationError):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=_tenant_technical_human_waiver_envelope(role_policy=role_policy),
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-non-owner",
+                        request_fingerprint="tenant-waiver-non-owner-fingerprint",
+                    ),
+                )
+            with self.assertRaises(TenantTechnicalHumanWaiverStaleAuthorityError):
+                stale_envelope = _tenant_technical_human_waiver_envelope(role_policy=role_policy)
+                stale_envelope.expected_authority.authz_policy_digest = "f" * 64
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(github_id=302),
+                    envelope=stale_envelope,
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-authz-drift",
+                        request_fingerprint="tenant-waiver-authz-drift-fingerprint",
+                        scope="github-human-id|302",
+                    ),
+                )
+            failed_reservation = store.read_idempotency_record(
+                scope="github-human-id|302",
+                route_path="/v1/tenant-admission/technical-human-waivers/apply",
+                idempotency_key="tenant-waiver-authz-drift",
+            )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            store.close()
+
+        self.assertIsNone(failed_reservation)
+        self.assertEqual(records, ())
+
+    def test_tenant_technical_human_waiver_compare_write_rolls_back_on_completion_failure(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            _seed_tenant_technical_human_waiver_authority(store)
+            mutation = _tenant_technical_human_waiver_mutation(
+                idempotency_key="tenant-waiver-rollback",
+                request_fingerprint="tenant-waiver-rollback-fingerprint",
+                response_trace_id="trace-waiver-rollback",
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_sync_idempotency_row",
+                    side_effect=RuntimeError("injected completion failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected completion failure"),
+            ):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=_tenant_technical_human_waiver_envelope(),
+                    mutation=mutation,
+                )
+
+            stored_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            store.close()
+
+        self.assertIsNone(stored_idempotency)
+        self.assertEqual(records, ())
+
+    def test_tenant_technical_human_waiver_compare_write_serializes_no_row_race(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            _seed_tenant_technical_human_waiver_authority(store)
+
+            def write_with_suffix(suffix: str) -> str:
+                active_store = PostgresRecordStore(database_url=database_url)
+                try:
+                    result = active_store.compare_and_write_tenant_technical_human_waiver_event(
+                        identity=_tenant_technical_human_waiver_identity(),
+                        envelope=_tenant_technical_human_waiver_envelope(
+                            source_event_id=f"comment-race-{suffix}"
+                        ),
+                        mutation=_tenant_technical_human_waiver_mutation(
+                            idempotency_key=f"tenant-waiver-race-{suffix}",
+                            request_fingerprint=f"tenant-waiver-race-{suffix}-fingerprint",
+                            response_trace_id=f"trace-waiver-race-{suffix}",
+                        ),
+                    )
+                    return result.status
+                except TenantTechnicalHumanWaiverEventConflictError:
+                    return "conflict"
+                finally:
+                    active_store.close()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                statuses = tuple(executor.map(write_with_suffix, ("a", "b")))
+
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            store.close()
+
+        self.assertEqual(statuses.count("written"), 1)
+        self.assertEqual(statuses.count("conflict"), 1)
+        self.assertEqual(len(records), 1)
 
     def test_write_promotion_evidence_records_writes_promotion_and_inventory(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -5947,6 +7869,19 @@ env_var = "GH_TOKEN"
                     ),
                 )
             )
+            classification_revision_1 = _tenant_repository_classification_record()
+            classification_revision_2 = _tenant_repository_classification_record(
+                classification_kind="engineering",
+                classification_revision=2,
+                classified_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=classification_revision_1.record_id,
+            )
+            filesystem_store.write_tenant_repository_classification_record(
+                classification_revision_1
+            )
+            filesystem_store.write_tenant_repository_classification_record(
+                classification_revision_2
+            )
             filesystem_store.write_merge_train_policy_record(
                 MergeTrainPolicyRecord(
                     record_id="merge-train-policy-20260513T210000Z-active",
@@ -6050,7 +7985,18 @@ env_var = "GH_TOKEN"
                     "odoo_stable_target_replacement_operations": 1,
                     "release_tuples": 1,
                     "runtime_key_safety_policies": 1,
+                    "tenant_repository_classifications": 2,
                 },
+            )
+            self.assertEqual(
+                store.latest_tenant_repository_classification_lookup(repository_id="1001")
+                .records[0]
+                .classification_kind,
+                "engineering",
+            )
+            self.assertEqual(
+                len(store.list_tenant_repository_classification_records(repository_id="1001")),
+                2,
             )
             self.assertEqual(
                 store.read_promotion_record(

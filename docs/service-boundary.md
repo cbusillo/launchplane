@@ -609,18 +609,23 @@ The cookie-capable mutation inventory is intentionally limited to:
 - `POST /v1/product-config/apply`
 - `POST /v1/merge-train/policies/import`
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
+- `POST /v1/tenant-admission/technical-human-waivers/apply`
 
 Every other authenticated mutation route intentionally rejects session-cookie
 authentication and continues to require its existing GitHub Actions OIDC,
 local-operator/admin bearer, Every Code worker, or webhook boundary. A valid
-`Authorization: Bearer` identity on the routes above also bypasses browser
-origin, fetch-metadata, and CSRF checks exactly as before; a cookie does not
-weaken or replace bearer verification. The operator UI therefore exposes only
-the cookie-capable writes. In particular, GitHub issue inbox reconciliation is
-displayed as unavailable because it remains a GitHub Actions OIDC service
-operation. Managed-secret root re-encryption is explicitly bearer-only even
-when a valid human session cookie is present; rotating the service root is not a
-browser mutation surface.
+`Authorization: Bearer` identity on the existing mixed-identity routes above
+also bypasses browser origin, fetch-metadata, and CSRF checks exactly as before;
+a cookie does not weaken or replace bearer verification. The tenant technical
+human waiver apply route is narrower: after the browser mutation boundary it
+requires a `GitHubHumanIdentity` with positive numeric `github_id` and rejects
+bearer-only/non-human identities. The operator UI exposes only the separately
+generated UI write slice; this inventory is a server-side cookie-capable surface
+list, not a promise of UI controls for every route. In particular, GitHub issue
+inbox reconciliation is displayed as unavailable because it remains a GitHub
+Actions OIDC service operation. Managed-secret root re-encryption is explicitly
+bearer-only even when a valid human session cookie is present; rotating the
+service root is not a browser mutation surface.
 
 Trusted Launchplane CLI clients that are explicitly given `--session-cookie`
 preserve compatibility by reading `/v1/auth/session` immediately before the
@@ -2847,6 +2852,135 @@ driver results. Its descriptor remains discoverable. The older
 `POST /v1/drivers/odoo/prod-promotion` compatibility route is also native
 FastAPI for explicit operator workflows and diagnostics, but product repos
 should prefer the thin `prod-promotion-run` path.
+
+### Tenant Admission, Classification, And Role-Policy API Boundary
+
+`GET /v1/work-graph/tenant-admission/repository-classification` and `POST /v1/tenant-admission/repository-classifications/apply` provide DB-backed authority for repository classification.
+
+- `GET /v1/work-graph/tenant-admission/repository-classification?repository_id=...`:
+  Returns the current classification read model (`missing`, `available`, or fail-closed `ambiguous`, plus active record when unique, history count, and generated_at). Requires `tenant_repository_classification.read` authorization against Launchplane service context (`launchplane`).
+- `POST /v1/tenant-admission/repository-classifications/apply`:
+  Accepts a strict envelope (`schema_version`, `mode: dry_run|apply`, `expected_current_record_id`, `record`).
+  Terminal agents are denied (HTTP 403). Requires `tenant_repository_classification.write` authorization against Launchplane service context (`launchplane`).
+  Apply mode requires JSON with one exact bounded `Content-Length` (maximum 64 KiB), a non-empty `Idempotency-Key` header, and a `PostgresRecordStore` using the `postgresql` dialect (returns HTTP 503 `database_storage_required` for filesystem, SQLite-backed rehearsal stores, or unsupported stores). Launchplane reserves durable idempotency, locks the repository classification stream, validates CAS, appends the immutable revision, and completes the stored response in one PostgreSQL transaction. Exact same-key, same-payload retries replay the completed response; a different key revalidates current state and cannot replay an already-applied revision.
+  Validation uses CAS (compare-and-swap): first revision must be revision 1 with no `supersedes_record_id` and empty `expected_current_record_id`. Subsequent revisions must increment revision by 1, set `supersedes_record_id` to the active current record ID, and match `expected_current_record_id`. Mismatches fail closed with HTTP 409 conflict, and sequence gaps fail closed with HTTP 400.
+  Dry-run mode performs full CAS/sequence validation without persisting changes and reports `would_apply` or `would_replay`.
+  Pure tenant merge eligibility evaluation uses this DB authority without heuristics, PR label fallbacks, or wildcard matching. Repositories classified as `engineering` take the normal engineering fast path. Repositories classified as `tenant_ui` default to requiring exact manager preview approval (or optional fast-path waiver/maintenance evidence bound to the exact head SHA and classification digest).
+  This pure evaluator remains internal and separate from scheduler merge train admission (`merge_train_admission`).
+
+`GET /v1/work-graph/tenant-admission/repository-human-role-policy` and
+`POST /v1/tenant-admission/repository-human-role-policies/apply` provide the
+first hardened repository-human role-policy service boundary. This split is
+limited to current role-policy reads plus dry-run/apply writes.
+
+- `GET /v1/work-graph/tenant-admission/repository-human-role-policy?repository_id=...&product=...&context=...`:
+  Returns the current role-policy read model keyed by immutable repository ID,
+  product, and context. The model reports `missing`, `available`, or fail-closed
+  `ambiguous`; `available` includes the unique active current record, history
+  count, and `generated_at`. Requires `repository_human_role_policy.read`
+  authorization against the submitted product/context and an explicit
+  `AuthorizationTarget(scope="context")`.
+- `POST /v1/tenant-admission/repository-human-role-policies/apply`:
+  Accepts a strict envelope (`schema_version`, `mode: dry_run|apply`,
+  `expected_current_record_id`, `expected_current_role_policy_digest`,
+  `record`). Terminal agents are denied (HTTP 403). Requires
+  `repository_human_role_policy.write` authorization against the submitted
+  product/context and an explicit `AuthorizationTarget(scope="context")`.
+  Apply mode requires JSON with one exact bounded `Content-Length` (maximum
+  64 KiB), a non-empty `Idempotency-Key` header, and a `PostgresRecordStore`
+  using the `postgresql` dialect. Filesystem, SQLite-backed rehearsal stores,
+  and unsupported stores return HTTP 503 `database_storage_required` for live
+  apply. Dry-run mode may use rehearsal/read stores and writes nothing.
+  Launchplane reserves durable idempotency, locks the repository role-policy
+  stream, validates the expected current tip record ID and digest, supersedes
+  the active tip, inserts the candidate, completes the stored response, and
+  commits in one PostgreSQL transaction. Same key plus same canonical request
+  replays the stored HTTP 202 response. Same key plus a changed request returns
+  HTTP 409 `idempotency_key_reused`. Repeating the exact currently active record
+  under a new key also replays without adding history when the request retains
+  the original predecessor record ID and digest CAS. In-progress and reconciliation-required
+  reservations use the existing mutation error conventions.
+  Validation is fail-closed: revision 1 must have no current tip expectation;
+  later revisions must increment by one, identify and digest-match the active
+  current tip, and set `supersedes_record_id` to that current record. Missing,
+  ambiguous, stale, scope-drifted, inactive, sequence-invalid, or conflicting
+  candidates are rejected. Request-provided superseded records are not persisted
+  as authority; the database writer derives supersession from the locked stream.
+  These routes never infer authorization or runtime authority from repository
+  names, logins, changed files, paths, actor strings, or request-provided
+  superseded history.
+
+The role-policy route still does not add trusted-maintenance evidence, unified
+tenant-admission status, controller changes, or any Launchplane authorization-
+policy mutation.
+
+`POST /v1/tenant-admission/technical-human-waivers/apply` provides the focused
+human technical-waiver mutation boundary. The route accepts `mode: dry_run|apply`
+and `action: created|revoked` envelopes containing candidate, source event
+kind/id, reason, optional creation `expires_at`, expected current
+classification/role-policy/authz record IDs plus digests, and revoke-only
+expected current waiver ID plus event digest. The request never accepts
+`occurred_at`, author GitHub ID, or author login. Launchplane builds the binding,
+authorization provenance, event IDs, digests, and author display login from the
+browser session and current records.
+
+The route is browser-human-only. It first passes the normal browser session,
+origin, fetch-metadata, and single-use CSRF mutation boundary, then requires a
+`GitHubHumanIdentity` with `github_id > 0`. Local admins/operators, GitHub
+Actions, terminal agents, Every Code workers, bearer-only callers, and other
+non-human identities are rejected. Login is display/audit only; the route scopes
+idempotency as `github-human-id|<github_id>` and authorizes only when the active
+schema-v2 authz policy has exactly one managed
+`tenant_technical_human_waiver.write` GitHub-human rule whose `github_ids`
+explicitly contains that numeric caller ID. Login/org/team/role-only matching is
+insufficient. The caller must also be the current repository owner in exactly
+one active role-policy record for the candidate, and the current classification
+must exactly match the candidate and be `tenant_ui`.
+
+Dry-run uses the same pure read/planning helpers against rehearsal-capable stores
+and writes nothing. Apply requires JSON with one exact bounded `Content-Length`
+(maximum 64 KiB), a non-empty `Idempotency-Key` header, and a real PostgreSQL
+`PostgresRecordStore`; filesystem, SQLite-backed rehearsal stores, and
+unsupported stores return HTTP 503 `database_storage_required` for live apply.
+The PostgreSQL writer reserves idempotency, locks classification, role-policy,
+authz-policy, and waiver binding/history authority in deterministic order,
+re-reads and validates expected IDs/digests under lock, builds the event with the
+database/server timestamp as both `occurred_at` and `recorded_at`, validates
+create/revoke lifecycle and revoke CAS, appends the event, verifies the resulting
+tenant-admission path, stores the HTTP response, and commits once. Validation
+failures remove the reservation; completion failures roll back both event and
+reservation.
+
+Same key plus the same canonical request body replays the stored response with
+the original trace, while the same key plus a changed body returns HTTP 409
+`idempotency_key_reused`. A different key revalidates current authority and
+history, so classification, role-policy, authz-policy, head, revocation, or
+expiry drift cannot create a false success. Create may only produce a satisfied
+technical-waiver path. Revoke requires the exact current satisfied waiver and
+must produce a denied path. Exact create event replay is accepted only while the
+current lifecycle/CAS proves it is still safe; stale historical replay fails
+closed.
+
+This focused waiver slice does not add UI controls, GitHub provider calls,
+status/controller projection, trusted-maintenance evidence, rollout behavior,
+or authz-policy mutation. Existing tenant merge/admission behavior remains
+unchanged until later rollout work wires shared authority into admission
+decisions.
+
+Trusted-maintenance currently has only contracts, pure evaluator behavior,
+filesystem rehearsal storage, PostgreSQL storage, migration, and schema
+invariants. It is a dedicated repository automation policy/evidence authority,
+not a human role-policy shortcut and not a generic Launchplane authz-policy
+reuse. Policy revisions and evidence are keyed to immutable numeric repository,
+actor, sender, and exact-head provenance; display logins are audit only, and no
+route may infer trust from repository names, branches, refs, files, labels,
+commit metadata, PR text, login strings, or blanket bot status. This slice does
+use source/delivery identity for deterministic replay, validates complete policy
+history before selecting current authority, performs policy CAS inside the
+storage transaction, and re-derives evidence expiration from policy TTL. It
+does not add HTTP routes, signed webhook ingress, OpenAPI, unified tenant-admission
+status, controller or merge-train wiring, rollout behavior, UI, provider calls,
+policy mutation authorization, or checked-in real repository policy values.
 
 The CM tenant preview workflow uses tenant-product scope for both artifact
 publish input/evidence and preview lifecycle requests. Artifact publish still

@@ -105,6 +105,14 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.repository_human_admission import (
+    RepositoryHumanRolePolicyRecord,
+    TenantTechnicalHumanWaiverEventRecord,
+)
+from control_plane.contracts.trusted_maintenance import (
+    TrustedMaintenanceEvidenceRecord,
+    TrustedMaintenancePolicyRecord,
+)
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     build_route_binding_key,
@@ -146,6 +154,10 @@ from control_plane.contracts.secret_record import (
     SecretRotationWrite,
     SecretVersion,
 )
+from control_plane.contracts.tenant_merge_eligibility import (
+    TenantRepositoryClassificationLookup,
+    TenantRepositoryClassificationRecord,
+)
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_host_hygiene import (
@@ -156,10 +168,22 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
     build_cancelled_verireel_prod_backup_gate_record,
 )
+from control_plane.tenant_repository_classification import (
+    plan_tenant_repository_classification_append,
+)
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentDelete,
+)
+from control_plane.repository_human_admission import (
+    plan_repository_human_role_policy_append,
+    plan_tenant_technical_human_waiver_event_append,
+)
+from control_plane.trusted_maintenance import (
+    plan_trusted_maintenance_evidence_append,
+    plan_trusted_maintenance_policy_apply,
+    plan_trusted_maintenance_policy_append,
 )
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
@@ -779,6 +803,310 @@ class FilesystemRecordStore:
 
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> Path:
         return self._write_model("launchplane_agent_write_intents", record.record_id, record)
+
+    def write_tenant_repository_classification_record(
+        self, record: TenantRepositoryClassificationRecord
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_tenant_repository_classifications"
+        with self._product_authority_bundle_lock():
+            records = tuple(
+                existing
+                for existing in self._list_models_locked(
+                    TenantRepositoryClassificationRecord,
+                    record_type,
+                )
+                if existing.repository_id == record.repository_id
+            )
+            plan = plan_tenant_repository_classification_append(
+                records=records,
+                record=record,
+            )
+            if plan.status == "replayed":
+                return "replayed"
+            self._write_model_locked(record_type, record.record_id, record)
+            return "written"
+
+    def read_tenant_repository_classification_record(
+        self, record_id: str
+    ) -> TenantRepositoryClassificationRecord:
+        return self._read_model(
+            TenantRepositoryClassificationRecord,
+            "launchplane_tenant_repository_classifications",
+            record_id,
+        )
+
+    def list_tenant_repository_classification_records(
+        self,
+        *,
+        repository_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[TenantRepositoryClassificationRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                TenantRepositoryClassificationRecord,
+                "launchplane_tenant_repository_classifications",
+            )
+            if not repository_id or record.repository_id == repository_id
+        ]
+        records.sort(
+            key=lambda record: (
+                record.classification_revision,
+                record.repository_id,
+                record.record_id,
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def latest_tenant_repository_classification_lookup(
+        self, *, repository_id: str
+    ) -> TenantRepositoryClassificationLookup:
+        records = self.list_tenant_repository_classification_records(
+            repository_id=repository_id,
+        )
+        if not records:
+            return TenantRepositoryClassificationLookup(status="missing")
+        latest_revision = records[0].classification_revision
+        return TenantRepositoryClassificationLookup(
+            records=tuple(
+                record for record in records if record.classification_revision == latest_revision
+            )
+        )
+
+    def write_repository_human_role_policy_record(
+        self,
+        record: RepositoryHumanRolePolicyRecord,
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_repository_human_role_policies"
+        with self._product_authority_bundle_lock():
+            records = self._list_models_locked(RepositoryHumanRolePolicyRecord, record_type)
+            plan = plan_repository_human_role_policy_append(records=records, record=record)
+            if plan.status == "replayed":
+                return "replayed"
+            if plan.superseded_current_record is None:
+                self._write_model_locked(record_type, record.record_id, record)
+                return "written"
+            self._write_repository_human_role_policy_replacement_locked(
+                record_type=record_type,
+                superseded_current_record=plan.superseded_current_record,
+                active_record=record,
+            )
+            return "written"
+
+    def _write_repository_human_role_policy_replacement_locked(
+        self,
+        *,
+        record_type: str,
+        superseded_current_record: RepositoryHumanRolePolicyRecord,
+        active_record: RepositoryHumanRolePolicyRecord,
+    ) -> None:
+        stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
+        stage_dir = self._product_authority_bundle_stage_root() / stage_id
+        records_dir = stage_dir / "records"
+        records_dir.mkdir(parents=True, exist_ok=False)
+        entries: list[_AuthorityBundleStageEntry] = []
+        try:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type=record_type,
+                record_id=superseded_current_record.record_id,
+                model=superseded_current_record,
+                step_name="supersede_repository_human_role_policy",
+            )
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type=record_type,
+                record_id=active_record.record_id,
+                model=active_record,
+                step_name="write_repository_human_role_policy",
+            )
+            manifest = _AuthorityBundleStageManifest(
+                stage_id=stage_id,
+                state="ready",
+                entries=tuple(entries),
+            )
+            self._write_product_authority_bundle_stage_manifest(
+                stage_dir=stage_dir,
+                manifest=manifest,
+            )
+            self._after_product_authority_bundle_step(
+                "stage_repository_human_role_policy_replacement"
+            )
+            publishing_manifest = manifest.model_copy(update={"state": "publishing"})
+            self._write_product_authority_bundle_stage_manifest(
+                stage_dir=stage_dir,
+                manifest=publishing_manifest,
+            )
+            self._after_product_authority_bundle_step(
+                "publish_repository_human_role_policy_replacement"
+            )
+            self._publish_product_authority_bundle_stage(
+                manifest=publishing_manifest,
+                stage_dir=stage_dir,
+                recovering=False,
+            )
+        except Exception:
+            if not (stage_dir / "manifest.json").exists():
+                shutil.rmtree(stage_dir, ignore_errors=True)
+            raise
+
+    def read_repository_human_role_policy_record(
+        self,
+        record_id: str,
+    ) -> RepositoryHumanRolePolicyRecord:
+        return self._read_model(
+            RepositoryHumanRolePolicyRecord,
+            "launchplane_repository_human_role_policies",
+            record_id,
+        )
+
+    def list_repository_human_role_policy_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RepositoryHumanRolePolicyRecord, ...]:
+        normalized_repository = repository.strip().lower()
+        records = [
+            record
+            for record in self._list_models(
+                RepositoryHumanRolePolicyRecord,
+                "launchplane_repository_human_role_policies",
+            )
+            if (not repository_id or record.repository_id == repository_id)
+            and (not repository_owner_id or record.repository_owner_id == repository_owner_id)
+            and (not normalized_repository or record.repository == normalized_repository)
+            and (not product or record.product == product)
+            and (not context or record.context == context)
+            and (not status or record.status == status)
+        ]
+        records.sort(
+            key=lambda record: (
+                record.role_policy_revision,
+                record.repository_id,
+                record.product,
+                record.context,
+                record.record_id,
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_tenant_technical_human_waiver_event_record(
+        self,
+        record: TenantTechnicalHumanWaiverEventRecord,
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_tenant_technical_human_waiver_events"
+        with self._product_authority_bundle_lock():
+            records = self._list_models_locked(
+                TenantTechnicalHumanWaiverEventRecord,
+                record_type,
+            )
+            plan = plan_tenant_technical_human_waiver_event_append(
+                records=records,
+                record=record,
+            )
+            if plan.status == "replayed":
+                return "replayed"
+            self._write_model_locked(record_type, record.event_id, record)
+            return "written"
+
+    def read_tenant_technical_human_waiver_event_record(
+        self,
+        event_id: str,
+    ) -> TenantTechnicalHumanWaiverEventRecord:
+        return self._read_model(
+            TenantTechnicalHumanWaiverEventRecord,
+            "launchplane_tenant_technical_human_waiver_events",
+            event_id,
+        )
+
+    def list_tenant_technical_human_waiver_event_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        waiver_id: str = "",
+        binding_sha256: str = "",
+        pull_request_number: int | None = None,
+        head_sha: str = "",
+        classification_digest: str = "",
+        role_policy_record_id: str = "",
+        role_policy_digest: str = "",
+        authz_policy_record_id: str = "",
+        authz_policy_digest: str = "",
+        action: str = "",
+        author_github_id: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[TenantTechnicalHumanWaiverEventRecord, ...]:
+        normalized_repository = repository.strip().lower()
+        records = [
+            record
+            for record in self._list_models(
+                TenantTechnicalHumanWaiverEventRecord,
+                "launchplane_tenant_technical_human_waiver_events",
+            )
+            if (not repository_id or record.binding.repository_id == repository_id)
+            and (
+                not repository_owner_id or record.binding.repository_owner_id == repository_owner_id
+            )
+            and (not normalized_repository or record.binding.repository == normalized_repository)
+            and (not product or record.binding.product == product)
+            and (not context or record.binding.context == context)
+            and (not waiver_id or record.waiver_id == waiver_id)
+            and (not binding_sha256 or record.binding.binding_sha256 == binding_sha256)
+            and (
+                pull_request_number is None
+                or record.binding.pull_request_number == pull_request_number
+            )
+            and (not head_sha or record.binding.head_sha == head_sha)
+            and (
+                not classification_digest
+                or record.binding.classification_digest == classification_digest
+            )
+            and (
+                not role_policy_record_id
+                or record.binding.role_policy_record_id == role_policy_record_id
+            )
+            and (not role_policy_digest or record.binding.role_policy_digest == role_policy_digest)
+            and (
+                not authz_policy_record_id
+                or record.binding.authz_policy_record_id == authz_policy_record_id
+            )
+            and (
+                not authz_policy_digest or record.binding.authz_policy_digest == authz_policy_digest
+            )
+            and (not action or record.action == action)
+            and (
+                author_github_id is None
+                or record.authorization.author_github_id == author_github_id
+            )
+        ]
+        records.sort(
+            key=lambda record: (
+                record.occurred_at,
+                record.event_id,
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def read_agent_write_intent_record(self, record_id: str) -> AgentWriteIntentRecord:
         return AgentWriteIntentRecord.model_validate(
@@ -2076,6 +2404,262 @@ class FilesystemRecordStore:
             and (not status or record.status == status)
         ]
         records.sort(key=lambda record: (record.product, record.context, record.canary_key))
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_trusted_maintenance_policy_record(
+        self,
+        record: TrustedMaintenancePolicyRecord,
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_trusted_maintenance_policies"
+        with self._product_authority_bundle_lock():
+            records = self._list_models_locked(TrustedMaintenancePolicyRecord, record_type)
+            plan = plan_trusted_maintenance_policy_append(records=records, record=record)
+            if plan.status == "replayed":
+                return "replayed"
+            if plan.superseded_current_record is None:
+                self._write_model_locked(record_type, record.record_id, record)
+                return "written"
+            self._write_trusted_maintenance_policy_replacement_locked(
+                record_type=record_type,
+                superseded_current_record=plan.superseded_current_record,
+                active_record=record,
+            )
+            return "written"
+
+    def compare_and_write_trusted_maintenance_policy_record(
+        self,
+        record: TrustedMaintenancePolicyRecord,
+        *,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_trusted_maintenance_policies"
+        with self._product_authority_bundle_lock():
+            records = self._list_models_locked(TrustedMaintenancePolicyRecord, record_type)
+            plan = plan_trusted_maintenance_policy_apply(
+                records=records,
+                record=record,
+                expected_current_record_id=expected_current_record_id,
+                expected_current_policy_digest=expected_current_policy_digest,
+            )
+            if plan.status == "replayed":
+                return "replayed"
+            if plan.superseded_current_record is None:
+                self._write_model_locked(record_type, record.record_id, record)
+                return "written"
+            self._write_trusted_maintenance_policy_replacement_locked(
+                record_type=record_type,
+                superseded_current_record=plan.superseded_current_record,
+                active_record=record,
+            )
+            return "written"
+
+    def _write_trusted_maintenance_policy_replacement_locked(
+        self,
+        *,
+        record_type: str,
+        superseded_current_record: TrustedMaintenancePolicyRecord,
+        active_record: TrustedMaintenancePolicyRecord,
+    ) -> None:
+        stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
+        stage_dir = self._product_authority_bundle_stage_root() / stage_id
+        records_dir = stage_dir / "records"
+        records_dir.mkdir(parents=True, exist_ok=False)
+        entries: list[_AuthorityBundleStageEntry] = []
+        try:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type=record_type,
+                record_id=superseded_current_record.record_id,
+                model=superseded_current_record,
+                step_name="supersede_trusted_maintenance_policy",
+            )
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type=record_type,
+                record_id=active_record.record_id,
+                model=active_record,
+                step_name="write_trusted_maintenance_policy",
+            )
+            manifest = _AuthorityBundleStageManifest(
+                stage_id=stage_id,
+                state="ready",
+                entries=tuple(entries),
+            )
+            self._write_product_authority_bundle_stage_manifest(
+                stage_dir=stage_dir,
+                manifest=manifest,
+            )
+            self._after_product_authority_bundle_step(
+                "stage_trusted_maintenance_policy_replacement"
+            )
+            publishing_manifest = manifest.model_copy(update={"state": "publishing"})
+            self._write_product_authority_bundle_stage_manifest(
+                stage_dir=stage_dir,
+                manifest=publishing_manifest,
+            )
+            self._after_product_authority_bundle_step(
+                "publish_trusted_maintenance_policy_replacement"
+            )
+            self._publish_product_authority_bundle_stage(
+                manifest=publishing_manifest,
+                stage_dir=stage_dir,
+                recovering=False,
+            )
+        except Exception:
+            if not (stage_dir / "manifest.json").exists():
+                shutil.rmtree(stage_dir, ignore_errors=True)
+            raise
+
+    def read_trusted_maintenance_policy_record(
+        self,
+        record_id: str,
+    ) -> TrustedMaintenancePolicyRecord:
+        return self._read_model(
+            TrustedMaintenancePolicyRecord,
+            "launchplane_trusted_maintenance_policies",
+            record_id,
+        )
+
+    def list_trusted_maintenance_policy_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[TrustedMaintenancePolicyRecord, ...]:
+        normalized_repository = repository.strip().lower()
+        records = [
+            record
+            for record in self._list_models(
+                TrustedMaintenancePolicyRecord,
+                "launchplane_trusted_maintenance_policies",
+            )
+            if (not repository_id or record.repository_id == repository_id)
+            and (not repository_owner_id or record.repository_owner_id == repository_owner_id)
+            and (not normalized_repository or record.repository == normalized_repository)
+            and (not product or record.product == product)
+            and (not context or record.context == context)
+            and (not status or record.status == status)
+        ]
+        records.sort(
+            key=lambda record: (
+                record.policy_revision,
+                record.repository_id,
+                record.product,
+                record.context,
+                record.record_id,
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_trusted_maintenance_evidence_record(
+        self,
+        record: TrustedMaintenanceEvidenceRecord,
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_trusted_maintenance_evidence"
+        with self._product_authority_bundle_lock():
+            records = self._list_models_locked(
+                TrustedMaintenanceEvidenceRecord,
+                record_type,
+            )
+            plan = plan_trusted_maintenance_evidence_append(records=records, record=record)
+            if plan.status == "replayed":
+                return "replayed"
+            self._write_model_locked(record_type, record.evidence_id, record)
+            return "written"
+
+    def read_trusted_maintenance_evidence_record(
+        self,
+        evidence_id: str,
+    ) -> TrustedMaintenanceEvidenceRecord:
+        return self._read_model(
+            TrustedMaintenanceEvidenceRecord,
+            "launchplane_trusted_maintenance_evidence",
+            evidence_id,
+        )
+
+    def list_trusted_maintenance_evidence_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        evidence_id: str = "",
+        binding_sha256: str = "",
+        pull_request_number: int | None = None,
+        head_sha: str = "",
+        classification_digest: str = "",
+        policy_record_id: str = "",
+        policy_digest: str = "",
+        matched_actor_rule_id: str = "",
+        pr_author_github_id: int | None = None,
+        sender_github_id: int | None = None,
+        event_name: str = "",
+        event_action: str = "",
+        delivery_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[TrustedMaintenanceEvidenceRecord, ...]:
+        normalized_repository = repository.strip().lower()
+        records = [
+            record
+            for record in self._list_models(
+                TrustedMaintenanceEvidenceRecord,
+                "launchplane_trusted_maintenance_evidence",
+            )
+            if (not repository_id or record.binding.repository_id == repository_id)
+            and (
+                not repository_owner_id or record.binding.repository_owner_id == repository_owner_id
+            )
+            and (not normalized_repository or record.binding.repository == normalized_repository)
+            and (not product or record.binding.product == product)
+            and (not context or record.binding.context == context)
+            and (not evidence_id or record.evidence_id == evidence_id)
+            and (not binding_sha256 or record.binding.binding_sha256 == binding_sha256)
+            and (
+                pull_request_number is None
+                or record.binding.pull_request_number == pull_request_number
+            )
+            and (not head_sha or record.binding.head_sha == head_sha)
+            and (
+                not classification_digest
+                or record.binding.classification_digest == classification_digest
+            )
+            and (not policy_record_id or record.binding.policy_record_id == policy_record_id)
+            and (not policy_digest or record.binding.policy_digest == policy_digest)
+            and (
+                not matched_actor_rule_id
+                or record.binding.matched_actor_rule_id == matched_actor_rule_id
+            )
+            and (
+                pr_author_github_id is None
+                or record.binding.pr_author_github_id == pr_author_github_id
+            )
+            and (sender_github_id is None or record.binding.sender_github_id == sender_github_id)
+            and (not event_name or record.binding.event_name == event_name)
+            and (not event_action or record.binding.event_action == event_action)
+            and (not delivery_id or record.binding.delivery_id == delivery_id)
+        ]
+        records.sort(
+            key=lambda record: (
+                record.occurred_at,
+                record.evidence_id,
+            ),
+            reverse=True,
+        )
         if limit is not None:
             records = records[:limit]
         return tuple(records)

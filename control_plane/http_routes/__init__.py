@@ -63,6 +63,15 @@ from control_plane.http_routes.products import (
     require_product_profile_read_store,
 )
 from control_plane.http_routes.support import ReadRouteDependencies
+from control_plane.http_routes.tenant_admission import (
+    REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
+    TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE,
+    TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
+    TenantAdmissionReadRouteDependencies,
+    TenantAdmissionWriteRouteDependencies,
+    register_tenant_admission_read_routes,
+    register_tenant_admission_write_routes,
+)
 from control_plane.http_routes.topology import register_topology_read_routes
 from control_plane.http_routes.work_graph import (
     WorkGraphReadRouteDependencies,
@@ -81,7 +90,11 @@ __all__ = (
     "GenericWebWriteRouteHandlers",
     "ProductReadRouteDependencies",
     "PromotionEvidenceRequest",
+    "REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE",
+    "TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE",
     "ReadRouteDependencies",
+    "TenantAdmissionReadRouteDependencies",
+    "TenantAdmissionWriteRouteDependencies",
     "WorkGraphReadRouteDependencies",
     "accepted_evidence_response",
     "build_generic_web_write_route_handlers",
@@ -115,6 +128,9 @@ __all__ = (
     "register_product_profile_read_routes",
     "register_protected_artifact_read_routes",
     "register_runner_host_hygiene_read_routes",
+    "register_tenant_admission_read_routes",
+    "register_tenant_admission_write_routes",
+    "TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE",
     "register_topology_read_routes",
     "register_tracked_target_log_read_routes",
     "register_work_graph_issue_inbox_read_routes",
