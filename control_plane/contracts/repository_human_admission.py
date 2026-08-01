@@ -417,7 +417,7 @@ def build_repository_human_role_policy_record_id(
 
 
 def repository_human_role_policy_digest(record: RepositoryHumanRolePolicyRecord) -> str:
-    return _model_sha256(record, exclude={"role_policy_digest"})
+    return _model_sha256(record, exclude={"role_policy_digest", "status"})
 
 
 def tenant_technical_human_waiver_binding_sha256(

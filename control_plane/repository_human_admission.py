@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal, NamedTuple, cast
+from typing import Literal, NamedTuple, Protocol, cast
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.repository_human_admission import (
@@ -32,13 +33,203 @@ class RepositoryHumanRolePolicyError(ValueError):
     pass
 
 
+class RepositoryHumanRolePolicyConflictError(ValueError):
+    """Raised when repository human role-policy history is replayed differently or has conflicting authority."""
+
+
+class RepositoryHumanRolePolicySequenceError(ValueError):
+    """Raised when repository human role-policy revision sequence is invalid."""
+
+
 class TenantTechnicalHumanWaiverAuthorizationError(PermissionError):
     pass
+
+
+class TenantTechnicalHumanWaiverEventConflictError(ValueError):
+    """Raised when immutable tenant technical human waiver event history is replayed differently."""
 
 
 class TenantTechnicalHumanWaiverWriteResult(NamedTuple):
     record: TenantTechnicalHumanWaiverEventRecord
     path_result: TenantAdmissionPathResult
+
+
+class RepositoryHumanRolePolicyReadStore(Protocol):
+    def list_repository_human_role_policy_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RepositoryHumanRolePolicyRecord, ...]: ...
+
+
+class RepositoryHumanRolePolicyStore(RepositoryHumanRolePolicyReadStore, Protocol):
+    def write_repository_human_role_policy_record(
+        self,
+        record: RepositoryHumanRolePolicyRecord,
+    ) -> Literal["written", "replayed"]: ...
+
+    def read_repository_human_role_policy_record(
+        self,
+        record_id: str,
+    ) -> RepositoryHumanRolePolicyRecord: ...
+
+
+class TenantTechnicalHumanWaiverEventReadStore(Protocol):
+    def list_tenant_technical_human_waiver_event_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        waiver_id: str = "",
+        binding_sha256: str = "",
+        pull_request_number: int | None = None,
+        head_sha: str = "",
+        classification_digest: str = "",
+        role_policy_record_id: str = "",
+        role_policy_digest: str = "",
+        authz_policy_record_id: str = "",
+        authz_policy_digest: str = "",
+        action: str = "",
+        author_github_id: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[TenantTechnicalHumanWaiverEventRecord, ...]: ...
+
+
+class TenantTechnicalHumanWaiverEventStore(
+    TenantTechnicalHumanWaiverEventReadStore,
+    Protocol,
+):
+    def write_tenant_technical_human_waiver_event_record(
+        self,
+        record: TenantTechnicalHumanWaiverEventRecord,
+    ) -> Literal["written", "replayed"]: ...
+
+    def read_tenant_technical_human_waiver_event_record(
+        self,
+        event_id: str,
+    ) -> TenantTechnicalHumanWaiverEventRecord: ...
+
+
+RepositoryHumanRolePolicyAppendStatus = Literal["written", "replayed"]
+TenantTechnicalHumanWaiverEventAppendStatus = Literal["written", "replayed"]
+
+
+@dataclass(frozen=True)
+class RepositoryHumanRolePolicyAppendPlan:
+    status: RepositoryHumanRolePolicyAppendStatus
+    current_record: RepositoryHumanRolePolicyRecord | None
+    superseded_current_record: RepositoryHumanRolePolicyRecord | None = None
+
+
+@dataclass(frozen=True)
+class TenantTechnicalHumanWaiverEventAppendPlan:
+    status: TenantTechnicalHumanWaiverEventAppendStatus
+    existing_record: TenantTechnicalHumanWaiverEventRecord | None = None
+
+
+def plan_repository_human_role_policy_append(
+    *,
+    records: tuple[RepositoryHumanRolePolicyRecord, ...],
+    record: RepositoryHumanRolePolicyRecord,
+) -> RepositoryHumanRolePolicyAppendPlan:
+    matching_records = tuple(
+        existing for existing in records if _role_policy_same_stream(existing, record)
+    )
+    for existing in matching_records:
+        if not _role_policy_same_scope(existing, record):
+            raise RepositoryHumanRolePolicyConflictError(
+                "Repository human role-policy history contains records for the same stream with different scope."
+            )
+
+    if not matching_records:
+        if record.status != "active":
+            raise RepositoryHumanRolePolicySequenceError(
+                "First repository human role-policy record must be active."
+            )
+        if record.role_policy_revision != 1:
+            raise RepositoryHumanRolePolicySequenceError(
+                "First repository human role-policy record must have revision 1, "
+                f"got {record.role_policy_revision}."
+            )
+        if record.supersedes_record_id:
+            raise RepositoryHumanRolePolicySequenceError(
+                "First repository human role-policy record cannot set supersedes_record_id."
+            )
+        return RepositoryHumanRolePolicyAppendPlan(status="written", current_record=None)
+
+    current_record = _validate_repository_human_role_policy_history(matching_records)
+    same_revision_records = tuple(
+        existing
+        for existing in matching_records
+        if existing.role_policy_revision == record.role_policy_revision
+    )
+    if same_revision_records:
+        existing = same_revision_records[0]
+        if _role_policy_replay_matches(existing=existing, replay=record):
+            return RepositoryHumanRolePolicyAppendPlan(
+                status="replayed",
+                current_record=current_record,
+            )
+        raise RepositoryHumanRolePolicyConflictError(
+            "Repository human role-policy revision already exists with different payload."
+        )
+
+    if record.status != "active":
+        raise RepositoryHumanRolePolicySequenceError(
+            "New repository human role-policy revisions must be active."
+        )
+    expected_revision = current_record.role_policy_revision + 1
+    if record.role_policy_revision != expected_revision:
+        raise RepositoryHumanRolePolicySequenceError(
+            f"Next repository human role-policy revision must be {expected_revision}, got {record.role_policy_revision}."
+        )
+    if record.supersedes_record_id != current_record.record_id:
+        raise RepositoryHumanRolePolicySequenceError(
+            "Repository human role-policy supersedes_record_id must be "
+            f"'{current_record.record_id}', got '{record.supersedes_record_id}'."
+        )
+    superseded_current_record = RepositoryHumanRolePolicyRecord.model_validate(
+        current_record.model_dump(mode="json") | {"status": "superseded"}
+    )
+    return RepositoryHumanRolePolicyAppendPlan(
+        status="written",
+        current_record=current_record,
+        superseded_current_record=superseded_current_record,
+    )
+
+
+def plan_tenant_technical_human_waiver_event_append(
+    *,
+    records: tuple[TenantTechnicalHumanWaiverEventRecord, ...],
+    record: TenantTechnicalHumanWaiverEventRecord,
+) -> TenantTechnicalHumanWaiverEventAppendPlan:
+    same_id_records = tuple(
+        existing for existing in records if existing.event_id == record.event_id
+    )
+    if len(same_id_records) > 1:
+        raise TenantTechnicalHumanWaiverEventConflictError(
+            "Tenant technical human waiver event history has multiple records with the same event_id."
+        )
+    if same_id_records:
+        existing = same_id_records[0]
+        if existing == record:
+            return TenantTechnicalHumanWaiverEventAppendPlan(
+                status="replayed",
+                existing_record=existing,
+            )
+        raise TenantTechnicalHumanWaiverEventConflictError(
+            "Tenant technical human waiver event already exists with different payload."
+        )
+    return TenantTechnicalHumanWaiverEventAppendPlan(status="written")
 
 
 def repository_owner_role_policy_provenance(
@@ -496,6 +687,77 @@ def _role_policy_matches_candidate(
         and role_policy_record.product == candidate.product
         and role_policy_record.context == candidate.context
     )
+
+
+def _role_policy_same_stream(
+    left: RepositoryHumanRolePolicyRecord,
+    right: RepositoryHumanRolePolicyRecord,
+) -> bool:
+    return (
+        left.repository_id == right.repository_id
+        and left.product == right.product
+        and left.context == right.context
+    )
+
+
+def _role_policy_same_scope(
+    left: RepositoryHumanRolePolicyRecord,
+    right: RepositoryHumanRolePolicyRecord,
+) -> bool:
+    return (
+        _role_policy_same_stream(left, right)
+        and left.repository_owner_id == right.repository_owner_id
+        and left.repository == right.repository
+    )
+
+
+def _role_policy_replay_matches(
+    *,
+    existing: RepositoryHumanRolePolicyRecord,
+    replay: RepositoryHumanRolePolicyRecord,
+) -> bool:
+    if (
+        existing.record_id != replay.record_id
+        or existing.role_policy_digest != replay.role_policy_digest
+    ):
+        return False
+    return existing.status == replay.status or (
+        existing.status == "superseded" and replay.status == "active"
+    )
+
+
+def _validate_repository_human_role_policy_history(
+    records: tuple[RepositoryHumanRolePolicyRecord, ...],
+) -> RepositoryHumanRolePolicyRecord:
+    ordered_records = tuple(sorted(records, key=lambda item: item.role_policy_revision))
+    revisions = tuple(record.role_policy_revision for record in ordered_records)
+    if len(set(revisions)) != len(revisions):
+        raise RepositoryHumanRolePolicyConflictError(
+            "Repository human role-policy history has duplicate revisions."
+        )
+    for expected_revision, existing in enumerate(ordered_records, start=1):
+        if existing.role_policy_revision != expected_revision:
+            raise RepositoryHumanRolePolicySequenceError(
+                "Repository human role-policy history must be contiguous from revision 1."
+            )
+        expected_supersedes = (
+            None if expected_revision == 1 else ordered_records[expected_revision - 2].record_id
+        )
+        if existing.supersedes_record_id != expected_supersedes:
+            raise RepositoryHumanRolePolicySequenceError(
+                "Repository human role-policy history has an invalid supersedes_record_id link."
+            )
+    active_records = tuple(record for record in ordered_records if record.status == "active")
+    if len(active_records) != 1:
+        raise RepositoryHumanRolePolicyConflictError(
+            "Repository human role-policy history must contain exactly one active record."
+        )
+    current_record = ordered_records[-1]
+    if active_records[0].record_id != current_record.record_id:
+        raise RepositoryHumanRolePolicyConflictError(
+            "Repository human role-policy active record must be the highest revision."
+        )
+    return current_record
 
 
 def _classification_matches_candidate(

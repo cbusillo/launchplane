@@ -1696,8 +1696,17 @@ run` is the foreground loop intended for an external process supervisor, and
 - A delegation is valid only while its current role-policy revision is active and effective, its grantor remains a primary or backup manager, and its start, expiration, and revocation timestamps permit it. Silence or elapsed review time never creates approval authority.
 - Technical human waiver events are append-only create/revoke evidence. Creation requires a GitHub human who is both a current repository owner in the exact role policy and allowed by exactly one managed `tenant_technical_human_waiver.write` authorization rule.
 - Waiver evidence binds repository, product, context, pull request, exact head SHA, classification revision/digest, role-policy revision/digest, active authorization-policy revision/digest, human numeric identity, source event, reason, occurrence time, and optional expiration. New commits or any bound policy/classification drift make prior evidence stale; revocation wins a same-timestamp tie.
+- Filesystem storage can rehearse role-policy revision history and technical
+  human waiver event history locally. It is not shared runtime authority:
+  role-policy replacements are staged through the same recoverable filesystem
+  machinery as product authority bundles, and waiver events remain exact
+  append-only records, but production authority still requires the deferred
+  PostgreSQL storage and service write surfaces.
 - Manager-preview authorization can carry the same role-policy provenance for primary, backup, or delegated managers. Legacy approval records remain readable, but they cannot satisfy an evaluation once a repository role policy is explicitly enforced.
-- These domain contracts intentionally precede their PostgreSQL storage and HTTP write surfaces. Until those follow-up pieces are deployed and rollout supplies a role policy, existing manager-preview behavior remains unchanged.
+- These domain contracts intentionally precede their PostgreSQL storage and HTTP
+  write surfaces. Until those follow-up pieces are deployed and rollout supplies
+  a shared-authority role policy, existing manager-preview behavior remains
+  unchanged.
 
 ## Runtime Key-Safety Policy Record
 
