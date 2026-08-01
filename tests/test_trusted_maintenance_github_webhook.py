@@ -21,7 +21,8 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.trusted_maintenance_github_webhook import (
     TRUSTED_MAINTENANCE_GITHUB_WEBHOOK_SOURCE,
     TrustedMaintenanceGitHubWebhookDependencies,
-    handle_trusted_maintenance_github_webhook,
+    TrustedMaintenanceGitHubWebhookResult,
+    handle_trusted_maintenance_github_webhook as _handle_trusted_maintenance_github_webhook,
 )
 
 
@@ -32,6 +33,27 @@ REPOSITORY_OWNER_ID = "2001"
 REPOSITORY = "example/example-product"
 PULL_REQUEST_NUMBER = 17
 HEAD_SHA = "a" * 40
+SIGNED_PAYLOAD_SHA256 = "d" * 64
+
+
+def handle_trusted_maintenance_github_webhook(
+    *,
+    event_name: str,
+    delivery_id: str,
+    payload: dict[str, object],
+    record_store: object,
+    control_plane_root: Path,
+    dependencies: TrustedMaintenanceGitHubWebhookDependencies,
+) -> TrustedMaintenanceGitHubWebhookResult:
+    return _handle_trusted_maintenance_github_webhook(
+        event_name=event_name,
+        delivery_id=delivery_id,
+        signed_payload_sha256=SIGNED_PAYLOAD_SHA256,
+        payload=payload,
+        record_store=record_store,
+        control_plane_root=control_plane_root,
+        dependencies=dependencies,
+    )
 
 
 class _TestPostgresRecordStore(PostgresRecordStore):
@@ -117,7 +139,7 @@ class TrustedMaintenanceGitHubWebhookTests(unittest.TestCase):
         self.assertEqual(wrong_event_action.reason, "rule_not_matched")
         self.assertEqual(api.calls, [])
 
-    def test_capture_uses_refetched_current_facts_and_replays_exact_delivery(self) -> None:
+    def test_capture_uses_refetched_facts_and_replays_changed_delivery_header(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             store = _seeded_store(root / "store", policy=_policy(evidence_ttl_seconds=60))
@@ -137,7 +159,7 @@ class TrustedMaintenanceGitHubWebhookTests(unittest.TestCase):
             )
             replay = handle_trusted_maintenance_github_webhook(
                 event_name="pull_request",
-                delivery_id="delivery-capture",
+                delivery_id="changed-unsigned-delivery-header",
                 payload=payload,
                 record_store=store,
                 control_plane_root=root,
@@ -156,6 +178,8 @@ class TrustedMaintenanceGitHubWebhookTests(unittest.TestCase):
         self.assertEqual(len(evidence), 1)
         binding = evidence[0].binding
         self.assertEqual(binding.source, TRUSTED_MAINTENANCE_GITHUB_WEBHOOK_SOURCE)
+        self.assertEqual(binding.delivery_id, "delivery-capture")
+        self.assertEqual(binding.signed_payload_sha256, SIGNED_PAYLOAD_SHA256)
         self.assertEqual(binding.pr_author_login, "current-automation")
         self.assertEqual(binding.sender_login, "signed-sender")
         self.assertEqual(binding.pr_author_github_id, 301)

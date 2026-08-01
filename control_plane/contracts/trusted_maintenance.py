@@ -181,6 +181,7 @@ class TrustedMaintenanceEvidenceBinding(BaseModel):
     event_action: str
     source: str
     delivery_id: str
+    signed_payload_sha256: str
     binding_sha256: str = ""
 
     @model_validator(mode="after")
@@ -233,6 +234,10 @@ class TrustedMaintenanceEvidenceBinding(BaseModel):
         self.event_action = _required_token(self.event_action, "event_action")
         self.source = _required_token(self.source, "source")
         self.delivery_id = _required_token(self.delivery_id, "delivery_id")
+        self.signed_payload_sha256 = _normalize_sha256(
+            self.signed_payload_sha256,
+            "signed_payload_sha256",
+        )
         computed_binding_sha256 = trusted_maintenance_evidence_binding_sha256(self)
         if self.binding_sha256:
             self.binding_sha256 = _normalize_sha256(self.binding_sha256, "binding_sha256")
@@ -272,7 +277,7 @@ class TrustedMaintenanceEvidenceRecord(BaseModel):
                 raise ValueError("trusted-maintenance evidence expires_at must follow occurred_at")
         computed_evidence_id = build_trusted_maintenance_evidence_id(
             source=self.binding.source,
-            delivery_id=self.binding.delivery_id,
+            signed_payload_sha256=self.binding.signed_payload_sha256,
         )
         if self.evidence_id:
             self.evidence_id = _required_token(self.evidence_id, "evidence_id")
@@ -340,15 +345,27 @@ def trusted_maintenance_evidence_binding_sha256(
 ) -> str:
     return _model_sha256(
         binding,
-        exclude={"binding_sha256", "pr_author_login", "sender_login"},
+        exclude={
+            "binding_sha256",
+            "delivery_id",
+            "pr_author_login",
+            "sender_login",
+        },
     )
 
 
-def build_trusted_maintenance_evidence_id(*, source: str, delivery_id: str) -> str:
+def build_trusted_maintenance_evidence_id(
+    *,
+    source: str,
+    signed_payload_sha256: str,
+) -> str:
     identity_digest = _canonical_sha256(
         {
             "source": _required_token(source, "source"),
-            "delivery_id": _required_token(delivery_id, "delivery_id"),
+            "signed_payload_sha256": _normalize_sha256(
+                signed_payload_sha256,
+                "signed_payload_sha256",
+            ),
         }
     )
     return f"trusted-maintenance-evidence-{identity_digest[:32]}"

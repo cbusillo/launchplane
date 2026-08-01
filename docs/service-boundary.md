@@ -610,6 +610,7 @@ The cookie-capable mutation inventory is intentionally limited to:
 - `POST /v1/merge-train/policies/import`
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
 - `POST /v1/tenant-admission/technical-human-waivers/apply`
+- `POST /v1/tenant-admission/trusted-maintenance-policies/apply`
 
 Every other authenticated mutation route intentionally rejects session-cookie
 authentication and continues to require its existing GitHub Actions OIDC,
@@ -3028,6 +3029,8 @@ or blanket bot status.
   tip, inserts the candidate, completes the stored response, and commits once.
   Exact same-key/same-request retries replay the stored response; same-key
   changed requests return `idempotency_key_reused`; stale CAS returns conflict.
+  The route is included in the shared exact-length JSON body guard, so the
+  64 KiB limit is enforced before FastAPI/Pydantic parsing.
 
 Trusted-maintenance capture now enters from both existing signed webhook
 surfaces, but unified tenant-admission status/controller projection,

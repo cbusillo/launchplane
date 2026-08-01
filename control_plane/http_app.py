@@ -97,6 +97,7 @@ from control_plane.http_routes import (
     REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
     TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE,
     TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
+    TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE,
     TenantAdmissionReadRouteDependencies,
     TenantAdmissionWriteRouteDependencies,
     register_tenant_admission_read_routes,
@@ -714,6 +715,7 @@ _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES = 64 * 1024
 _REPOSITORY_HUMAN_ROLE_POLICY_MAX_BODY_BYTES = 64 * 1024
 _TENANT_TECHNICAL_HUMAN_WAIVER_MAX_BODY_BYTES = 64 * 1024
+_TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE = "/v1/product-profiles/prelaunch-rebuild/apply"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
@@ -778,6 +780,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE: (
         "Tenant technical human waiver",
         _TENANT_TECHNICAL_HUMAN_WAIVER_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE: (
+        "Trusted-maintenance policy",
+        _TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES,
         True,
         True,
     ),

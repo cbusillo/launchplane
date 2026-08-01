@@ -401,6 +401,7 @@ def _trusted_maintenance_evidence_record(
     event_name: str = "pull_request",
     event_action: str = "synchronize",
     delivery_id: str = "delivery-1001",
+    signed_payload_sha256: str = "d" * 64,
     occurred_at: str = "2026-07-31T10:15:00Z",
     expires_at: str = "",
 ) -> TrustedMaintenanceEvidenceRecord:
@@ -432,6 +433,7 @@ def _trusted_maintenance_evidence_record(
         event_action=event_action,
         source="signed-event-fixture",
         delivery_id=delivery_id,
+        signed_payload_sha256=signed_payload_sha256,
     )
     event_payload: dict[str, object] = {
         "binding": binding,
@@ -1255,6 +1257,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 product="other-product",
                 context="other-product",
                 delivery_id="delivery-other",
+                signed_payload_sha256="e" * 64,
             )
 
             first_write = store.write_trusted_maintenance_evidence_record(evidence)

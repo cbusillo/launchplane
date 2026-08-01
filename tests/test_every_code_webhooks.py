@@ -704,6 +704,9 @@ class EveryCodeGitHubWebhookRequestTests(unittest.TestCase):
         trusted_handler.assert_called_once_with(
             event_name="pull_request",
             delivery_id="delivery-trusted-every-code",
+            signed_payload_sha256=hashlib.sha256(
+                json.dumps(webhook_payload).encode("utf-8")
+            ).hexdigest(),
             payload=webhook_payload,
             record_store=ANY,
             control_plane_root=Path(temporary_directory_name),

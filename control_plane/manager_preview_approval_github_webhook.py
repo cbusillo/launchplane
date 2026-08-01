@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import os
@@ -190,6 +191,7 @@ def handle_manager_preview_approval_github_webhook_request(
             trusted_maintenance_result = handle_trusted_maintenance_github_webhook(
                 event_name=normalized_event_name,
                 delivery_id=normalized_delivery_id,
+                signed_payload_sha256=hashlib.sha256(payload_bytes).hexdigest(),
                 payload=payload,
                 record_store=record_store,
                 control_plane_root=control_plane_root,

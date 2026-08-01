@@ -71,6 +71,7 @@ def handle_trusted_maintenance_github_webhook(
     *,
     event_name: str,
     delivery_id: str,
+    signed_payload_sha256: str,
     payload: dict[str, object],
     record_store: object,
     control_plane_root: Path,
@@ -80,15 +81,19 @@ def handle_trusted_maintenance_github_webhook(
 
     normalized_event_name = event_name.strip().lower()
     normalized_delivery_id = delivery_id.strip()
+    normalized_signed_payload_sha256 = signed_payload_sha256.strip().lower()
     if normalized_event_name != "pull_request":
         return _skipped("unsupported_event")
     if not normalized_delivery_id:
         return _skipped("missing_delivery")
+    if not _valid_sha256(normalized_signed_payload_sha256):
+        return _skipped("missing_signed_payload_digest")
 
     signed = _signed_pull_request_delivery(
         payload=payload,
         event_name=normalized_event_name,
         delivery_id=normalized_delivery_id,
+        signed_payload_sha256=normalized_signed_payload_sha256,
     )
     if signed is None:
         return _skipped("malformed_payload")
@@ -164,6 +169,7 @@ def handle_trusted_maintenance_github_webhook(
         event_action=signed.action,
         source=TRUSTED_MAINTENANCE_GITHUB_WEBHOOK_SOURCE,
         delivery_id=signed.delivery_id,
+        signed_payload_sha256=signed.signed_payload_sha256,
     )
     expected_authority = TrustedMaintenanceExpectedAuthority(
         classification_record_id=authority.classification.record_id,
@@ -210,6 +216,7 @@ class _SignedPullRequestDelivery:
     event_name: str
     action: str
     delivery_id: str
+    signed_payload_sha256: str
     repository_id: str
     repository_owner_id: str
     repository: str
@@ -244,6 +251,7 @@ def _signed_pull_request_delivery(
     payload: dict[str, object],
     event_name: str,
     delivery_id: str,
+    signed_payload_sha256: str,
 ) -> _SignedPullRequestDelivery | None:
     repository_payload = _mapping(payload, "repository")
     owner_payload = _mapping(repository_payload, "owner")
@@ -281,6 +289,7 @@ def _signed_pull_request_delivery(
         event_name=event_name,
         action=action,
         delivery_id=delivery_id,
+        signed_payload_sha256=signed_payload_sha256,
         repository_id=repository_id,
         repository_owner_id=repository_owner_id,
         repository=repository,
@@ -478,6 +487,10 @@ def _valid_repository(repository: str) -> bool:
 
 def _valid_git_sha(value: str) -> bool:
     return len(value) in {40, 64} and all(character in "0123456789abcdef" for character in value)
+
+
+def _valid_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
 def _skipped(reason: str) -> TrustedMaintenanceGitHubWebhookResult:

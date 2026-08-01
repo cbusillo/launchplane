@@ -1783,14 +1783,18 @@ run` is the foreground loop intended for an external process supervisor, and
   record/revision/digest, matched actor rule ID, PR author numeric ID/type,
   signed-event sender numeric ID/type, same-repository head numeric IDs, event
   name/action, delivery/source ID, DB/server `occurred_at=recorded_at`, and
-  optional expiration derived only from policy TTL. Request-provided times,
-  authors, Launchplane authz-policy IDs, and login strings are outside this
-  evidence authority.
-- Evidence identity is the normalized source/delivery pair. Reprocessing the
-  same delivery with the same trust-bearing binding replays the first persisted
-  record even when audit-only logins or the later processing timestamp differ;
-  reusing that source/delivery identity with a different repository, head,
-  classification, policy, actor, sender, or event binding is a conflict.
+  source, signed request-body SHA-256 digest, audit-only delivery ID,
+  DB/server `occurred_at=recorded_at`, and optional expiration derived only from
+  policy TTL. Request-provided times, authors, Launchplane authz-policy IDs, and
+  login strings are outside this evidence authority.
+- Evidence identity is the normalized source plus the SHA-256 digest of the
+  already signature-verified request body. Reprocessing the same signed body
+  with the same trust-bearing binding replays the first persisted record even
+  when the unsigned delivery header, audit-only logins, or later processing
+  timestamp differ. Reusing that signed-body identity with a different
+  repository, head, classification, policy, actor, sender, or event binding is
+  a conflict. Delivery ID remains required audit metadata but is not identity or
+  trust-bearing binding authority.
 - Policy dry-run/apply accepts a strict envelope containing the candidate
   trusted-maintenance policy record plus the caller's expected current policy
   record ID and digest, both empty only for the first revision. `GET
@@ -1834,10 +1838,11 @@ run` is the foreground loop intended for an external process supervisor, and
   DB-authoritative repository classification product/context, re-fetches the
   current PR, and persists only re-fetched current facts. The base repository
   numeric ID, owner, and full name must exactly match the signed tuple; the PR
-  must still be open; the re-fetched PR author numeric ID/type/login must match
-  the signed author identity; the re-fetched head SHA must equal the signed head
-  SHA; and the head repository numeric ID/owner/full name must exactly equal the
-  base repository, preserving same-repository-only v1 evidence. Missing,
+  must still be open; the re-fetched PR author numeric ID and type must match the
+  signed author identity, while the current login is stored for audit only; the
+  re-fetched head SHA must equal the signed head SHA; and the head repository
+  numeric ID/owner/full name must exactly equal the base repository, preserving
+  same-repository-only v1 evidence. Missing,
   indeterminate, forked, stale, closed, non-Bot, login-only, or mismatched facts
   fail closed with no evidence.
 - PostgreSQL capture uses one transaction and one database/server timestamp. It
@@ -1847,8 +1852,8 @@ run` is the foreground loop intended for an external process supervisor, and
   event, and action rule, then appends or deterministically replays evidence in
   that same transaction. Policy or classification drift never produces success.
   The evidence source is the fixed canonical generic GitHub webhook source;
-  source/delivery replay is deterministic, while changed binding conflicts are
-  rejected.
+  signed-body replay is deterministic even if the unsigned delivery header
+  changes, while changed trust-bearing binding conflicts are rejected.
 - Invalid signatures, missing deliveries, and malformed payloads stop at the
   existing ingress boundary and never call the trusted-maintenance handler.
   Unsupported, nonmatching, non-Bot, fork, closed, and stale cases return

@@ -16,6 +16,7 @@ from control_plane.contracts.trusted_maintenance import (
     TrustedMaintenanceEvidenceBinding,
     TrustedMaintenanceEvidenceRecord,
     TrustedMaintenancePolicyRecord,
+    _normalize_sha256,
     _normalize_utc_timestamp,
     _parse_utc_timestamp,
     _required_decimal_id,
@@ -269,6 +270,7 @@ class TrustedMaintenanceGitHubEventFacts(BaseModel):
     event_action: str
     source: str
     delivery_id: str
+    signed_payload_sha256: str
 
     @model_validator(mode="after")
     def _validate_event_facts(self) -> "TrustedMaintenanceGitHubEventFacts":
@@ -291,6 +293,10 @@ class TrustedMaintenanceGitHubEventFacts(BaseModel):
         self.event_action = _required_token(self.event_action, "event_action")
         self.source = _required_token(self.source, "source")
         self.delivery_id = _required_token(self.delivery_id, "delivery_id")
+        self.signed_payload_sha256 = _normalize_sha256(
+            self.signed_payload_sha256,
+            "signed_payload_sha256",
+        )
         return self
 
 
@@ -736,6 +742,7 @@ def capture_trusted_maintenance_evidence(
         event_action=event_facts.event_action,
         source=event_facts.source,
         delivery_id=event_facts.delivery_id,
+        signed_payload_sha256=event_facts.signed_payload_sha256,
     )
     record = TrustedMaintenanceEvidenceRecord(
         binding=binding,

@@ -8755,16 +8755,14 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         session: Any,
         *,
-        source: str,
-        delivery_id: str,
+        evidence_id: str,
     ) -> None:
         if self.database_url.startswith("sqlite"):
             return
         lock_parts = (
             "launchplane",
             "trusted-maintenance-evidence",
-            source,
-            delivery_id,
+            evidence_id,
         )
         session.execute(
             text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
@@ -8775,14 +8773,12 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         *,
         session: Any,
-        source: str,
-        delivery_id: str,
+        evidence_id: str,
     ) -> tuple[LaunchplaneTrustedMaintenanceEvidenceRow, ...]:
         statement = (
             select(LaunchplaneTrustedMaintenanceEvidenceRow)
             .where(
-                LaunchplaneTrustedMaintenanceEvidenceRow.source == source,
-                LaunchplaneTrustedMaintenanceEvidenceRow.delivery_id == delivery_id,
+                LaunchplaneTrustedMaintenanceEvidenceRow.evidence_id == evidence_id,
             )
             .order_by(
                 LaunchplaneTrustedMaintenanceEvidenceRow.occurred_at.asc(),
@@ -9331,13 +9327,11 @@ class PostgresRecordStore(HumanSessionStore):
 
             self._lock_trusted_maintenance_evidence_identity(
                 session,
-                source=event_facts.source,
-                delivery_id=event_facts.delivery_id,
+                evidence_id=provisional.record.evidence_id,
             )
             evidence_rows = self._locked_trusted_maintenance_evidence_identity_rows(
                 session=session,
-                source=event_facts.source,
-                delivery_id=event_facts.delivery_id,
+                evidence_id=provisional.record.evidence_id,
             )
             evidence_records = tuple(
                 self._read_payload(
@@ -9367,13 +9361,11 @@ class PostgresRecordStore(HumanSessionStore):
             self._begin_serialized_write(session)
             self._lock_trusted_maintenance_evidence_identity(
                 session,
-                source=event_facts.source,
-                delivery_id=event_facts.delivery_id,
+                evidence_id=provisional.record.evidence_id,
             )
             evidence_rows = self._locked_trusted_maintenance_evidence_identity_rows(
                 session=session,
-                source=event_facts.source,
-                delivery_id=event_facts.delivery_id,
+                evidence_id=provisional.record.evidence_id,
             )
             evidence_records = tuple(
                 self._read_payload(

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 import re
@@ -436,6 +437,7 @@ def handle_every_code_github_webhook_request(
 
     normalized_delivery_id = delivery_id.strip()
     normalized_event_name = event_name.strip()
+    signed_payload_sha256 = hashlib.sha256(body_bytes).hexdigest()
     payload = _decode_json_request_body_or_none(body_bytes)
     if payload is None:
         return _every_code_github_webhook_invalid_payload_response(trace_id)
@@ -443,6 +445,7 @@ def handle_every_code_github_webhook_request(
         trace_id=trace_id,
         normalized_delivery_id=normalized_delivery_id,
         normalized_event_name=normalized_event_name,
+        signed_payload_sha256=signed_payload_sha256,
         payload=payload,
         record_store=record_store,
         control_plane_root_path=control_plane_root_path,
@@ -481,6 +484,7 @@ def _handle_decoded_every_code_github_webhook_request(
     trace_id: str,
     normalized_delivery_id: str,
     normalized_event_name: str,
+    signed_payload_sha256: str,
     payload: dict[str, object],
     record_store: object,
     control_plane_root_path: Path,
@@ -514,6 +518,7 @@ def _handle_decoded_every_code_github_webhook_request(
         trusted_maintenance_result = handle_trusted_maintenance_github_webhook(
             event_name=normalized_event_name,
             delivery_id=normalized_delivery_id,
+            signed_payload_sha256=signed_payload_sha256,
             payload=payload,
             record_store=record_store,
             control_plane_root=control_plane_root_path,

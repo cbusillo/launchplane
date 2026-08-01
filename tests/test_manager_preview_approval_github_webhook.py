@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import unittest
@@ -294,6 +295,7 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         store = _Store()
         github = _GitHubApi()
         payload = _pull_request_payload(action="synchronize")
+        body = json.dumps(payload).encode()
         with patch(
             "control_plane.manager_preview_approval_github_webhook."
             "handle_trusted_maintenance_github_webhook",
@@ -303,7 +305,7 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
             ),
         ) as trusted_handler:
             status_code, response = handle_manager_preview_approval_github_webhook_request(
-                json.dumps(payload).encode(),
+                body,
                 "pull_request",
                 "delivery-trusted-preview",
                 "sha256=test",
@@ -318,6 +320,7 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         trusted_handler.assert_called_once_with(
             event_name="pull_request",
             delivery_id="delivery-trusted-preview",
+            signed_payload_sha256=hashlib.sha256(body).hexdigest(),
             payload=payload,
             record_store=store,
             control_plane_root=Path("/tmp/launchplane"),
