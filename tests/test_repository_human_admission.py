@@ -9,17 +9,21 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.repository_human_admission import (
     TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,
     RepositoryHumanManagerDelegation,
+    RepositoryHumanRolePolicyStatus,
     RepositoryHumanRolePolicyRecord,
     TenantTechnicalHumanWaiverAction,
+    repository_human_role_policy_digest,
 )
 from control_plane.contracts.tenant_merge_eligibility import (
     TenantMergeCandidate,
     TenantRepositoryClassificationRecord,
 )
 from control_plane.repository_human_admission import (
+    RepositoryHumanRolePolicyConflictError,
     TenantTechnicalHumanWaiverAuthorizationError,
     capture_tenant_technical_human_waiver_event,
     manager_role_policy_provenance,
+    plan_repository_human_role_policy_append,
     technical_human_waiver_path_result,
 )
 from control_plane.service_auth import (
@@ -43,6 +47,74 @@ EVALUATED_AT = "2026-07-31T12:05:00Z"
 
 
 class RepositoryHumanAdmissionTests(unittest.TestCase):
+    def test_role_policy_digest_ignores_lifecycle_status(self) -> None:
+        active = _role_policy(repository_owner_ids=(301,))
+        superseded = _role_policy(
+            repository_owner_ids=(301,),
+            status="superseded",
+        )
+
+        self.assertEqual(active.record_id, superseded.record_id)
+        self.assertEqual(active.role_policy_digest, superseded.role_policy_digest)
+        self.assertEqual(
+            repository_human_role_policy_digest(superseded),
+            active.role_policy_digest,
+        )
+
+    def test_role_policy_append_plan_supersedes_current_without_digest_churn(
+        self,
+    ) -> None:
+        revision_1 = _role_policy(repository_owner_ids=(301,))
+        revision_2 = _role_policy(
+            repository_owner_ids=(302,),
+            revision=2,
+            supersedes_record_id=revision_1.record_id,
+        )
+
+        plan = plan_repository_human_role_policy_append(
+            records=(revision_1,),
+            record=revision_2,
+        )
+
+        self.assertEqual(plan.status, "written")
+        self.assertEqual(plan.current_record, revision_1)
+        self.assertIsNotNone(plan.superseded_current_record)
+        superseded_current = plan.superseded_current_record
+        assert superseded_current is not None
+        self.assertEqual(superseded_current.status, "superseded")
+        self.assertEqual(superseded_current.record_id, revision_1.record_id)
+        self.assertEqual(
+            superseded_current.role_policy_digest,
+            revision_1.role_policy_digest,
+        )
+
+        replay = plan_repository_human_role_policy_append(
+            records=(superseded_current, revision_2),
+            record=revision_2,
+        )
+        self.assertEqual(replay.status, "replayed")
+
+        historical_replay = plan_repository_human_role_policy_append(
+            records=(superseded_current, revision_2),
+            record=revision_1,
+        )
+        self.assertEqual(historical_replay.status, "replayed")
+
+        with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+            plan_repository_human_role_policy_append(
+                records=(superseded_current, revision_2),
+                record=_role_policy(
+                    repository_owner_ids=(301,),
+                    reason="different historical payload",
+                ),
+            )
+
+        with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+            plan_repository_human_role_policy_append(
+                records=(revision_1,),
+                record=revision_1.model_copy(update={"status": "superseded"}),
+            )
+
     def test_owner_waiver_captures_exact_managed_authz_and_satisfies_path(self) -> None:
         role_policy = _role_policy(repository_owner_ids=(301,))
         authz_policy = _authz_policy_record(github_ids=(301,))
@@ -449,8 +521,11 @@ def _role_policy(
     manager_primary_ids: tuple[int, ...] = (501,),
     manager_backup_ids: tuple[int, ...] = (),
     manager_delegations: tuple[RepositoryHumanManagerDelegation, ...] = (),
+    status: RepositoryHumanRolePolicyStatus = "active",
     revision: int = 1,
     effective_at: str = "2026-07-31T11:00:00Z",
+    supersedes_record_id: str | None = None,
+    reason: str = "test role policy",
 ) -> RepositoryHumanRolePolicyRecord:
     return RepositoryHumanRolePolicyRecord(
         repository_id=REPOSITORY_ID,
@@ -458,6 +533,7 @@ def _role_policy(
         repository=REPOSITORY,
         product=PRODUCT,
         context=CONTEXT,
+        status=status,
         role_policy_revision=revision,
         repository_owner_github_ids=repository_owner_ids,
         manager_primary_github_ids=manager_primary_ids,
@@ -465,7 +541,8 @@ def _role_policy(
         manager_delegations=manager_delegations,
         effective_at=effective_at,
         source="test:role-policy",
-        reason="test role policy",
+        reason=reason,
+        supersedes_record_id=supersedes_record_id,
     )
 
 
