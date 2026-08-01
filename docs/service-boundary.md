@@ -2891,7 +2891,7 @@ should prefer the thin `prod-promotion-run` path.
   Apply mode requires JSON with one exact bounded `Content-Length` (maximum 64 KiB), a non-empty `Idempotency-Key` header, and a `PostgresRecordStore` using the `postgresql` dialect (returns HTTP 503 `database_storage_required` for filesystem, SQLite-backed rehearsal stores, or unsupported stores). Launchplane reserves durable idempotency, locks the repository classification stream, validates CAS, appends the immutable revision, and completes the stored response in one PostgreSQL transaction. Exact same-key, same-payload retries replay the completed response; a different key revalidates current state and cannot replay an already-applied revision.
   Validation uses CAS (compare-and-swap): first revision must be revision 1 with no `supersedes_record_id` and empty `expected_current_record_id`. Subsequent revisions must increment revision by 1, set `supersedes_record_id` to the active current record ID, and match `expected_current_record_id`. Mismatches fail closed with HTTP 409 conflict, and sequence gaps fail closed with HTTP 400.
   Dry-run mode performs full CAS/sequence validation without persisting changes and reports `would_apply` or `would_replay`.
-  Pure tenant merge eligibility evaluation uses this DB authority without heuristics, PR label fallbacks, or wildcard matching. Repositories classified as `engineering` take the normal engineering fast path. Repositories classified as `tenant_ui` default to requiring exact manager preview approval (or optional fast-path waiver/maintenance evidence bound to the exact head SHA and classification digest).
+  Pure tenant merge eligibility evaluation uses this DB authority without heuristics, PR label fallbacks, or wildcard matching. Repositories classified as `engineering` take the normal engineering fast path. Repositories classified as `tenant_ui` require one satisfied exact-head path from manager preview approval, technical human waiver, or trusted-maintenance evidence.
   This pure evaluator remains internal and separate from scheduler merge train admission (`merge_train_admission`).
 
 `GET /v1/work-graph/tenant-admission/repository-human-role-policy` and
@@ -3032,14 +3032,39 @@ or blanket bot status.
   The route is included in the shared exact-length JSON body guard, so the
   64 KiB limit is enforced before FastAPI/Pydantic parsing.
 
-Trusted-maintenance capture now enters from both existing signed webhook
-surfaces, but unified tenant-admission status/controller projection,
-merge-train wiring, branch protection and rollout behavior, UI, provider
-mutations, checked-in real repository or actor policy values, and changed-file,
-name, branch, title, or label heuristics remain deferred. Repositories without
-active trusted-maintenance authority do not incur GitHub re-fetches or new
-failures, so existing manager-preview and Every Code behavior remains unchanged
-until rollout deliberately supplies shared authority records.
+`GET /v1/work-graph/tenant-admission/status` exposes the public-safe unified
+tenant-admission read model. The query supplies the complete candidate binding:
+product, context, numeric repository ID, numeric repository-owner ID,
+`OWNER/REPO`, pull-request number, and exact head SHA. The route requires
+`tenant_admission.read` authorization for the submitted product/context and a
+context-scoped authorization target. It recomputes from the current DB-backed
+classification, role policy, authorization policy, manager-preview lifecycle,
+waiver events, maintenance policy, and maintenance evidence; it does not trust
+GitHub commit status as decision authority. Engineering returns the normal-flow
+category. Tenant UI returns `pending`, `manager-approved`, `technical-waived`,
+`maintenance-admitted`, `stale`, `denied`, or `unavailable` and exposes no human
+membership, private policy, credential, or provider-topology detail.
+
+`POST /v1/tenant-admission/status/reconcile` accepts a strict schema-v1 envelope
+containing that candidate. It is bearer-only, rejects terminal-agent identities,
+requires `tenant_admission.reconcile` authorization for the candidate
+product/context, and is covered by the exact-length JSON body guard at 64 KiB.
+Before evaluation it resolves the managed GitHub credential and re-fetches the
+PR, requiring the PR to remain open and its numeric base repository, numeric
+owner, full name, and head SHA to equal the submitted candidate. Drift returns
+HTTP 409; indeterminate GitHub facts or delivery return retryable HTTP 503.
+Launchplane then recomputes the read model and idempotently writes the classic
+`tenant-admission` status to the exact head. Matching state, description, and
+target URL replay without another write. A provider failure or mismatched write
+response never returns success. Engineering is reported as not requiring the
+tenant status and performs no status write.
+
+The GitHub status is projection only. Merge-controller enforcement, branch
+protection, portfolio rollout, UI, and checked-in real repository or actor
+policy values remain deferred. Trusted maintenance is never inferred from a Bot
+type alone, and no admission decision uses changed files, repository names,
+branches, titles, labels, or commit text. Preview refresh, verification, destroy,
+and cleanup remain independent from admission and projection delivery.
 
 The CM tenant preview workflow uses tenant-product scope for both artifact
 publish input/evidence and preview lifecycle requests. Artifact publish still

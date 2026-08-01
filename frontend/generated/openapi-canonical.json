@@ -22062,6 +22062,83 @@
         "title": "StructuredHealthEvidence",
         "type": "object"
       },
+      "TenantAdmissionGitHubProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "engineering",
+              "pending",
+              "manager-approved",
+              "technical-waived",
+              "maintenance-admitted",
+              "stale",
+              "denied",
+              "unavailable"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "decision_binding_sha256": {
+            "title": "Decision Binding Sha256",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "minimum": 1.0,
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "success",
+              "failure",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "target_url": {
+            "title": "Target Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "required",
+          "repository",
+          "pull_request_number",
+          "head_sha",
+          "category",
+          "state",
+          "description",
+          "target_url",
+          "decision_binding_sha256"
+        ],
+        "title": "TenantAdmissionGitHubProjection",
+        "type": "object"
+      },
       "TenantAdmissionPathResult": {
         "additionalProperties": false,
         "properties": {
@@ -22140,6 +22217,215 @@
         "title": "TenantAdmissionPathResult",
         "type": "object"
       },
+      "TenantAdmissionProjectionWriteResult": {
+        "additionalProperties": false,
+        "properties": {
+          "check_context": {
+            "default": "tenant-admission",
+            "title": "Check Context",
+            "type": "string"
+          },
+          "check_state": {
+            "enum": [
+              "pending",
+              "success",
+              "failure",
+              "error"
+            ],
+            "title": "Check State",
+            "type": "string"
+          },
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "projected",
+              "replayed",
+              "not_required"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "check_state",
+          "head_sha"
+        ],
+        "title": "TenantAdmissionProjectionWriteResult",
+        "type": "object"
+      },
+      "TenantAdmissionStatusReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "engineering",
+              "pending",
+              "manager-approved",
+              "technical-waived",
+              "maintenance-admitted",
+              "stale",
+              "denied",
+              "unavailable"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "classification_digest": {
+            "default": "",
+            "title": "Classification Digest",
+            "type": "string"
+          },
+          "classification_kind": {
+            "default": "",
+            "enum": [
+              "engineering",
+              "tenant_ui",
+              ""
+            ],
+            "title": "Classification Kind",
+            "type": "string"
+          },
+          "classification_revision": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Classification Revision",
+            "type": "integer"
+          },
+          "classification_status": {
+            "enum": [
+              "available",
+              "missing",
+              "ambiguous",
+              "unknown"
+            ],
+            "title": "Classification Status",
+            "type": "string"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/TenantMergeEligibilityDecision"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "paths": {
+            "$ref": "#/components/schemas/TenantMergeEligibilityEvidenceInputs"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "category",
+          "classification_status",
+          "decision",
+          "paths",
+          "generated_at"
+        ],
+        "title": "TenantAdmissionStatusReadModel",
+        "type": "object"
+      },
+      "TenantAdmissionStatusReadResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "read_model": {
+            "$ref": "#/components/schemas/TenantAdmissionStatusReadModel"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "read_model"
+        ],
+        "title": "TenantAdmissionStatusReadResponse",
+        "type": "object"
+      },
+      "TenantAdmissionStatusReconcileEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/TenantMergeCandidate"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "candidate"
+        ],
+        "title": "TenantAdmissionStatusReconcileEnvelope",
+        "type": "object"
+      },
+      "TenantAdmissionStatusReconcileResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/TenantAdmissionStatusReconcileResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "TenantAdmissionStatusReconcileResponse",
+        "type": "object"
+      },
+      "TenantAdmissionStatusReconcileResult": {
+        "additionalProperties": false,
+        "properties": {
+          "projection": {
+            "$ref": "#/components/schemas/TenantAdmissionGitHubProjection"
+          },
+          "read_model": {
+            "$ref": "#/components/schemas/TenantAdmissionStatusReadModel"
+          },
+          "write_result": {
+            "$ref": "#/components/schemas/TenantAdmissionProjectionWriteResult"
+          }
+        },
+        "required": [
+          "read_model",
+          "projection",
+          "write_result"
+        ],
+        "title": "TenantAdmissionStatusReconcileResult",
+        "type": "object"
+      },
       "TenantMergeCandidate": {
         "additionalProperties": false,
         "properties": {
@@ -22189,6 +22475,195 @@
           "head_sha"
         ],
         "title": "TenantMergeCandidate",
+        "type": "object"
+      },
+      "TenantMergeEligibilityDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "classification_digest": {
+            "default": "",
+            "title": "Classification Digest",
+            "type": "string"
+          },
+          "classification_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "engineering",
+                  "tenant_ui"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "default": "",
+            "title": "Classification Kind"
+          },
+          "classification_revision": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Classification Revision",
+            "type": "integer"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "decision_binding_sha256": {
+            "default": "",
+            "title": "Decision Binding Sha256",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "evaluated_at": {
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "evidence_digest": {
+            "default": "",
+            "title": "Evidence Digest",
+            "type": "string"
+          },
+          "evidence_id": {
+            "default": "",
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "evidence_kind": {
+            "default": "none",
+            "enum": [
+              "none",
+              "trusted_maintenance",
+              "technical_human_waiver",
+              "manager_preview_approval"
+            ],
+            "title": "Evidence Kind",
+            "type": "string"
+          },
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "minimum": 1.0,
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "reason_code": {
+            "enum": [
+              "engineering_normal_flow",
+              "trusted_maintenance_admitted",
+              "technical_human_waiver_admitted",
+              "manager_preview_approved",
+              "manager_preview_required",
+              "evidence_denied",
+              "evidence_stale",
+              "evidence_unavailable",
+              "evidence_identity_drift",
+              "evidence_head_mismatch",
+              "evidence_policy_drift",
+              "classification_missing",
+              "classification_unknown",
+              "classification_ambiguous",
+              "classification_identity_drift"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "title": "Repository Owner Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "admitted",
+              "blocked"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "reason_code",
+          "detail",
+          "product",
+          "context",
+          "repository_id",
+          "repository_owner_id",
+          "repository",
+          "pull_request_number",
+          "head_sha",
+          "evaluated_at"
+        ],
+        "title": "TenantMergeEligibilityDecision",
+        "type": "object"
+      },
+      "TenantMergeEligibilityEvidenceInputs": {
+        "additionalProperties": false,
+        "properties": {
+          "manager_preview_approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TenantAdmissionPathResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "technical_human_waiver": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TenantAdmissionPathResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trusted_maintenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TenantAdmissionPathResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "TenantMergeEligibilityEvidenceInputs",
         "type": "object"
       },
       "TenantRepositoryClassificationApplyEnvelope": {
@@ -53332,6 +53807,96 @@
         "summary": "Apply or dry-run a repository human role-policy record"
       }
     },
+    "/v1/tenant-admission/status/reconcile": {
+      "post": {
+        "operationId": "reconcile_tenant_admission_status",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantAdmissionStatusReconcileEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantAdmissionStatusReconcileResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Recompute and project exact-head tenant admission status"
+      }
+    },
     "/v1/tenant-admission/technical-human-waivers/apply": {
       "post": {
         "operationId": "apply_tenant_technical_human_waiver",
@@ -55345,6 +55910,160 @@
           }
         },
         "summary": "Read current repository human role-policy read model"
+      }
+    },
+    "/v1/work-graph/tenant-admission/status": {
+      "get": {
+        "operationId": "read_tenant_admission_status",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repository_id",
+            "required": true,
+            "schema": {
+              "title": "Repository Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repository_owner_id",
+            "required": true,
+            "schema": {
+              "title": "Repository Owner Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repository",
+            "required": true,
+            "schema": {
+              "title": "Repository",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pull_request_number",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Pull Request Number",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "head_sha",
+            "required": true,
+            "schema": {
+              "title": "Head Sha",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantAdmissionStatusReadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read current exact-head tenant admission status"
       }
     },
     "/v1/work-graph/tenant-admission/trusted-maintenance-policy": {

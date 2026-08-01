@@ -199,6 +199,14 @@ reconciliation. If GitHub is degraded, the lifecycle operation still completes
 and an authorized operator retries `POST /v1/manager-preview-approval/reconcile`
 with `repository` and `pr_number` after GitHub recovers.
 
+The broader `tenant-admission` status is a separate Launchplane projection. For
+a repository classified as `tenant_ui`, it recomputes the exact current
+candidate and succeeds when manager preview approval, a technical human waiver,
+or trusted-maintenance evidence is satisfied. It does not replace or weaken the
+manager-preview binding rules. Preview refresh, verification, destroy, and
+cleanup do not wait for either status, and projection delivery failure never
+rolls back a completed lifecycle mutation.
+
 Generic-web routes write lifecycle records as part of refresh, destroy, and
 verification. Odoo preview apply finalizes the serving preview and generation
 evidence after the provider result is `pass` but before the durable provider

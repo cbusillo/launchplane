@@ -65,6 +65,7 @@ from control_plane.http_routes.products import (
 from control_plane.http_routes.support import ReadRouteDependencies
 from control_plane.http_routes.tenant_admission import (
     REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
+    TENANT_ADMISSION_STATUS_RECONCILE_ROUTE,
     TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE,
     TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
     TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE,
@@ -92,6 +93,7 @@ __all__ = (
     "ProductReadRouteDependencies",
     "PromotionEvidenceRequest",
     "REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE",
+    "TENANT_ADMISSION_STATUS_RECONCILE_ROUTE",
     "TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE",
     "TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE",
     "ReadRouteDependencies",

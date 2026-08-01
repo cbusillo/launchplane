@@ -36,9 +36,10 @@ service-host env, or generic service-code conditionals.
 Scheduler merge train admission (`merge_train_admission`) governs pull request queueing, batch candidate construction, and landing order under active `launchplane_merge_train_policies` records.
 
 Tenant merge eligibility (`evaluate_tenant_merge_eligibility`) and repository classification records (`launchplane_tenant_repository_classifications`) operate independently under their own DB authority:
-- Repository classifications explicitly categorize repositories as `engineering` (taking the normal engineering fast path) or `tenant_ui` (requiring manager preview approval by default).
+- Repository classifications explicitly categorize repositories as `engineering` (taking the normal engineering fast path) or `tenant_ui` (requiring one exact-head manager-preview, technical-human-waiver, or trusted-maintenance path).
 - Repository classifications use exact immutable identity and CAS operator recovery without heuristics or PR label fallback.
-- Pure tenant merge evaluation is kept separate from scheduler merge train admission and does not alter queueing or batch landing semantics.
+- Unified tenant admission is recomputed from DB records. The GitHub `tenant-admission` commit status is a public projection, not merge authority.
+- Pure tenant merge evaluation is kept separate from scheduler merge train admission and does not alter queueing or batch landing semantics. A later controller slice must independently re-fetch the exact current candidate and re-evaluate admission immediately before landing instead of trusting a previously green status.
 
 ## Controller Lease And Resume State
 
