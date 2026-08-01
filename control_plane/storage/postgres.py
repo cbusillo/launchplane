@@ -196,6 +196,10 @@ from control_plane.contracts.repository_human_admission import (
     RepositoryHumanRolePolicyRecord,
     TenantTechnicalHumanWaiverEventRecord,
 )
+from control_plane.contracts.trusted_maintenance import (
+    TrustedMaintenanceEvidenceRecord,
+    TrustedMaintenancePolicyRecord,
+)
 from control_plane.repository_human_admission import (
     RepositoryHumanRolePolicyConflictError,
     RepositoryHumanRolePolicySequenceError,
@@ -216,6 +220,11 @@ from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationConflictError,
     TenantRepositoryClassificationSequenceError,
     plan_tenant_repository_classification_append,
+)
+from control_plane.trusted_maintenance import (
+    plan_trusted_maintenance_evidence_append,
+    plan_trusted_maintenance_policy_apply,
+    plan_trusted_maintenance_policy_append,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -911,6 +920,158 @@ class LaunchplaneTenantTechnicalHumanWaiverEventRow(Base):
     source_event_kind: Mapped[str] = mapped_column(String, nullable=False)
     source_event_id: Mapped[str] = mapped_column(String, nullable=False)
     event_digest: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneTrustedMaintenancePolicyRow(Base):
+    __tablename__ = "launchplane_trusted_maintenance_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'superseded')",
+            name="launchplane_trusted_maintenance_policy_status_ck",
+        ),
+        CheckConstraint(
+            "policy_revision >= 1",
+            name="launchplane_trusted_maintenance_policy_revision_ck",
+        ),
+        CheckConstraint(
+            "(policy_revision = 1 AND supersedes_record_id IS NULL) OR "
+            "(policy_revision > 1 AND supersedes_record_id IS NOT NULL)",
+            name="launchplane_trusted_maintenance_policy_supersedes_ck",
+        ),
+        Index(
+            "launchplane_trusted_maintenance_policy_revision_uidx",
+            "repository_id",
+            "product",
+            "context",
+            "policy_revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_trusted_maintenance_policy_active_uidx",
+            "repository_id",
+            "product",
+            "context",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "launchplane_trusted_maintenance_policy_current_idx",
+            "repository_id",
+            "product",
+            "context",
+            "status",
+            desc("policy_revision"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    repository_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository_owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    policy_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    effective_at: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    supersedes_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    policy_digest: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneTrustedMaintenanceEvidenceRow(Base):
+    __tablename__ = "launchplane_trusted_maintenance_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "pull_request_number >= 1",
+            name="launchplane_trusted_maintenance_evidence_pr_ck",
+        ),
+        CheckConstraint(
+            "classification_revision >= 1",
+            name="launchplane_trusted_maintenance_evidence_class_revision_ck",
+        ),
+        CheckConstraint(
+            "policy_revision >= 1",
+            name="launchplane_trusted_maintenance_evidence_policy_revision_ck",
+        ),
+        CheckConstraint(
+            "pr_author_github_id >= 1",
+            name="launchplane_trusted_maintenance_evidence_author_ck",
+        ),
+        CheckConstraint(
+            "sender_github_id >= 1",
+            name="launchplane_trusted_maintenance_evidence_sender_ck",
+        ),
+        CheckConstraint(
+            "head_repository_id = repository_id AND "
+            "head_repository_owner_id = repository_owner_id AND "
+            "head_repository = repository",
+            name="launchplane_trusted_maintenance_evidence_same_head_repo_ck",
+        ),
+        Index(
+            "launchplane_trusted_maintenance_exact_head_idx",
+            "repository_id",
+            "pull_request_number",
+            "head_sha",
+            desc("occurred_at"),
+            desc("evidence_id"),
+        ),
+        Index(
+            "launchplane_trusted_maintenance_binding_idx",
+            "binding_sha256",
+            desc("occurred_at"),
+            desc("evidence_id"),
+        ),
+        Index(
+            "launchplane_trusted_maintenance_policy_idx",
+            "policy_record_id",
+            "classification_digest",
+            desc("occurred_at"),
+        ),
+        Index(
+            "launchplane_trusted_maintenance_actor_event_idx",
+            "pr_author_github_id",
+            "sender_github_id",
+            "event_name",
+            "event_action",
+            desc("occurred_at"),
+        ),
+    )
+
+    evidence_id: Mapped[str] = mapped_column(String, primary_key=True)
+    repository_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository_owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    binding_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    pull_request_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    head_sha: Mapped[str] = mapped_column(String, nullable=False)
+    classification_record_id: Mapped[str] = mapped_column(String, nullable=False)
+    classification_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    classification_digest: Mapped[str] = mapped_column(String, nullable=False)
+    policy_record_id: Mapped[str] = mapped_column(String, nullable=False)
+    policy_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    policy_digest: Mapped[str] = mapped_column(String, nullable=False)
+    matched_actor_rule_id: Mapped[str] = mapped_column(String, nullable=False)
+    pr_author_github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pr_author_type: Mapped[str] = mapped_column(String, nullable=False)
+    pr_author_login: Mapped[str] = mapped_column(String, nullable=False)
+    sender_github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sender_type: Mapped[str] = mapped_column(String, nullable=False)
+    sender_login: Mapped[str] = mapped_column(String, nullable=False)
+    head_repository_id: Mapped[str] = mapped_column(String, nullable=False)
+    head_repository_owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    head_repository: Mapped[str] = mapped_column(String, nullable=False)
+    event_name: Mapped[str] = mapped_column(String, nullable=False)
+    event_action: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    delivery_id: Mapped[str] = mapped_column(String, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    evidence_digest: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -8436,6 +8597,464 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(
                 LaunchplaneTenantTechnicalHumanWaiverEventRow.occurred_at.desc(),
                 LaunchplaneTenantTechnicalHumanWaiverEventRow.event_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def _trusted_maintenance_policy_row(
+        self,
+        record: TrustedMaintenancePolicyRecord,
+    ) -> LaunchplaneTrustedMaintenancePolicyRow:
+        return LaunchplaneTrustedMaintenancePolicyRow(
+            record_id=record.record_id,
+            repository_id=record.repository_id,
+            repository_owner_id=record.repository_owner_id,
+            repository=record.repository,
+            product=record.product,
+            context=record.context,
+            status=record.status,
+            policy_revision=record.policy_revision,
+            effective_at=record.effective_at,
+            source=record.source,
+            supersedes_record_id=record.supersedes_record_id,
+            policy_digest=record.policy_digest,
+            payload=self._payload_dict(record),
+        )
+
+    def _sync_trusted_maintenance_policy_row(
+        self,
+        row: LaunchplaneTrustedMaintenancePolicyRow,
+        record: TrustedMaintenancePolicyRecord,
+    ) -> None:
+        row.repository_id = record.repository_id
+        row.repository_owner_id = record.repository_owner_id
+        row.repository = record.repository
+        row.product = record.product
+        row.context = record.context
+        row.status = record.status
+        row.policy_revision = record.policy_revision
+        row.effective_at = record.effective_at
+        row.source = record.source
+        row.supersedes_record_id = record.supersedes_record_id
+        row.policy_digest = record.policy_digest
+        row.payload = self._payload_dict(record)
+
+    def _trusted_maintenance_evidence_row(
+        self,
+        record: TrustedMaintenanceEvidenceRecord,
+    ) -> LaunchplaneTrustedMaintenanceEvidenceRow:
+        binding = record.binding
+        return LaunchplaneTrustedMaintenanceEvidenceRow(
+            evidence_id=record.evidence_id,
+            repository_id=binding.repository_id,
+            repository_owner_id=binding.repository_owner_id,
+            repository=binding.repository,
+            product=binding.product,
+            context=binding.context,
+            binding_sha256=binding.binding_sha256,
+            pull_request_number=binding.pull_request_number,
+            head_sha=binding.head_sha,
+            classification_record_id=binding.classification_record_id,
+            classification_revision=binding.classification_revision,
+            classification_digest=binding.classification_digest,
+            policy_record_id=binding.policy_record_id,
+            policy_revision=binding.policy_revision,
+            policy_digest=binding.policy_digest,
+            matched_actor_rule_id=binding.matched_actor_rule_id,
+            pr_author_github_id=binding.pr_author_github_id,
+            pr_author_type=binding.pr_author_type,
+            pr_author_login=binding.pr_author_login,
+            sender_github_id=binding.sender_github_id,
+            sender_type=binding.sender_type,
+            sender_login=binding.sender_login,
+            head_repository_id=binding.head_repository_id,
+            head_repository_owner_id=binding.head_repository_owner_id,
+            head_repository=binding.head_repository,
+            event_name=binding.event_name,
+            event_action=binding.event_action,
+            source=binding.source,
+            delivery_id=binding.delivery_id,
+            occurred_at=record.occurred_at,
+            expires_at=record.expires_at,
+            evidence_digest=record.evidence_digest,
+            payload=self._payload_dict(record),
+        )
+
+    def _lock_trusted_maintenance_policy_write(
+        self,
+        session: Any,
+        *,
+        repository_id: str,
+        product: str,
+        context_name: str,
+    ) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        lock_parts = (
+            "launchplane",
+            "trusted-maintenance-policy",
+            repository_id,
+            product,
+            context_name,
+        )
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": "".join(f"{len(lock_part)}:{lock_part}" for lock_part in lock_parts)},
+        )
+
+    def _trusted_maintenance_policy_stream_rows(
+        self,
+        *,
+        session: Any,
+        repository_id: str,
+        product: str,
+        context_name: str,
+        for_update: bool,
+    ) -> tuple[LaunchplaneTrustedMaintenancePolicyRow, ...]:
+        statement = (
+            select(LaunchplaneTrustedMaintenancePolicyRow)
+            .where(
+                LaunchplaneTrustedMaintenancePolicyRow.repository_id == repository_id,
+                LaunchplaneTrustedMaintenancePolicyRow.product == product,
+                LaunchplaneTrustedMaintenancePolicyRow.context == context_name,
+            )
+            .order_by(LaunchplaneTrustedMaintenancePolicyRow.policy_revision.asc())
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return tuple(session.scalars(statement).all())
+
+    def write_trusted_maintenance_policy_record(
+        self,
+        record: TrustedMaintenancePolicyRecord,
+    ) -> Literal["written", "replayed"]:
+        insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_trusted_maintenance_policy_write(
+                session,
+                repository_id=record.repository_id,
+                product=record.product,
+                context_name=record.context,
+            )
+            rows = self._trusted_maintenance_policy_stream_rows(
+                session=session,
+                repository_id=record.repository_id,
+                product=record.product,
+                context_name=record.context,
+                for_update=True,
+            )
+            records = tuple(
+                self._read_payload(
+                    model_type=TrustedMaintenancePolicyRecord,
+                    payload=row.payload,
+                )
+                for row in rows
+            )
+            plan = plan_trusted_maintenance_policy_append(records=records, record=record)
+            if plan.status == "replayed":
+                session.rollback()
+                return "replayed"
+            if plan.superseded_current_record is not None:
+                current_row = next(
+                    row for row in rows if row.record_id == plan.superseded_current_record.record_id
+                )
+                self._sync_trusted_maintenance_policy_row(
+                    current_row,
+                    plan.superseded_current_record,
+                )
+                session.flush()
+            session.add(self._trusted_maintenance_policy_row(record))
+            try:
+                session.flush()
+                session.commit()
+                return "written"
+            except IntegrityError as error:
+                session.rollback()
+                insert_error = error
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_trusted_maintenance_policy_write(
+                session,
+                repository_id=record.repository_id,
+                product=record.product,
+                context_name=record.context,
+            )
+            rows = self._trusted_maintenance_policy_stream_rows(
+                session=session,
+                repository_id=record.repository_id,
+                product=record.product,
+                context_name=record.context,
+                for_update=True,
+            )
+            current_records = tuple(
+                self._read_payload(
+                    model_type=TrustedMaintenancePolicyRecord,
+                    payload=row.payload,
+                )
+                for row in rows
+            )
+            replay_plan = plan_trusted_maintenance_policy_append(
+                records=current_records,
+                record=record,
+            )
+            session.rollback()
+            if replay_plan.status == "replayed":
+                return "replayed"
+        assert insert_error is not None
+        raise insert_error
+
+    def compare_and_write_trusted_maintenance_policy_record(
+        self,
+        record: TrustedMaintenancePolicyRecord,
+        *,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+    ) -> Literal["written", "replayed"]:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_trusted_maintenance_policy_write(
+                session,
+                repository_id=record.repository_id,
+                product=record.product,
+                context_name=record.context,
+            )
+            rows = self._trusted_maintenance_policy_stream_rows(
+                session=session,
+                repository_id=record.repository_id,
+                product=record.product,
+                context_name=record.context,
+                for_update=True,
+            )
+            records = tuple(
+                self._read_payload(
+                    model_type=TrustedMaintenancePolicyRecord,
+                    payload=row.payload,
+                )
+                for row in rows
+            )
+            plan = plan_trusted_maintenance_policy_apply(
+                records=records,
+                record=record,
+                expected_current_record_id=expected_current_record_id,
+                expected_current_policy_digest=expected_current_policy_digest,
+            )
+            if plan.status == "replayed":
+                session.rollback()
+                return "replayed"
+            if plan.superseded_current_record is not None:
+                current_row = next(
+                    row for row in rows if row.record_id == plan.superseded_current_record.record_id
+                )
+                self._sync_trusted_maintenance_policy_row(
+                    current_row,
+                    plan.superseded_current_record,
+                )
+                session.flush()
+            session.add(self._trusted_maintenance_policy_row(record))
+            session.flush()
+            session.commit()
+            return "written"
+
+    def read_trusted_maintenance_policy_record(
+        self,
+        record_id: str,
+    ) -> TrustedMaintenancePolicyRecord:
+        return self._read_model(
+            model_type=TrustedMaintenancePolicyRecord,
+            orm_model=LaunchplaneTrustedMaintenancePolicyRow,
+            filters=(LaunchplaneTrustedMaintenancePolicyRow.record_id == record_id,),
+        )
+
+    def list_trusted_maintenance_policy_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[TrustedMaintenancePolicyRecord, ...]:
+        filters: list[object] = []
+        normalized_repository = repository.strip().lower()
+        if repository_id:
+            filters.append(LaunchplaneTrustedMaintenancePolicyRow.repository_id == repository_id)
+        if repository_owner_id:
+            filters.append(
+                LaunchplaneTrustedMaintenancePolicyRow.repository_owner_id == repository_owner_id
+            )
+        if normalized_repository:
+            filters.append(
+                LaunchplaneTrustedMaintenancePolicyRow.repository == normalized_repository
+            )
+        if product:
+            filters.append(LaunchplaneTrustedMaintenancePolicyRow.product == product)
+        if context:
+            filters.append(LaunchplaneTrustedMaintenancePolicyRow.context == context)
+        if status:
+            filters.append(LaunchplaneTrustedMaintenancePolicyRow.status == status)
+        return self._list_models(
+            model_type=TrustedMaintenancePolicyRecord,
+            orm_model=LaunchplaneTrustedMaintenancePolicyRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneTrustedMaintenancePolicyRow.policy_revision.desc(),
+                LaunchplaneTrustedMaintenancePolicyRow.repository_id.desc(),
+                LaunchplaneTrustedMaintenancePolicyRow.product.desc(),
+                LaunchplaneTrustedMaintenancePolicyRow.context.desc(),
+                LaunchplaneTrustedMaintenancePolicyRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_trusted_maintenance_evidence_record(
+        self,
+        record: TrustedMaintenanceEvidenceRecord,
+    ) -> Literal["written", "replayed"]:
+        insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = select(LaunchplaneTrustedMaintenanceEvidenceRow).where(
+                LaunchplaneTrustedMaintenanceEvidenceRow.evidence_id == record.evidence_id
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            existing_row = session.scalar(statement)
+            if existing_row is not None:
+                existing_record = self._read_payload(
+                    model_type=TrustedMaintenanceEvidenceRecord,
+                    payload=existing_row.payload,
+                )
+                plan = plan_trusted_maintenance_evidence_append(
+                    records=(existing_record,),
+                    record=record,
+                )
+                session.rollback()
+                return plan.status
+            session.add(self._trusted_maintenance_evidence_row(record))
+            try:
+                session.flush()
+                session.commit()
+                return "written"
+            except IntegrityError as error:
+                session.rollback()
+                insert_error = error
+
+        try:
+            existing_record = self.read_trusted_maintenance_evidence_record(record.evidence_id)
+        except FileNotFoundError as read_error:
+            assert insert_error is not None
+            raise insert_error from read_error
+        replay_plan = plan_trusted_maintenance_evidence_append(
+            records=(existing_record,),
+            record=record,
+        )
+        if replay_plan.status == "replayed":
+            return "replayed"
+        assert insert_error is not None
+        raise insert_error
+
+    def read_trusted_maintenance_evidence_record(
+        self,
+        evidence_id: str,
+    ) -> TrustedMaintenanceEvidenceRecord:
+        return self._read_model(
+            model_type=TrustedMaintenanceEvidenceRecord,
+            orm_model=LaunchplaneTrustedMaintenanceEvidenceRow,
+            filters=(LaunchplaneTrustedMaintenanceEvidenceRow.evidence_id == evidence_id,),
+        )
+
+    def list_trusted_maintenance_evidence_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        evidence_id: str = "",
+        binding_sha256: str = "",
+        pull_request_number: int | None = None,
+        head_sha: str = "",
+        classification_digest: str = "",
+        policy_record_id: str = "",
+        policy_digest: str = "",
+        matched_actor_rule_id: str = "",
+        pr_author_github_id: int | None = None,
+        sender_github_id: int | None = None,
+        event_name: str = "",
+        event_action: str = "",
+        delivery_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[TrustedMaintenanceEvidenceRecord, ...]:
+        filters: list[object] = []
+        normalized_repository = repository.strip().lower()
+        if repository_id:
+            filters.append(LaunchplaneTrustedMaintenanceEvidenceRow.repository_id == repository_id)
+        if repository_owner_id:
+            filters.append(
+                LaunchplaneTrustedMaintenanceEvidenceRow.repository_owner_id == repository_owner_id
+            )
+        if normalized_repository:
+            filters.append(
+                LaunchplaneTrustedMaintenanceEvidenceRow.repository == normalized_repository
+            )
+        if product:
+            filters.append(LaunchplaneTrustedMaintenanceEvidenceRow.product == product)
+        if context:
+            filters.append(LaunchplaneTrustedMaintenanceEvidenceRow.context == context)
+        if evidence_id:
+            filters.append(LaunchplaneTrustedMaintenanceEvidenceRow.evidence_id == evidence_id)
+        if binding_sha256:
+            filters.append(
+                LaunchplaneTrustedMaintenanceEvidenceRow.binding_sha256 == binding_sha256
+            )
+        if pull_request_number is not None:
+            filters.append(
+                LaunchplaneTrustedMaintenanceEvidenceRow.pull_request_number == pull_request_number
+            )
+        if head_sha:
+            filters.append(LaunchplaneTrustedMaintenanceEvidenceRow.head_sha == head_sha)
+        if classification_digest:
+            filters.append(
+                LaunchplaneTrustedMaintenanceEvidenceRow.classification_digest
+                == classification_digest
+            )
+        if policy_record_id:
+            filters.append(
+                LaunchplaneTrustedMaintenanceEvidenceRow.policy_record_id == policy_record_id
+            )
+        if policy_digest:
+            filters.append(LaunchplaneTrustedMaintenanceEvidenceRow.policy_digest == policy_digest)
+        if matched_actor_rule_id:
+            filters.append(
+                LaunchplaneTrustedMaintenanceEvidenceRow.matched_actor_rule_id
+                == matched_actor_rule_id
+            )
+        if pr_author_github_id is not None:
+            filters.append(
+                LaunchplaneTrustedMaintenanceEvidenceRow.pr_author_github_id == pr_author_github_id
+            )
+        if sender_github_id is not None:
+            filters.append(
+                LaunchplaneTrustedMaintenanceEvidenceRow.sender_github_id == sender_github_id
+            )
+        if event_name:
+            filters.append(LaunchplaneTrustedMaintenanceEvidenceRow.event_name == event_name)
+        if event_action:
+            filters.append(LaunchplaneTrustedMaintenanceEvidenceRow.event_action == event_action)
+        if delivery_id:
+            filters.append(LaunchplaneTrustedMaintenanceEvidenceRow.delivery_id == delivery_id)
+        return self._list_models(
+            model_type=TrustedMaintenanceEvidenceRecord,
+            orm_model=LaunchplaneTrustedMaintenanceEvidenceRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneTrustedMaintenanceEvidenceRow.occurred_at.desc(),
+                LaunchplaneTrustedMaintenanceEvidenceRow.evidence_id.desc(),
             ),
             limit=limit,
         )

@@ -1760,10 +1760,59 @@ run` is the foreground loop intended for an external process supervisor, and
   key plus a changed body returns conflict; a different key revalidates current
   authority and history.
 - Manager-preview authorization can carry the same role-policy provenance for primary, backup, or delegated managers. Legacy approval records remain readable, but they cannot satisfy an evaluation once a repository role policy is explicitly enforced.
-- Trusted-maintenance evidence, unified status/controller projection, rollout,
-  and enforced tenant-admission decisions remain deferred. Until those follow-up
-  pieces are deployed and rollout supplies shared-authority records, existing
-  manager-preview behavior remains unchanged.
+- Trusted-maintenance policy records are a separate contract, not a human role
+  policy and not a generic authz-policy reuse. Each policy revision is keyed by
+  immutable numeric `repository_id` plus `repository_owner_id`, `repository`,
+  `product`, and `context`; has `status: active|superseded`, source, reason,
+  `effective_at`, and optional evidence TTL; and uses CAS-friendly
+  `supersedes_record_id` chaining. The canonical policy digest excludes mutable
+  lifecycle `status` and audit-only display logins.
+- Trusted-maintenance v1 actor rules require one explicit positive numeric
+  GitHub PR author ID with actor type `Bot`, explicit positive numeric sender
+  IDs with sender type `Bot`, and an explicit allow-list of signed GitHub event
+  names and actions. Display logins are audit only and are never matching
+  authority. The contract does not store or infer a GitHub App ID because this
+  slice has no reliable GitHub fact source for it.
+- Trusted-maintenance matching never uses repository name alone, branch/ref,
+  changed files, labels, commits, PR title/body, semantic inference, actor or
+  sender login strings, or blanket bot bypass. Same-repository PR head identity
+  is required for v1.
+- Trusted-maintenance evidence is append-only captured evidence bound to the
+  exact candidate repository tuple, pull request, head SHA, current repository
+  classification record/revision/digest, current trusted-maintenance policy
+  record/revision/digest, matched actor rule ID, PR author numeric ID/type,
+  signed-event sender numeric ID/type, same-repository head numeric IDs, event
+  name/action, delivery/source ID, DB/server `occurred_at=recorded_at`, and
+  optional expiration derived only from policy TTL. Request-provided times,
+  authors, Launchplane authz-policy IDs, and login strings are outside this
+  evidence authority.
+- Evidence identity is the normalized source/delivery pair. Reprocessing the
+  same delivery with the same trust-bearing binding replays the first persisted
+  record even when audit-only logins or the later processing timestamp differ;
+  reusing that source/delivery identity with a different repository, head,
+  classification, policy, actor, sender, or event binding is a conflict.
+- Policy apply compares and writes the expected active tip inside the same
+  filesystem authority lock or PostgreSQL advisory/row-lock transaction.
+  Current-authority reads validate the complete revision and supersession chain,
+  and evidence evaluation re-derives expiration from the bound policy TTL rather
+  than trusting a stored expiration value alone.
+- Pure trusted-maintenance evaluation returns
+  `TenantAdmissionPathResult(path_kind='trusted_maintenance')` and fails closed
+  on head, repository identity, classification, policy, actor/sender/event
+  provenance, expiration, or ambiguous/missing authority drift. Filesystem
+  storage can rehearse trusted-maintenance policy history and evidence locally;
+  shared PostgreSQL storage persists
+  `launchplane_trusted_maintenance_policies` and
+  `launchplane_trusted_maintenance_evidence` with canonical JSON payloads,
+  promoted query/audit columns, one active policy tip per
+  repository/product/context, exact-head/evidence/policy/actor indexes, and
+  critical schema invariants.
+- HTTP routes, webhook ingress/signature handling, OpenAPI, unified
+  status/controller projection, merge-train wiring, rollout decisions, UI,
+  provider calls, policy mutation authorization, and real repository policy
+  values remain deferred. Until those follow-up pieces are deployed and rollout
+  supplies shared-authority records, existing manager-preview behavior remains
+  unchanged.
 
 ## Runtime Key-Safety Policy Record
 
