@@ -355,7 +355,7 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         _replace_serving_generation(store, head_sha=current_head_sha)
         github.head_sha = current_head_sha
         github.comment_id = 502
-        github.comment_created_at = "2026-07-31T12:05:00Z"
+        github.comment_created_at = NOW
         current_fingerprint = build_current_manager_preview_approval_binding(
             product=PRODUCT,
             preview=store.preview,

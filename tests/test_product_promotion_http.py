@@ -411,7 +411,7 @@ def _manager_generation() -> PreviewGenerationRecord:
         artifact_id="preview-artifact-atlas-17",
         source_git_ref=TESTING_SOURCE_REF,
         image_reference=TESTING_ARTIFACT,
-        preview_id="pr-17",
+        preview_id="preview-atlas-17",
         preview_generation_id="generation-atlas-17",
         deployed_at="2026-07-15T08:35:00Z",
     )

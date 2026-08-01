@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import NamedTuple, Protocol, cast
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
@@ -15,9 +16,18 @@ from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalReasonCode,
     immutable_image_digest,
 )
+from control_plane.contracts.repository_human_admission import (
+    RepositoryHumanRolePolicyRecord,
+)
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.repository_human_admission import (
+    RepositoryHumanRolePolicyError,
+    manager_authority_current,
+    manager_role_policy_provenance,
+)
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity
+from control_plane.service_auth import matching_github_human_policy_rules
 
 
 _TERMINAL_APPROVAL_ACTIONS = frozenset({"invalidated", "superseded"})
@@ -173,6 +183,10 @@ def capture_manager_preview_approval_authorization(
     context: str,
     policy_record: LaunchplaneAuthzPolicyRecord,
     authorized_at: str,
+    role_policy_record: RepositoryHumanRolePolicyRecord | None = None,
+    repository_id: str = "",
+    repository_owner_id: str = "",
+    repository: str = "",
 ) -> ManagerPreviewApprovalAuthorization:
     if identity.github_id < 1:
         raise ManagerPreviewApprovalAuthorizationError(
@@ -182,22 +196,36 @@ def capture_manager_preview_approval_authorization(
         raise ManagerPreviewApprovalAuthorizationError(
             "Manager preview approval requires one active schema-v2 authorization policy."
         )
+    role_policy_provenance = None
+    if role_policy_record is not None:
+        if not repository_id.strip() or not repository_owner_id.strip() or not repository.strip():
+            raise ManagerPreviewApprovalAuthorizationError(
+                "Role-aware manager preview approval requires repository numeric identity."
+            )
+        try:
+            role_policy_provenance = manager_role_policy_provenance(
+                role_policy_record=role_policy_record,
+                repository_id=repository_id,
+                repository_owner_id=repository_owner_id,
+                repository=repository,
+                github_id=identity.github_id,
+                evaluated_at=authorized_at,
+            )
+        except RepositoryHumanRolePolicyError as error:
+            raise ManagerPreviewApprovalAuthorizationError(str(error)) from error
     target = AuthorizationTarget(scope="context")
     matching_rules = tuple(
         rule
-        for rule in policy_record.policy.github_humans
-        if rule.managed_set_id is not None
-        and rule.managed_rule_id is not None
-        and identity.github_id in rule.github_ids
-        and MANAGER_PREVIEW_APPROVAL_WRITE_ACTION in rule.actions
-        and rule.allows(
+        for rule in matching_github_human_policy_rules(
+            policy=policy_record.policy,
             identity=identity,
             action=MANAGER_PREVIEW_APPROVAL_WRITE_ACTION,
             product=product,
             context=context,
             target=target,
-            schema_version=2,
+            managed_only=True,
         )
+        if identity.github_id in rule.github_ids
     )
     if len(matching_rules) != 1:
         raise ManagerPreviewApprovalAuthorizationError(
@@ -213,6 +241,7 @@ def capture_manager_preview_approval_authorization(
         policy_revision=policy_record.revision,
         policy_sha256=policy_record.policy_sha256,
         policy_source=policy_record.source,
+        role_policy_provenance=role_policy_provenance,
         authorized_at=authorized_at,
     )
 
@@ -230,6 +259,9 @@ def record_manager_preview_approval_event(
     source_event_kind: str,
     source_event_id: str,
     reason: str = "",
+    role_policy_record: RepositoryHumanRolePolicyRecord | None = None,
+    repository_id: str = "",
+    repository_owner_id: str = "",
 ) -> ManagerPreviewApprovalWriteResult:
     if action not in {"approved", "changes_requested", "revoked"}:
         raise ValueError("Manager-authored preview approval events require a manager action.")
@@ -244,6 +276,10 @@ def record_manager_preview_approval_event(
         context=binding.context,
         policy_record=policy_record,
         authorized_at=occurred_at,
+        role_policy_record=role_policy_record,
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        repository=binding.repository,
     )
     record = ManagerPreviewApprovalEventRecord(
         binding=binding,
@@ -287,8 +323,10 @@ def evaluate_manager_preview_approval(
     policy_record: LaunchplaneAuthzPolicyRecord | None,
     events: tuple[ManagerPreviewApprovalEventRecord, ...],
     evaluated_at: str,
+    role_policy_record: RepositoryHumanRolePolicyRecord | None = None,
 ) -> ManagerPreviewApprovalDecision:
     """Evaluate current evidence against the complete approval history for the PR."""
+    normalized_evaluated_at = _normalize_utc_timestamp(evaluated_at)
     try:
         binding = build_current_manager_preview_approval_binding(
             product=product,
@@ -300,7 +338,7 @@ def evaluate_manager_preview_approval(
             status="unavailable",
             reason_code=error.code,
             reason=str(error),
-            evaluated_at=evaluated_at,
+            evaluated_at=normalized_evaluated_at,
         )
     if (
         policy_record is None
@@ -312,13 +350,14 @@ def evaluate_manager_preview_approval(
             reason_code="policy_unavailable",
             reason="The active manager authorization policy is unavailable.",
             binding=binding,
-            evaluated_at=evaluated_at,
+            evaluated_at=normalized_evaluated_at,
         )
 
     subject_events = tuple(
         event
         for event in events
-        if event.binding.product == binding.product
+        if event.occurred_at <= normalized_evaluated_at
+        and event.binding.product == binding.product
         and event.binding.context == binding.context
         and event.binding.repository == binding.repository
         and event.binding.pr_number == binding.pr_number
@@ -345,14 +384,14 @@ def evaluate_manager_preview_approval(
                     reason_code="approval_stale",
                     reason="Prior approval evidence does not match the current preview.",
                     binding=binding,
-                    evaluated_at=evaluated_at,
+                    evaluated_at=normalized_evaluated_at,
                 )
         return _decision(
             status="pending",
             reason_code="approval_missing",
             reason="The current preview has not been approved by the manager.",
             binding=binding,
-            evaluated_at=evaluated_at,
+            evaluated_at=normalized_evaluated_at,
         )
 
     terminal_events = tuple(
@@ -369,7 +408,7 @@ def evaluate_manager_preview_approval(
             reason="The current preview approval was superseded or invalidated.",
             binding=binding,
             event=latest_terminal_event,
-            evaluated_at=evaluated_at,
+            evaluated_at=normalized_evaluated_at,
         )
 
     latest_event = max(exact_events, key=lambda event: (event.occurred_at, event.event_id))
@@ -377,6 +416,8 @@ def evaluate_manager_preview_approval(
         if not _approval_authorization_matches_policy(
             event=latest_event,
             policy_record=policy_record,
+            role_policy_record=role_policy_record,
+            evaluated_at=normalized_evaluated_at,
         ):
             return _decision(
                 status="stale",
@@ -384,7 +425,7 @@ def evaluate_manager_preview_approval(
                 reason="The approval was recorded under a different authorization policy.",
                 binding=binding,
                 event=latest_event,
-                evaluated_at=evaluated_at,
+                evaluated_at=normalized_evaluated_at,
             )
         return _decision(
             status="approved",
@@ -392,7 +433,7 @@ def evaluate_manager_preview_approval(
             reason="The manager approved the exact current preview.",
             binding=binding,
             event=latest_event,
-            evaluated_at=evaluated_at,
+            evaluated_at=normalized_evaluated_at,
         )
     if latest_event.action == "changes_requested":
         return _decision(
@@ -401,7 +442,7 @@ def evaluate_manager_preview_approval(
             reason="The manager requested changes to the current preview.",
             binding=binding,
             event=latest_event,
-            evaluated_at=evaluated_at,
+            evaluated_at=normalized_evaluated_at,
         )
     if latest_event.action == "revoked":
         return _decision(
@@ -410,7 +451,7 @@ def evaluate_manager_preview_approval(
             reason="The manager revoked approval for the current preview.",
             binding=binding,
             event=latest_event,
-            evaluated_at=evaluated_at,
+            evaluated_at=normalized_evaluated_at,
         )
     return _decision(
         status="stale",
@@ -418,7 +459,7 @@ def evaluate_manager_preview_approval(
         reason="The current preview approval was superseded or invalidated.",
         binding=binding,
         event=latest_event,
-        evaluated_at=evaluated_at,
+        evaluated_at=normalized_evaluated_at,
     )
 
 
@@ -426,6 +467,8 @@ def _approval_authorization_matches_policy(
     *,
     event: ManagerPreviewApprovalEventRecord,
     policy_record: LaunchplaneAuthzPolicyRecord,
+    role_policy_record: RepositoryHumanRolePolicyRecord | None,
+    evaluated_at: str,
 ) -> bool:
     authorization = event.authorization
     if authorization is None:
@@ -445,11 +488,19 @@ def _approval_authorization_matches_policy(
     if len(matching_rules) != 1:
         return False
     rule = matching_rules[0]
-    return (
+    authz_current = (
         authorization.manager_github_id in rule.github_ids
         and MANAGER_PREVIEW_APPROVAL_WRITE_ACTION in rule.actions
         and (not rule.products or event.binding.product in rule.products)
         and (not rule.contexts or event.binding.context in rule.contexts)
+    )
+    if not authz_current:
+        return False
+    return manager_authority_current(
+        provenance=authorization.role_policy_provenance,
+        role_policy_record=role_policy_record,
+        manager_github_id=authorization.manager_github_id,
+        evaluated_at=evaluated_at,
     )
 
 
@@ -473,3 +524,18 @@ def _decision(
         manager_login=event.manager_login if event is not None else "",
         evaluated_at=evaluated_at,
     )
+
+
+def _normalize_utc_timestamp(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("manager preview approval requires evaluated_at")
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(
+            "manager preview approval evaluated_at must be an ISO-8601 timestamp"
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("manager preview approval evaluated_at requires a timezone")
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
