@@ -9,6 +9,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+TRUSTED_MAINTENANCE_POLICY_READ_ACTION = "trusted_maintenance_policy.read"
+TRUSTED_MAINTENANCE_POLICY_WRITE_ACTION = "trusted_maintenance_policy.write"
+
 TrustedMaintenancePolicyStatus = Literal["active", "superseded"]
 TrustedMaintenanceActorType = Literal["Bot"]
 

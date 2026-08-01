@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast
+from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast, overload
 
 from pydantic import BaseModel
 from sqlalchemy import (
@@ -189,6 +189,7 @@ from control_plane.contracts.secret_record import (
     SecretVersion,
 )
 from control_plane.contracts.tenant_merge_eligibility import (
+    TenantMergeCandidate,
     TenantRepositoryClassificationLookup,
     TenantRepositoryClassificationRecord,
 )
@@ -222,9 +223,17 @@ from control_plane.tenant_repository_classification import (
     plan_tenant_repository_classification_append,
 )
 from control_plane.trusted_maintenance import (
+    TrustedMaintenanceAuthorityError,
+    TrustedMaintenanceExpectedAuthority,
+    TrustedMaintenanceGitHubEventFacts,
+    TrustedMaintenanceRuleMatchError,
+    TrustedMaintenancePolicyConflictError,
+    TrustedMaintenancePolicySequenceError,
+    capture_trusted_maintenance_evidence,
     plan_trusted_maintenance_evidence_append,
     plan_trusted_maintenance_policy_apply,
     plan_trusted_maintenance_policy_append,
+    trusted_maintenance_current_authority,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -262,6 +271,14 @@ TenantRepositoryClassificationCompareWriteStatus = Literal[
     "reconciliation_required",
 ]
 RepositoryHumanRolePolicyCompareWriteStatus = Literal[
+    "written",
+    "exact_replay",
+    "replayed",
+    "idempotency_conflict",
+    "reservation_in_progress",
+    "reconciliation_required",
+]
+TrustedMaintenancePolicyCompareWriteStatus = Literal[
     "written",
     "exact_replay",
     "replayed",
@@ -377,6 +394,11 @@ class TenantRepositoryClassificationCompareWriteResult(NamedTuple):
 
 class RepositoryHumanRolePolicyCompareWriteResult(NamedTuple):
     status: RepositoryHumanRolePolicyCompareWriteStatus
+    idempotency_record: LaunchplaneIdempotencyRecord | None = None
+
+
+class TrustedMaintenancePolicyCompareWriteResult(NamedTuple):
+    status: TrustedMaintenancePolicyCompareWriteStatus
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
@@ -535,6 +557,55 @@ class _TenantTechnicalHumanWaiverAuthoritySnapshot:
         self,
         **_: object,
     ) -> tuple[TenantTechnicalHumanWaiverEventRecord, ...]:
+        return ()
+
+
+@dataclass(frozen=True)
+class _TrustedMaintenanceAuthoritySnapshot:
+    classifications: tuple[TenantRepositoryClassificationRecord, ...]
+    policies: tuple[TrustedMaintenancePolicyRecord, ...]
+
+    def list_tenant_repository_classification_records(
+        self,
+        *,
+        repository_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[TenantRepositoryClassificationRecord, ...]:
+        records = tuple(
+            record
+            for record in self.classifications
+            if not repository_id or record.repository_id == repository_id
+        )
+        return records if limit is None else records[: max(limit, 0)]
+
+    def list_trusted_maintenance_policy_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[TrustedMaintenancePolicyRecord, ...]:
+        normalized_repository = repository.strip().lower()
+        records = tuple(
+            record
+            for record in self.policies
+            if (not repository_id or record.repository_id == repository_id)
+            and (not repository_owner_id or record.repository_owner_id == repository_owner_id)
+            and (not normalized_repository or record.repository == normalized_repository)
+            and (not product or record.product == product)
+            and (not context or record.context == context)
+            and (not status or record.status == status)
+        )
+        return records if limit is None else records[: max(limit, 0)]
+
+    def list_trusted_maintenance_evidence_records(
+        self,
+        **_: object,
+    ) -> tuple[TrustedMaintenanceEvidenceRecord, ...]:
         return ()
 
 
@@ -8680,6 +8751,48 @@ class PostgresRecordStore(HumanSessionStore):
             payload=self._payload_dict(record),
         )
 
+    def _lock_trusted_maintenance_evidence_identity(
+        self,
+        session: Any,
+        *,
+        source: str,
+        delivery_id: str,
+    ) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        lock_parts = (
+            "launchplane",
+            "trusted-maintenance-evidence",
+            source,
+            delivery_id,
+        )
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": "".join(f"{len(lock_part)}:{lock_part}" for lock_part in lock_parts)},
+        )
+
+    def _locked_trusted_maintenance_evidence_identity_rows(
+        self,
+        *,
+        session: Any,
+        source: str,
+        delivery_id: str,
+    ) -> tuple[LaunchplaneTrustedMaintenanceEvidenceRow, ...]:
+        statement = (
+            select(LaunchplaneTrustedMaintenanceEvidenceRow)
+            .where(
+                LaunchplaneTrustedMaintenanceEvidenceRow.source == source,
+                LaunchplaneTrustedMaintenanceEvidenceRow.delivery_id == delivery_id,
+            )
+            .order_by(
+                LaunchplaneTrustedMaintenanceEvidenceRow.occurred_at.asc(),
+                LaunchplaneTrustedMaintenanceEvidenceRow.evidence_id.asc(),
+            )
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return tuple(session.scalars(statement).all())
+
     def _lock_trusted_maintenance_policy_write(
         self,
         session: Any,
@@ -8805,10 +8918,165 @@ class PostgresRecordStore(HumanSessionStore):
         assert insert_error is not None
         raise insert_error
 
+    @overload
     def compare_and_write_trusted_maintenance_policy_record(
         self,
         record: TrustedMaintenancePolicyRecord,
         *,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+    ) -> Literal["written", "replayed"]: ...
+
+    @overload
+    def compare_and_write_trusted_maintenance_policy_record(
+        self,
+        *,
+        record: TrustedMaintenancePolicyRecord,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+        mutation: DbOnlyMutationRequest,
+    ) -> TrustedMaintenancePolicyCompareWriteResult: ...
+
+    def compare_and_write_trusted_maintenance_policy_record(
+        self,
+        record: TrustedMaintenancePolicyRecord,
+        *,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+        mutation: DbOnlyMutationRequest | None = None,
+    ) -> Literal["written", "replayed"] | TrustedMaintenancePolicyCompareWriteResult:
+        if mutation is None:
+            return self._compare_and_write_trusted_maintenance_policy_without_idempotency(
+                record=record,
+                expected_current_record_id=expected_current_record_id,
+                expected_current_policy_digest=expected_current_policy_digest,
+            )
+        if not 100 <= mutation.response_status_code <= 599:
+            raise ValueError("DB-only mutation response status must be between 100 and 599.")
+        if not mutation.response_trace_id.strip():
+            raise ValueError("DB-only mutation response trace id is required.")
+        normalized_expected_record_id = expected_current_record_id.strip()
+        normalized_expected_digest = expected_current_policy_digest.strip().lower()
+
+        reservation_insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            observed_at = self._database_mutation_timestamp(session)
+            stored_reservation = build_launchplane_mutation_reservation(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                request_fingerprint=mutation.request_fingerprint,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                reserved_at=observed_at,
+            )
+            reservation_row = self._idempotency_row(stored_reservation)
+            session.add(reservation_row)
+            try:
+                session.flush()
+            except IntegrityError as error:
+                session.rollback()
+                reservation_insert_error = error
+            if reservation_insert_error is None:
+                return self._compare_and_write_trusted_maintenance_policy_locked(
+                    session=session,
+                    record=record,
+                    expected_current_record_id=normalized_expected_record_id,
+                    expected_current_policy_digest=normalized_expected_digest,
+                    reservation_row=reservation_row,
+                    mutation_reservation=stored_reservation,
+                    mutation=mutation,
+                )
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            reservation_row = session.scalar(
+                self._idempotency_statement(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if reservation_row is None:
+                assert reservation_insert_error is not None
+                raise reservation_insert_error
+            current_reservation = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=reservation_row.payload,
+            )
+            if current_reservation.request_fingerprint != mutation.request_fingerprint:
+                return TrustedMaintenancePolicyCompareWriteResult(
+                    status="idempotency_conflict",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "completed":
+                return TrustedMaintenancePolicyCompareWriteResult(
+                    status="replayed",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "reconcile_required":
+                return TrustedMaintenancePolicyCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=current_reservation,
+                )
+            observed_at = self._database_mutation_timestamp(session)
+            if parse_launchplane_mutation_timestamp(
+                current_reservation.lease_expires_at,
+                field_name="lease_expires_at",
+            ) > parse_launchplane_mutation_timestamp(
+                observed_at,
+                field_name="observed_at",
+            ):
+                return TrustedMaintenancePolicyCompareWriteResult(
+                    status="reservation_in_progress",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.reconciliation_key:
+                reconcile_record = self._updated_idempotency_record(
+                    current_reservation,
+                    state="reconcile_required",
+                    updated_at=observed_at,
+                )
+                self._sync_idempotency_row(reservation_row, reconcile_record)
+                session.commit()
+                return TrustedMaintenancePolicyCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=reconcile_record,
+                )
+            reclaimed_reservation = self._updated_idempotency_record(
+                current_reservation,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                attempt=current_reservation.attempt + 1,
+                updated_at=observed_at,
+                response_status_code=None,
+                response_trace_id="",
+                recorded_at="",
+                response_payload={},
+            )
+            self._sync_idempotency_row(reservation_row, reclaimed_reservation)
+            return self._compare_and_write_trusted_maintenance_policy_locked(
+                session=session,
+                record=record,
+                expected_current_record_id=normalized_expected_record_id,
+                expected_current_policy_digest=normalized_expected_digest,
+                reservation_row=reservation_row,
+                mutation_reservation=reclaimed_reservation,
+                mutation=mutation,
+            )
+
+    def _compare_and_write_trusted_maintenance_policy_without_idempotency(
+        self,
+        *,
+        record: TrustedMaintenancePolicyRecord,
         expected_current_record_id: str,
         expected_current_policy_digest: str,
     ) -> Literal["written", "replayed"]:
@@ -8856,6 +9124,86 @@ class PostgresRecordStore(HumanSessionStore):
             session.flush()
             session.commit()
             return "written"
+
+    def _compare_and_write_trusted_maintenance_policy_locked(
+        self,
+        *,
+        session: Any,
+        record: TrustedMaintenancePolicyRecord,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+        reservation_row: LaunchplaneIdempotencyRow,
+        mutation_reservation: LaunchplaneIdempotencyRecord,
+        mutation: DbOnlyMutationRequest,
+    ) -> TrustedMaintenancePolicyCompareWriteResult:
+        self._lock_trusted_maintenance_policy_write(
+            session,
+            repository_id=record.repository_id,
+            product=record.product,
+            context_name=record.context,
+        )
+        rows = self._trusted_maintenance_policy_stream_rows(
+            session=session,
+            repository_id=record.repository_id,
+            product=record.product,
+            context_name=record.context,
+            for_update=True,
+        )
+        records = tuple(
+            self._read_payload(
+                model_type=TrustedMaintenancePolicyRecord,
+                payload=row.payload,
+            )
+            for row in rows
+        )
+        try:
+            plan = plan_trusted_maintenance_policy_apply(
+                records=records,
+                record=record,
+                expected_current_record_id=expected_current_record_id,
+                expected_current_policy_digest=expected_current_policy_digest,
+            )
+        except (
+            TrustedMaintenancePolicyConflictError,
+            TrustedMaintenancePolicySequenceError,
+            ValueError,
+        ):
+            session.delete(reservation_row)
+            session.commit()
+            raise
+
+        exact_replay = plan.status == "replayed"
+        if not exact_replay:
+            if plan.superseded_current_record is not None:
+                current_row = next(
+                    row for row in rows if row.record_id == plan.superseded_current_record.record_id
+                )
+                self._sync_trusted_maintenance_policy_row(
+                    current_row,
+                    plan.superseded_current_record,
+                )
+                session.flush()
+            session.add(self._trusted_maintenance_policy_row(record))
+            session.flush()
+        completed_at = self._database_mutation_timestamp(session)
+        completion = complete_launchplane_mutation_reservation(
+            mutation_reservation,
+            response_status_code=mutation.response_status_code,
+            response_trace_id=mutation.response_trace_id,
+            completed_at=completed_at,
+            response_payload=(
+                mutation.replay_response_payload
+                if exact_replay and mutation.replay_response_payload is not None
+                else mutation.response_payload
+            ),
+        )
+        self._sync_idempotency_row(reservation_row, completion)
+        session.flush()
+        session.commit()
+        return TrustedMaintenancePolicyCompareWriteResult(
+            status="exact_replay" if exact_replay else "written",
+            idempotency_record=completion,
+        )
 
     def read_trusted_maintenance_policy_record(
         self,
@@ -8909,6 +9257,140 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def capture_trusted_maintenance_evidence_transactionally(
+        self,
+        *,
+        candidate: TenantMergeCandidate,
+        expected_authority: TrustedMaintenanceExpectedAuthority,
+        event_facts: TrustedMaintenanceGitHubEventFacts,
+    ) -> Literal["written", "replayed"]:
+        insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_tenant_repository_classification_write(
+                session,
+                repository_id=candidate.repository_id,
+            )
+            self._lock_trusted_maintenance_policy_write(
+                session,
+                repository_id=candidate.repository_id,
+                product=candidate.product,
+                context_name=candidate.context,
+            )
+            observed_at = self._database_mutation_timestamp(session)
+            classification_rows = self._locked_current_classification_rows(
+                session=session,
+                repository_id=candidate.repository_id,
+            )
+            policy_rows = self._trusted_maintenance_policy_stream_rows(
+                session=session,
+                repository_id=candidate.repository_id,
+                product=candidate.product,
+                context_name=candidate.context,
+                for_update=True,
+            )
+            authority_snapshot = _TrustedMaintenanceAuthoritySnapshot(
+                classifications=tuple(
+                    self._read_payload(
+                        model_type=TenantRepositoryClassificationRecord,
+                        payload=row.payload,
+                    )
+                    for row in classification_rows
+                ),
+                policies=tuple(
+                    self._read_payload(
+                        model_type=TrustedMaintenancePolicyRecord,
+                        payload=row.payload,
+                    )
+                    for row in policy_rows
+                ),
+            )
+            try:
+                current = trusted_maintenance_current_authority(
+                    store=authority_snapshot,
+                    candidate=candidate,
+                    expected_authority=expected_authority,
+                    evaluated_at=observed_at,
+                )
+                provisional = capture_trusted_maintenance_evidence(
+                    candidate=candidate,
+                    classification=current.classification,
+                    policy_record=current.policy_record,
+                    event_facts=event_facts,
+                    occurred_at=observed_at,
+                    recorded_at=observed_at,
+                )
+            except (
+                TrustedMaintenanceAuthorityError,
+                TrustedMaintenanceRuleMatchError,
+                ValueError,
+            ):
+                session.rollback()
+                raise
+
+            self._lock_trusted_maintenance_evidence_identity(
+                session,
+                source=event_facts.source,
+                delivery_id=event_facts.delivery_id,
+            )
+            evidence_rows = self._locked_trusted_maintenance_evidence_identity_rows(
+                session=session,
+                source=event_facts.source,
+                delivery_id=event_facts.delivery_id,
+            )
+            evidence_records = tuple(
+                self._read_payload(
+                    model_type=TrustedMaintenanceEvidenceRecord,
+                    payload=row.payload,
+                )
+                for row in evidence_rows
+            )
+            append_plan = plan_trusted_maintenance_evidence_append(
+                records=evidence_records,
+                record=provisional.record,
+            )
+            if append_plan.status != "replayed":
+                session.add(self._trusted_maintenance_evidence_row(provisional.record))
+                try:
+                    session.flush()
+                    session.commit()
+                    return append_plan.status
+                except IntegrityError as error:
+                    session.rollback()
+                    insert_error = error
+            else:
+                session.commit()
+                return append_plan.status
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_trusted_maintenance_evidence_identity(
+                session,
+                source=event_facts.source,
+                delivery_id=event_facts.delivery_id,
+            )
+            evidence_rows = self._locked_trusted_maintenance_evidence_identity_rows(
+                session=session,
+                source=event_facts.source,
+                delivery_id=event_facts.delivery_id,
+            )
+            evidence_records = tuple(
+                self._read_payload(
+                    model_type=TrustedMaintenanceEvidenceRecord,
+                    payload=row.payload,
+                )
+                for row in evidence_rows
+            )
+            replay_plan = plan_trusted_maintenance_evidence_append(
+                records=evidence_records,
+                record=provisional.record,
+            )
+            session.rollback()
+            if replay_plan.status == "replayed":
+                return "replayed"
+        assert insert_error is not None
+        raise insert_error
 
     def write_trusted_maintenance_evidence_record(
         self,

@@ -1791,6 +1791,18 @@ run` is the foreground loop intended for an external process supervisor, and
   record even when audit-only logins or the later processing timestamp differ;
   reusing that source/delivery identity with a different repository, head,
   classification, policy, actor, sender, or event binding is a conflict.
+- Policy dry-run/apply accepts a strict envelope containing the candidate
+  trusted-maintenance policy record plus the caller's expected current policy
+  record ID and digest, both empty only for the first revision. `GET
+  /v1/work-graph/tenant-admission/trusted-maintenance-policy` requires
+  `trusted_maintenance_policy.read`; `POST
+  /v1/tenant-admission/trusted-maintenance-policies/apply` requires
+  `trusted_maintenance_policy.write`. Both actions are separate from repository
+  human role-policy actions and are scoped to the submitted product/context.
+  Apply is browser-GitHub-human-only, PostgreSQL-only, requires a non-empty
+  `Idempotency-Key`, and reserves idempotency, locks the policy stream,
+  validates CAS, writes/replays the response, and commits in one database
+  transaction. Dry-run writes nothing and may use rehearsal/read stores.
 - Policy apply compares and writes the expected active tip inside the same
   filesystem authority lock or PostgreSQL advisory/row-lock transaction.
   Current-authority reads validate the complete revision and supersession chain,
@@ -1807,12 +1819,51 @@ run` is the foreground loop intended for an external process supervisor, and
   promoted query/audit columns, one active policy tip per
   repository/product/context, exact-head/evidence/policy/actor indexes, and
   critical schema invariants.
-- HTTP routes, webhook ingress/signature handling, OpenAPI, unified
-  status/controller projection, merge-train wiring, rollout decisions, UI,
-  provider calls, policy mutation authorization, and real repository policy
-  values remain deferred. Until those follow-up pieces are deployed and rollout
-  supplies shared-authority records, existing manager-preview behavior remains
-  unchanged.
+- Trusted-maintenance evidence capture is invoked only after existing signed
+  GitHub webhook verification in both current ingress surfaces: `POST
+  /v1/manager-preview-approval/github-webhook` and `POST
+  /v1/every-code/github-webhook`. This common post-signature handler adds no new
+  route, webhook secret, durable raw receipt table, or runtime config. It only
+  considers authenticated `pull_request` deliveries with an explicit policy
+  event/action match. Before any GitHub API call it uses the signed numeric
+  repository tuple, PR number, sender ID/type/login, PR author ID/type/login,
+  and head SHA as structural pre-filter facts; if no current `tenant_ui`
+  classification authority or exact signed rule candidate exists, the delivery
+  is accepted/skipped and no provider call or evidence write occurs.
+- For relevant deliveries, Launchplane resolves the GitHub token from the
+  DB-authoritative repository classification product/context, re-fetches the
+  current PR, and persists only re-fetched current facts. The base repository
+  numeric ID, owner, and full name must exactly match the signed tuple; the PR
+  must still be open; the re-fetched PR author numeric ID/type/login must match
+  the signed author identity; the re-fetched head SHA must equal the signed head
+  SHA; and the head repository numeric ID/owner/full name must exactly equal the
+  base repository, preserving same-repository-only v1 evidence. Missing,
+  indeterminate, forked, stale, closed, non-Bot, login-only, or mismatched facts
+  fail closed with no evidence.
+- PostgreSQL capture uses one transaction and one database/server timestamp. It
+  locks and re-reads repository classification and the full trusted-maintenance
+  policy history at write time, requires the expected authority record IDs,
+  revisions, and digests to remain exact, evaluates the numeric actor, sender,
+  event, and action rule, then appends or deterministically replays evidence in
+  that same transaction. Policy or classification drift never produces success.
+  The evidence source is the fixed canonical generic GitHub webhook source;
+  source/delivery replay is deterministic, while changed binding conflicts are
+  rejected.
+- Invalid signatures, missing deliveries, and malformed payloads stop at the
+  existing ingress boundary and never call the trusted-maintenance handler.
+  Unsupported, nonmatching, non-Bot, fork, closed, and stale cases return
+  accepted/skipped. Transient token resolution, GitHub API, or database
+  uncertainty on an otherwise relevant delivery returns retryable 503 and writes
+  no evidence; exact GitHub redelivery or existing signed replay-envelope
+  tooling is the reconcile path. Responses do not expose policy actor IDs or
+  logins.
+- Unified tenant-admission status/controller projection, merge-train wiring,
+  branch protection or rollout behavior, UI, provider mutations, blanket Bot
+  bypass, changed-file/name/branch/title/label heuristics, and checked-in real
+  repository policy values remain deferred. Until those follow-up pieces are
+  deliberately deployed and rollout supplies shared-authority records, existing
+  manager-preview and Every Code behavior remains unchanged for repositories
+  without active trusted-maintenance authority.
 
 ## Runtime Key-Safety Policy Record
 

@@ -5,9 +5,18 @@ from typing import Any, cast
 import unittest
 
 from control_plane.contracts.repository_human_admission import (
+    REPOSITORY_HUMAN_ROLE_POLICY_WRITE_ACTION,
     TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,
     RepositoryHumanRolePolicyRecord,
     build_repository_human_role_policy_record_id,
+)
+from control_plane.contracts.trusted_maintenance import (
+    TRUSTED_MAINTENANCE_POLICY_READ_ACTION,
+    TRUSTED_MAINTENANCE_POLICY_WRITE_ACTION,
+    TrustedMaintenanceActorRule,
+    TrustedMaintenanceAllowedEvent,
+    TrustedMaintenancePolicyRecord,
+    build_trusted_maintenance_policy_record_id,
 )
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -115,6 +124,26 @@ def _waiver_session_app(
     return app, session_manager, human_session
 
 
+def _trusted_maintenance_session_app(
+    store: object,
+    *,
+    actions: tuple[str, ...] = (TRUSTED_MAINTENANCE_POLICY_WRITE_ACTION,),
+    identity: GitHubHumanIdentity | None = None,
+) -> tuple[Any, HumanSessionManager, Any]:
+    session_manager = HumanSessionManager(
+        config=_github_oauth_config(),
+        session_store=InMemoryHumanSessionStore(),
+    )
+    human_session = session_manager.issue(identity or _waiver_human_identity())
+    app = create_launchplane_fastapi_app(
+        verifier=_StubVerifier(_identity()),
+        authz_policy=_trusted_maintenance_authz_policy_record(actions=actions).policy,
+        record_store_factory=lambda: store,
+        human_session_manager=session_manager,
+    )
+    return app, session_manager, human_session
+
+
 def _waiver_authz_policy_record(
     *, github_ids: tuple[int, ...] = (301,)
 ) -> LaunchplaneAuthzPolicyRecord:
@@ -138,6 +167,37 @@ def _waiver_authz_policy_record(
         revision=1,
         status="active",
         source="test:tenant-technical-human-waiver-authz",
+        updated_at="2026-07-31T00:00:00Z",
+        policy_sha256=digest,
+        policy=policy,
+    )
+
+
+def _trusted_maintenance_authz_policy_record(
+    *,
+    actions: tuple[str, ...] = (TRUSTED_MAINTENANCE_POLICY_WRITE_ACTION,),
+    github_ids: tuple[int, ...] = (301,),
+) -> LaunchplaneAuthzPolicyRecord:
+    policy = LaunchplaneAuthzPolicy(
+        schema_version=2,
+        github_humans=(
+            GitHubHumanPolicyRule(
+                managed_set_id="tenant-human.example",
+                managed_rule_id="trusted-maintenance-policy",
+                github_ids=github_ids,
+                roles=("read_only",),
+                products=(PRODUCT,),
+                contexts=(CONTEXT,),
+                actions=actions,
+            ),
+        ),
+    )
+    digest = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+        revision=1,
+        status="active",
+        source="test:trusted-maintenance-policy-authz",
         updated_at="2026-07-31T00:00:00Z",
         policy_sha256=digest,
         policy=policy,
@@ -229,6 +289,60 @@ def _seed_waiver_authority(
     else:
         raise TypeError("unsupported waiver test store")
     return classification_record, role_policy_record, authz_policy_record
+
+
+def _trusted_maintenance_policy_payload(
+    *,
+    revision: int,
+    mode: str = "apply",
+    actor_github_id: int = 301,
+    sender_github_ids: tuple[int, ...] = (301,),
+    event_actions: tuple[str, ...] = ("synchronize",),
+    expected_current_record_id: str = "",
+    expected_current_policy_digest: str = "",
+    supersedes_record_id: str | None = None,
+    effective_at: str = CLASSIFIED_AT,
+    reason: str = "initial trusted-maintenance policy",
+) -> dict[str, object]:
+    actor_rule = TrustedMaintenanceActorRule(
+        actor_github_id=actor_github_id,
+        actor_login="automation-301",
+        sender_github_ids=sender_github_ids,
+        sender_logins=("automation-sender",),
+        allowed_events=(
+            TrustedMaintenanceAllowedEvent(
+                event_name="pull_request",
+                actions=event_actions,
+            ),
+        ),
+    )
+    record = TrustedMaintenancePolicyRecord(
+        record_id=build_trusted_maintenance_policy_record_id(
+            repository_id=REPOSITORY_ID,
+            product=PRODUCT,
+            context=CONTEXT,
+            policy_revision=revision,
+        ),
+        repository_id=REPOSITORY_ID,
+        repository_owner_id=REPOSITORY_OWNER_ID,
+        repository=REPOSITORY,
+        product=PRODUCT,
+        context=CONTEXT,
+        policy_revision=revision,
+        actor_rules=(actor_rule,),
+        effective_at=effective_at,
+        source=SOURCE,
+        reason=reason,
+        supersedes_record_id=supersedes_record_id,
+    )
+
+    return {
+        "schema_version": 1,
+        "mode": mode,
+        "expected_current_record_id": expected_current_record_id,
+        "expected_current_policy_digest": expected_current_policy_digest,
+        "record": record.model_dump(mode="json"),
+    }
 
 
 def _waiver_apply_payload(
@@ -1150,6 +1264,375 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(revision_2_response.status_code, 202)
         self.assertEqual(replay_response.status_code, 202)
         self.assertEqual(replay_response.json()["result"]["status"], "replayed")
+
+    async def test_trusted_maintenance_policy_read_apply_uses_separate_human_authz(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(
+                Path(tmp_dir),
+                authz_policy_record=_trusted_maintenance_authz_policy_record(
+                    actions=(
+                        TRUSTED_MAINTENANCE_POLICY_READ_ACTION,
+                        TRUSTED_MAINTENANCE_POLICY_WRITE_ACTION,
+                    )
+                ),
+            )
+            app, session_manager, human_session = _trusted_maintenance_session_app(
+                store,
+                actions=(
+                    TRUSTED_MAINTENANCE_POLICY_READ_ACTION,
+                    TRUSTED_MAINTENANCE_POLICY_WRITE_ACTION,
+                ),
+            )
+            browser_headers = _browser_mutation_headers(session_manager, human_session)
+            read_response = await _asgi_get(
+                app,
+                (
+                    "/v1/work-graph/tenant-admission/trusted-maintenance-policy"
+                    f"?repository_id={REPOSITORY_ID}&product={PRODUCT}&context={CONTEXT}"
+                ),
+                headers=browser_headers,
+            )
+            apply_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "trusted-maintenance-policy-create",
+                },
+                payload=_trusted_maintenance_policy_payload(revision=1),
+            )
+            read_after_apply = await _asgi_get(
+                app,
+                (
+                    "/v1/work-graph/tenant-admission/trusted-maintenance-policy"
+                    f"?repository_id={REPOSITORY_ID}&product={PRODUCT}&context={CONTEXT}"
+                ),
+                headers=_browser_mutation_headers(session_manager, human_session),
+            )
+
+        self.assertEqual(read_response.status_code, 200)
+        self.assertEqual(read_response.json()["read_model"]["status"], "missing")
+        self.assertEqual(apply_response.status_code, 202)
+        self.assertEqual(apply_response.json()["result"]["status"], "applied")
+        self.assertEqual(apply_response.json()["result"]["policy_revision"], 1)
+        self.assertEqual(read_after_apply.status_code, 200)
+        self.assertEqual(read_after_apply.json()["read_model"]["status"], "available")
+        self.assertEqual(
+            read_after_apply.json()["read_model"]["current_record"]["policy_revision"],
+            1,
+        )
+
+    def test_openapi_includes_trusted_maintenance_policy_contract(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(
+                Path(tmp_dir),
+                authz_policy_record=_trusted_maintenance_authz_policy_record(),
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_trusted_maintenance_authz_policy_record().policy,
+                record_store_factory=lambda: store,
+            )
+            openapi = app.openapi()
+            store.close()
+
+        read_route = openapi["paths"]["/v1/work-graph/tenant-admission/trusted-maintenance-policy"][
+            "get"
+        ]
+        apply_route = openapi["paths"]["/v1/tenant-admission/trusted-maintenance-policies/apply"][
+            "post"
+        ]
+
+        self.assertEqual(read_route["operationId"], "read_trusted_maintenance_policy")
+        self.assertEqual(apply_route["operationId"], "apply_trusted_maintenance_policy")
+        self.assertEqual(
+            read_route["responses"]["200"]["content"]["application/json"]["schema"],
+            {"$ref": "#/components/schemas/TrustedMaintenancePolicyReadResponse"},
+        )
+        self.assertEqual(
+            apply_route["requestBody"]["content"]["application/json"]["schema"],
+            {"$ref": "#/components/schemas/TrustedMaintenancePolicyApplyEnvelope"},
+        )
+        self.assertEqual(
+            apply_route["responses"]["202"]["content"]["application/json"]["schema"],
+            {"$ref": "#/components/schemas/TrustedMaintenancePolicyApplyResponse"},
+        )
+        for status_code in ("409", "503"):
+            self.assertEqual(
+                read_route["responses"][status_code]["content"]["application/json"]["schema"],
+                {"$ref": "#/components/schemas/LaunchplaneErrorResponse"},
+            )
+            self.assertEqual(
+                apply_route["responses"][status_code]["content"]["application/json"]["schema"],
+                {"$ref": "#/components/schemas/LaunchplaneErrorResponse"},
+            )
+
+    async def test_trusted_maintenance_policy_apply_requires_browser_human_and_csrf(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(
+                Path(tmp_dir),
+                authz_policy_record=_trusted_maintenance_authz_policy_record(),
+            )
+            app, session_manager, human_session = _trusted_maintenance_session_app(store)
+            bearer_only = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "trusted-bearer-only",
+                },
+                payload=_trusted_maintenance_policy_payload(revision=1),
+            )
+            missing_csrf_headers = _browser_mutation_headers(
+                session_manager,
+                human_session,
+            )
+            missing_csrf_headers.pop("X-CSRF-Token")
+            missing_csrf = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers={
+                    **missing_csrf_headers,
+                    "Idempotency-Key": "trusted-missing-csrf",
+                },
+                payload=_trusted_maintenance_policy_payload(revision=1),
+            )
+
+        self.assertEqual(bearer_only.status_code, 403)
+        self.assertEqual(bearer_only.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(missing_csrf.status_code, 403)
+        self.assertEqual(missing_csrf.json()["error"]["code"], "browser_mutation_denied")
+
+    async def test_trusted_maintenance_policy_authz_is_separate_from_role_policy(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(
+                Path(tmp_dir),
+                authz_policy_record=_trusted_maintenance_authz_policy_record(
+                    actions=(REPOSITORY_HUMAN_ROLE_POLICY_WRITE_ACTION,)
+                ),
+            )
+            app, session_manager, human_session = _trusted_maintenance_session_app(
+                store,
+                actions=(REPOSITORY_HUMAN_ROLE_POLICY_WRITE_ACTION,),
+            )
+            read_denied = await _asgi_get(
+                app,
+                (
+                    "/v1/work-graph/tenant-admission/trusted-maintenance-policy"
+                    f"?repository_id={REPOSITORY_ID}&product={PRODUCT}&context={CONTEXT}"
+                ),
+                headers=_browser_mutation_headers(session_manager, human_session),
+            )
+            write_denied = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "trusted-role-policy-action-only",
+                },
+                payload=_trusted_maintenance_policy_payload(revision=1),
+            )
+
+        self.assertEqual(read_denied.status_code, 403)
+        self.assertEqual(write_denied.status_code, 403)
+
+    async def test_trusted_maintenance_policy_apply_requires_postgres_and_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            filesystem_store = FilesystemRecordStore(Path(tmp_dir) / "fs")
+            _write_filesystem_authz_policy(
+                filesystem_store,
+                _trusted_maintenance_authz_policy_record(),
+            )
+            (
+                filesystem_app,
+                filesystem_sessions,
+                filesystem_session,
+            ) = _trusted_maintenance_session_app(filesystem_store)
+            sqlite_store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(tmp_dir) / 'launchplane.sqlite3'}"
+            )
+            sqlite_store.ensure_schema()
+            sqlite_store.seed_authz_policy_if_absent(_trusted_maintenance_authz_policy_record())
+            sqlite_app, sqlite_sessions, sqlite_session = _trusted_maintenance_session_app(
+                sqlite_store
+            )
+
+            missing_key = await _asgi_request(
+                sqlite_app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers=_browser_mutation_headers(sqlite_sessions, sqlite_session),
+                payload=_trusted_maintenance_policy_payload(revision=1),
+            )
+            filesystem_response = await _asgi_request(
+                filesystem_app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers={
+                    **_browser_mutation_headers(filesystem_sessions, filesystem_session),
+                    "Idempotency-Key": "trusted-fs-apply",
+                },
+                payload=_trusted_maintenance_policy_payload(revision=1),
+            )
+            sqlite_response = await _asgi_request(
+                sqlite_app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers={
+                    **_browser_mutation_headers(sqlite_sessions, sqlite_session),
+                    "Idempotency-Key": "trusted-sqlite-apply",
+                },
+                payload=_trusted_maintenance_policy_payload(revision=1),
+            )
+            sqlite_store.close()
+
+        self.assertEqual(missing_key.status_code, 400)
+        self.assertEqual(missing_key.json()["error"]["code"], "idempotency_key_required")
+        self.assertEqual(filesystem_response.status_code, 503)
+        self.assertEqual(
+            filesystem_response.json()["error"]["code"],
+            "database_storage_required",
+        )
+        self.assertEqual(sqlite_response.status_code, 503)
+        self.assertEqual(sqlite_response.json()["error"]["code"], "database_storage_required")
+
+    async def test_trusted_maintenance_policy_dry_run_and_idempotency_semantics(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            filesystem_store = FilesystemRecordStore(Path(tmp_dir) / "fs")
+            _write_filesystem_authz_policy(
+                filesystem_store,
+                _trusted_maintenance_authz_policy_record(),
+            )
+            dry_app, dry_sessions, dry_session = _trusted_maintenance_session_app(filesystem_store)
+            dry_run = await _asgi_request(
+                dry_app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers=_browser_mutation_headers(dry_sessions, dry_session),
+                payload=_trusted_maintenance_policy_payload(revision=1, mode="dry_run"),
+            )
+            dry_records = filesystem_store.list_trusted_maintenance_policy_records(
+                repository_id=REPOSITORY_ID
+            )
+
+            store = _postgres_store(
+                Path(tmp_dir) / "pg",
+                authz_policy_record=_trusted_maintenance_authz_policy_record(),
+            )
+            app, session_manager, human_session = _trusted_maintenance_session_app(store)
+            payload = _trusted_maintenance_policy_payload(revision=1)
+            first = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "trusted-idempotency",
+                },
+                payload=payload,
+            )
+            same_key = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "trusted-idempotency",
+                },
+                payload=payload,
+            )
+            changed_same_key = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "trusted-idempotency",
+                },
+                payload=_trusted_maintenance_policy_payload(
+                    revision=1,
+                    reason="changed trusted-maintenance payload",
+                ),
+            )
+            exact_replay = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "trusted-idempotency-new-key",
+                },
+                payload=payload,
+            )
+
+        self.assertEqual(dry_run.status_code, 202)
+        self.assertEqual(dry_run.json()["result"]["status"], "would_apply")
+        self.assertEqual(dry_run.json()["result"]["mode"], "dry_run")
+        self.assertEqual(dry_records, ())
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(same_key.status_code, 202)
+        self.assertTrue(same_key.json().get("replayed"))
+        self.assertEqual(changed_same_key.status_code, 409)
+        self.assertEqual(changed_same_key.json()["error"]["code"], "idempotency_key_reused")
+        self.assertEqual(exact_replay.status_code, 202)
+        self.assertIsNone(exact_replay.json().get("replayed"))
+        self.assertEqual(exact_replay.json()["result"]["status"], "replayed")
+
+    async def test_trusted_maintenance_policy_rejects_stale_expected_tip(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(
+                Path(tmp_dir),
+                authz_policy_record=_trusted_maintenance_authz_policy_record(),
+            )
+            app, session_manager, human_session = _trusted_maintenance_session_app(store)
+            revision_1_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "trusted-rev-1",
+                },
+                payload=_trusted_maintenance_policy_payload(revision=1),
+            )
+            revision_1 = revision_1_response.json()["result"]
+            stale_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/tenant-admission/trusted-maintenance-policies/apply",
+                headers={
+                    **_browser_mutation_headers(session_manager, human_session),
+                    "Idempotency-Key": "trusted-stale-tip",
+                },
+                payload=_trusted_maintenance_policy_payload(
+                    revision=2,
+                    actor_github_id=302,
+                    expected_current_record_id="wrong-record-id",
+                    expected_current_policy_digest=revision_1["policy_digest"],
+                    supersedes_record_id=revision_1["record_id"],
+                ),
+            )
+
+        self.assertEqual(revision_1_response.status_code, 202)
+        self.assertEqual(stale_response.status_code, 409)
+        self.assertEqual(
+            stale_response.json()["error"]["code"],
+            "trusted_maintenance_policy_conflict",
+        )
 
     async def test_role_policy_rejects_missing_stale_or_digest_drift_expected_tip(
         self,

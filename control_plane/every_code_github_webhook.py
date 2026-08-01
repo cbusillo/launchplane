@@ -27,8 +27,14 @@ from control_plane.every_code_work_request_write import (
     EveryCodeWorkRequestCreateEnvelope,
     build_every_code_work_request_record,
 )
+from control_plane.trusted_maintenance_github_webhook import (
+    TrustedMaintenanceGitHubWebhookDependencies,
+    TrustedMaintenanceGitHubWebhookResult,
+    handle_trusted_maintenance_github_webhook,
+)
 from control_plane.workflows.launchplane import (
     ProductProfileListStore,
+    github_api_request,
     launchplane_anchor_repo_context,
     resolve_launchplane_github_token,
     verify_github_webhook_signature,
@@ -88,6 +94,8 @@ class EveryCodeGitHubWebhookDependencies:
     now_timestamp: Callable[[], str] = _utc_now_timestamp
     anchor_repo_context: _LaunchplaneAnchorRepoContextResolver = launchplane_anchor_repo_context
     github_token: _LaunchplaneGitHubTokenResolver = resolve_launchplane_github_token
+    github_api: Callable[..., object] = github_api_request
+    trusted_maintenance: TrustedMaintenanceGitHubWebhookDependencies | None = None
 
 
 EveryCodeGitHubWebhookHandler = Callable[
@@ -306,6 +314,68 @@ def _every_code_github_webhook_invalid_payload_response(
     )
 
 
+def _trusted_maintenance_dependencies(
+    dependencies: EveryCodeGitHubWebhookDependencies,
+) -> TrustedMaintenanceGitHubWebhookDependencies:
+    return dependencies.trusted_maintenance or TrustedMaintenanceGitHubWebhookDependencies(
+        github_token=dependencies.github_token,
+        github_api=dependencies.github_api,
+    )
+
+
+def _trusted_maintenance_terminal_response(
+    *,
+    trace_id: str,
+    result: TrustedMaintenanceGitHubWebhookResult,
+) -> _EveryCodeWebhookResponse | None:
+    if result.status == "conflict":
+        return (
+            409,
+            {
+                "status": "rejected",
+                "trace_id": trace_id,
+                "error": {
+                    "code": "trusted_maintenance_evidence_conflict",
+                    "message": (
+                        "Trusted-maintenance evidence conflicts with an existing signed delivery."
+                    ),
+                },
+            },
+        )
+    if result.status == "retryable_error":
+        return (
+            503,
+            {
+                "status": "rejected",
+                "trace_id": trace_id,
+                "error": {
+                    "code": "trusted_maintenance_unavailable",
+                    "message": "Trusted-maintenance evidence capture is temporarily unavailable.",
+                },
+            },
+        )
+    return None
+
+
+def _merge_trusted_maintenance_response(
+    payload: dict[str, object],
+    result: TrustedMaintenanceGitHubWebhookResult,
+) -> dict[str, object]:
+    if result.status not in {"captured", "replayed"}:
+        return payload
+    merged_payload = dict(payload)
+    result_payload = merged_payload.get("result")
+    if not isinstance(result_payload, dict):
+        result_payload = {}
+    merged_payload["result"] = dict(result_payload) | {
+        "trusted_maintenance": {
+            "status": result.status,
+            "evidence_status": result.evidence_status,
+        }
+    }
+    return merged_payload
+
+
 def handle_every_code_github_webhook_request(
     body_bytes: bytes,
     event_name: str,
@@ -441,12 +511,30 @@ def _handle_decoded_every_code_github_webhook_request(
             dependencies=dependencies,
         )
     if normalized_event_name == "pull_request":
-        return _handle_every_code_pull_request_webhook(
+        trusted_maintenance_result = handle_trusted_maintenance_github_webhook(
+            event_name=normalized_event_name,
+            delivery_id=normalized_delivery_id,
+            payload=payload,
+            record_store=record_store,
+            control_plane_root=control_plane_root_path,
+            dependencies=_trusted_maintenance_dependencies(dependencies),
+        )
+        terminal_response = _trusted_maintenance_terminal_response(
+            trace_id=trace_id,
+            result=trusted_maintenance_result,
+        )
+        if terminal_response is not None:
+            return terminal_response
+        status_code, response_payload = _handle_every_code_pull_request_webhook(
             trace_id=trace_id,
             delivery_id=normalized_delivery_id,
             payload=payload,
             record_store=record_store,
             dependencies=dependencies,
+        )
+        return status_code, _merge_trusted_maintenance_response(
+            response_payload,
+            trusted_maintenance_result,
         )
     if normalized_event_name != "issues":
         return (

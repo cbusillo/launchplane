@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 import unittest
-from unittest.mock import ANY
+from unittest.mock import ANY, patch
 
 import click
 
@@ -45,6 +45,9 @@ from control_plane.manager_preview_approval_projection import (
     write_manager_preview_approval_projection,
 )
 from control_plane.service_auth import GitHubHumanPolicyRule, LaunchplaneAuthzPolicy
+from control_plane.trusted_maintenance_github_webhook import (
+    TrustedMaintenanceGitHubWebhookResult,
+)
 
 
 PRODUCT = "example-site"
@@ -284,6 +287,73 @@ class ManagerPreviewApprovalGitHubWebhookTests(unittest.TestCase):
         )
         self.assertEqual(github.statuses[-1]["context"], "manager-preview-approval")
         self.assertEqual(github.statuses[-1]["state"], "pending")
+
+    def test_signed_pull_request_delegates_to_trusted_maintenance_after_signature(
+        self,
+    ) -> None:
+        store = _Store()
+        github = _GitHubApi()
+        payload = _pull_request_payload(action="synchronize")
+        with patch(
+            "control_plane.manager_preview_approval_github_webhook."
+            "handle_trusted_maintenance_github_webhook",
+            return_value=TrustedMaintenanceGitHubWebhookResult(
+                status="skipped",
+                reason="test",
+            ),
+        ) as trusted_handler:
+            status_code, response = handle_manager_preview_approval_github_webhook_request(
+                json.dumps(payload).encode(),
+                "pull_request",
+                "delivery-trusted-preview",
+                "sha256=test",
+                store,
+                Path("/tmp/launchplane"),
+                "trace-trusted-preview",
+                dependencies=_dependencies(github),
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(response["status"], "accepted")
+        trusted_handler.assert_called_once_with(
+            event_name="pull_request",
+            delivery_id="delivery-trusted-preview",
+            payload=payload,
+            record_store=store,
+            control_plane_root=Path("/tmp/launchplane"),
+            dependencies=ANY,
+        )
+
+    def test_invalid_signature_never_delegates_to_trusted_maintenance(self) -> None:
+        def reject_signature(**_kwargs: object) -> None:
+            raise click.ClickException("invalid signature")
+
+        dependencies = ManagerPreviewApprovalGitHubDependencies(
+            webhook_secret=lambda: "secret",
+            verify_signature=reject_signature,
+            github_api=_GitHubApi(),
+            github_token=lambda **_kwargs: "managed-token",
+        )
+        with patch(
+            "control_plane.manager_preview_approval_github_webhook."
+            "handle_trusted_maintenance_github_webhook"
+        ) as trusted_handler:
+            status_code, response = handle_manager_preview_approval_github_webhook_request(
+                json.dumps(_pull_request_payload(action="synchronize")).encode(),
+                "pull_request",
+                "delivery-invalid-signature",
+                "sha256=invalid",
+                _Store(),
+                Path("/tmp/launchplane"),
+                "trace-invalid-signature",
+                dependencies=dependencies,
+            )
+
+        self.assertEqual(status_code, 401)
+        error = response["error"]
+        assert isinstance(error, dict)
+        self.assertEqual(error["code"], "invalid_signature")
+        trusted_handler.assert_not_called()
 
     def test_signed_comment_approves_exact_preview_and_replays(self) -> None:
         store = _Store()
@@ -851,6 +921,21 @@ def _issue_comment_payload(*, comment_id: int = 501) -> dict[str, object]:
             "pull_request": {"url": f"https://api.github.com/repos/{REPOSITORY}/pulls/{PR_NUMBER}"},
         },
         "comment": {"id": comment_id},
+    }
+
+
+def _pull_request_payload(*, action: str = "synchronize") -> dict[str, object]:
+    return {
+        "action": action,
+        "number": PR_NUMBER,
+        "repository": {"full_name": REPOSITORY},
+        "pull_request": {
+            "number": PR_NUMBER,
+            "html_url": f"https://github.com/{REPOSITORY}/pull/{PR_NUMBER}",
+            "head": {"sha": HEAD_SHA},
+            "user": {"id": 301, "type": "Bot", "login": "automation"},
+        },
+        "sender": {"id": 301, "type": "Bot", "login": "automation"},
     }
 
 
