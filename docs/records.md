@@ -1696,6 +1696,31 @@ run` is the foreground loop intended for an external process supervisor, and
 - A delegation is valid only while its current role-policy revision is active and effective, its grantor remains a primary or backup manager, and its start, expiration, and revocation timestamps permit it. Silence or elapsed review time never creates approval authority.
 - Technical human waiver events are append-only create/revoke evidence. Creation requires a GitHub human who is both a current repository owner in the exact role policy and allowed by exactly one managed `tenant_technical_human_waiver.write` authorization rule.
 - Waiver evidence binds repository, product, context, pull request, exact head SHA, classification revision/digest, role-policy revision/digest, active authorization-policy revision/digest, human numeric identity, source event, reason, occurrence time, and optional expiration. New commits or any bound policy/classification drift make prior evidence stale; revocation wins a same-timestamp tie.
+- The role-policy read model is keyed by immutable `repository_id`, `product`,
+  and `context`. It returns `missing`, `available`, or fail-closed
+  `ambiguous` state plus the active current record when exactly one current tip
+  exists. Authorization uses `repository_human_role_policy.read` against the
+  submitted product/context and an explicit context target; repository names,
+  paths, actor strings, logins, and changed files are never authority hints.
+- Role-policy dry-run/apply accepts a strict envelope containing the candidate
+  role-policy record plus the caller's expected current tip record ID and digest
+  (both empty only for revision 1). Dry-run validates with filesystem or DB read
+  stores and writes nothing. Apply is PostgreSQL-only, requires a non-empty
+  `Idempotency-Key`, rejects terminal agents, authorizes
+  `repository_human_role_policy.write` against the submitted product/context,
+  and performs reservation, stream advisory lock, CAS/current-tip validation,
+  supersede plus insert, stored-response completion, and commit in one database
+  transaction. Same key plus same canonical request replays the stored HTTP 202
+  response; same key plus changed request returns `idempotency_key_reused`.
+  Repeating the exact currently active record under a new key also returns a
+  replay without adding history, but the request must retain its original
+  predecessor record ID and digest CAS.
+- Role-policy apply fails closed on missing, ambiguous, stale, scope-drifted,
+  conflicting, inactive, or sequence-invalid candidates. Request-provided
+  superseded records are ignored; the database writer derives supersession from
+  the locked current stream. This split does not add technical-human waiver HTTP
+  mutation routes, trusted-maintenance evidence, unified status, controller
+  changes, or Launchplane authz-policy mutation from role-policy routes.
 - Filesystem storage can rehearse role-policy revision history and technical
   human waiver event history locally. Shared PostgreSQL storage now persists
   `launchplane_repository_human_role_policies` and
@@ -1704,10 +1729,11 @@ run` is the foreground loop intended for an external process supervisor, and
   active role-policy tip per repository/product/context, and append-only waiver
   event replay/conflict semantics.
 - Manager-preview authorization can carry the same role-policy provenance for primary, backup, or delegated managers. Legacy approval records remain readable, but they cannot satisfy an evaluation once a repository role policy is explicitly enforced.
-- HTTP/service mutation, projections, idempotency/CAS response reservation,
-  trusted-maintenance evidence, and rollout remain deferred. Until those
-  follow-up pieces are deployed and rollout supplies a shared-authority role
-  policy, existing manager-preview behavior remains unchanged.
+- Technical-human waiver HTTP mutation, trusted-maintenance evidence, unified
+  status, controller rollout, and enforced tenant-admission decisions remain
+  deferred. Until those follow-up pieces are deployed and rollout supplies a
+  shared-authority role policy, existing manager-preview behavior remains
+  unchanged.
 
 ## Runtime Key-Safety Policy Record
 

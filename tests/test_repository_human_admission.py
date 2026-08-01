@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
 
 from control_plane.contracts.authz_policy_record import (
@@ -20,9 +22,13 @@ from control_plane.contracts.tenant_merge_eligibility import (
 )
 from control_plane.repository_human_admission import (
     RepositoryHumanRolePolicyConflictError,
+    RepositoryHumanRolePolicySequenceError,
     TenantTechnicalHumanWaiverAuthorizationError,
+    apply_repository_human_role_policy,
     capture_tenant_technical_human_waiver_event,
+    get_repository_human_role_policy_read_model,
     manager_role_policy_provenance,
+    plan_repository_human_role_policy_apply,
     plan_repository_human_role_policy_append,
     technical_human_waiver_path_result,
 )
@@ -32,6 +38,7 @@ from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
     TerminalAgentIdentity,
 )
+from control_plane.storage.filesystem import FilesystemRecordStore
 
 
 PRODUCT = "launchplane"
@@ -113,6 +120,151 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
             plan_repository_human_role_policy_append(
                 records=(revision_1,),
                 record=revision_1.model_copy(update={"status": "superseded"}),
+            )
+
+    def test_role_policy_current_read_model_is_scope_bound_and_ambiguous_safe(
+        self,
+    ) -> None:
+        class AmbiguousReadStore:
+            def list_repository_human_role_policy_records(
+                self,
+                *,
+                repository_id: str = "",
+                repository_owner_id: str = "",
+                repository: str = "",
+                product: str = "",
+                context: str = "",
+                status: str = "",
+                limit: int | None = None,
+            ) -> tuple[RepositoryHumanRolePolicyRecord, ...]:
+                del repository_id, repository_owner_id, repository, product, context, status, limit
+                revision_1 = _role_policy(repository_owner_ids=(301,))
+                revision_2 = _role_policy(
+                    repository_owner_ids=(302,),
+                    revision=2,
+                    supersedes_record_id=revision_1.record_id,
+                )
+                return (revision_1, revision_2)
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(Path(temporary_directory_name))
+            missing = get_repository_human_role_policy_read_model(
+                repository_id=REPOSITORY_ID,
+                product=PRODUCT,
+                context=CONTEXT,
+                store=store,
+            )
+            revision_1 = _role_policy(repository_owner_ids=(301,))
+            revision_2 = _role_policy(
+                repository_owner_ids=(302,),
+                revision=2,
+                supersedes_record_id=revision_1.record_id,
+            )
+            store.write_repository_human_role_policy_record(revision_1)
+            store.write_repository_human_role_policy_record(revision_2)
+            available = get_repository_human_role_policy_read_model(
+                repository_id=REPOSITORY_ID,
+                product=PRODUCT,
+                context=CONTEXT,
+                store=store,
+            )
+
+        ambiguous = get_repository_human_role_policy_read_model(
+            repository_id=REPOSITORY_ID,
+            product=PRODUCT,
+            context=CONTEXT,
+            store=AmbiguousReadStore(),
+        )
+
+        self.assertEqual(missing.status, "missing")
+        self.assertIsNone(missing.current_record)
+        self.assertEqual(available.status, "available")
+        self.assertEqual(available.current_record, revision_2)
+        self.assertEqual(available.history_count, 2)
+        self.assertEqual(ambiguous.status, "ambiguous")
+        self.assertIsNone(ambiguous.current_record)
+
+    def test_role_policy_apply_requires_explicit_expected_tip_id_and_digest(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(Path(temporary_directory_name))
+            revision_1 = _role_policy(repository_owner_ids=(301,))
+            revision_2 = _role_policy(
+                repository_owner_ids=(302,),
+                revision=2,
+                supersedes_record_id=revision_1.record_id,
+            )
+
+            applied_1 = apply_repository_human_role_policy(
+                store=store,
+                record=revision_1,
+                mode="apply",
+            )
+
+            with self.assertRaisesRegex(ValueError, "expected current record ID and digest"):
+                apply_repository_human_role_policy(
+                    store=store,
+                    record=revision_2,
+                    expected_current_record_id=revision_1.record_id,
+                    mode="apply",
+                )
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                apply_repository_human_role_policy(
+                    store=store,
+                    record=revision_2,
+                    expected_current_record_id="wrong-record-id",
+                    expected_current_role_policy_digest=revision_1.role_policy_digest,
+                    mode="apply",
+                )
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                apply_repository_human_role_policy(
+                    store=store,
+                    record=revision_2,
+                    expected_current_record_id=revision_1.record_id,
+                    expected_current_role_policy_digest="f" * 64,
+                    mode="apply",
+                )
+
+            applied_2 = apply_repository_human_role_policy(
+                store=store,
+                record=revision_2,
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
+                mode="apply",
+            )
+            replay_2 = apply_repository_human_role_policy(
+                store=store,
+                record=revision_2,
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
+                mode="apply",
+            )
+
+        self.assertEqual(applied_1.status, "applied")
+        self.assertEqual(applied_2.status, "applied")
+        self.assertEqual(replay_2.status, "replayed")
+
+    def test_role_policy_apply_rejects_inactive_candidate_and_sequence_gaps(
+        self,
+    ) -> None:
+        revision_1 = _role_policy(repository_owner_ids=(301,))
+        revision_2 = _role_policy(
+            repository_owner_ids=(302,),
+            revision=2,
+            supersedes_record_id=revision_1.record_id,
+        )
+        with self.assertRaisesRegex(ValueError, "active candidate"):
+            plan_repository_human_role_policy_apply(
+                records=(),
+                record=revision_1.model_copy(update={"status": "superseded"}),
+                expected_current_record_id="",
+                expected_current_role_policy_digest="",
+            )
+        with self.assertRaises(RepositoryHumanRolePolicySequenceError):
+            plan_repository_human_role_policy_apply(
+                records=(revision_1,),
+                record=revision_2.model_copy(update={"role_policy_revision": 3}),
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
             )
 
     def test_owner_waiver_captures_exact_managed_authz_and_satisfies_path(self) -> None:
