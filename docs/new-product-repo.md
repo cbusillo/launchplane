@@ -154,7 +154,9 @@ history when they contain site-specific runtime details.
 Start with these workflows:
 
 - CI: lint, test, build, and product-owned checks.
-- Security: dependency and static/security checks appropriate for the repo.
+- Security: causal pull-request dependency checks plus absolute default-branch
+  and artifact health appropriate for the repo. See
+  [dependency-health-contract.md](dependency-health-contract.md).
 - Publish image: build and publish an immutable artifact, then trigger
   Launchplane stable deploy for `testing`.
 - Preview trigger: for PRs that request preview, build and publish an immutable
@@ -212,7 +214,8 @@ See [driver-development.md](driver-development.md) for the driver workflow and
 
 Before treating the repo as Launchplane-ready:
 
-- CI and security pass.
+- CI and pull-request dependency regression checks pass, and the current
+  default-branch/artifact absolute health evidence is acceptable.
 - The image or artifact is immutable and traceable to a source SHA.
 - Launchplane can read the product profile and target records.
 - A non-prod deploy or preview path has been exercised through Launchplane.

@@ -35,8 +35,15 @@ title: Coding Standards
 - Keep semantic-version major updates independently reviewable. Where the
   package ecosystem supports cooldowns, delay newly released majors so they do
   not poison routine groups before adjacent tools declare compatibility.
-- Keep security updates ungrouped and independently mergeable; version-update
-  grouping and cooldown policy must not delay them.
+- Keep security remediation isolated from routine updates, but allow one update
+  to contain the complete minimal dependency closure required to resolve its
+  target advisories. Version-update grouping and cooldown policy must not delay
+  security remediation.
 - Fix compatibility findings in code or dependency constraints. Do not weaken
   type checks, peer-dependency resolution, tests, or vulnerability gates merely
   to make an automated update green.
+- Pull-request dependency gates must distinguish candidate regressions from
+  inherited baseline findings under one explicit comparison provenance. Keep
+  absolute high/critical health on default-branch, scheduled, publication, and
+  promotion paths rather than requiring every pull request to remove unrelated
+  inherited findings.

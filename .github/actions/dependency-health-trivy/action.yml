@@ -1,0 +1,161 @@
+---
+name: Compare Trivy dependency health
+description: >-
+  Normalize and compare trusted vulnerability-only Trivy JSON reports generated
+  with complete package and suppression evidence.
+
+inputs:
+  baseline-report:
+    description: Path to the baseline Trivy JSON report.
+    required: true
+  candidate-report:
+    description: Path to the candidate Trivy JSON report.
+    required: true
+  repository:
+    description: Canonical owner/repository identity for both reports.
+    required: true
+  baseline-commit:
+    description: Exact lowercase 40-character baseline commit.
+    required: true
+  candidate-commit:
+    description: Exact lowercase 40-character candidate commit.
+    required: true
+  producer-version:
+    description: Exact Trivy version that produced both reports.
+    required: true
+  advisory-source:
+    description: Advisory database source identity.
+    required: false
+    default: trivy-db
+  advisory-revision:
+    description: Exact shared Trivy advisory database revision or digest.
+    required: true
+  scan-scope:
+    description: Canonical shared scan scope.
+    required: true
+  scan-configuration-sha256:
+    description: SHA-256 of shared scanner configuration and external inputs.
+    required: true
+  target-advisory-ids:
+    description: Optional comma- or newline-separated target advisory IDs.
+    required: false
+    default: ""
+  target-advisory-text:
+    description: Optional trusted text from which GHSA, CVE, PYSEC, and OSV IDs are extracted.
+    required: false
+    default: ""
+  output-directory:
+    description: Optional directory for normalized snapshots and evaluation JSON.
+    required: false
+    default: ""
+
+outputs:
+  baseline-snapshot:
+    description: Path to the normalized baseline snapshot.
+    value: ${{ steps.compare.outputs.baseline-snapshot }}
+  candidate-snapshot:
+    description: Path to the normalized candidate snapshot.
+    value: ${{ steps.compare.outputs.candidate-snapshot }}
+  evaluation:
+    description: Path to the dependency-health evaluation JSON.
+    value: ${{ steps.compare.outputs.evaluation }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up uv
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      with:
+        version: "0.11.32"
+
+    - name: Normalize and compare reports
+      id: compare
+      shell: bash
+      env:
+        INPUT_BASELINE_REPORT: ${{ inputs.baseline-report }}
+        INPUT_CANDIDATE_REPORT: ${{ inputs.candidate-report }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        INPUT_BASELINE_COMMIT: ${{ inputs.baseline-commit }}
+        INPUT_CANDIDATE_COMMIT: ${{ inputs.candidate-commit }}
+        INPUT_PRODUCER_VERSION: ${{ inputs.producer-version }}
+        INPUT_ADVISORY_SOURCE: ${{ inputs.advisory-source }}
+        INPUT_ADVISORY_REVISION: ${{ inputs.advisory-revision }}
+        INPUT_SCAN_SCOPE: ${{ inputs.scan-scope }}
+        INPUT_SCAN_CONFIGURATION_SHA256: ${{ inputs.scan-configuration-sha256 }}
+        INPUT_TARGET_ADVISORY_IDS: ${{ inputs.target-advisory-ids }}
+        INPUT_TARGET_ADVISORY_TEXT: ${{ inputs.target-advisory-text }}
+        INPUT_OUTPUT_DIRECTORY: ${{ inputs.output-directory }}
+      run: |
+        set -euo pipefail
+
+        launchplane_root="$(cd "${GITHUB_ACTION_PATH}/../../.." && pwd)"
+        job_slug="$(printf '%s' "${GITHUB_JOB}" | tr -c 'A-Za-z0-9._-' '-')"
+        output_directory="${INPUT_OUTPUT_DIRECTORY}"
+        if [[ -z "${output_directory}" ]]; then
+          output_directory="${RUNNER_TEMP}/dependency-health-${GITHUB_RUN_ID}-${job_slug}-${GITHUB_RUN_ATTEMPT}"
+        fi
+        if [[ "${output_directory}" =~ [[:cntrl:]] ]]; then
+          echo "output-directory cannot contain control characters" >&2
+          exit 2
+        fi
+        mkdir -p "${output_directory}"
+
+        baseline_snapshot="${output_directory}/baseline-snapshot.json"
+        candidate_snapshot="${output_directory}/candidate-snapshot.json"
+        evaluation="${output_directory}/evaluation.json"
+        target_text_file="${output_directory}/target-advisory-text.txt"
+        printf '%s' "${INPUT_TARGET_ADVISORY_TEXT}" > "${target_text_file}"
+
+        export UV_PROJECT_ENVIRONMENT="${RUNNER_TEMP}/launchplane-dependency-health-venv-${GITHUB_RUN_ID}-${job_slug}"
+
+        uv run --project "${launchplane_root}" launchplane dependency-health trivy-snapshot \
+          --report "${INPUT_BASELINE_REPORT}" \
+          --repository "${INPUT_REPOSITORY}" \
+          --source-commit "${INPUT_BASELINE_COMMIT}" \
+          --producer-version "${INPUT_PRODUCER_VERSION}" \
+          --advisory-source "${INPUT_ADVISORY_SOURCE}" \
+          --advisory-revision "${INPUT_ADVISORY_REVISION}" \
+          --scan-scope "${INPUT_SCAN_SCOPE}" \
+          --scan-configuration-sha256 "${INPUT_SCAN_CONFIGURATION_SHA256}" \
+          > "${baseline_snapshot}"
+
+        uv run --project "${launchplane_root}" launchplane dependency-health trivy-snapshot \
+          --report "${INPUT_CANDIDATE_REPORT}" \
+          --repository "${INPUT_REPOSITORY}" \
+          --source-commit "${INPUT_CANDIDATE_COMMIT}" \
+          --baseline-commit "${INPUT_BASELINE_COMMIT}" \
+          --producer-version "${INPUT_PRODUCER_VERSION}" \
+          --advisory-source "${INPUT_ADVISORY_SOURCE}" \
+          --advisory-revision "${INPUT_ADVISORY_REVISION}" \
+          --scan-scope "${INPUT_SCAN_SCOPE}" \
+          --scan-configuration-sha256 "${INPUT_SCAN_CONFIGURATION_SHA256}" \
+          > "${candidate_snapshot}"
+
+        compare_arguments=(
+          dependency-health compare
+          --baseline-snapshot "${baseline_snapshot}"
+          --candidate-snapshot "${candidate_snapshot}"
+        )
+        while IFS= read -r advisory_id; do
+          advisory_id="${advisory_id#"${advisory_id%%[![:space:]]*}"}"
+          advisory_id="${advisory_id%"${advisory_id##*[![:space:]]}"}"
+          if [[ -n "${advisory_id}" ]]; then
+            compare_arguments+=(--target-advisory-id "${advisory_id}")
+          fi
+        done < <(printf '%s' "${INPUT_TARGET_ADVISORY_IDS}" | tr ',' '\n')
+        if [[ -s "${target_text_file}" ]]; then
+          compare_arguments+=(--target-advisory-text-file "${target_text_file}")
+        fi
+
+        set +e
+        uv run --project "${launchplane_root}" launchplane "${compare_arguments[@]}" > "${evaluation}"
+        comparison_status=$?
+        set -e
+
+        cat "${evaluation}"
+        {
+          echo "baseline-snapshot=${baseline_snapshot}"
+          echo "candidate-snapshot=${candidate_snapshot}"
+          echo "evaluation=${evaluation}"
+        } >> "${GITHUB_OUTPUT}"
+        exit "${comparison_status}"

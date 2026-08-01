@@ -14,6 +14,10 @@ name: Reusable Product Repo Config Authority
         required: false
         default: true
         type: boolean
+      launchplane-revision:
+        description: Immutable Launchplane commit that contains this reusable workflow.
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -28,11 +32,33 @@ jobs:
           path: product-repo
           fetch-depth: 0
 
+      - name: Validate Launchplane audit tool revision
+        env:
+          JOB_CONTEXT_JSON: ${{ toJSON(job) }}
+          LAUNCHPLANE_REVISION: ${{ inputs.launchplane-revision }}
+        run: |
+          if [[ ! "${LAUNCHPLANE_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "launchplane-revision must be a 40-character commit SHA" >&2
+            exit 1
+          fi
+          if ! workflow_sha="$(
+            jq -er \
+              '.workflow_sha | select(type == "string" and length == 40 and test("^[0-9a-f]+$"))' \
+              <<< "${JOB_CONTEXT_JSON}"
+          )"; then
+            echo "GitHub job context did not provide the called workflow commit SHA" >&2
+            exit 1
+          fi
+          if [[ "${LAUNCHPLANE_REVISION}" != "${workflow_sha}" ]]; then
+            echo "launchplane-revision must match the called workflow commit SHA" >&2
+            exit 1
+          fi
+
       - name: Check out Launchplane audit tool
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: cbusillo/launchplane
-          ref: main
+          ref: ${{ inputs.launchplane-revision }}
           path: launchplane
           fetch-depth: 1
 
