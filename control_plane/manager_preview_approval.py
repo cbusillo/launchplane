@@ -208,6 +208,8 @@ def capture_manager_preview_approval_authorization(
                 repository_id=repository_id,
                 repository_owner_id=repository_owner_id,
                 repository=repository,
+                product=product,
+                context=context,
                 github_id=identity.github_id,
                 evaluated_at=authorized_at,
             )
@@ -262,9 +264,14 @@ def record_manager_preview_approval_event(
     role_policy_record: RepositoryHumanRolePolicyRecord | None = None,
     repository_id: str = "",
     repository_owner_id: str = "",
+    recorded_at: str | None = None,
 ) -> ManagerPreviewApprovalWriteResult:
     if action not in {"approved", "changes_requested", "revoked"}:
         raise ValueError("Manager-authored preview approval events require a manager action.")
+    normalized_occurred_at = _normalize_utc_timestamp(occurred_at)
+    normalized_recorded_at = _normalize_utc_timestamp(recorded_at or occurred_at)
+    if normalized_occurred_at > normalized_recorded_at:
+        raise ValueError("Manager preview approval cannot be recorded before it occurred.")
     binding = build_current_manager_preview_approval_binding(
         product=product,
         preview=preview,
@@ -275,7 +282,7 @@ def record_manager_preview_approval_event(
         product=binding.product,
         context=binding.context,
         policy_record=policy_record,
-        authorized_at=occurred_at,
+        authorized_at=normalized_occurred_at,
         role_policy_record=role_policy_record,
         repository_id=repository_id,
         repository_owner_id=repository_owner_id,
@@ -284,7 +291,7 @@ def record_manager_preview_approval_event(
     record = ManagerPreviewApprovalEventRecord(
         binding=binding,
         action=action,
-        occurred_at=occurred_at,
+        occurred_at=normalized_occurred_at,
         source_event_kind=source_event_kind,
         source_event_id=source_event_id,
         reason=reason,
@@ -411,7 +418,14 @@ def evaluate_manager_preview_approval(
             evaluated_at=normalized_evaluated_at,
         )
 
-    latest_event = max(exact_events, key=lambda event: (event.occurred_at, event.event_id))
+    latest_event = max(
+        exact_events,
+        key=lambda event: (
+            event.occurred_at,
+            {"approved": 0, "changes_requested": 1, "revoked": 2}.get(event.action, 3),
+            event.event_id,
+        ),
+    )
     if latest_event.action == "approved":
         if not _approval_authorization_matches_policy(
             event=latest_event,
@@ -495,6 +509,12 @@ def _approval_authorization_matches_policy(
         and (not rule.contexts or event.binding.context in rule.contexts)
     )
     if not authz_current:
+        return False
+    if role_policy_record is not None and (
+        role_policy_record.repository != event.binding.repository
+        or role_policy_record.product != event.binding.product
+        or role_policy_record.context != event.binding.context
+    ):
         return False
     return manager_authority_current(
         provenance=authorization.role_policy_provenance,

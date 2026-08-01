@@ -75,6 +75,8 @@ class RepositoryHumanRolePolicyRecord(BaseModel):
     repository_id: str
     repository_owner_id: str
     repository: str
+    product: str
+    context: str
     role_policy_revision: int = Field(ge=1)
     repository_owner_github_ids: tuple[int, ...]
     manager_primary_github_ids: tuple[int, ...]
@@ -95,6 +97,8 @@ class RepositoryHumanRolePolicyRecord(BaseModel):
             self.repository_owner_id, "repository_owner_id"
         )
         self.repository = _normalize_repository(self.repository, "repository")
+        self.product = _required_token(self.product, "product")
+        self.context = _required_token(self.context, "context")
         self.repository_owner_github_ids = _positive_unique_ids(
             self.repository_owner_github_ids, "repository_owner_github_ids"
         )
@@ -113,6 +117,10 @@ class RepositoryHumanRolePolicyRecord(BaseModel):
             self.manager_backup_github_ids
         )
         for delegation in self.manager_delegations:
+            if delegation.delegated_by_github_id not in standing_manager_ids:
+                raise ValueError(
+                    "repository human manager delegation must be granted by a primary or backup manager"
+                )
             if delegation.delegated_manager_github_id in standing_manager_ids:
                 raise ValueError(
                     "repository human manager delegation must name a non-standing manager"
@@ -130,6 +138,8 @@ class RepositoryHumanRolePolicyRecord(BaseModel):
 
         computed_record_id = build_repository_human_role_policy_record_id(
             repository_id=self.repository_id,
+            product=self.product,
+            context=self.context,
             role_policy_revision=self.role_policy_revision,
         )
         if self.record_id:
@@ -158,6 +168,8 @@ class RepositoryHumanRolePolicyProvenance(BaseModel):
     repository_id: str
     repository_owner_id: str
     repository: str
+    product: str
+    context: str
     role_policy_record_id: str
     role_policy_revision: int = Field(ge=1)
     role_policy_digest: str
@@ -175,6 +187,8 @@ class RepositoryHumanRolePolicyProvenance(BaseModel):
             self.repository_owner_id, "repository_owner_id"
         )
         self.repository = _normalize_repository(self.repository, "repository")
+        self.product = _required_token(self.product, "product")
+        self.context = _required_token(self.context, "context")
         self.role_policy_record_id = _required_token(
             self.role_policy_record_id, "role_policy_record_id"
         )
@@ -196,6 +210,8 @@ class TenantTechnicalHumanWaiverBinding(BaseModel):
     repository_id: str
     repository_owner_id: str
     repository: str
+    product: str
+    context: str
     pull_request_number: int = Field(ge=1)
     head_sha: str
     classification_revision: int = Field(ge=1)
@@ -217,6 +233,8 @@ class TenantTechnicalHumanWaiverBinding(BaseModel):
             self.repository_owner_id, "repository_owner_id"
         )
         self.repository = _normalize_repository(self.repository, "repository")
+        self.product = _required_token(self.product, "product")
+        self.context = _required_token(self.context, "context")
         self.head_sha = _normalize_git_sha(self.head_sha, "head_sha")
         self.classification_digest = _normalize_sha256(
             self.classification_digest, "classification_digest"
@@ -316,6 +334,8 @@ class TenantTechnicalHumanWaiverEventRecord(BaseModel):
             self.binding.repository_id != role_provenance.repository_id
             or self.binding.repository_owner_id != role_provenance.repository_owner_id
             or self.binding.repository != role_provenance.repository
+            or self.binding.product != role_provenance.product
+            or self.binding.context != role_provenance.context
             or self.binding.role_policy_record_id != role_provenance.role_policy_record_id
             or self.binding.role_policy_revision != role_provenance.role_policy_revision
             or self.binding.role_policy_digest != role_provenance.role_policy_digest
@@ -381,14 +401,19 @@ def build_repository_human_manager_delegation_id(
 
 
 def build_repository_human_role_policy_record_id(
-    *, repository_id: str, role_policy_revision: int
+    *, repository_id: str, product: str, context: str, role_policy_revision: int
 ) -> str:
     if role_policy_revision < 1:
         raise ValueError("repository human role policy revision must be positive")
-    return (
-        "repository-human-role-policy-"
-        f"{_required_decimal_id(repository_id, 'repository_id')}-r{role_policy_revision}"
+    normalized_repository_id = _required_decimal_id(repository_id, "repository_id")
+    scope_digest = _canonical_sha256(
+        {
+            "repository_id": normalized_repository_id,
+            "product": _required_token(product, "product"),
+            "context": _required_token(context, "context"),
+        }
     )
+    return f"repository-human-role-policy-{normalized_repository_id}-{scope_digest[:12]}-r{role_policy_revision}"
 
 
 def repository_human_role_policy_digest(record: RepositoryHumanRolePolicyRecord) -> str:
@@ -451,7 +476,8 @@ def _required_decimal_id(value: str, label: str) -> str:
 
 def _normalize_repository(value: str, label: str) -> str:
     normalized = _required_token(value, label).lower()
-    if "/" not in normalized or normalized.startswith("/") or normalized.endswith("/"):
+    owner, separator, name = normalized.partition("/")
+    if not separator or not owner or not name or "/" in name:
         raise ValueError(f"repository human admission {label} must be OWNER/REPO")
     return normalized
 

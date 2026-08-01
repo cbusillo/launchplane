@@ -387,6 +387,15 @@ class ManagerPreviewApprovalTests(unittest.TestCase):
             self.assertEqual(decision.status, "stale")
             self.assertEqual(decision.reason_code, "approval_stale")
 
+            wrong_scope = _decision(
+                events=(approved,),
+                role_policy_record=_role_policy(
+                    manager_primary_ids=(101,),
+                    context="staging",
+                ),
+            )
+            self.assertEqual(wrong_scope.status, "stale")
+
     def test_future_dated_approval_event_is_ignored(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
@@ -407,6 +416,21 @@ class ManagerPreviewApprovalTests(unittest.TestCase):
 
             self.assertEqual(decision.status, "pending")
             self.assertEqual(decision.reason_code, "approval_missing")
+
+            with self.assertRaisesRegex(ValueError, "recorded before it occurred"):
+                record_manager_preview_approval_event(
+                    record_store=store,
+                    identity=_manager_identity(),
+                    policy_record=_policy_record(),
+                    product=PRODUCT,
+                    preview=_preview(),
+                    generation=_generation(),
+                    action="approved",
+                    occurred_at="2026-07-30T12:11:00Z",
+                    recorded_at="2026-07-30T12:10:00Z",
+                    source_event_kind="github_issue_comment",
+                    source_event_id="comment-future-rejected",
+                )
 
     def test_role_aware_manager_approval_requires_current_delegation(self) -> None:
         active_delegation = RepositoryHumanManagerDelegation(
@@ -454,6 +478,42 @@ class ManagerPreviewApprovalTests(unittest.TestCase):
             stale_decision = _decision(events=(approved,), role_policy_record=revoked_policy)
             self.assertEqual(stale_decision.status, "stale")
             self.assertEqual(stale_decision.reason_code, "approval_stale")
+
+    def test_role_policy_rejects_legacy_approval_without_provenance(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            legacy_approval = _approved_event(store)
+
+            decision = _decision(
+                events=(legacy_approval,),
+                role_policy_record=_role_policy(manager_primary_ids=(101,)),
+            )
+
+            self.assertEqual(decision.status, "stale")
+            self.assertEqual(decision.reason_code, "approval_stale")
+
+    def test_same_timestamp_revocation_wins_over_approval(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            approved = _approved_event(store)
+            revoked = record_manager_preview_approval_event(
+                record_store=store,
+                identity=_manager_identity(),
+                policy_record=_policy_record(),
+                product=PRODUCT,
+                preview=_preview(),
+                generation=_generation(),
+                action="revoked",
+                occurred_at=OCCURRED_AT,
+                source_event_kind="github_issue_comment",
+                source_event_id="comment-revoked-same-time",
+                reason="Manager revoked approval.",
+            ).record
+
+            decision = _decision(events=(approved, revoked))
+
+            self.assertEqual(decision.status, "revoked")
+            self.assertEqual(decision.reason_code, "approval_revoked")
 
     def test_missing_policy_makes_approval_unavailable(self) -> None:
         decision = evaluate_manager_preview_approval(
@@ -591,11 +651,14 @@ def _role_policy(
     manager_primary_ids: tuple[int, ...] = (202,),
     manager_backup_ids: tuple[int, ...] = (),
     manager_delegations: tuple[RepositoryHumanManagerDelegation, ...] = (),
+    context: str = CONTEXT,
 ) -> RepositoryHumanRolePolicyRecord:
     return RepositoryHumanRolePolicyRecord(
         repository_id="1001",
         repository_owner_id="2001",
         repository=REPOSITORY,
+        product=PRODUCT,
+        context=context,
         role_policy_revision=1,
         repository_owner_github_ids=(301,),
         manager_primary_github_ids=manager_primary_ids,

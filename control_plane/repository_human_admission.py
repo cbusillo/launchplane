@@ -47,6 +47,8 @@ def repository_owner_role_policy_provenance(
     repository_id: str,
     repository_owner_id: str,
     repository: str,
+    product: str,
+    context: str,
     github_id: int,
     evaluated_at: str,
 ) -> RepositoryHumanRolePolicyProvenance:
@@ -54,18 +56,23 @@ def repository_owner_role_policy_provenance(
         raise RepositoryHumanRolePolicyError("Repository human role policy must be active.")
     if github_id < 1:
         raise RepositoryHumanRolePolicyError("Repository human role lookup requires a GitHub ID.")
-    _require_role_policy_repository_match(
+    normalized_evaluated_at = _normalize_utc_timestamp(evaluated_at, "evaluated_at")
+    if role_policy_record.effective_at > normalized_evaluated_at:
+        raise RepositoryHumanRolePolicyError("Repository human role policy is not effective yet.")
+    _require_role_policy_scope_match(
         role_policy_record=role_policy_record,
         repository_id=repository_id,
         repository_owner_id=repository_owner_id,
         repository=repository,
+        product=product,
+        context=context,
     )
     if github_id not in role_policy_record.repository_owner_github_ids:
         raise RepositoryHumanRolePolicyError("GitHub human is not a repository owner.")
     return _role_policy_provenance(
         role_policy_record=role_policy_record,
         authority_kind="repository_owner",
-        evaluated_at=evaluated_at,
+        evaluated_at=normalized_evaluated_at,
     )
 
 
@@ -75,6 +82,8 @@ def manager_role_policy_provenance(
     repository_id: str,
     repository_owner_id: str,
     repository: str,
+    product: str,
+    context: str,
     github_id: int,
     evaluated_at: str,
 ) -> RepositoryHumanRolePolicyProvenance:
@@ -83,11 +92,15 @@ def manager_role_policy_provenance(
     if github_id < 1:
         raise RepositoryHumanRolePolicyError("Manager role lookup requires a GitHub ID.")
     normalized_evaluated_at = _normalize_utc_timestamp(evaluated_at, "evaluated_at")
-    _require_role_policy_repository_match(
+    if role_policy_record.effective_at > normalized_evaluated_at:
+        raise RepositoryHumanRolePolicyError("Repository human role policy is not effective yet.")
+    _require_role_policy_scope_match(
         role_policy_record=role_policy_record,
         repository_id=repository_id,
         repository_owner_id=repository_owner_id,
         repository=repository,
+        product=product,
+        context=context,
     )
     if github_id in role_policy_record.manager_primary_github_ids:
         return _role_policy_provenance(
@@ -105,6 +118,11 @@ def manager_role_policy_provenance(
         delegation
         for delegation in role_policy_record.manager_delegations
         if delegation.delegated_manager_github_id == github_id
+        and delegation.delegated_by_github_id
+        in (
+            set(role_policy_record.manager_primary_github_ids)
+            | set(role_policy_record.manager_backup_github_ids)
+        )
         and delegation.starts_at <= normalized_evaluated_at < delegation.expires_at
         and (not delegation.revoked_at or delegation.revoked_at > normalized_evaluated_at)
     )
@@ -132,6 +150,7 @@ def capture_tenant_technical_human_waiver_event(
     source_event_kind: str,
     source_event_id: str,
     reason: str,
+    recorded_at: str,
     expires_at: str = "",
 ) -> TenantTechnicalHumanWaiverWriteResult:
     if not isinstance(identity, GitHubHumanIdentity):
@@ -146,16 +165,23 @@ def capture_tenant_technical_human_waiver_event(
         raise TenantTechnicalHumanWaiverAuthorizationError(
             "Tenant technical human waiver requires one active schema-v2 authorization policy."
         )
-    if classification.repository_id != candidate.repository_id:
+    if not _classification_matches_candidate(classification=classification, candidate=candidate):
         raise ValueError("Tenant technical human waiver classification does not match candidate.")
+    if classification.classification_kind != "tenant_ui":
+        raise ValueError("Tenant technical human waiver requires tenant_ui classification.")
 
     normalized_occurred_at = _normalize_utc_timestamp(occurred_at, "occurred_at")
+    normalized_recorded_at = _normalize_utc_timestamp(recorded_at, "recorded_at")
+    if normalized_occurred_at > normalized_recorded_at:
+        raise ValueError("Tenant technical human waiver cannot be recorded before it occurred.")
     try:
         role_provenance = repository_owner_role_policy_provenance(
             role_policy_record=role_policy_record,
             repository_id=candidate.repository_id,
             repository_owner_id=candidate.repository_owner_id,
             repository=candidate.repository,
+            product=candidate.product,
+            context=candidate.context,
             github_id=identity.github_id,
             evaluated_at=normalized_occurred_at,
         )
@@ -179,6 +205,8 @@ def capture_tenant_technical_human_waiver_event(
         repository_id=candidate.repository_id,
         repository_owner_id=candidate.repository_owner_id,
         repository=candidate.repository,
+        product=candidate.product,
+        context=candidate.context,
         pull_request_number=candidate.pull_request_number,
         head_sha=candidate.head_sha,
         classification_revision=classification.classification_revision,
@@ -257,12 +285,16 @@ def technical_human_waiver_path_result(
 
     if role_policy_record.status != "active" or authz_policy_record.status != "active":
         return path_result(state="unavailable")
+    if role_policy_record.effective_at > normalized_evaluated_at:
+        return path_result(state="unavailable")
+    if not _role_policy_matches_candidate(
+        role_policy_record=role_policy_record,
+        candidate=candidate,
+    ) or not _classification_matches_candidate(classification=classification, candidate=candidate):
+        return path_result(state="stale")
     if (
-        role_policy_record.repository_id != candidate.repository_id
-        or role_policy_record.repository_owner_id != candidate.repository_owner_id
-        or role_policy_record.repository != candidate.repository
-        or classification.repository_id != candidate.repository_id
-        or classification.classification_digest == ""
+        classification.classification_kind != "tenant_ui"
+        or not classification.classification_digest
     ):
         return path_result(state="stale")
 
@@ -273,6 +305,8 @@ def technical_human_waiver_path_result(
         and event.binding.repository_id == candidate.repository_id
         and event.binding.repository_owner_id == candidate.repository_owner_id
         and event.binding.repository == candidate.repository
+        and event.binding.product == candidate.product
+        and event.binding.context == candidate.context
         and event.binding.pull_request_number == candidate.pull_request_number
         and event.binding.head_sha == candidate.head_sha
         and event.binding.classification_revision == classification.classification_revision
@@ -294,7 +328,10 @@ def technical_human_waiver_path_result(
         )
         return path_result(state="stale" if stale_events else "pending")
 
-    latest = max(current_events, key=lambda event: (event.occurred_at, event.event_id))
+    latest = max(
+        current_events,
+        key=lambda event: (event.occurred_at, event.action == "revoked", event.event_id),
+    )
     if latest.action == "revoked":
         return path_result(
             state="denied",
@@ -307,7 +344,12 @@ def technical_human_waiver_path_result(
             evidence_id=latest.waiver_id,
             evidence_digest=latest.event_digest,
         )
-    if not _waiver_authz_rule_current(event=latest, authz_policy_record=authz_policy_record):
+    if not _waiver_authz_rule_current(
+        event=latest,
+        authz_policy_record=authz_policy_record,
+        product=candidate.product,
+        context=candidate.context,
+    ):
         return path_result(
             state="stale",
             evidence_id=latest.waiver_id,
@@ -334,7 +376,7 @@ def manager_authority_current(
     evaluated_at: str,
 ) -> bool:
     if provenance is None:
-        return True
+        return role_policy_record is None
     if role_policy_record is None or role_policy_record.status != "active":
         return False
     if (
@@ -352,6 +394,8 @@ def manager_authority_current(
             repository_id=provenance.repository_id,
             repository_owner_id=provenance.repository_owner_id,
             repository=provenance.repository,
+            product=provenance.product,
+            context=provenance.context,
             github_id=manager_github_id,
             evaluated_at=evaluated_at,
         )
@@ -367,6 +411,8 @@ def _waiver_authz_rule_current(
     *,
     event: TenantTechnicalHumanWaiverEventRecord,
     authz_policy_record: LaunchplaneAuthzPolicyRecord,
+    product: str,
+    context: str,
 ) -> bool:
     authorization = event.authorization
     if authz_policy_record.policy.schema_version != 2:
@@ -389,6 +435,8 @@ def _waiver_authz_rule_current(
     return (
         authorization.author_github_id in rule.github_ids
         and TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION in rule.actions
+        and (not rule.products or product in rule.products)
+        and (not rule.contexts or context in rule.contexts)
     )
 
 
@@ -403,6 +451,8 @@ def _role_policy_provenance(
         repository_id=role_policy_record.repository_id,
         repository_owner_id=role_policy_record.repository_owner_id,
         repository=role_policy_record.repository,
+        product=role_policy_record.product,
+        context=role_policy_record.context,
         role_policy_record_id=role_policy_record.record_id,
         role_policy_revision=role_policy_record.role_policy_revision,
         role_policy_digest=role_policy_record.role_policy_digest,
@@ -413,21 +463,53 @@ def _role_policy_provenance(
     )
 
 
-def _require_role_policy_repository_match(
+def _require_role_policy_scope_match(
     *,
     role_policy_record: RepositoryHumanRolePolicyRecord,
     repository_id: str,
     repository_owner_id: str,
     repository: str,
+    product: str,
+    context: str,
 ) -> None:
     if (
         role_policy_record.repository_id != repository_id
         or role_policy_record.repository_owner_id != repository_owner_id
         or role_policy_record.repository != repository.lower()
+        or role_policy_record.product != product
+        or role_policy_record.context != context
     ):
         raise RepositoryHumanRolePolicyError(
-            "Repository human role policy does not match repository identity."
+            "Repository human role policy does not match repository scope."
         )
+
+
+def _role_policy_matches_candidate(
+    *,
+    role_policy_record: RepositoryHumanRolePolicyRecord,
+    candidate: TenantMergeCandidate,
+) -> bool:
+    return (
+        role_policy_record.repository_id == candidate.repository_id
+        and role_policy_record.repository_owner_id == candidate.repository_owner_id
+        and role_policy_record.repository == candidate.repository
+        and role_policy_record.product == candidate.product
+        and role_policy_record.context == candidate.context
+    )
+
+
+def _classification_matches_candidate(
+    *,
+    classification: TenantRepositoryClassificationRecord,
+    candidate: TenantMergeCandidate,
+) -> bool:
+    return (
+        classification.repository_id == candidate.repository_id
+        and classification.repository_owner_id == candidate.repository_owner_id
+        and classification.repository == candidate.repository
+        and classification.product == candidate.product
+        and classification.context == candidate.context
+    )
 
 
 def _normalize_utc_timestamp(value: str, label: str) -> str:

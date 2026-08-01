@@ -230,6 +230,15 @@ class ManagerPreviewApprovalEventRecord(BaseModel):
                 raise ValueError(
                     "manager preview approval authorization and event timestamps must match"
                 )
+            provenance = self.authorization.role_policy_provenance
+            if provenance is not None and (
+                provenance.repository != self.binding.repository
+                or provenance.product != self.binding.product
+                or provenance.context != self.binding.context
+            ):
+                raise ValueError(
+                    "manager preview approval role policy provenance does not match binding"
+                )
         elif self.action in _SYSTEM_ACTIONS and self.authorization is not None:
             raise ValueError(
                 f"manager preview approval action {self.action!r} must be system-authored"

@@ -1,4 +1,5 @@
 import unittest
+from typing import cast
 
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -9,6 +10,7 @@ from control_plane.contracts.repository_human_admission import (
     TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,
     RepositoryHumanManagerDelegation,
     RepositoryHumanRolePolicyRecord,
+    TenantTechnicalHumanWaiverAction,
 )
 from control_plane.contracts.tenant_merge_eligibility import (
     TenantMergeCandidate,
@@ -56,11 +58,14 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
             source_event_kind="github_issue_comment",
             source_event_id="comment-1001",
             reason="Narrow technical change reviewed by repo owner.",
+            recorded_at=OCCURRED_AT,
             expires_at="2026-07-31T13:00:00Z",
         )
 
         self.assertEqual(result.path_result.state, "satisfied")
         self.assertEqual(result.record.binding.head_sha, HEAD_SHA)
+        self.assertEqual(result.record.binding.product, PRODUCT)
+        self.assertEqual(result.record.binding.context, CONTEXT)
         self.assertEqual(result.record.authorization.managed_set_id, "tenant-human.example")
         self.assertEqual(result.record.authorization.managed_rule_id, "technical-waiver")
         self.assertEqual(
@@ -91,6 +96,7 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
                 source_event_kind="terminal",
                 source_event_id="event-1",
                 reason="Agent cannot authorize this.",
+                recorded_at=OCCURRED_AT,
             )
 
         with self.assertRaisesRegex(
@@ -108,6 +114,7 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
                 source_event_kind="github_issue_comment",
                 source_event_id="comment-1002",
                 reason="Not an owner.",
+                recorded_at=OCCURRED_AT,
             )
 
         with self.assertRaisesRegex(
@@ -125,6 +132,7 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
                 source_event_kind="github_issue_comment",
                 source_event_id="comment-1003",
                 reason="No authz rule.",
+                recorded_at=OCCURRED_AT,
             )
 
     def test_waiver_path_is_exact_head_policy_bound_expiring_and_revocable(self) -> None:
@@ -141,6 +149,7 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
             source_event_kind="github_issue_comment",
             source_event_id="comment-1001",
             reason="Narrow technical change reviewed by repo owner.",
+            recorded_at=OCCURRED_AT,
             expires_at="2026-07-31T13:00:00Z",
         ).record
 
@@ -185,6 +194,7 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
             source_event_kind="github_issue_comment",
             source_event_id="comment-1004",
             reason="Owner revoked the waiver.",
+            recorded_at="2026-07-31T12:10:00Z",
         ).record
         revoked_path = technical_human_waiver_path_result(
             candidate=_candidate(),
@@ -210,6 +220,7 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
             source_event_kind="github_issue_comment",
             source_event_id="comment-1001",
             reason="Future event should not count yet.",
+            recorded_at="2026-07-31T12:10:00Z",
         ).record
 
         path = technical_human_waiver_path_result(
@@ -222,6 +233,74 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
         )
 
         self.assertEqual(path.state, "pending")
+
+    def test_waiver_rejects_future_occurrence_and_classification_scope_drift(self) -> None:
+        role_policy = _role_policy(repository_owner_ids=(301,))
+        authz_policy = _authz_policy_record(github_ids=(301,))
+
+        with self.assertRaisesRegex(ValueError, "recorded before it occurred"):
+            capture_tenant_technical_human_waiver_event(
+                identity=_human(github_id=301),
+                candidate=_candidate(),
+                classification=_classification(),
+                role_policy_record=role_policy,
+                authz_policy_record=authz_policy,
+                action="created",
+                occurred_at="2026-07-31T12:10:00Z",
+                recorded_at=OCCURRED_AT,
+                source_event_kind="github_issue_comment",
+                source_event_id="comment-future",
+                reason="Future evidence must fail closed.",
+            )
+
+        with self.assertRaisesRegex(ValueError, "classification does not match"):
+            capture_tenant_technical_human_waiver_event(
+                identity=_human(github_id=301),
+                candidate=_candidate(),
+                classification=_classification(context="staging"),
+                role_policy_record=role_policy,
+                authz_policy_record=authz_policy,
+                action="created",
+                occurred_at=OCCURRED_AT,
+                recorded_at=OCCURRED_AT,
+                source_event_kind="github_issue_comment",
+                source_event_id="comment-scope",
+                reason="Wrong classification scope must fail closed.",
+            )
+
+    def test_same_timestamp_revocation_wins(self) -> None:
+        role_policy = _role_policy(repository_owner_ids=(301,))
+        authz_policy = _authz_policy_record(github_ids=(301,))
+        events = tuple(
+            capture_tenant_technical_human_waiver_event(
+                identity=_human(github_id=301),
+                candidate=_candidate(),
+                classification=_classification(),
+                role_policy_record=role_policy,
+                authz_policy_record=authz_policy,
+                action=cast(TenantTechnicalHumanWaiverAction, action),
+                occurred_at=OCCURRED_AT,
+                recorded_at=OCCURRED_AT,
+                source_event_kind="github_issue_comment",
+                source_event_id=source_event_id,
+                reason=reason,
+            ).record
+            for action, source_event_id, reason in (
+                ("created", "comment-create", "Owner approved technical handling."),
+                ("revoked", "comment-revoke", "Owner revoked technical handling."),
+            )
+        )
+
+        result = technical_human_waiver_path_result(
+            candidate=_candidate(),
+            classification=_classification(),
+            role_policy_record=role_policy,
+            authz_policy_record=authz_policy,
+            events=events,
+            evaluated_at=EVALUATED_AT,
+        )
+
+        self.assertEqual(result.state, "denied")
 
     def test_manager_authority_distinguishes_primary_backup_delegated_and_revoked(self) -> None:
         active_delegation = RepositoryHumanManagerDelegation(
@@ -256,6 +335,8 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
                 repository_id=REPOSITORY_ID,
                 repository_owner_id=REPOSITORY_OWNER_ID,
                 repository=REPOSITORY,
+                product=PRODUCT,
+                context=CONTEXT,
                 github_id=501,
                 evaluated_at=EVALUATED_AT,
             ).authority_kind,
@@ -267,6 +348,8 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
                 repository_id=REPOSITORY_ID,
                 repository_owner_id=REPOSITORY_OWNER_ID,
                 repository=REPOSITORY,
+                product=PRODUCT,
+                context=CONTEXT,
                 github_id=502,
                 evaluated_at=EVALUATED_AT,
             ).authority_kind,
@@ -277,6 +360,8 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
             repository_id=REPOSITORY_ID,
             repository_owner_id=REPOSITORY_OWNER_ID,
             repository=REPOSITORY,
+            product=PRODUCT,
+            context=CONTEXT,
             github_id=503,
             evaluated_at=EVALUATED_AT,
         )
@@ -288,8 +373,42 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
                 repository_id=REPOSITORY_ID,
                 repository_owner_id=REPOSITORY_OWNER_ID,
                 repository=REPOSITORY,
+                product=PRODUCT,
+                context=CONTEXT,
                 github_id=504,
                 evaluated_at=EVALUATED_AT,
+            )
+
+    def test_role_policy_effective_time_and_delegator_fail_closed(self) -> None:
+        future_policy = _role_policy(
+            repository_owner_ids=(301,),
+            effective_at="2026-07-31T13:00:00Z",
+        )
+        with self.assertRaisesRegex(ValueError, "not effective yet"):
+            manager_role_policy_provenance(
+                role_policy_record=future_policy,
+                repository_id=REPOSITORY_ID,
+                repository_owner_id=REPOSITORY_OWNER_ID,
+                repository=REPOSITORY,
+                product=PRODUCT,
+                context=CONTEXT,
+                github_id=501,
+                evaluated_at=EVALUATED_AT,
+            )
+
+        unauthorized_delegation = RepositoryHumanManagerDelegation(
+            delegated_manager_github_id=503,
+            delegated_by_github_id=999,
+            starts_at="2026-07-31T11:00:00Z",
+            expires_at="2026-07-31T13:00:00Z",
+            source_event_kind="github_issue_comment",
+            source_event_id="delegation-unauthorized",
+            reason="Unauthorized delegation must fail.",
+        )
+        with self.assertRaisesRegex(ValueError, "granted by a primary or backup manager"):
+            _role_policy(
+                repository_owner_ids=(301,),
+                manager_delegations=(unauthorized_delegation,),
             )
 
 
@@ -331,17 +450,20 @@ def _role_policy(
     manager_backup_ids: tuple[int, ...] = (),
     manager_delegations: tuple[RepositoryHumanManagerDelegation, ...] = (),
     revision: int = 1,
+    effective_at: str = "2026-07-31T11:00:00Z",
 ) -> RepositoryHumanRolePolicyRecord:
     return RepositoryHumanRolePolicyRecord(
         repository_id=REPOSITORY_ID,
         repository_owner_id=REPOSITORY_OWNER_ID,
         repository=REPOSITORY,
+        product=PRODUCT,
+        context=CONTEXT,
         role_policy_revision=revision,
         repository_owner_github_ids=repository_owner_ids,
         manager_primary_github_ids=manager_primary_ids,
         manager_backup_github_ids=manager_backup_ids,
         manager_delegations=manager_delegations,
-        effective_at="2026-07-31T11:00:00Z",
+        effective_at=effective_at,
         source="test:role-policy",
         reason="test role policy",
     )

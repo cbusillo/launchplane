@@ -644,6 +644,7 @@ def _handle_issue_comment(
             generation=generation,
             action=command.action,
             occurred_at=_string(comment, "created_at"),
+            recorded_at=evaluated_at,
             source_event_kind="github_issue_comment",
             source_event_id=f"{repository}#{comment_id}",
             reason=command.reason,
