@@ -1690,6 +1690,15 @@ run` is the foreground loop intended for an external process supervisor, and
 - Pure tenant merge eligibility evaluates candidates against this DB authority: engineering repos take the engineering fast path, while tenant UI repos require exact manager preview approval (or optional fast-path waiver/maintenance evidence bound to the exact head SHA and classification digest).
 - This record and pure evaluation remain separate from scheduler merge train admission (`merge_train_admission`).
 
+## Repository Human Admission Contracts
+
+- Repository human role-policy contracts bind one revision to exact numeric GitHub repository and owner IDs plus repository, product, and context. They name repository-owner humans, primary managers, optional backup managers, and direct time-bounded manager delegations without hard-coding people in code or checked-in configuration.
+- A delegation is valid only while its current role-policy revision is active and effective, its grantor remains a primary or backup manager, and its start, expiration, and revocation timestamps permit it. Silence or elapsed review time never creates approval authority.
+- Technical human waiver events are append-only create/revoke evidence. Creation requires a GitHub human who is both a current repository owner in the exact role policy and allowed by exactly one managed `tenant_technical_human_waiver.write` authorization rule.
+- Waiver evidence binds repository, product, context, pull request, exact head SHA, classification revision/digest, role-policy revision/digest, active authorization-policy revision/digest, human numeric identity, source event, reason, occurrence time, and optional expiration. New commits or any bound policy/classification drift make prior evidence stale; revocation wins a same-timestamp tie.
+- Manager-preview authorization can carry the same role-policy provenance for primary, backup, or delegated managers. Legacy approval records remain readable, but they cannot satisfy an evaluation once a repository role policy is explicitly enforced.
+- These domain contracts intentionally precede their PostgreSQL storage and HTTP write surfaces. Until those follow-up pieces are deployed and rollout supplies a role policy, existing manager-preview behavior remains unchanged.
+
 ## Runtime Key-Safety Policy Record
 
 - One record per imported runtime key-safety policy version under
