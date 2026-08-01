@@ -199,9 +199,18 @@ from control_plane.contracts.repository_human_admission import (
 from control_plane.repository_human_admission import (
     RepositoryHumanRolePolicyConflictError,
     RepositoryHumanRolePolicySequenceError,
+    TenantTechnicalHumanWaiverApplyEnvelope,
+    TenantTechnicalHumanWaiverApplyResult,
+    TenantTechnicalHumanWaiverAuthorizationError,
+    TenantTechnicalHumanWaiverEventConflictError,
+    TenantTechnicalHumanWaiverRevokeCurrentError,
+    TenantTechnicalHumanWaiverStaleAuthorityError,
+    build_tenant_technical_human_waiver_apply_result,
+    capture_tenant_technical_human_waiver_event,
     plan_repository_human_role_policy_apply,
     plan_repository_human_role_policy_append,
     plan_tenant_technical_human_waiver_event_append,
+    tenant_technical_human_waiver_current_authority,
 )
 from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationConflictError,
@@ -244,6 +253,14 @@ TenantRepositoryClassificationCompareWriteStatus = Literal[
     "reconciliation_required",
 ]
 RepositoryHumanRolePolicyCompareWriteStatus = Literal[
+    "written",
+    "exact_replay",
+    "replayed",
+    "idempotency_conflict",
+    "reservation_in_progress",
+    "reconciliation_required",
+]
+TenantTechnicalHumanWaiverCompareWriteStatus = Literal[
     "written",
     "exact_replay",
     "replayed",
@@ -354,6 +371,13 @@ class RepositoryHumanRolePolicyCompareWriteResult(NamedTuple):
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
+class TenantTechnicalHumanWaiverCompareWriteResult(NamedTuple):
+    status: TenantTechnicalHumanWaiverCompareWriteStatus
+    result: TenantTechnicalHumanWaiverApplyResult | None = None
+    event_record: TenantTechnicalHumanWaiverEventRecord | None = None
+    idempotency_record: LaunchplaneIdempotencyRecord | None = None
+
+
 class PublicIngressTransitionWriteResult(NamedTuple):
     status: PublicIngressTransitionWriteStatus
 
@@ -442,6 +466,67 @@ class DbOnlyMutationRequest:
 class OutboxWithIdempotencyRequest:
     delivery: OutboxDeliveryRecord
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
+
+
+@dataclass(frozen=True)
+class _TenantTechnicalHumanWaiverAuthoritySnapshot:
+    classifications: tuple[TenantRepositoryClassificationRecord, ...]
+    role_policies: tuple[RepositoryHumanRolePolicyRecord, ...]
+    authz_policies: tuple[LaunchplaneAuthzPolicyRecord, ...]
+
+    def list_tenant_repository_classification_records(
+        self,
+        *,
+        repository_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[TenantRepositoryClassificationRecord, ...]:
+        records = tuple(
+            record
+            for record in self.classifications
+            if not repository_id or record.repository_id == repository_id
+        )
+        return records if limit is None else records[: max(limit, 0)]
+
+    def list_repository_human_role_policy_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RepositoryHumanRolePolicyRecord, ...]:
+        normalized_repository = repository.strip().lower()
+        records = tuple(
+            record
+            for record in self.role_policies
+            if (not repository_id or record.repository_id == repository_id)
+            and (not repository_owner_id or record.repository_owner_id == repository_owner_id)
+            and (not normalized_repository or record.repository == normalized_repository)
+            and (not product or record.product == product)
+            and (not context or record.context == context)
+            and (not status or record.status == status)
+        )
+        return records if limit is None else records[: max(limit, 0)]
+
+    def list_authz_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]:
+        records = tuple(
+            record for record in self.authz_policies if not status or record.status == status
+        )
+        return records if limit is None else records[: max(limit, 0)]
+
+    def list_tenant_technical_human_waiver_event_records(
+        self,
+        **_: object,
+    ) -> tuple[TenantTechnicalHumanWaiverEventRecord, ...]:
+        return ()
 
 
 def _utc_now_timestamp() -> str:
@@ -2481,6 +2566,9 @@ class PostgresRecordStore(HumanSessionStore):
         return None
 
     def _after_authz_policy_write_step(self, step_name: str) -> None:
+        return None
+
+    def _after_tenant_technical_human_waiver_write_step(self, step_name: str) -> None:
         return None
 
     def _merge_authority_row(self, session: Any, row: Base, *, step_name: str) -> None:
@@ -7443,6 +7531,311 @@ class PostgresRecordStore(HumanSessionStore):
             payload=self._payload_dict(record),
         )
 
+    def _lock_tenant_technical_human_waiver_binding(
+        self,
+        session: Any,
+        *,
+        binding_sha256: str,
+    ) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        lock_parts = (
+            "launchplane",
+            "tenant-technical-human-waiver",
+            binding_sha256,
+        )
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": "".join(f"{len(lock_part)}:{lock_part}" for lock_part in lock_parts)},
+        )
+
+    def _locked_current_classification_rows(
+        self,
+        *,
+        session: Any,
+        repository_id: str,
+    ) -> tuple[LaunchplaneTenantRepositoryClassificationRow, ...]:
+        statement = (
+            select(LaunchplaneTenantRepositoryClassificationRow)
+            .where(LaunchplaneTenantRepositoryClassificationRow.repository_id == repository_id)
+            .order_by(LaunchplaneTenantRepositoryClassificationRow.classification_revision.asc())
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return tuple(session.scalars(statement).all())
+
+    def _locked_active_authz_policy_rows(
+        self,
+        *,
+        session: Any,
+    ) -> tuple[LaunchplaneAuthzPolicyRow, ...]:
+        statement = (
+            select(LaunchplaneAuthzPolicyRow)
+            .where(LaunchplaneAuthzPolicyRow.status == "active")
+            .order_by(desc(LaunchplaneAuthzPolicyRow.revision))
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return tuple(session.scalars(statement).all())
+
+    def _locked_tenant_technical_human_waiver_event_rows(
+        self,
+        *,
+        session: Any,
+        repository_id: str,
+        repository_owner_id: str,
+        repository: str,
+        product: str,
+        context_name: str,
+        pull_request_number: int,
+        head_sha: str,
+    ) -> tuple[LaunchplaneTenantTechnicalHumanWaiverEventRow, ...]:
+        statement = (
+            select(LaunchplaneTenantTechnicalHumanWaiverEventRow)
+            .where(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.repository_id == repository_id,
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.repository_owner_id
+                == repository_owner_id,
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.repository == repository,
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.product == product,
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.context == context_name,
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.pull_request_number
+                == pull_request_number,
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.head_sha == head_sha,
+            )
+            .order_by(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.occurred_at.asc(),
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.event_id.asc(),
+            )
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return tuple(session.scalars(statement).all())
+
+    def compare_and_write_tenant_technical_human_waiver_event(
+        self,
+        *,
+        identity: GitHubHumanIdentity,
+        envelope: TenantTechnicalHumanWaiverApplyEnvelope,
+        mutation: DbOnlyMutationRequest,
+    ) -> TenantTechnicalHumanWaiverCompareWriteResult:
+        if not 100 <= mutation.response_status_code <= 599:
+            raise ValueError("DB-only mutation response status must be between 100 and 599.")
+        if not mutation.response_trace_id.strip():
+            raise ValueError("DB-only mutation response trace id is required.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            reservation_status, reservation_row, mutation_reservation = (
+                self._reserve_db_only_mutation_in_session(
+                    session=session,
+                    mutation=mutation,
+                )
+            )
+            if reservation_status == "idempotency_conflict":
+                return TenantTechnicalHumanWaiverCompareWriteResult(
+                    status="idempotency_conflict",
+                    idempotency_record=mutation_reservation,
+                )
+            if reservation_status == "replayed":
+                return TenantTechnicalHumanWaiverCompareWriteResult(
+                    status="replayed",
+                    idempotency_record=mutation_reservation,
+                )
+            if reservation_status == "reservation_in_progress":
+                return TenantTechnicalHumanWaiverCompareWriteResult(
+                    status="reservation_in_progress",
+                    idempotency_record=mutation_reservation,
+                )
+            if reservation_status == "reconciliation_required":
+                return TenantTechnicalHumanWaiverCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=mutation_reservation,
+                )
+            if reservation_row is None:
+                raise RuntimeError(
+                    "Tenant technical human waiver mutation reservation missing row."
+                )
+
+            return self._compare_and_write_tenant_technical_human_waiver_locked(
+                session=session,
+                identity=identity,
+                envelope=envelope,
+                reservation_row=reservation_row,
+                mutation_reservation=mutation_reservation,
+                mutation=mutation,
+            )
+
+    def _compare_and_write_tenant_technical_human_waiver_locked(
+        self,
+        *,
+        session: Any,
+        identity: GitHubHumanIdentity,
+        envelope: TenantTechnicalHumanWaiverApplyEnvelope,
+        reservation_row: LaunchplaneIdempotencyRow,
+        mutation_reservation: LaunchplaneIdempotencyRecord,
+        mutation: DbOnlyMutationRequest,
+    ) -> TenantTechnicalHumanWaiverCompareWriteResult:
+        candidate = envelope.candidate
+        self._lock_tenant_repository_classification_write(
+            session,
+            repository_id=candidate.repository_id,
+        )
+        self._lock_repository_human_role_policy_write(
+            session,
+            repository_id=candidate.repository_id,
+            product=candidate.product,
+            context_name=candidate.context,
+        )
+        self._lock_active_authz_policy(session)
+        observed_at = self._database_mutation_timestamp(session)
+        classification_rows = self._locked_current_classification_rows(
+            session=session,
+            repository_id=candidate.repository_id,
+        )
+        role_policy_rows = self._repository_human_role_policy_stream_rows(
+            session=session,
+            repository_id=candidate.repository_id,
+            product=candidate.product,
+            context_name=candidate.context,
+            for_update=True,
+        )
+        authz_policy_rows = self._locked_active_authz_policy_rows(session=session)
+        authority_snapshot = _TenantTechnicalHumanWaiverAuthoritySnapshot(
+            classifications=tuple(
+                self._read_payload(
+                    model_type=TenantRepositoryClassificationRecord,
+                    payload=row.payload,
+                )
+                for row in classification_rows
+            ),
+            role_policies=tuple(
+                self._read_payload(
+                    model_type=RepositoryHumanRolePolicyRecord,
+                    payload=row.payload,
+                )
+                for row in role_policy_rows
+            ),
+            authz_policies=tuple(self._read_authz_policy_row(row) for row in authz_policy_rows),
+        )
+        try:
+            current = tenant_technical_human_waiver_current_authority(
+                store=authority_snapshot,
+                candidate=candidate,
+                expected_authority=envelope.expected_authority,
+                evaluated_at=observed_at,
+            )
+            provisional_event = capture_tenant_technical_human_waiver_event(
+                identity=identity,
+                candidate=candidate,
+                classification=current.classification,
+                role_policy_record=current.role_policy_record,
+                authz_policy_record=current.authz_policy_record,
+                action=envelope.action,
+                occurred_at=observed_at,
+                source_event_kind=envelope.source_event_kind,
+                source_event_id=envelope.source_event_id,
+                reason=envelope.reason,
+                recorded_at=observed_at,
+                expires_at=envelope.expires_at,
+            )
+        except (
+            TenantTechnicalHumanWaiverAuthorizationError,
+            TenantTechnicalHumanWaiverEventConflictError,
+            TenantTechnicalHumanWaiverRevokeCurrentError,
+            TenantTechnicalHumanWaiverStaleAuthorityError,
+            ValueError,
+        ):
+            session.delete(reservation_row)
+            session.commit()
+            raise
+
+        self._lock_tenant_technical_human_waiver_binding(
+            session,
+            binding_sha256=provisional_event.record.binding.binding_sha256,
+        )
+        event_rows = self._locked_tenant_technical_human_waiver_event_rows(
+            session=session,
+            repository_id=candidate.repository_id,
+            repository_owner_id=candidate.repository_owner_id,
+            repository=candidate.repository,
+            product=candidate.product,
+            context_name=candidate.context,
+            pull_request_number=candidate.pull_request_number,
+            head_sha=candidate.head_sha,
+        )
+        events = tuple(
+            self._read_payload(
+                model_type=TenantTechnicalHumanWaiverEventRecord,
+                payload=row.payload,
+            )
+            for row in event_rows
+        )
+        try:
+            result = build_tenant_technical_human_waiver_apply_result(
+                identity=identity,
+                envelope=envelope,
+                classification=current.classification,
+                role_policy_record=current.role_policy_record,
+                authz_policy_record=current.authz_policy_record,
+                events=events,
+                observed_at=observed_at,
+            )
+            event_record = capture_tenant_technical_human_waiver_event(
+                identity=identity,
+                candidate=candidate,
+                classification=current.classification,
+                role_policy_record=current.role_policy_record,
+                authz_policy_record=current.authz_policy_record,
+                action=envelope.action,
+                occurred_at=observed_at,
+                source_event_kind=envelope.source_event_kind,
+                source_event_id=envelope.source_event_id,
+                reason=envelope.reason,
+                recorded_at=observed_at,
+                expires_at=envelope.expires_at,
+            ).record
+            if event_record.event_id != result.event_id:
+                raise RuntimeError("Tenant technical human waiver result/event identity mismatch.")
+            append_plan = plan_tenant_technical_human_waiver_event_append(
+                records=events,
+                record=event_record,
+            )
+        except (
+            TenantTechnicalHumanWaiverAuthorizationError,
+            TenantTechnicalHumanWaiverEventConflictError,
+            TenantTechnicalHumanWaiverRevokeCurrentError,
+            TenantTechnicalHumanWaiverStaleAuthorityError,
+            ValueError,
+        ):
+            session.delete(reservation_row)
+            session.commit()
+            raise
+
+        if append_plan.status != "replayed":
+            session.add(self._tenant_technical_human_waiver_event_row(event_record))
+            session.flush()
+            self._after_tenant_technical_human_waiver_write_step("insert_event")
+        response_payload = mutation.response_payload | {
+            "result": result.model_dump(mode="json"),
+        }
+        completed_at = self._database_mutation_timestamp(session)
+        completion = complete_launchplane_mutation_reservation(
+            mutation_reservation,
+            response_status_code=mutation.response_status_code,
+            response_trace_id=mutation.response_trace_id,
+            completed_at=completed_at,
+            response_payload=response_payload,
+        )
+        self._sync_idempotency_row(reservation_row, completion)
+        self._after_tenant_technical_human_waiver_write_step("complete_idempotency")
+        session.commit()
+        return TenantTechnicalHumanWaiverCompareWriteResult(
+            status="exact_replay" if append_plan.status == "replayed" else "written",
+            result=result,
+            event_record=event_record,
+            idempotency_record=completion,
+        )
+
     def _lock_repository_human_role_policy_write(
         self,
         session: Any,
@@ -7486,6 +7879,89 @@ class PostgresRecordStore(HumanSessionStore):
         if for_update and not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update()
         return tuple(session.scalars(statement).all())
+
+    def _reserve_db_only_mutation_in_session(
+        self,
+        *,
+        session: Any,
+        mutation: DbOnlyMutationRequest,
+    ) -> tuple[str, LaunchplaneIdempotencyRow | None, LaunchplaneIdempotencyRecord]:
+        observed_at = self._database_mutation_timestamp(session)
+        reservation = build_launchplane_mutation_reservation(
+            scope=mutation.scope,
+            route_path=mutation.route_path,
+            idempotency_key=mutation.idempotency_key,
+            request_fingerprint=mutation.request_fingerprint,
+            lease_owner=mutation.lease_owner,
+            lease_expires_at=self._mutation_lease_expiry(
+                observed_at=observed_at,
+                lease_seconds=mutation.lease_seconds,
+            ),
+            reserved_at=observed_at,
+        )
+        reservation_row = self._idempotency_row(reservation)
+        session.add(reservation_row)
+        try:
+            session.flush()
+            return "acquired", reservation_row, reservation
+        except IntegrityError:
+            session.rollback()
+
+        self._begin_serialized_write(session)
+        reservation_row = session.scalar(
+            self._idempotency_statement(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                for_update=True,
+            )
+        )
+        if reservation_row is None:
+            raise RuntimeError("Mutation reservation collision disappeared before replay read.")
+        current_reservation = self._read_payload(
+            model_type=LaunchplaneIdempotencyRecord,
+            payload=reservation_row.payload,
+        )
+        if current_reservation.request_fingerprint != mutation.request_fingerprint:
+            return "idempotency_conflict", reservation_row, current_reservation
+        if current_reservation.state == "completed":
+            return "replayed", reservation_row, current_reservation
+        if current_reservation.state == "reconcile_required":
+            return "reconciliation_required", reservation_row, current_reservation
+        observed_at = self._database_mutation_timestamp(session)
+        if parse_launchplane_mutation_timestamp(
+            current_reservation.lease_expires_at,
+            field_name="lease_expires_at",
+        ) > parse_launchplane_mutation_timestamp(
+            observed_at,
+            field_name="observed_at",
+        ):
+            return "reservation_in_progress", reservation_row, current_reservation
+        if current_reservation.reconciliation_key:
+            reconcile_record = self._updated_idempotency_record(
+                current_reservation,
+                state="reconcile_required",
+                updated_at=observed_at,
+            )
+            self._sync_idempotency_row(reservation_row, reconcile_record)
+            session.commit()
+            return "reconciliation_required", reservation_row, reconcile_record
+        reclaimed_reservation = self._updated_idempotency_record(
+            current_reservation,
+            lease_owner=mutation.lease_owner,
+            lease_expires_at=self._mutation_lease_expiry(
+                observed_at=observed_at,
+                lease_seconds=mutation.lease_seconds,
+            ),
+            attempt=current_reservation.attempt + 1,
+            updated_at=observed_at,
+            response_status_code=None,
+            response_trace_id="",
+            recorded_at="",
+            response_payload={},
+        )
+        self._sync_idempotency_row(reservation_row, reclaimed_reservation)
+        return "acquired", reservation_row, reclaimed_reservation
 
     def compare_and_write_repository_human_role_policy_record(
         self,

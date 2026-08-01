@@ -181,6 +181,7 @@ from control_plane.contracts.tenant_merge_eligibility import (
 from control_plane.contracts.repository_human_admission import (
     RepositoryHumanRolePolicyProvenance,
     RepositoryHumanRolePolicyRecord,
+    TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,
     TenantTechnicalHumanWaiverAuthorization,
     TenantTechnicalHumanWaiverBinding,
     TenantTechnicalHumanWaiverEventRecord,
@@ -188,12 +189,18 @@ from control_plane.contracts.repository_human_admission import (
 from control_plane.repository_human_admission import (
     RepositoryHumanRolePolicyConflictError,
     RepositoryHumanRolePolicySequenceError,
+    TenantTechnicalHumanWaiverApplyEnvelope,
+    TenantTechnicalHumanWaiverAuthorizationError,
+    TenantTechnicalHumanWaiverExpectedAuthority,
+    TenantTechnicalHumanWaiverRevokeCurrentError,
     TenantTechnicalHumanWaiverEventConflictError,
+    TenantTechnicalHumanWaiverStaleAuthorityError,
 )
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
     GitHubHumanIdentity,
+    GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
     agent_authz_audit,
 )
@@ -428,6 +435,134 @@ def _role_policy_db_only_mutation(
         response_trace_id=response_trace_id,
         response_payload={"status": "accepted", "trace_id": response_trace_id},
     )
+
+
+def _tenant_technical_human_waiver_authz_policy_record(
+    *,
+    github_ids: tuple[int, ...] = (301,),
+) -> LaunchplaneAuthzPolicyRecord:
+    policy = LaunchplaneAuthzPolicy(
+        schema_version=2,
+        github_humans=(
+            GitHubHumanPolicyRule(
+                managed_set_id="tenant-human.example",
+                managed_rule_id="technical-waiver",
+                github_ids=github_ids,
+                roles=("read_only",),
+                products=("example-product",),
+                contexts=("example-product",),
+                actions=(TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,),
+            ),
+        ),
+    )
+    digest = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+        revision=1,
+        status="active",
+        source="test:tenant-technical-human-waiver-authz",
+        updated_at="2026-07-31T10:00:00Z",
+        policy_sha256=digest,
+        policy=policy,
+    )
+
+
+def _tenant_technical_human_waiver_envelope(
+    *,
+    action: str = "created",
+    source_event_id: str = "comment-create",
+    expected_current: dict[str, object] | None = None,
+    reason: str = "Owner reviewed exact technical waiver.",
+    classification: TenantRepositoryClassificationRecord | None = None,
+    role_policy: RepositoryHumanRolePolicyRecord | None = None,
+    authz_policy: LaunchplaneAuthzPolicyRecord | None = None,
+) -> TenantTechnicalHumanWaiverApplyEnvelope:
+    classification_record = classification or _tenant_repository_classification_record()
+    role_policy_record = role_policy or _repository_human_role_policy_record()
+    authz_policy_record = authz_policy or _tenant_technical_human_waiver_authz_policy_record()
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "mode": "apply",
+        "action": action,
+        "candidate": {
+            "product": "example-product",
+            "context": "example-product",
+            "repository_id": "1001",
+            "repository_owner_id": "2001",
+            "repository": "example/example-product",
+            "pull_request_number": 17,
+            "head_sha": "a" * 40,
+        },
+        "expected_authority": TenantTechnicalHumanWaiverExpectedAuthority(
+            classification_record_id=classification_record.record_id,
+            classification_digest=classification_record.classification_digest,
+            role_policy_record_id=role_policy_record.record_id,
+            role_policy_digest=role_policy_record.role_policy_digest,
+            authz_policy_record_id=authz_policy_record.record_id,
+            authz_policy_digest=authz_policy_record.policy_sha256,
+        ).model_dump(mode="json"),
+        "source_event_kind": "github_issue_comment",
+        "source_event_id": source_event_id,
+        "reason": reason,
+    }
+    if expected_current is not None:
+        payload["expected_current"] = expected_current
+    return TenantTechnicalHumanWaiverApplyEnvelope.model_validate(payload)
+
+
+def _tenant_technical_human_waiver_mutation(
+    *,
+    idempotency_key: str = "tenant-waiver-create",
+    request_fingerprint: str = "tenant-waiver-fingerprint",
+    response_trace_id: str = "trace-tenant-waiver",
+    scope: str = "github-human-id|301",
+) -> DbOnlyMutationRequest:
+    return DbOnlyMutationRequest(
+        scope=scope,
+        route_path="/v1/tenant-admission/technical-human-waivers/apply",
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        lease_owner=response_trace_id,
+        response_status_code=202,
+        response_trace_id=response_trace_id,
+        response_payload={"status": "ok", "trace_id": response_trace_id},
+    )
+
+
+def _tenant_technical_human_waiver_identity(
+    *,
+    github_id: int = 301,
+    login: str = "human-301",
+) -> GitHubHumanIdentity:
+    return GitHubHumanIdentity(
+        login=login,
+        github_id=github_id,
+        name="Human Example",
+        email="human@example.com",
+        organizations=frozenset(),
+        teams=frozenset(),
+        role="read_only",
+    )
+
+
+def _seed_tenant_technical_human_waiver_authority(
+    store: PostgresRecordStore,
+    *,
+    classification: TenantRepositoryClassificationRecord | None = None,
+    role_policy: RepositoryHumanRolePolicyRecord | None = None,
+    authz_policy: LaunchplaneAuthzPolicyRecord | None = None,
+) -> tuple[
+    TenantRepositoryClassificationRecord,
+    RepositoryHumanRolePolicyRecord,
+    LaunchplaneAuthzPolicyRecord,
+]:
+    classification_record = classification or _tenant_repository_classification_record()
+    role_policy_record = role_policy or _repository_human_role_policy_record()
+    authz_policy_record = authz_policy or _tenant_technical_human_waiver_authz_policy_record()
+    store.write_tenant_repository_classification_record(classification_record)
+    store.write_repository_human_role_policy_record(role_policy_record)
+    store.seed_authz_policy_if_absent(authz_policy_record)
+    return classification_record, role_policy_record, authz_policy_record
 
 
 def _mutation_reservation(
@@ -2133,6 +2268,413 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 with self.assertRaises(IntegrityError):
                     store.write_tenant_technical_human_waiver_event_record(record)
             store.close()
+
+    def test_tenant_technical_human_waiver_compare_write_create_replay_and_conflict(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            _seed_tenant_technical_human_waiver_authority(store)
+            envelope = _tenant_technical_human_waiver_envelope()
+            mutation = _tenant_technical_human_waiver_mutation()
+
+            first_result = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(),
+                envelope=envelope,
+                mutation=mutation,
+            )
+            same_key_result = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(login="renamed-human"),
+                envelope=envelope,
+                mutation=mutation,
+            )
+            conflict_result = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(),
+                envelope=envelope,
+                mutation=_tenant_technical_human_waiver_mutation(
+                    request_fingerprint="changed-waiver-fingerprint"
+                ),
+            )
+            event_records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            stored_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(first_result.status, "written")
+        self.assertIsNotNone(first_result.result)
+        self.assertIsNotNone(first_result.event_record)
+        assert first_result.result is not None
+        assert first_result.event_record is not None
+        self.assertEqual(first_result.result.status, "applied")
+        self.assertEqual(first_result.result.path_result.state, "satisfied")
+        self.assertEqual(
+            first_result.event_record.recorded_at, first_result.event_record.occurred_at
+        )
+        self.assertEqual(first_result.result.recorded_at, first_result.result.occurred_at)
+        self.assertEqual(same_key_result.status, "replayed")
+        self.assertIsNotNone(same_key_result.idempotency_record)
+        assert same_key_result.idempotency_record is not None
+        self.assertEqual(
+            same_key_result.idempotency_record.response_trace_id,
+            mutation.response_trace_id,
+        )
+        self.assertEqual(conflict_result.status, "idempotency_conflict")
+        self.assertEqual(event_records, (first_result.event_record,))
+        self.assertIsNotNone(stored_idempotency)
+        assert stored_idempotency is not None
+        self.assertEqual(stored_idempotency.response_payload["result"]["status"], "applied")
+
+    def test_tenant_technical_human_waiver_compare_write_exact_create_replay_with_new_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            _seed_tenant_technical_human_waiver_authority(store)
+            envelope = _tenant_technical_human_waiver_envelope()
+            timestamp = "2026-08-01T12:00:00Z"
+
+            with patch.object(store, "_database_mutation_timestamp", return_value=timestamp):
+                written = store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=envelope,
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-create-fixed",
+                        request_fingerprint="tenant-waiver-create-fixed-fingerprint",
+                        response_trace_id="trace-waiver-create-fixed",
+                    ),
+                )
+                replayed = store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=envelope,
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-create-fixed-replay",
+                        request_fingerprint="tenant-waiver-create-fixed-replay-fingerprint",
+                        response_trace_id="trace-waiver-create-fixed-replay",
+                    ),
+                )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            store.close()
+
+        self.assertEqual(written.status, "written")
+        self.assertEqual(replayed.status, "exact_replay")
+        self.assertIsNotNone(written.event_record)
+        self.assertIsNotNone(replayed.event_record)
+        assert written.event_record is not None
+        assert replayed.event_record is not None
+        self.assertEqual(written.event_record, replayed.event_record)
+        self.assertEqual(records, (written.event_record,))
+
+    def test_tenant_technical_human_waiver_compare_write_rejects_stale_create_replay(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            _seed_tenant_technical_human_waiver_authority(store)
+            envelope = _tenant_technical_human_waiver_envelope()
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                side_effect=(
+                    "2026-08-01T12:00:00Z",
+                    "2026-08-01T12:00:00Z",
+                    "2026-08-01T12:00:01Z",
+                    "2026-08-01T12:00:02Z",
+                    "2026-08-01T12:00:02Z",
+                ),
+            ):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=envelope,
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-create-original",
+                        request_fingerprint="tenant-waiver-create-original-fingerprint",
+                        response_trace_id="trace-waiver-create-original",
+                    ),
+                )
+                with self.assertRaises(TenantTechnicalHumanWaiverEventConflictError):
+                    store.compare_and_write_tenant_technical_human_waiver_event(
+                        identity=_tenant_technical_human_waiver_identity(),
+                        envelope=envelope,
+                        mutation=_tenant_technical_human_waiver_mutation(
+                            idempotency_key="tenant-waiver-create-stale",
+                            request_fingerprint="tenant-waiver-create-stale-fingerprint",
+                            response_trace_id="trace-waiver-create-stale",
+                        ),
+                    )
+
+            stale_reservation = store.read_idempotency_record(
+                scope="github-human-id|301",
+                route_path="/v1/tenant-admission/technical-human-waivers/apply",
+                idempotency_key="tenant-waiver-create-stale",
+            )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            store.close()
+
+        self.assertIsNone(stale_reservation)
+        self.assertEqual(len(records), 1)
+
+    def test_tenant_technical_human_waiver_compare_write_revokes_with_expected_current(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            _seed_tenant_technical_human_waiver_authority(store)
+            created = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(),
+                envelope=_tenant_technical_human_waiver_envelope(
+                    source_event_id="comment-create-revoke"
+                ),
+                mutation=_tenant_technical_human_waiver_mutation(
+                    idempotency_key="tenant-waiver-create-revoke",
+                    request_fingerprint="tenant-waiver-create-revoke-fingerprint",
+                    response_trace_id="trace-waiver-create-revoke",
+                ),
+            )
+            assert created.event_record is not None
+            revoke_envelope = _tenant_technical_human_waiver_envelope(
+                action="revoked",
+                source_event_id="comment-revoke",
+                expected_current={
+                    "waiver_id": created.event_record.waiver_id,
+                    "event_digest": created.event_record.event_digest,
+                },
+                reason="Owner revoked exact waiver.",
+            )
+            revoked = store.compare_and_write_tenant_technical_human_waiver_event(
+                identity=_tenant_technical_human_waiver_identity(),
+                envelope=revoke_envelope,
+                mutation=_tenant_technical_human_waiver_mutation(
+                    idempotency_key="tenant-waiver-revoke",
+                    request_fingerprint="tenant-waiver-revoke-fingerprint",
+                    response_trace_id="trace-waiver-revoke",
+                ),
+            )
+            with self.assertRaises(TenantTechnicalHumanWaiverRevokeCurrentError):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=_tenant_technical_human_waiver_envelope(
+                        action="revoked",
+                        source_event_id="comment-revoke-stale-cas",
+                        expected_current={
+                            "waiver_id": created.event_record.waiver_id,
+                            "event_digest": created.event_record.event_digest,
+                        },
+                        reason="Owner retried stale revoke.",
+                    ),
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-revoke-stale-cas",
+                        request_fingerprint="tenant-waiver-revoke-stale-cas-fingerprint",
+                        response_trace_id="trace-waiver-revoke-stale-cas",
+                    ),
+                )
+            with self.assertRaises(TenantTechnicalHumanWaiverRevokeCurrentError):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=revoke_envelope,
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-revoke-stale-event",
+                        request_fingerprint="tenant-waiver-revoke-stale-event-fingerprint",
+                        response_trace_id="trace-waiver-revoke-stale-event",
+                    ),
+                )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            stale_revoke_reservation = store.read_idempotency_record(
+                scope="github-human-id|301",
+                route_path="/v1/tenant-admission/technical-human-waivers/apply",
+                idempotency_key="tenant-waiver-revoke-stale-event",
+            )
+            store.close()
+
+        self.assertEqual(revoked.status, "written")
+        self.assertIsNotNone(revoked.result)
+        self.assertIsNotNone(revoked.event_record)
+        assert revoked.result is not None
+        assert revoked.event_record is not None
+        self.assertEqual(revoked.result.path_result.state, "denied")
+        self.assertEqual(tuple(record.action for record in records), ("revoked", "created"))
+        self.assertIsNone(stale_revoke_reservation)
+
+    def test_tenant_technical_human_waiver_compare_write_validates_current_authority(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            role_policy = _repository_human_role_policy_record(repository_owner_github_ids=(302,))
+            _seed_tenant_technical_human_waiver_authority(
+                store,
+                role_policy=role_policy,
+            )
+
+            with self.assertRaises(TenantTechnicalHumanWaiverAuthorizationError):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=_tenant_technical_human_waiver_envelope(role_policy=role_policy),
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-non-owner",
+                        request_fingerprint="tenant-waiver-non-owner-fingerprint",
+                    ),
+                )
+            with self.assertRaises(TenantTechnicalHumanWaiverStaleAuthorityError):
+                stale_envelope = _tenant_technical_human_waiver_envelope(role_policy=role_policy)
+                stale_envelope.expected_authority.authz_policy_digest = "f" * 64
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(github_id=302),
+                    envelope=stale_envelope,
+                    mutation=_tenant_technical_human_waiver_mutation(
+                        idempotency_key="tenant-waiver-authz-drift",
+                        request_fingerprint="tenant-waiver-authz-drift-fingerprint",
+                        scope="github-human-id|302",
+                    ),
+                )
+            failed_reservation = store.read_idempotency_record(
+                scope="github-human-id|302",
+                route_path="/v1/tenant-admission/technical-human-waivers/apply",
+                idempotency_key="tenant-waiver-authz-drift",
+            )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            store.close()
+
+        self.assertIsNone(failed_reservation)
+        self.assertEqual(records, ())
+
+    def test_tenant_technical_human_waiver_compare_write_rolls_back_on_completion_failure(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            _seed_tenant_technical_human_waiver_authority(store)
+            mutation = _tenant_technical_human_waiver_mutation(
+                idempotency_key="tenant-waiver-rollback",
+                request_fingerprint="tenant-waiver-rollback-fingerprint",
+                response_trace_id="trace-waiver-rollback",
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_sync_idempotency_row",
+                    side_effect=RuntimeError("injected completion failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected completion failure"),
+            ):
+                store.compare_and_write_tenant_technical_human_waiver_event(
+                    identity=_tenant_technical_human_waiver_identity(),
+                    envelope=_tenant_technical_human_waiver_envelope(),
+                    mutation=mutation,
+                )
+
+            stored_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            store.close()
+
+        self.assertIsNone(stored_idempotency)
+        self.assertEqual(records, ())
+
+    def test_tenant_technical_human_waiver_compare_write_serializes_no_row_race(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            _seed_tenant_technical_human_waiver_authority(store)
+
+            def write_with_suffix(suffix: str) -> str:
+                active_store = PostgresRecordStore(database_url=database_url)
+                try:
+                    result = active_store.compare_and_write_tenant_technical_human_waiver_event(
+                        identity=_tenant_technical_human_waiver_identity(),
+                        envelope=_tenant_technical_human_waiver_envelope(
+                            source_event_id=f"comment-race-{suffix}"
+                        ),
+                        mutation=_tenant_technical_human_waiver_mutation(
+                            idempotency_key=f"tenant-waiver-race-{suffix}",
+                            request_fingerprint=f"tenant-waiver-race-{suffix}-fingerprint",
+                            response_trace_id=f"trace-waiver-race-{suffix}",
+                        ),
+                    )
+                    return result.status
+                except TenantTechnicalHumanWaiverEventConflictError:
+                    return "conflict"
+                finally:
+                    active_store.close()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                statuses = tuple(executor.map(write_with_suffix, ("a", "b")))
+
+            records = store.list_tenant_technical_human_waiver_event_records(
+                repository_id="1001",
+                product="example-product",
+                context="example-product",
+            )
+            store.close()
+
+        self.assertEqual(statuses.count("written"), 1)
+        self.assertEqual(statuses.count("conflict"), 1)
+        self.assertEqual(len(records), 1)
 
     def test_write_promotion_evidence_records_writes_promotion_and_inventory(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

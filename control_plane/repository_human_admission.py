@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
 from typing import Literal, NamedTuple, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -27,10 +28,9 @@ from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationRecord,
 )
 from control_plane.service_auth import (
-    AuthorizationTarget,
     GitHubHumanIdentity,
+    GitHubHumanPolicyRule,
     LaunchplaneIdentity,
-    matching_github_human_policy_rules,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -51,6 +51,14 @@ class TenantTechnicalHumanWaiverAuthorizationError(PermissionError):
     pass
 
 
+class TenantTechnicalHumanWaiverStaleAuthorityError(ValueError):
+    pass
+
+
+class TenantTechnicalHumanWaiverRevokeCurrentError(ValueError):
+    pass
+
+
 class TenantTechnicalHumanWaiverEventConflictError(ValueError):
     """Raised when immutable tenant technical human waiver event history is replayed differently."""
 
@@ -58,6 +66,21 @@ class TenantTechnicalHumanWaiverEventConflictError(ValueError):
 class TenantTechnicalHumanWaiverWriteResult(NamedTuple):
     record: TenantTechnicalHumanWaiverEventRecord
     path_result: TenantAdmissionPathResult
+
+
+class TenantTechnicalHumanWaiverCurrentAuthority(NamedTuple):
+    classification: TenantRepositoryClassificationRecord
+    role_policy_record: RepositoryHumanRolePolicyRecord
+    authz_policy_record: LaunchplaneAuthzPolicyRecord
+
+
+TenantTechnicalHumanWaiverApplyMode = Literal["dry_run", "apply"]
+TenantTechnicalHumanWaiverApplyStatus = Literal[
+    "would_apply",
+    "would_replay",
+    "applied",
+    "replayed",
+]
 
 
 class RepositoryHumanRolePolicyReadStore(Protocol):
@@ -123,6 +146,26 @@ class TenantTechnicalHumanWaiverEventStore(
         self,
         event_id: str,
     ) -> TenantTechnicalHumanWaiverEventRecord: ...
+
+
+class TenantTechnicalHumanWaiverAuthorityReadStore(
+    TenantTechnicalHumanWaiverEventReadStore,
+    RepositoryHumanRolePolicyReadStore,
+    Protocol,
+):
+    def list_tenant_repository_classification_records(
+        self,
+        *,
+        repository_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[TenantRepositoryClassificationRecord, ...]: ...
+
+    def list_authz_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]: ...
 
 
 RepositoryHumanRolePolicyAppendStatus = Literal["written", "replayed"]
@@ -239,6 +282,161 @@ class RepositoryHumanRolePolicyApplyResult(BaseModel):
         return self
 
 
+class TenantTechnicalHumanWaiverExpectedAuthority(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    classification_record_id: str
+    classification_digest: str
+    role_policy_record_id: str
+    role_policy_digest: str
+    authz_policy_record_id: str
+    authz_policy_digest: str
+
+    @model_validator(mode="after")
+    def _validate_expected_authority(self) -> "TenantTechnicalHumanWaiverExpectedAuthority":
+        if self.schema_version != 1:
+            raise ValueError(
+                "Unsupported tenant technical human waiver expected authority schema version."
+            )
+        self.classification_record_id = _required_token(
+            self.classification_record_id,
+            "classification_record_id",
+        )
+        self.classification_digest = _normalize_sha256(
+            self.classification_digest,
+            "classification_digest",
+        )
+        self.role_policy_record_id = _required_token(
+            self.role_policy_record_id,
+            "role_policy_record_id",
+        )
+        self.role_policy_digest = _normalize_sha256(
+            self.role_policy_digest,
+            "role_policy_digest",
+        )
+        self.authz_policy_record_id = _required_token(
+            self.authz_policy_record_id,
+            "authz_policy_record_id",
+        )
+        self.authz_policy_digest = _normalize_sha256(
+            self.authz_policy_digest,
+            "authz_policy_digest",
+        )
+        return self
+
+
+class TenantTechnicalHumanWaiverExpectedCurrent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    waiver_id: str
+    event_digest: str
+
+    @model_validator(mode="after")
+    def _validate_expected_current(self) -> "TenantTechnicalHumanWaiverExpectedCurrent":
+        if self.schema_version != 1:
+            raise ValueError(
+                "Unsupported tenant technical human waiver expected current schema version."
+            )
+        self.waiver_id = _required_token(self.waiver_id, "waiver_id")
+        self.event_digest = _normalize_sha256(self.event_digest, "event_digest")
+        return self
+
+
+class TenantTechnicalHumanWaiverApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: TenantTechnicalHumanWaiverApplyMode = "apply"
+    action: TenantTechnicalHumanWaiverAction
+    candidate: TenantMergeCandidate
+    expected_authority: TenantTechnicalHumanWaiverExpectedAuthority
+    source_event_kind: str
+    source_event_id: str
+    reason: str
+    expires_at: str = ""
+    expected_current: TenantTechnicalHumanWaiverExpectedCurrent | None = None
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "TenantTechnicalHumanWaiverApplyEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported tenant technical human waiver apply schema version.")
+        self.source_event_kind = _required_token(
+            self.source_event_kind,
+            "source_event_kind",
+        )
+        self.source_event_id = _required_token(self.source_event_id, "source_event_id")
+        self.reason = _required_token(self.reason, "reason")
+        if self.expires_at:
+            self.expires_at = _normalize_utc_timestamp(self.expires_at, "expires_at")
+        if self.action == "created" and self.expected_current is not None:
+            raise ValueError(
+                "Tenant technical human waiver creation cannot declare expected current waiver."
+            )
+        if self.action == "revoked" and self.expected_current is None:
+            raise ValueError(
+                "Tenant technical human waiver revocation requires expected current waiver."
+            )
+        if self.action == "revoked" and self.expires_at:
+            raise ValueError("Tenant technical human waiver revocation cannot declare expires_at.")
+        return self
+
+
+class TenantTechnicalHumanWaiverApplyResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    status: TenantTechnicalHumanWaiverApplyStatus
+    mode: TenantTechnicalHumanWaiverApplyMode
+    action: TenantTechnicalHumanWaiverAction
+    repository_id: str
+    repository_owner_id: str
+    repository: str
+    product: str
+    context: str
+    pull_request_number: int = Field(ge=1)
+    head_sha: str
+    waiver_id: str
+    event_id: str
+    event_digest: str
+    binding_sha256: str
+    path_result: TenantAdmissionPathResult
+    occurred_at: str
+    recorded_at: str
+    expires_at: str = ""
+    dry_run: bool = False
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> "TenantTechnicalHumanWaiverApplyResult":
+        if self.schema_version != 1:
+            raise ValueError(
+                "Unsupported tenant technical human waiver apply result schema version."
+            )
+        self.repository_id = _required_decimal_id(self.repository_id, "repository_id")
+        self.repository_owner_id = _required_decimal_id(
+            self.repository_owner_id,
+            "repository_owner_id",
+        )
+        self.repository = self.repository.strip().lower()
+        self.product = _required_token(self.product, "product")
+        self.context = _required_token(self.context, "context")
+        self.head_sha = _required_token(self.head_sha, "head_sha").lower()
+        self.waiver_id = _required_token(self.waiver_id, "waiver_id")
+        self.event_id = _required_token(self.event_id, "event_id")
+        self.event_digest = _normalize_sha256(self.event_digest, "event_digest")
+        self.binding_sha256 = _normalize_sha256(self.binding_sha256, "binding_sha256")
+        self.occurred_at = _normalize_utc_timestamp(self.occurred_at, "occurred_at")
+        self.recorded_at = _normalize_utc_timestamp(self.recorded_at, "recorded_at")
+        if self.expires_at:
+            self.expires_at = _normalize_utc_timestamp(self.expires_at, "expires_at")
+        if self.mode == "dry_run" and not self.dry_run:
+            raise ValueError("Dry-run tenant technical human waiver result must set dry_run.")
+        if self.mode == "apply" and self.dry_run:
+            raise ValueError("Applied tenant technical human waiver result cannot be dry_run.")
+        return self
+
+
 def require_repository_human_role_policy_read_store(
     record_store: object,
 ) -> RepositoryHumanRolePolicyReadStore:
@@ -255,6 +453,29 @@ def require_repository_human_role_policy_read_store(
             f"{missing_summary}"
         )
     return cast(RepositoryHumanRolePolicyReadStore, record_store)
+
+
+def require_tenant_technical_human_waiver_authority_read_store(
+    record_store: object,
+) -> TenantTechnicalHumanWaiverAuthorityReadStore:
+    required_methods = (
+        "list_tenant_repository_classification_records",
+        "list_repository_human_role_policy_records",
+        "list_authz_policy_records",
+        "list_tenant_technical_human_waiver_event_records",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support tenant technical human waiver reads: "
+            f"{missing_summary}"
+        )
+    return cast(TenantTechnicalHumanWaiverAuthorityReadStore, record_store)
 
 
 def require_repository_human_role_policy_store(
@@ -343,6 +564,178 @@ def get_repository_human_role_policy_read_model(
         history_count=len(matching_records),
         generated_at=utc_now_timestamp(),
     )
+
+
+def apply_tenant_technical_human_waiver(
+    *,
+    store: TenantTechnicalHumanWaiverAuthorityReadStore,
+    identity: LaunchplaneIdentity,
+    envelope: TenantTechnicalHumanWaiverApplyEnvelope,
+    observed_at: str,
+) -> TenantTechnicalHumanWaiverApplyResult:
+    current = tenant_technical_human_waiver_current_authority(
+        store=store,
+        candidate=envelope.candidate,
+        expected_authority=envelope.expected_authority,
+        evaluated_at=observed_at,
+    )
+    events = store.list_tenant_technical_human_waiver_event_records(
+        repository_id=envelope.candidate.repository_id,
+        repository_owner_id=envelope.candidate.repository_owner_id,
+        repository=envelope.candidate.repository,
+        product=envelope.candidate.product,
+        context=envelope.candidate.context,
+        pull_request_number=envelope.candidate.pull_request_number,
+        head_sha=envelope.candidate.head_sha,
+    )
+    return build_tenant_technical_human_waiver_apply_result(
+        identity=identity,
+        envelope=envelope,
+        classification=current.classification,
+        role_policy_record=current.role_policy_record,
+        authz_policy_record=current.authz_policy_record,
+        events=events,
+        observed_at=observed_at,
+    )
+
+
+def tenant_technical_human_waiver_current_authority(
+    *,
+    store: TenantTechnicalHumanWaiverAuthorityReadStore,
+    candidate: TenantMergeCandidate,
+    expected_authority: TenantTechnicalHumanWaiverExpectedAuthority,
+    evaluated_at: str,
+) -> TenantTechnicalHumanWaiverCurrentAuthority:
+    normalized_evaluated_at = _normalize_utc_timestamp(evaluated_at, "evaluated_at")
+    classification = _current_expected_tenant_ui_classification(
+        store=store,
+        candidate=candidate,
+        expected_authority=expected_authority,
+        evaluated_at=normalized_evaluated_at,
+    )
+    role_policy_record = _current_expected_repository_owner_role_policy(
+        store=store,
+        candidate=candidate,
+        expected_authority=expected_authority,
+        evaluated_at=normalized_evaluated_at,
+    )
+    authz_policy_record = _current_expected_waiver_authz_policy(
+        store=store,
+        candidate=candidate,
+        expected_authority=expected_authority,
+    )
+    return TenantTechnicalHumanWaiverCurrentAuthority(
+        classification=classification,
+        role_policy_record=role_policy_record,
+        authz_policy_record=authz_policy_record,
+    )
+
+
+def build_tenant_technical_human_waiver_apply_result(
+    *,
+    identity: LaunchplaneIdentity,
+    envelope: TenantTechnicalHumanWaiverApplyEnvelope,
+    classification: TenantRepositoryClassificationRecord,
+    role_policy_record: RepositoryHumanRolePolicyRecord,
+    authz_policy_record: LaunchplaneAuthzPolicyRecord,
+    events: tuple[TenantTechnicalHumanWaiverEventRecord, ...],
+    observed_at: str,
+) -> TenantTechnicalHumanWaiverApplyResult:
+    normalized_observed_at = _normalize_utc_timestamp(observed_at, "observed_at")
+    current_path = technical_human_waiver_path_result(
+        candidate=envelope.candidate,
+        classification=classification,
+        role_policy_record=role_policy_record,
+        authz_policy_record=authz_policy_record,
+        events=events,
+        evaluated_at=normalized_observed_at,
+    )
+    captured = capture_tenant_technical_human_waiver_event(
+        identity=identity,
+        candidate=envelope.candidate,
+        classification=classification,
+        role_policy_record=role_policy_record,
+        authz_policy_record=authz_policy_record,
+        action=envelope.action,
+        occurred_at=normalized_observed_at,
+        source_event_kind=envelope.source_event_kind,
+        source_event_id=envelope.source_event_id,
+        reason=envelope.reason,
+        recorded_at=normalized_observed_at,
+        expires_at=envelope.expires_at,
+    )
+    append_plan = plan_tenant_technical_human_waiver_event_append(
+        records=events,
+        record=captured.record,
+    )
+    if envelope.action == "created":
+        if append_plan.status == "replayed":
+            _require_replayed_create_current(
+                path_result=current_path,
+                existing_record=append_plan.existing_record,
+            )
+        elif current_path.state == "satisfied":
+            raise TenantTechnicalHumanWaiverEventConflictError(
+                "Tenant technical human waiver already satisfies this exact binding."
+            )
+        elif current_path.state not in {"pending", "stale", "denied"}:
+            raise TenantTechnicalHumanWaiverEventConflictError(
+                "Tenant technical human waiver creation requires a mutable current path."
+            )
+    else:
+        _require_expected_current_waiver(
+            path_result=current_path,
+            expected_current=envelope.expected_current,
+        )
+    all_events = (
+        tuple(events) if append_plan.status == "replayed" else tuple(events) + (captured.record,)
+    )
+    resulting_path = technical_human_waiver_path_result(
+        candidate=envelope.candidate,
+        classification=classification,
+        role_policy_record=role_policy_record,
+        authz_policy_record=authz_policy_record,
+        events=all_events,
+        evaluated_at=normalized_observed_at,
+    )
+    if envelope.action == "created" and resulting_path.state != "satisfied":
+        raise TenantTechnicalHumanWaiverEventConflictError(
+            "Tenant technical human waiver creation did not satisfy the exact binding."
+        )
+    if envelope.action == "revoked" and resulting_path.state != "denied":
+        raise TenantTechnicalHumanWaiverEventConflictError(
+            "Tenant technical human waiver revocation did not deny the exact binding."
+        )
+    if append_plan.status == "replayed" and envelope.action == "revoked":
+        raise TenantTechnicalHumanWaiverEventConflictError(
+            "Tenant technical human waiver revocation replay is stale for the current lifecycle."
+        )
+
+    status: TenantTechnicalHumanWaiverApplyStatus
+    if envelope.mode == "dry_run":
+        status = "would_replay" if append_plan.status == "replayed" else "would_apply"
+    else:
+        status = "replayed" if append_plan.status == "replayed" else "applied"
+    return _tenant_technical_human_waiver_apply_result(
+        record=captured.record,
+        path_result=resulting_path,
+        mode=envelope.mode,
+        status=status,
+        dry_run=envelope.mode == "dry_run",
+        recorded_at=normalized_observed_at,
+    )
+
+
+def tenant_technical_human_waiver_apply_response_payload(
+    *,
+    trace_id: str,
+    result: TenantTechnicalHumanWaiverApplyResult,
+) -> dict[str, object]:
+    return {
+        "status": "ok",
+        "trace_id": trace_id,
+        "result": result.model_dump(mode="json"),
+    }
 
 
 def apply_repository_human_role_policy(
@@ -690,18 +1083,15 @@ def capture_tenant_technical_human_waiver_event(
         )
     except RepositoryHumanRolePolicyError as error:
         raise TenantTechnicalHumanWaiverAuthorizationError(str(error)) from error
-    matching_rules = matching_github_human_policy_rules(
-        policy=authz_policy_record.policy,
+    matching_rules = _matching_managed_waiver_rules_for_identity(
+        authz_policy_record=authz_policy_record,
         identity=identity,
-        action=TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,
         product=candidate.product,
         context=candidate.context,
-        target=AuthorizationTarget(scope="context"),
-        managed_only=True,
     )
     if len(matching_rules) != 1:
         raise TenantTechnicalHumanWaiverAuthorizationError(
-            "Tenant technical human waiver requires exactly one managed authz policy rule."
+            "Tenant technical human waiver requires exactly one managed authz policy rule with the caller GitHub ID."
         )
     matching_rule = matching_rules[0]
     binding = TenantTechnicalHumanWaiverBinding(
@@ -737,6 +1127,7 @@ def capture_tenant_technical_human_waiver_event(
         binding=binding,
         action=action,
         occurred_at=normalized_occurred_at,
+        recorded_at=normalized_recorded_at,
         source_event_kind=source_event_kind,
         source_event_id=source_event_id,
         reason=reason,
@@ -940,6 +1331,234 @@ def _waiver_authz_rule_current(
         and TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION in rule.actions
         and (not rule.products or product in rule.products)
         and (not rule.contexts or context in rule.contexts)
+    )
+
+
+def _current_expected_tenant_ui_classification(
+    *,
+    store: TenantTechnicalHumanWaiverAuthorityReadStore,
+    candidate: TenantMergeCandidate,
+    expected_authority: TenantTechnicalHumanWaiverExpectedAuthority,
+    evaluated_at: str,
+) -> TenantRepositoryClassificationRecord:
+    records = store.list_tenant_repository_classification_records(
+        repository_id=candidate.repository_id
+    )
+    repository_records = tuple(
+        record for record in records if record.repository_id == candidate.repository_id
+    )
+    if not repository_records:
+        raise TenantTechnicalHumanWaiverStaleAuthorityError(
+            "Tenant technical human waiver requires current repository classification."
+        )
+    highest_revision = max(record.classification_revision for record in repository_records)
+    current_records = tuple(
+        record
+        for record in repository_records
+        if record.classification_revision == highest_revision
+    )
+    if len(current_records) != 1:
+        raise TenantTechnicalHumanWaiverStaleAuthorityError(
+            "Tenant technical human waiver requires exactly one current repository classification."
+        )
+    current_record = current_records[0]
+    if current_record.classified_at > evaluated_at:
+        raise TenantTechnicalHumanWaiverStaleAuthorityError(
+            "Tenant technical human waiver classification is not effective yet."
+        )
+    if not _classification_matches_candidate(
+        classification=current_record,
+        candidate=candidate,
+    ):
+        raise TenantTechnicalHumanWaiverStaleAuthorityError(
+            "Tenant technical human waiver classification does not match candidate."
+        )
+    if current_record.classification_kind != "tenant_ui":
+        raise TenantTechnicalHumanWaiverStaleAuthorityError(
+            "Tenant technical human waiver requires tenant_ui classification."
+        )
+    if (
+        current_record.record_id != expected_authority.classification_record_id
+        or current_record.classification_digest != expected_authority.classification_digest
+    ):
+        raise TenantTechnicalHumanWaiverStaleAuthorityError(
+            "Expected tenant repository classification authority is stale."
+        )
+    return current_record
+
+
+def _current_expected_repository_owner_role_policy(
+    *,
+    store: TenantTechnicalHumanWaiverAuthorityReadStore,
+    candidate: TenantMergeCandidate,
+    expected_authority: TenantTechnicalHumanWaiverExpectedAuthority,
+    evaluated_at: str,
+) -> RepositoryHumanRolePolicyRecord:
+    records = store.list_repository_human_role_policy_records(
+        repository_id=candidate.repository_id,
+        product=candidate.product,
+        context=candidate.context,
+        status="active",
+    )
+    matching_records = tuple(
+        record
+        for record in records
+        if _role_policy_matches_candidate(role_policy_record=record, candidate=candidate)
+    )
+    if len(matching_records) != 1:
+        raise TenantTechnicalHumanWaiverStaleAuthorityError(
+            "Tenant technical human waiver requires exactly one active repository role policy."
+        )
+    current_record = matching_records[0]
+    if current_record.effective_at > evaluated_at:
+        raise TenantTechnicalHumanWaiverStaleAuthorityError(
+            "Tenant technical human waiver role policy is not effective yet."
+        )
+    if (
+        current_record.record_id != expected_authority.role_policy_record_id
+        or current_record.role_policy_digest != expected_authority.role_policy_digest
+    ):
+        raise TenantTechnicalHumanWaiverStaleAuthorityError(
+            "Expected repository human role-policy authority is stale."
+        )
+    return current_record
+
+
+def _current_expected_waiver_authz_policy(
+    *,
+    store: TenantTechnicalHumanWaiverAuthorityReadStore,
+    candidate: TenantMergeCandidate,
+    expected_authority: TenantTechnicalHumanWaiverExpectedAuthority,
+) -> LaunchplaneAuthzPolicyRecord:
+    records = store.list_authz_policy_records(status="active")
+    if len(records) != 1:
+        raise TenantTechnicalHumanWaiverStaleAuthorityError(
+            "Tenant technical human waiver requires exactly one active authz policy."
+        )
+    current_record = records[0]
+    if current_record.policy.schema_version != 2:
+        raise TenantTechnicalHumanWaiverAuthorizationError(
+            "Tenant technical human waiver requires schema-v2 authz policy."
+        )
+    if (
+        current_record.record_id != expected_authority.authz_policy_record_id
+        or current_record.policy_sha256 != expected_authority.authz_policy_digest
+    ):
+        raise TenantTechnicalHumanWaiverStaleAuthorityError(
+            "Expected tenant technical human waiver authz authority is stale."
+        )
+    return current_record
+
+
+def _matching_managed_waiver_rules_for_identity(
+    *,
+    authz_policy_record: LaunchplaneAuthzPolicyRecord,
+    identity: GitHubHumanIdentity,
+    product: str,
+    context: str,
+) -> tuple[GitHubHumanPolicyRule, ...]:
+    if authz_policy_record.policy.schema_version != 2:
+        return ()
+
+    def intersects(values: frozenset[str], allowed_values: tuple[str, ...]) -> bool:
+        return any(
+            fnmatchcase(value.strip(), allowed_value)
+            for value in values
+            for allowed_value in allowed_values
+        )
+
+    return tuple(
+        rule
+        for rule in authz_policy_record.policy.github_humans
+        if rule.managed_set_id is not None
+        and rule.managed_rule_id is not None
+        and TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION in rule.actions
+        and (not rule.products or product in rule.products)
+        and (not rule.contexts or context in rule.contexts)
+        and not rule.instances
+        and bool(rule.github_ids)
+        and identity.github_id in rule.github_ids
+        and (not rule.organizations or intersects(identity.organizations, rule.organizations))
+        and (not rule.teams or intersects(identity.teams, rule.teams))
+        and (not rule.roles or identity.role in rule.roles)
+    )
+
+
+def _require_expected_current_waiver(
+    *,
+    path_result: TenantAdmissionPathResult,
+    expected_current: TenantTechnicalHumanWaiverExpectedCurrent | None,
+) -> None:
+    if expected_current is None:
+        raise TenantTechnicalHumanWaiverRevokeCurrentError(
+            "Tenant technical human waiver revocation requires expected current waiver."
+        )
+    if path_result.state != "satisfied":
+        raise TenantTechnicalHumanWaiverRevokeCurrentError(
+            "Tenant technical human waiver revocation requires a current satisfied waiver."
+        )
+    if (
+        path_result.evidence_id != expected_current.waiver_id
+        or path_result.evidence_digest != expected_current.event_digest
+    ):
+        raise TenantTechnicalHumanWaiverRevokeCurrentError(
+            "Expected current tenant technical human waiver does not match current state."
+        )
+
+
+def _require_replayed_create_current(
+    *,
+    path_result: TenantAdmissionPathResult,
+    existing_record: TenantTechnicalHumanWaiverEventRecord | None,
+) -> None:
+    if existing_record is None:
+        raise TenantTechnicalHumanWaiverEventConflictError(
+            "Tenant technical human waiver replay missing existing event."
+        )
+    if existing_record.action != "created":
+        raise TenantTechnicalHumanWaiverEventConflictError(
+            "Tenant technical human waiver replay action changed."
+        )
+    if (
+        path_result.state != "satisfied"
+        or path_result.evidence_id != existing_record.waiver_id
+        or path_result.evidence_digest != existing_record.event_digest
+    ):
+        raise TenantTechnicalHumanWaiverEventConflictError(
+            "Tenant technical human waiver creation replay is stale for the current lifecycle."
+        )
+
+
+def _tenant_technical_human_waiver_apply_result(
+    *,
+    record: TenantTechnicalHumanWaiverEventRecord,
+    path_result: TenantAdmissionPathResult,
+    mode: TenantTechnicalHumanWaiverApplyMode,
+    status: TenantTechnicalHumanWaiverApplyStatus,
+    dry_run: bool,
+    recorded_at: str,
+) -> TenantTechnicalHumanWaiverApplyResult:
+    binding = record.binding
+    return TenantTechnicalHumanWaiverApplyResult(
+        status=status,
+        mode=mode,
+        action=record.action,
+        repository_id=binding.repository_id,
+        repository_owner_id=binding.repository_owner_id,
+        repository=binding.repository,
+        product=binding.product,
+        context=binding.context,
+        pull_request_number=binding.pull_request_number,
+        head_sha=binding.head_sha,
+        waiver_id=record.waiver_id,
+        event_id=record.event_id,
+        event_digest=record.event_digest,
+        binding_sha256=binding.binding_sha256,
+        path_result=path_result,
+        occurred_at=record.occurred_at,
+        recorded_at=recorded_at,
+        expires_at=record.expires_at,
+        dry_run=dry_run,
     )
 
 
