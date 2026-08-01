@@ -2967,6 +2967,21 @@ or authz-policy mutation. Existing tenant merge/admission behavior remains
 unchanged until later rollout work wires shared authority into admission
 decisions.
 
+Trusted-maintenance currently has only contracts, pure evaluator behavior,
+filesystem rehearsal storage, PostgreSQL storage, migration, and schema
+invariants. It is a dedicated repository automation policy/evidence authority,
+not a human role-policy shortcut and not a generic Launchplane authz-policy
+reuse. Policy revisions and evidence are keyed to immutable numeric repository,
+actor, sender, and exact-head provenance; display logins are audit only, and no
+route may infer trust from repository names, branches, refs, files, labels,
+commit metadata, PR text, login strings, or blanket bot status. This slice does
+use source/delivery identity for deterministic replay, validates complete policy
+history before selecting current authority, performs policy CAS inside the
+storage transaction, and re-derives evidence expiration from policy TTL. It
+does not add HTTP routes, signed webhook ingress, OpenAPI, unified tenant-admission
+status, controller or merge-train wiring, rollout behavior, UI, provider calls,
+policy mutation authorization, or checked-in real repository policy values.
+
 The CM tenant preview workflow uses tenant-product scope for both artifact
 publish input/evidence and preview lifecycle requests. Artifact publish still
 uses Odoo driver routes, but source-ref build metadata resolves through the

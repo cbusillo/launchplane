@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "a0d2f4b6c8e1"
+EXPECTED_ALEMBIC_HEAD_REVISION = "b1c2d3e4f5a6"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -234,6 +234,46 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_tenant_technical_human_waiver_events",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_trusted_maintenance_policies",
+        "policy_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_trusted_maintenance_policies",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_trusted_maintenance_evidence",
+        "pull_request_number",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_trusted_maintenance_evidence",
+        "classification_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_trusted_maintenance_evidence",
+        "policy_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_trusted_maintenance_evidence",
+        "pr_author_github_id",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_trusted_maintenance_evidence",
+        "sender_github_id",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_trusted_maintenance_evidence",
         "payload",
         ("jsonb",),
     ),
@@ -491,6 +531,50 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_tenant_human_waiver_policy_idx",
         ("role_policy_record_id", "authz_policy_record_id", "occurred_at"),
     ),
+    CriticalIndex(
+        "launchplane_trusted_maintenance_policies",
+        "launchplane_trusted_maintenance_policy_revision_uidx",
+        ("repository_id", "product", "context", "policy_revision"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_trusted_maintenance_policies",
+        "launchplane_trusted_maintenance_policy_active_uidx",
+        ("repository_id", "product", "context"),
+        unique=True,
+        predicate_expression="status='active'",
+    ),
+    CriticalIndex(
+        "launchplane_trusted_maintenance_policies",
+        "launchplane_trusted_maintenance_policy_current_idx",
+        ("repository_id", "product", "context", "status", "policy_revision"),
+    ),
+    CriticalIndex(
+        "launchplane_trusted_maintenance_evidence",
+        "launchplane_trusted_maintenance_exact_head_idx",
+        ("repository_id", "pull_request_number", "head_sha", "occurred_at", "evidence_id"),
+    ),
+    CriticalIndex(
+        "launchplane_trusted_maintenance_evidence",
+        "launchplane_trusted_maintenance_binding_idx",
+        ("binding_sha256", "occurred_at", "evidence_id"),
+    ),
+    CriticalIndex(
+        "launchplane_trusted_maintenance_evidence",
+        "launchplane_trusted_maintenance_policy_idx",
+        ("policy_record_id", "classification_digest", "occurred_at"),
+    ),
+    CriticalIndex(
+        "launchplane_trusted_maintenance_evidence",
+        "launchplane_trusted_maintenance_actor_event_idx",
+        (
+            "pr_author_github_id",
+            "sender_github_id",
+            "event_name",
+            "event_action",
+            "occurred_at",
+        ),
+    ),
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
@@ -513,6 +597,14 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_tenant_technical_human_waiver_events",
         ("event_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_trusted_maintenance_policies",
+        ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_trusted_maintenance_evidence",
+        ("evidence_id",),
     ),
 )
 
