@@ -2848,7 +2848,7 @@ driver results. Its descriptor remains discoverable. The older
 FastAPI for explicit operator workflows and diagnostics, but product repos
 should prefer the thin `prod-promotion-run` path.
 
-### Tenant Admission & Repository Classification API Boundary
+### Tenant Admission, Classification, And Role-Policy API Boundary
 
 `GET /v1/work-graph/tenant-admission/repository-classification` and `POST /v1/tenant-admission/repository-classifications/apply` provide DB-backed authority for repository classification.
 
@@ -2862,6 +2862,54 @@ should prefer the thin `prod-promotion-run` path.
   Dry-run mode performs full CAS/sequence validation without persisting changes and reports `would_apply` or `would_replay`.
   Pure tenant merge eligibility evaluation uses this DB authority without heuristics, PR label fallbacks, or wildcard matching. Repositories classified as `engineering` take the normal engineering fast path. Repositories classified as `tenant_ui` default to requiring exact manager preview approval (or optional fast-path waiver/maintenance evidence bound to the exact head SHA and classification digest).
   This pure evaluator remains internal and separate from scheduler merge train admission (`merge_train_admission`).
+
+`GET /v1/work-graph/tenant-admission/repository-human-role-policy` and
+`POST /v1/tenant-admission/repository-human-role-policies/apply` provide the
+first hardened repository-human role-policy service boundary. This split is
+limited to current role-policy reads plus dry-run/apply writes.
+
+- `GET /v1/work-graph/tenant-admission/repository-human-role-policy?repository_id=...&product=...&context=...`:
+  Returns the current role-policy read model keyed by immutable repository ID,
+  product, and context. The model reports `missing`, `available`, or fail-closed
+  `ambiguous`; `available` includes the unique active current record, history
+  count, and `generated_at`. Requires `repository_human_role_policy.read`
+  authorization against the submitted product/context and an explicit
+  `AuthorizationTarget(scope="context")`.
+- `POST /v1/tenant-admission/repository-human-role-policies/apply`:
+  Accepts a strict envelope (`schema_version`, `mode: dry_run|apply`,
+  `expected_current_record_id`, `expected_current_role_policy_digest`,
+  `record`). Terminal agents are denied (HTTP 403). Requires
+  `repository_human_role_policy.write` authorization against the submitted
+  product/context and an explicit `AuthorizationTarget(scope="context")`.
+  Apply mode requires JSON with one exact bounded `Content-Length` (maximum
+  64 KiB), a non-empty `Idempotency-Key` header, and a `PostgresRecordStore`
+  using the `postgresql` dialect. Filesystem, SQLite-backed rehearsal stores,
+  and unsupported stores return HTTP 503 `database_storage_required` for live
+  apply. Dry-run mode may use rehearsal/read stores and writes nothing.
+  Launchplane reserves durable idempotency, locks the repository role-policy
+  stream, validates the expected current tip record ID and digest, supersedes
+  the active tip, inserts the candidate, completes the stored response, and
+  commits in one PostgreSQL transaction. Same key plus same canonical request
+  replays the stored HTTP 202 response. Same key plus a changed request returns
+  HTTP 409 `idempotency_key_reused`. Repeating the exact currently active record
+  under a new key also replays without adding history when the request retains
+  the original predecessor record ID and digest CAS. In-progress and reconciliation-required
+  reservations use the existing mutation error conventions.
+  Validation is fail-closed: revision 1 must have no current tip expectation;
+  later revisions must increment by one, identify and digest-match the active
+  current tip, and set `supersedes_record_id` to that current record. Missing,
+  ambiguous, stale, scope-drifted, inactive, sequence-invalid, or conflicting
+  candidates are rejected. Request-provided superseded records are not persisted
+  as authority; the database writer derives supersession from the locked stream.
+  These routes never infer authorization or runtime authority from repository
+  names, logins, changed files, paths, actor strings, or request-provided
+  superseded history.
+
+This role-policy split does not add technical-human waiver HTTP routes,
+trusted-maintenance evidence, unified tenant-admission status, controller
+changes, or any Launchplane authorization-policy mutation from the role-policy
+route. Existing tenant merge/admission behavior remains unchanged until a later
+rollout wires role-policy authority into the evaluator.
 
 The CM tenant preview workflow uses tenant-product scope for both artifact
 publish input/evidence and preview lifecycle requests. Artifact publish still

@@ -412,6 +412,24 @@ def _product_profile_db_only_mutation(
     )
 
 
+def _role_policy_db_only_mutation(
+    *,
+    idempotency_key: str = "role-policy:test:apply:1",
+    request_fingerprint: str = "role-policy-fingerprint",
+    response_trace_id: str = "trace-role-policy",
+) -> DbOnlyMutationRequest:
+    return DbOnlyMutationRequest(
+        scope="github-actions:repository-human-role-policy",
+        route_path="/v1/tenant-admission/repository-human-role-policies/apply",
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        lease_owner=response_trace_id,
+        response_status_code=202,
+        response_trace_id=response_trace_id,
+        response_payload={"status": "accepted", "trace_id": response_trace_id},
+    )
+
+
 def _mutation_reservation(
     *,
     request_fingerprint: str = "mutation-fingerprint-a",
@@ -1721,6 +1739,254 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     _repository_human_role_policy_record(role_policy_revision=2)
                 )
             store.close()
+
+    def test_repository_human_role_policy_compare_write_is_atomic_and_replays(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            revision_1 = _repository_human_role_policy_record()
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:repository-human-role-policy",
+                route_path="/v1/tenant-admission/repository-human-role-policies/apply",
+                idempotency_key="role-policy-atomic",
+                request_fingerprint="role-policy-fingerprint",
+                lease_owner="trace-role-policy",
+                response_status_code=202,
+                response_trace_id="trace-role-policy",
+                response_payload={"status": "ok", "record_id": revision_1.record_id},
+                replay_response_payload={
+                    "status": "ok",
+                    "record_id": revision_1.record_id,
+                    "result": "replayed",
+                },
+            )
+
+            first_result = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_1,
+                expected_current_record_id="",
+                expected_current_role_policy_digest="",
+                mutation=mutation,
+            )
+            same_key_result = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_1,
+                expected_current_record_id="",
+                expected_current_role_policy_digest="",
+                mutation=mutation,
+            )
+            exact_replay_mutation = DbOnlyMutationRequest(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key="role-policy-exact-replay",
+                request_fingerprint="role-policy-exact-replay-fingerprint",
+                lease_owner="trace-role-policy-exact-replay",
+                response_status_code=202,
+                response_trace_id="trace-role-policy-exact-replay",
+                response_payload={"status": "ok", "record_id": revision_1.record_id},
+                replay_response_payload={
+                    "status": "ok",
+                    "record_id": revision_1.record_id,
+                    "result": "replayed",
+                },
+            )
+            exact_replay_result = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_1,
+                expected_current_record_id="",
+                expected_current_role_policy_digest="",
+                mutation=exact_replay_mutation,
+            )
+            conflict_result = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_1,
+                expected_current_record_id="",
+                expected_current_role_policy_digest="",
+                mutation=DbOnlyMutationRequest(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    request_fingerprint="changed-role-policy-fingerprint",
+                    lease_owner="trace-role-policy-conflict",
+                    response_status_code=202,
+                    response_trace_id="trace-role-policy-conflict",
+                    response_payload={"status": "ok"},
+                ),
+            )
+            records = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+            exact_replay_idempotency = store.read_idempotency_record(
+                scope=exact_replay_mutation.scope,
+                route_path=exact_replay_mutation.route_path,
+                idempotency_key=exact_replay_mutation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(first_result.status, "written")
+        self.assertEqual(same_key_result.status, "replayed")
+        self.assertEqual(exact_replay_result.status, "exact_replay")
+        self.assertEqual(conflict_result.status, "idempotency_conflict")
+        self.assertEqual(records, (revision_1,))
+        self.assertIsNotNone(exact_replay_idempotency)
+        assert exact_replay_idempotency is not None
+        self.assertEqual(
+            exact_replay_idempotency.response_payload,
+            exact_replay_mutation.replay_response_payload,
+        )
+
+    def test_repository_human_role_policy_compare_write_validates_expected_tip(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            revision_1 = _repository_human_role_policy_record()
+            revision_2 = _repository_human_role_policy_record(
+                role_policy_revision=2,
+                repository_owner_github_ids=(302,),
+                effective_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+            store.write_repository_human_role_policy_record(revision_1)
+
+            with self.assertRaisesRegex(ValueError, "expected current record ID and digest"):
+                store.compare_and_write_repository_human_role_policy_record(
+                    record=revision_2,
+                    expected_current_record_id=revision_1.record_id,
+                    expected_current_role_policy_digest="",
+                    mutation=_role_policy_db_only_mutation(
+                        idempotency_key="role-policy-missing-digest"
+                    ),
+                )
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                store.compare_and_write_repository_human_role_policy_record(
+                    record=revision_2,
+                    expected_current_record_id="wrong-record-id",
+                    expected_current_role_policy_digest=revision_1.role_policy_digest,
+                    mutation=_role_policy_db_only_mutation(idempotency_key="role-policy-stale"),
+                )
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                store.compare_and_write_repository_human_role_policy_record(
+                    record=revision_2,
+                    expected_current_record_id=revision_1.record_id,
+                    expected_current_role_policy_digest="f" * 64,
+                    mutation=_role_policy_db_only_mutation(idempotency_key="role-policy-drift"),
+                )
+            records = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+            failed_reservation = store.read_idempotency_record(
+                scope="github-actions:repository-human-role-policy",
+                route_path="/v1/tenant-admission/repository-human-role-policies/apply",
+                idempotency_key="role-policy-drift",
+            )
+            store.close()
+
+        self.assertEqual(records, (revision_1,))
+        self.assertIsNone(failed_reservation)
+
+    def test_repository_human_role_policy_compare_write_replays_revision_two_with_new_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            revision_1 = _repository_human_role_policy_record()
+            revision_2 = _repository_human_role_policy_record(
+                role_policy_revision=2,
+                repository_owner_github_ids=(302,),
+                effective_at="2026-07-31T10:05:00Z",
+                supersedes_record_id=revision_1.record_id,
+            )
+            store.write_repository_human_role_policy_record(revision_1)
+            written = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_2,
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
+                mutation=_role_policy_db_only_mutation(idempotency_key="role-policy-revision-2"),
+            )
+            replayed = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_2,
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
+                mutation=_role_policy_db_only_mutation(
+                    idempotency_key="role-policy-revision-2-replay",
+                    request_fingerprint="role-policy-revision-2-replay-fingerprint",
+                    response_trace_id="trace-role-policy-revision-2-replay",
+                ),
+            )
+            records = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+            store.close()
+
+        self.assertEqual(written.status, "written")
+        self.assertEqual(replayed.status, "exact_replay")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0], revision_2)
+        self.assertEqual(records[1].record_id, revision_1.record_id)
+        self.assertEqual(records[1].status, "superseded")
+
+    def test_repository_human_role_policy_compare_write_rolls_back_on_completion_failure(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _repository_human_role_policy_record()
+            mutation = _role_policy_db_only_mutation(
+                idempotency_key="role-policy-rollback",
+                response_trace_id="trace-role-policy-rollback",
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_sync_idempotency_row",
+                    side_effect=RuntimeError("injected completion failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected completion failure"),
+            ):
+                store.compare_and_write_repository_human_role_policy_record(
+                    record=record,
+                    expected_current_record_id="",
+                    expected_current_role_policy_digest="",
+                    mutation=mutation,
+                )
+
+            stored_idempotency = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            records = store.list_repository_human_role_policy_records(
+                repository_id=record.repository_id,
+                product=record.product,
+                context=record.context,
+            )
+            store.close()
+
+        self.assertIsNone(stored_idempotency)
+        self.assertEqual(records, ())
 
     def test_repository_human_role_policy_database_uniqueness(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

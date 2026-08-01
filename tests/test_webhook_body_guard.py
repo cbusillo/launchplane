@@ -17,6 +17,7 @@ _JSON_MUTATION_ROUTES = (
     ("/v1/product-profiles/health-monitoring/apply", 64 * 1024),
     ("/v1/secrets/reencrypt", 64 * 1024),
     ("/v1/tenant-admission/repository-classifications/apply", 64 * 1024),
+    ("/v1/tenant-admission/repository-human-role-policies/apply", 64 * 1024),
 )
 
 

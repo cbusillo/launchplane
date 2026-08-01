@@ -1995,6 +1995,194 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(len(idempotency_records), 1)
         self.assertEqual(idempotency_records[0].state, "completed")
 
+    def test_repository_human_role_policy_compare_write_rolls_back_with_idempotency(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            record = _repository_human_role_policy_record(revision=1)
+            mutation = DbOnlyMutationRequest(
+                scope="github-actions:repository-human-role-policy",
+                route_path="/v1/tenant-admission/repository-human-role-policies/apply",
+                idempotency_key="postgres-role-policy-rollback",
+                request_fingerprint="postgres-role-policy-rollback-fingerprint",
+                lease_owner="trace-postgres-role-policy-rollback",
+                response_status_code=202,
+                response_trace_id="trace-postgres-role-policy-rollback",
+                response_payload={"status": "ok", "record_id": record.record_id},
+            )
+
+            with (
+                patch.object(
+                    store,
+                    "_sync_idempotency_row",
+                    side_effect=RuntimeError("injected completion failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected completion failure"),
+            ):
+                store.compare_and_write_repository_human_role_policy_record(
+                    record=record,
+                    expected_current_record_id="",
+                    expected_current_role_policy_digest="",
+                    mutation=mutation,
+                )
+
+            records = store.list_repository_human_role_policy_records(
+                repository_id=record.repository_id,
+                product=record.product,
+                context=record.context,
+            )
+            idempotency_record = store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+
+        self.assertEqual(records, ())
+        self.assertIsNone(idempotency_record)
+
+    def test_repository_human_role_policy_compare_write_replays_revision_two_with_new_key(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            revision_1 = _repository_human_role_policy_record(revision=1)
+            store.write_repository_human_role_policy_record(revision_1)
+            revision_2 = _repository_human_role_policy_record(
+                revision=2,
+                repository_owner_github_ids=(903002,),
+                effective_at="2026-08-01T10:05:00Z",
+                reason="postgres integration revision two replay",
+                supersedes_record_id=revision_1.record_id,
+            )
+
+            def mutation(*, suffix: str) -> DbOnlyMutationRequest:
+                return DbOnlyMutationRequest(
+                    scope="github-actions:repository-human-role-policy",
+                    route_path="/v1/tenant-admission/repository-human-role-policies/apply",
+                    idempotency_key=f"postgres-role-policy-revision-2-{suffix}",
+                    request_fingerprint=f"postgres-role-policy-revision-2-{suffix}-fingerprint",
+                    lease_owner=f"trace-postgres-role-policy-revision-2-{suffix}",
+                    response_status_code=202,
+                    response_trace_id=f"trace-postgres-role-policy-revision-2-{suffix}",
+                    response_payload={"status": "ok", "suffix": suffix},
+                    replay_response_payload={"status": "ok", "result": "replayed"},
+                )
+
+            written = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_2,
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
+                mutation=mutation(suffix="write"),
+            )
+            replayed = store.compare_and_write_repository_human_role_policy_record(
+                record=revision_2,
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
+                mutation=mutation(suffix="replay"),
+            )
+            records = store.list_repository_human_role_policy_records(
+                repository_id=revision_1.repository_id,
+                product=revision_1.product,
+                context=revision_1.context,
+            )
+
+        self.assertEqual(written.status, "written")
+        self.assertEqual(replayed.status, "exact_replay")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0], revision_2)
+        self.assertEqual(records[1].record_id, revision_1.record_id)
+        self.assertEqual(records[1].status, "superseded")
+
+    def test_repository_human_role_policy_compare_write_serializes_concurrent_updates(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as store:
+            revision_1 = _repository_human_role_policy_record(revision=1)
+            store.write_repository_human_role_policy_record(revision_1)
+            revision_2a = _repository_human_role_policy_record(
+                revision=2,
+                repository_owner_github_ids=(903002,),
+                effective_at="2026-08-01T10:05:00Z",
+                reason="postgres integration compare writer one",
+                supersedes_record_id=revision_1.record_id,
+            )
+            revision_2b = _repository_human_role_policy_record(
+                revision=2,
+                repository_owner_github_ids=(903003,),
+                effective_at="2026-08-01T10:05:01Z",
+                reason="postgres integration compare writer two",
+                supersedes_record_id=revision_1.record_id,
+            )
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def apply_revision(
+                active_store: PostgresRecordStore,
+                record: RepositoryHumanRolePolicyRecord,
+                suffix: str,
+            ) -> str:
+                barrier.wait(timeout=5)
+                try:
+                    return active_store.compare_and_write_repository_human_role_policy_record(
+                        record=record,
+                        expected_current_record_id=revision_1.record_id,
+                        expected_current_role_policy_digest=revision_1.role_policy_digest,
+                        mutation=DbOnlyMutationRequest(
+                            scope="github-actions:repository-human-role-policy",
+                            route_path=(
+                                "/v1/tenant-admission/repository-human-role-policies/apply"
+                            ),
+                            idempotency_key=f"postgres-role-policy-{suffix}",
+                            request_fingerprint=f"postgres-role-policy-fingerprint-{suffix}",
+                            lease_owner=f"trace-postgres-role-policy-{suffix}",
+                            response_status_code=202,
+                            response_trace_id=f"trace-postgres-role-policy-{suffix}",
+                            response_payload={"status": "ok", "suffix": suffix},
+                        ),
+                    ).status
+                except RepositoryHumanRolePolicyConflictError:
+                    return "role_policy_conflict"
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(
+                            lambda arguments: apply_revision(*arguments),
+                            (
+                                (store, revision_2a, "writer-1"),
+                                (second_store, revision_2b, "writer-2"),
+                            ),
+                        )
+                    )
+                records = store.list_repository_human_role_policy_records(
+                    repository_id=revision_1.repository_id,
+                    product=revision_1.product,
+                    context=revision_1.context,
+                )
+                idempotency_records = tuple(
+                    record
+                    for suffix in ("writer-1", "writer-2")
+                    if (
+                        record := store.read_idempotency_record(
+                            scope="github-actions:repository-human-role-policy",
+                            route_path=(
+                                "/v1/tenant-admission/repository-human-role-policies/apply"
+                            ),
+                            idempotency_key=f"postgres-role-policy-{suffix}",
+                        )
+                    )
+                    is not None
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(sorted(statuses), ["role_policy_conflict", "written"])
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0].role_policy_revision, 2)
+        self.assertEqual(records[1].status, "superseded")
+        self.assertEqual(records[1].record_id, revision_1.record_id)
+        self.assertEqual(len(idempotency_records), 1)
+        self.assertEqual(idempotency_records[0].state, "completed")
+
     def test_repository_human_role_policy_exact_concurrent_revision_replays(self) -> None:
         with _store_for_fresh_head_database() as store:
             revision_1 = _repository_human_role_policy_record(revision=1)

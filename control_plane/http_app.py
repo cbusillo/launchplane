@@ -94,6 +94,7 @@ from control_plane.http_routes import (
     register_product_profile_read_routes,
     register_protected_artifact_read_routes,
     register_runner_host_hygiene_read_routes,
+    REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
     TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
     TenantAdmissionReadRouteDependencies,
     TenantAdmissionWriteRouteDependencies,
@@ -710,6 +711,7 @@ _PRODUCT_HEALTH_MONITORING_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_MAX_BODY_BYTES = 64 * 1024
 _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES = 64 * 1024
+_REPOSITORY_HUMAN_ROLE_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE = "/v1/product-profiles/prelaunch-rebuild/apply"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
@@ -762,6 +764,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE: (
         "Tenant repository classification",
         _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE: (
+        "Repository human role policy",
+        _REPOSITORY_HUMAN_ROLE_POLICY_MAX_BODY_BYTES,
         True,
         True,
     ),

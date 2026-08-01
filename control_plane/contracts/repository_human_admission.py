@@ -9,6 +9,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+REPOSITORY_HUMAN_ROLE_POLICY_READ_ACTION = "repository_human_role_policy.read"
+REPOSITORY_HUMAN_ROLE_POLICY_WRITE_ACTION = "repository_human_role_policy.write"
 TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION = "tenant_technical_human_waiver.write"
 
 RepositoryHumanRolePolicyStatus = Literal["active", "superseded"]

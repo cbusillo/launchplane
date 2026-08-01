@@ -197,6 +197,9 @@ from control_plane.contracts.repository_human_admission import (
     TenantTechnicalHumanWaiverEventRecord,
 )
 from control_plane.repository_human_admission import (
+    RepositoryHumanRolePolicyConflictError,
+    RepositoryHumanRolePolicySequenceError,
+    plan_repository_human_role_policy_apply,
     plan_repository_human_role_policy_append,
     plan_tenant_technical_human_waiver_event_append,
 )
@@ -235,6 +238,14 @@ ProductProfileCompareWriteStatus = Literal[
 ]
 TenantRepositoryClassificationCompareWriteStatus = Literal[
     "written",
+    "replayed",
+    "idempotency_conflict",
+    "reservation_in_progress",
+    "reconciliation_required",
+]
+RepositoryHumanRolePolicyCompareWriteStatus = Literal[
+    "written",
+    "exact_replay",
     "replayed",
     "idempotency_conflict",
     "reservation_in_progress",
@@ -338,6 +349,11 @@ class TenantRepositoryClassificationCompareWriteResult(NamedTuple):
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
+class RepositoryHumanRolePolicyCompareWriteResult(NamedTuple):
+    status: RepositoryHumanRolePolicyCompareWriteStatus
+    idempotency_record: LaunchplaneIdempotencyRecord | None = None
+
+
 class PublicIngressTransitionWriteResult(NamedTuple):
     status: PublicIngressTransitionWriteStatus
 
@@ -418,6 +434,7 @@ class DbOnlyMutationRequest:
     response_status_code: int
     response_trace_id: str
     response_payload: dict[str, Any]
+    replay_response_payload: dict[str, Any] | None = None
     lease_seconds: int = 300
 
 
@@ -7469,6 +7486,215 @@ class PostgresRecordStore(HumanSessionStore):
         if for_update and not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update()
         return tuple(session.scalars(statement).all())
+
+    def compare_and_write_repository_human_role_policy_record(
+        self,
+        *,
+        record: RepositoryHumanRolePolicyRecord,
+        expected_current_record_id: str,
+        expected_current_role_policy_digest: str,
+        mutation: DbOnlyMutationRequest,
+    ) -> RepositoryHumanRolePolicyCompareWriteResult:
+        if not 100 <= mutation.response_status_code <= 599:
+            raise ValueError("DB-only mutation response status must be between 100 and 599.")
+        if not mutation.response_trace_id.strip():
+            raise ValueError("DB-only mutation response trace id is required.")
+        normalized_expected_record_id = expected_current_record_id.strip()
+        normalized_expected_digest = expected_current_role_policy_digest.strip().lower()
+
+        reservation_insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            observed_at = self._database_mutation_timestamp(session)
+            stored_reservation = build_launchplane_mutation_reservation(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+                request_fingerprint=mutation.request_fingerprint,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                reserved_at=observed_at,
+            )
+            reservation_row = self._idempotency_row(stored_reservation)
+            session.add(reservation_row)
+            try:
+                session.flush()
+            except IntegrityError as error:
+                session.rollback()
+                reservation_insert_error = error
+            if reservation_insert_error is None:
+                return self._compare_and_write_repository_human_role_policy_locked(
+                    session=session,
+                    record=record,
+                    expected_current_record_id=normalized_expected_record_id,
+                    expected_current_role_policy_digest=normalized_expected_digest,
+                    reservation_row=reservation_row,
+                    mutation_reservation=stored_reservation,
+                    mutation=mutation,
+                )
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            reservation_row = session.scalar(
+                self._idempotency_statement(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if reservation_row is None:
+                assert reservation_insert_error is not None
+                raise reservation_insert_error
+            current_reservation = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord,
+                payload=reservation_row.payload,
+            )
+            if current_reservation.request_fingerprint != mutation.request_fingerprint:
+                return RepositoryHumanRolePolicyCompareWriteResult(
+                    status="idempotency_conflict",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "completed":
+                return RepositoryHumanRolePolicyCompareWriteResult(
+                    status="replayed",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.state == "reconcile_required":
+                return RepositoryHumanRolePolicyCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=current_reservation,
+                )
+            observed_at = self._database_mutation_timestamp(session)
+            if parse_launchplane_mutation_timestamp(
+                current_reservation.lease_expires_at,
+                field_name="lease_expires_at",
+            ) > parse_launchplane_mutation_timestamp(
+                observed_at,
+                field_name="observed_at",
+            ):
+                return RepositoryHumanRolePolicyCompareWriteResult(
+                    status="reservation_in_progress",
+                    idempotency_record=current_reservation,
+                )
+            if current_reservation.reconciliation_key:
+                reconcile_record = self._updated_idempotency_record(
+                    current_reservation,
+                    state="reconcile_required",
+                    updated_at=observed_at,
+                )
+                self._sync_idempotency_row(reservation_row, reconcile_record)
+                session.commit()
+                return RepositoryHumanRolePolicyCompareWriteResult(
+                    status="reconciliation_required",
+                    idempotency_record=reconcile_record,
+                )
+            reclaimed_reservation = self._updated_idempotency_record(
+                current_reservation,
+                lease_owner=mutation.lease_owner,
+                lease_expires_at=self._mutation_lease_expiry(
+                    observed_at=observed_at,
+                    lease_seconds=mutation.lease_seconds,
+                ),
+                attempt=current_reservation.attempt + 1,
+                updated_at=observed_at,
+                response_status_code=None,
+                response_trace_id="",
+                recorded_at="",
+                response_payload={},
+            )
+            self._sync_idempotency_row(reservation_row, reclaimed_reservation)
+            return self._compare_and_write_repository_human_role_policy_locked(
+                session=session,
+                record=record,
+                expected_current_record_id=normalized_expected_record_id,
+                expected_current_role_policy_digest=normalized_expected_digest,
+                reservation_row=reservation_row,
+                mutation_reservation=reclaimed_reservation,
+                mutation=mutation,
+            )
+
+    def _compare_and_write_repository_human_role_policy_locked(
+        self,
+        *,
+        session: Any,
+        record: RepositoryHumanRolePolicyRecord,
+        expected_current_record_id: str,
+        expected_current_role_policy_digest: str,
+        reservation_row: LaunchplaneIdempotencyRow,
+        mutation_reservation: LaunchplaneIdempotencyRecord,
+        mutation: DbOnlyMutationRequest,
+    ) -> RepositoryHumanRolePolicyCompareWriteResult:
+        self._lock_repository_human_role_policy_write(
+            session,
+            repository_id=record.repository_id,
+            product=record.product,
+            context_name=record.context,
+        )
+        rows = self._repository_human_role_policy_stream_rows(
+            session=session,
+            repository_id=record.repository_id,
+            product=record.product,
+            context_name=record.context,
+            for_update=True,
+        )
+        existing_records = tuple(
+            self._read_payload(
+                model_type=RepositoryHumanRolePolicyRecord,
+                payload=row.payload,
+            )
+            for row in rows
+        )
+        try:
+            plan = plan_repository_human_role_policy_apply(
+                records=existing_records,
+                record=record,
+                expected_current_record_id=expected_current_record_id,
+                expected_current_role_policy_digest=expected_current_role_policy_digest,
+            )
+        except (
+            RepositoryHumanRolePolicyConflictError,
+            RepositoryHumanRolePolicySequenceError,
+            ValueError,
+        ):
+            session.delete(reservation_row)
+            session.commit()
+            raise
+
+        exact_replay = plan.status == "replayed"
+        if not exact_replay:
+            if plan.superseded_current_record is not None:
+                current_row = next(
+                    row for row in rows if row.record_id == plan.superseded_current_record.record_id
+                )
+                self._sync_repository_human_role_policy_row(
+                    current_row,
+                    plan.superseded_current_record,
+                )
+                session.flush()
+            session.add(self._repository_human_role_policy_row(record))
+            session.flush()
+        completed_at = self._database_mutation_timestamp(session)
+        completion = complete_launchplane_mutation_reservation(
+            mutation_reservation,
+            response_status_code=mutation.response_status_code,
+            response_trace_id=mutation.response_trace_id,
+            completed_at=completed_at,
+            response_payload=(
+                mutation.replay_response_payload
+                if exact_replay and mutation.replay_response_payload is not None
+                else mutation.response_payload
+            ),
+        )
+        self._sync_idempotency_row(reservation_row, completion)
+        session.commit()
+        return RepositoryHumanRolePolicyCompareWriteResult(
+            status="exact_replay" if exact_replay else "written",
+            idempotency_record=completion,
+        )
 
     def write_repository_human_role_policy_record(
         self,
