@@ -9,6 +9,7 @@ from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast
 from pydantic import BaseModel
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     JSON,
     Index,
     Integer,
@@ -190,6 +191,14 @@ from control_plane.contracts.secret_record import (
 from control_plane.contracts.tenant_merge_eligibility import (
     TenantRepositoryClassificationLookup,
     TenantRepositoryClassificationRecord,
+)
+from control_plane.contracts.repository_human_admission import (
+    RepositoryHumanRolePolicyRecord,
+    TenantTechnicalHumanWaiverEventRecord,
+)
+from control_plane.repository_human_admission import (
+    plan_repository_human_role_policy_append,
+    plan_tenant_technical_human_waiver_event_append,
 )
 from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationConflictError,
@@ -655,6 +664,151 @@ class LaunchplaneTenantRepositoryClassificationRow(Base):
     classification_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     classified_at: Mapped[str] = mapped_column(String, nullable=False)
     classification_digest: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneRepositoryHumanRolePolicyRow(Base):
+    __tablename__ = "launchplane_repository_human_role_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'superseded')",
+            name="launchplane_repo_human_role_status_ck",
+        ),
+        CheckConstraint(
+            "role_policy_revision >= 1",
+            name="launchplane_repo_human_role_revision_ck",
+        ),
+        CheckConstraint(
+            "(role_policy_revision = 1 AND supersedes_record_id IS NULL) OR "
+            "(role_policy_revision > 1 AND supersedes_record_id IS NOT NULL)",
+            name="launchplane_repo_human_role_supersedes_ck",
+        ),
+        Index(
+            "launchplane_repo_human_role_revision_uidx",
+            "repository_id",
+            "product",
+            "context",
+            "role_policy_revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_repo_human_role_active_uidx",
+            "repository_id",
+            "product",
+            "context",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "launchplane_repo_human_role_current_idx",
+            "repository_id",
+            "product",
+            "context",
+            "status",
+            desc("role_policy_revision"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    repository_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository_owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    role_policy_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    effective_at: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    supersedes_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    role_policy_digest: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneTenantTechnicalHumanWaiverEventRow(Base):
+    __tablename__ = "launchplane_tenant_technical_human_waiver_events"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('created', 'revoked')",
+            name="launchplane_tenant_human_waiver_action_ck",
+        ),
+        CheckConstraint(
+            "pull_request_number >= 1",
+            name="launchplane_tenant_human_waiver_pr_ck",
+        ),
+        CheckConstraint(
+            "classification_revision >= 1",
+            name="launchplane_tenant_human_waiver_class_revision_ck",
+        ),
+        CheckConstraint(
+            "role_policy_revision >= 1",
+            name="launchplane_tenant_human_waiver_role_revision_ck",
+        ),
+        CheckConstraint(
+            "authz_policy_revision >= 1",
+            name="launchplane_tenant_human_waiver_authz_revision_ck",
+        ),
+        CheckConstraint(
+            "author_github_id >= 1",
+            name="launchplane_tenant_human_waiver_author_ck",
+        ),
+        Index(
+            "launchplane_tenant_human_waiver_exact_head_idx",
+            "repository_id",
+            "pull_request_number",
+            "head_sha",
+            desc("occurred_at"),
+            desc("event_id"),
+        ),
+        Index(
+            "launchplane_tenant_human_waiver_binding_idx",
+            "binding_sha256",
+            desc("occurred_at"),
+            desc("event_id"),
+        ),
+        Index(
+            "launchplane_tenant_human_waiver_waiver_idx",
+            "waiver_id",
+            desc("occurred_at"),
+            desc("event_id"),
+        ),
+        Index(
+            "launchplane_tenant_human_waiver_policy_idx",
+            "role_policy_record_id",
+            "authz_policy_record_id",
+            desc("occurred_at"),
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    repository_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository_owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    waiver_id: Mapped[str] = mapped_column(String, nullable=False)
+    binding_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    pull_request_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    head_sha: Mapped[str] = mapped_column(String, nullable=False)
+    classification_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    classification_digest: Mapped[str] = mapped_column(String, nullable=False)
+    role_policy_record_id: Mapped[str] = mapped_column(String, nullable=False)
+    role_policy_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    role_policy_digest: Mapped[str] = mapped_column(String, nullable=False)
+    authz_policy_record_id: Mapped[str] = mapped_column(String, nullable=False)
+    authz_policy_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    authz_policy_digest: Mapped[str] = mapped_column(String, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    author_github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    author_login: Mapped[str] = mapped_column(String, nullable=False)
+    managed_set_id: Mapped[str] = mapped_column(String, nullable=False)
+    managed_rule_id: Mapped[str] = mapped_column(String, nullable=False)
+    authorized_at: Mapped[str] = mapped_column(String, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    source_event_kind: Mapped[str] = mapped_column(String, nullable=False)
+    source_event_id: Mapped[str] = mapped_column(String, nullable=False)
+    event_digest: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -7196,6 +7350,393 @@ class PostgresRecordStore(HumanSessionStore):
                         "Manager preview approval event replay changed the persisted payload."
                     )
                 return "replayed"
+
+    def _repository_human_role_policy_row(
+        self, record: RepositoryHumanRolePolicyRecord
+    ) -> LaunchplaneRepositoryHumanRolePolicyRow:
+        return LaunchplaneRepositoryHumanRolePolicyRow(
+            record_id=record.record_id,
+            repository_id=record.repository_id,
+            repository_owner_id=record.repository_owner_id,
+            repository=record.repository,
+            product=record.product,
+            context=record.context,
+            status=record.status,
+            role_policy_revision=record.role_policy_revision,
+            effective_at=record.effective_at,
+            source=record.source,
+            supersedes_record_id=record.supersedes_record_id,
+            role_policy_digest=record.role_policy_digest,
+            payload=self._payload_dict(record),
+        )
+
+    def _sync_repository_human_role_policy_row(
+        self,
+        row: LaunchplaneRepositoryHumanRolePolicyRow,
+        record: RepositoryHumanRolePolicyRecord,
+    ) -> None:
+        row.repository_id = record.repository_id
+        row.repository_owner_id = record.repository_owner_id
+        row.repository = record.repository
+        row.product = record.product
+        row.context = record.context
+        row.status = record.status
+        row.role_policy_revision = record.role_policy_revision
+        row.effective_at = record.effective_at
+        row.source = record.source
+        row.supersedes_record_id = record.supersedes_record_id
+        row.role_policy_digest = record.role_policy_digest
+        row.payload = self._payload_dict(record)
+
+    def _tenant_technical_human_waiver_event_row(
+        self, record: TenantTechnicalHumanWaiverEventRecord
+    ) -> LaunchplaneTenantTechnicalHumanWaiverEventRow:
+        binding = record.binding
+        authorization = record.authorization
+        return LaunchplaneTenantTechnicalHumanWaiverEventRow(
+            event_id=record.event_id,
+            repository_id=binding.repository_id,
+            repository_owner_id=binding.repository_owner_id,
+            repository=binding.repository,
+            product=binding.product,
+            context=binding.context,
+            waiver_id=record.waiver_id,
+            binding_sha256=binding.binding_sha256,
+            pull_request_number=binding.pull_request_number,
+            head_sha=binding.head_sha,
+            classification_revision=binding.classification_revision,
+            classification_digest=binding.classification_digest,
+            role_policy_record_id=binding.role_policy_record_id,
+            role_policy_revision=binding.role_policy_revision,
+            role_policy_digest=binding.role_policy_digest,
+            authz_policy_record_id=binding.authz_policy_record_id,
+            authz_policy_revision=binding.authz_policy_revision,
+            authz_policy_digest=binding.authz_policy_digest,
+            action=record.action,
+            author_github_id=authorization.author_github_id,
+            author_login=authorization.author_login,
+            managed_set_id=authorization.managed_set_id,
+            managed_rule_id=authorization.managed_rule_id,
+            authorized_at=authorization.authorized_at,
+            occurred_at=record.occurred_at,
+            expires_at=record.expires_at,
+            source_event_kind=record.source_event_kind,
+            source_event_id=record.source_event_id,
+            event_digest=record.event_digest,
+            payload=self._payload_dict(record),
+        )
+
+    def _lock_repository_human_role_policy_write(
+        self,
+        session: Any,
+        *,
+        repository_id: str,
+        product: str,
+        context_name: str,
+    ) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        lock_parts = (
+            "launchplane",
+            "repository-human-role-policy",
+            repository_id,
+            product,
+            context_name,
+        )
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": "".join(f"{len(lock_part)}:{lock_part}" for lock_part in lock_parts)},
+        )
+
+    def _repository_human_role_policy_stream_rows(
+        self,
+        *,
+        session: Any,
+        repository_id: str,
+        product: str,
+        context_name: str,
+        for_update: bool = False,
+    ) -> tuple[LaunchplaneRepositoryHumanRolePolicyRow, ...]:
+        statement = (
+            select(LaunchplaneRepositoryHumanRolePolicyRow)
+            .where(
+                LaunchplaneRepositoryHumanRolePolicyRow.repository_id == repository_id,
+                LaunchplaneRepositoryHumanRolePolicyRow.product == product,
+                LaunchplaneRepositoryHumanRolePolicyRow.context == context_name,
+            )
+            .order_by(LaunchplaneRepositoryHumanRolePolicyRow.role_policy_revision.asc())
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        return tuple(session.scalars(statement).all())
+
+    def write_repository_human_role_policy_record(
+        self,
+        record: RepositoryHumanRolePolicyRecord,
+    ) -> Literal["written", "replayed"]:
+        insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_repository_human_role_policy_write(
+                session,
+                repository_id=record.repository_id,
+                product=record.product,
+                context_name=record.context,
+            )
+            rows = self._repository_human_role_policy_stream_rows(
+                session=session,
+                repository_id=record.repository_id,
+                product=record.product,
+                context_name=record.context,
+                for_update=True,
+            )
+            records = tuple(
+                self._read_payload(
+                    model_type=RepositoryHumanRolePolicyRecord,
+                    payload=row.payload,
+                )
+                for row in rows
+            )
+            plan = plan_repository_human_role_policy_append(records=records, record=record)
+            if plan.status == "replayed":
+                session.rollback()
+                return "replayed"
+            if plan.superseded_current_record is not None:
+                current_row = next(
+                    row for row in rows if row.record_id == plan.superseded_current_record.record_id
+                )
+                self._sync_repository_human_role_policy_row(
+                    current_row,
+                    plan.superseded_current_record,
+                )
+                session.flush()
+            session.add(self._repository_human_role_policy_row(record))
+            try:
+                session.flush()
+                session.commit()
+                return "written"
+            except IntegrityError as error:
+                session.rollback()
+                insert_error = error
+
+        current_records = self.list_repository_human_role_policy_records(
+            repository_id=record.repository_id,
+            product=record.product,
+            context=record.context,
+        )
+        replay_plan = plan_repository_human_role_policy_append(
+            records=current_records,
+            record=record,
+        )
+        if replay_plan.status == "replayed":
+            return "replayed"
+        assert insert_error is not None
+        raise insert_error
+
+    def read_repository_human_role_policy_record(
+        self,
+        record_id: str,
+    ) -> RepositoryHumanRolePolicyRecord:
+        return self._read_model(
+            model_type=RepositoryHumanRolePolicyRecord,
+            orm_model=LaunchplaneRepositoryHumanRolePolicyRow,
+            filters=(LaunchplaneRepositoryHumanRolePolicyRow.record_id == record_id,),
+        )
+
+    def list_repository_human_role_policy_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RepositoryHumanRolePolicyRecord, ...]:
+        filters: list[object] = []
+        normalized_repository = repository.strip().lower()
+        if repository_id:
+            filters.append(LaunchplaneRepositoryHumanRolePolicyRow.repository_id == repository_id)
+        if repository_owner_id:
+            filters.append(
+                LaunchplaneRepositoryHumanRolePolicyRow.repository_owner_id == repository_owner_id
+            )
+        if normalized_repository:
+            filters.append(
+                LaunchplaneRepositoryHumanRolePolicyRow.repository == normalized_repository
+            )
+        if product:
+            filters.append(LaunchplaneRepositoryHumanRolePolicyRow.product == product)
+        if context:
+            filters.append(LaunchplaneRepositoryHumanRolePolicyRow.context == context)
+        if status:
+            filters.append(LaunchplaneRepositoryHumanRolePolicyRow.status == status)
+        return self._list_models(
+            model_type=RepositoryHumanRolePolicyRecord,
+            orm_model=LaunchplaneRepositoryHumanRolePolicyRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneRepositoryHumanRolePolicyRow.role_policy_revision.desc(),
+                LaunchplaneRepositoryHumanRolePolicyRow.repository_id.desc(),
+                LaunchplaneRepositoryHumanRolePolicyRow.product.desc(),
+                LaunchplaneRepositoryHumanRolePolicyRow.context.desc(),
+                LaunchplaneRepositoryHumanRolePolicyRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_tenant_technical_human_waiver_event_record(
+        self,
+        record: TenantTechnicalHumanWaiverEventRecord,
+    ) -> Literal["written", "replayed"]:
+        insert_error: IntegrityError | None = None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = select(LaunchplaneTenantTechnicalHumanWaiverEventRow).where(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.event_id == record.event_id
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            existing_row = session.scalar(statement)
+            if existing_row is not None:
+                existing_record = self._read_payload(
+                    model_type=TenantTechnicalHumanWaiverEventRecord,
+                    payload=existing_row.payload,
+                )
+                plan = plan_tenant_technical_human_waiver_event_append(
+                    records=(existing_record,),
+                    record=record,
+                )
+                session.rollback()
+                return plan.status
+            session.add(self._tenant_technical_human_waiver_event_row(record))
+            try:
+                session.flush()
+                session.commit()
+                return "written"
+            except IntegrityError as error:
+                session.rollback()
+                insert_error = error
+
+        try:
+            existing_record = self.read_tenant_technical_human_waiver_event_record(record.event_id)
+        except FileNotFoundError as read_error:
+            assert insert_error is not None
+            raise insert_error from read_error
+        replay_plan = plan_tenant_technical_human_waiver_event_append(
+            records=(existing_record,),
+            record=record,
+        )
+        if replay_plan.status == "replayed":
+            return "replayed"
+        assert insert_error is not None
+        raise insert_error
+
+    def read_tenant_technical_human_waiver_event_record(
+        self,
+        event_id: str,
+    ) -> TenantTechnicalHumanWaiverEventRecord:
+        return self._read_model(
+            model_type=TenantTechnicalHumanWaiverEventRecord,
+            orm_model=LaunchplaneTenantTechnicalHumanWaiverEventRow,
+            filters=(LaunchplaneTenantTechnicalHumanWaiverEventRow.event_id == event_id,),
+        )
+
+    def list_tenant_technical_human_waiver_event_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        waiver_id: str = "",
+        binding_sha256: str = "",
+        pull_request_number: int | None = None,
+        head_sha: str = "",
+        classification_digest: str = "",
+        role_policy_record_id: str = "",
+        role_policy_digest: str = "",
+        authz_policy_record_id: str = "",
+        authz_policy_digest: str = "",
+        action: str = "",
+        author_github_id: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[TenantTechnicalHumanWaiverEventRecord, ...]:
+        filters: list[object] = []
+        normalized_repository = repository.strip().lower()
+        if repository_id:
+            filters.append(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.repository_id == repository_id
+            )
+        if repository_owner_id:
+            filters.append(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.repository_owner_id
+                == repository_owner_id
+            )
+        if normalized_repository:
+            filters.append(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.repository == normalized_repository
+            )
+        if product:
+            filters.append(LaunchplaneTenantTechnicalHumanWaiverEventRow.product == product)
+        if context:
+            filters.append(LaunchplaneTenantTechnicalHumanWaiverEventRow.context == context)
+        if waiver_id:
+            filters.append(LaunchplaneTenantTechnicalHumanWaiverEventRow.waiver_id == waiver_id)
+        if binding_sha256:
+            filters.append(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.binding_sha256 == binding_sha256
+            )
+        if pull_request_number is not None:
+            filters.append(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.pull_request_number
+                == pull_request_number
+            )
+        if head_sha:
+            filters.append(LaunchplaneTenantTechnicalHumanWaiverEventRow.head_sha == head_sha)
+        if classification_digest:
+            filters.append(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.classification_digest
+                == classification_digest
+            )
+        if role_policy_record_id:
+            filters.append(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.role_policy_record_id
+                == role_policy_record_id
+            )
+        if role_policy_digest:
+            filters.append(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.role_policy_digest
+                == role_policy_digest
+            )
+        if authz_policy_record_id:
+            filters.append(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.authz_policy_record_id
+                == authz_policy_record_id
+            )
+        if authz_policy_digest:
+            filters.append(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.authz_policy_digest
+                == authz_policy_digest
+            )
+        if action:
+            filters.append(LaunchplaneTenantTechnicalHumanWaiverEventRow.action == action)
+        if author_github_id is not None:
+            filters.append(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.author_github_id == author_github_id
+            )
+        return self._list_models(
+            model_type=TenantTechnicalHumanWaiverEventRecord,
+            orm_model=LaunchplaneTenantTechnicalHumanWaiverEventRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.occurred_at.desc(),
+                LaunchplaneTenantTechnicalHumanWaiverEventRow.event_id.desc(),
+            ),
+            limit=limit,
+        )
 
     def _tenant_repository_classification_row(
         self, record: TenantRepositoryClassificationRecord
