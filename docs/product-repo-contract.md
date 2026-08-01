@@ -170,6 +170,10 @@ non-checkout `repository` values are rejected by the product-repo profile.
 - CI checks that validate the source artifact before Launchplane sees it: lint,
   typecheck, unit tests, app build, container build, and product-specific smoke
   checks.
+- Source-adjacent dependency scan evidence produced with explicit scanner,
+  advisory-revision, scope, and configuration provenance. Product repos own the
+  scan invocation; Launchplane owns normalized comparison semantics. See
+  [dependency-health-contract.md](dependency-health-contract.md).
 - Publishing an immutable image or artifact reference that Launchplane can
   deploy.
 - A minimal GitHub Actions trigger that authenticates to Launchplane with OIDC
