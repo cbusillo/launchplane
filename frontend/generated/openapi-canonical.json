@@ -22211,6 +22211,68 @@
         "title": "TenantAdmissionControllerRunOnceResult",
         "type": "object"
       },
+      "TenantAdmissionEvaluationReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_authoring_allowed": {
+            "const": false,
+            "default": false,
+            "title": "Agent Authoring Allowed",
+            "type": "boolean"
+          },
+          "evaluation": {
+            "$ref": "#/components/schemas/TenantAdmissionControllerRunOnceResult"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "human_actions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TenantAdmissionHumanActionReadModel"
+            },
+            "title": "Human Actions",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "evaluation",
+          "generated_at"
+        ],
+        "title": "TenantAdmissionEvaluationReadModel",
+        "type": "object"
+      },
+      "TenantAdmissionEvaluationReadResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "read_model": {
+            "$ref": "#/components/schemas/TenantAdmissionEvaluationReadModel"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "read_model"
+        ],
+        "title": "TenantAdmissionEvaluationReadResponse",
+        "type": "object"
+      },
       "TenantAdmissionGitHubProjection": {
         "additionalProperties": false,
         "properties": {
@@ -22286,6 +22348,74 @@
           "decision_binding_sha256"
         ],
         "title": "TenantAdmissionGitHubProjection",
+        "type": "object"
+      },
+      "TenantAdmissionHumanActionReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "action_kind": {
+            "enum": [
+              "manager_preview_approval",
+              "technical_human_waiver"
+            ],
+            "title": "Action Kind",
+            "type": "string"
+          },
+          "agent_authoring_allowed": {
+            "const": false,
+            "default": false,
+            "title": "Agent Authoring Allowed",
+            "type": "boolean"
+          },
+          "availability": {
+            "enum": [
+              "available",
+              "satisfied",
+              "unavailable"
+            ],
+            "title": "Availability",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "path_state": {
+            "enum": [
+              "satisfied",
+              "pending",
+              "denied",
+              "stale",
+              "unavailable"
+            ],
+            "title": "Path State",
+            "type": "string"
+          },
+          "requires_human": {
+            "const": true,
+            "default": true,
+            "title": "Requires Human",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action_kind",
+          "availability",
+          "path_state",
+          "title",
+          "detail"
+        ],
+        "title": "TenantAdmissionHumanActionReadModel",
         "type": "object"
       },
       "TenantAdmissionPathResult": {
@@ -26323,6 +26453,98 @@
             }
           },
           {
+            "in": "query",
+            "name": "product",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repository_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Repository Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repository_owner_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Repository Owner Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pull_request_number",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pull Request Number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "head_sha",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Head Sha",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "base_branch",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Base Branch",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "merge_method",
+            "required": false,
+            "schema": {
+              "default": "merge",
+              "enum": [
+                "merge",
+                "squash",
+                "rebase"
+              ],
+              "title": "Merge Method",
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,
@@ -26353,6 +26575,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
           },
           "401": {
             "content": {
@@ -52566,6 +52798,16 @@
             },
             "description": "Successful Response"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
           "401": {
             "content": {
               "application/json": {
@@ -56171,6 +56413,184 @@
         "summary": "Re-evaluate and merge one exact admitted tenant pull request"
       }
     },
+    "/v1/work-graph/tenant-admission/evaluation": {
+      "get": {
+        "operationId": "read_tenant_admission_evaluation",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repository_id",
+            "required": true,
+            "schema": {
+              "title": "Repository Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repository_owner_id",
+            "required": true,
+            "schema": {
+              "title": "Repository Owner Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repository",
+            "required": true,
+            "schema": {
+              "title": "Repository",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pull_request_number",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Pull Request Number",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "head_sha",
+            "required": true,
+            "schema": {
+              "title": "Head Sha",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "base_branch",
+            "required": true,
+            "schema": {
+              "title": "Base Branch",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "merge_method",
+            "required": false,
+            "schema": {
+              "default": "merge",
+              "enum": [
+                "merge",
+                "squash",
+                "rebase"
+              ],
+              "title": "Merge Method",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantAdmissionEvaluationReadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read exact pull-request tenant admission and technical readiness"
+      }
+    },
     "/v1/work-graph/tenant-admission/repository-classification": {
       "get": {
         "operationId": "read_tenant_repository_classification",
@@ -56683,7 +57103,8 @@
     "/v1/work-graph/github/issues": "read_work_graph_issue_inbox",
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
-    "/v1/work-graph/snapshot": "read_work_graph_snapshot"
+    "/v1/work-graph/snapshot": "read_work_graph_snapshot",
+    "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation"
   },
   "x-launchplane-ui-write-operations": {
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",

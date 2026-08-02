@@ -3,6 +3,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 import unittest
+from unittest.mock import patch
+from urllib.parse import urlencode
+
+import click
 
 from control_plane.contracts.repository_human_admission import (
     REPOSITORY_HUMAN_ROLE_POLICY_WRITE_ACTION,
@@ -24,8 +28,12 @@ from control_plane.contracts.authz_policy_record import (
     build_authz_policy_record_id,
 )
 from control_plane.contracts.tenant_merge_eligibility import (
+    TenantMergeEligibilityEvidenceInputs,
+    TenantMergeCandidate,
+    TenantRepositoryClassificationLookup,
     TenantRepositoryClassificationRecord,
     build_tenant_repository_classification_record_id,
+    evaluate_tenant_merge_eligibility,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import (
@@ -37,6 +45,14 @@ from control_plane.service_auth import (
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.tenant_admission_controller import (
+    TenantAdmissionControllerRunOnceResult,
+    TenantAdmissionPullRequestFacts,
+    TenantAdmissionRequiredTechnicalCheck,
+    TenantAdmissionTechnicalCheckSignal,
+    TenantAdmissionTechnicalChecks,
+)
+from control_plane.tenant_admission_status import TenantAdmissionStatusReadModel
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -44,6 +60,7 @@ from tests.http_app_test_support import (
     _github_oauth_config,
 )
 from tests.support.auth import _StubVerifier, _identity
+from tests.test_tenant_admission_status import _path_result
 
 PRODUCT = "launchplane"
 CONTEXT = "production"
@@ -53,6 +70,9 @@ REPOSITORY = "example/tenant-site"
 CLASSIFIED_AT = "2026-07-31T11:00:00Z"
 SOURCE = "operator"
 REASON = "initial classification"
+PULL_REQUEST_NUMBER = 69
+HEAD_SHA = "a" * 40
+BASE_SHA = "b" * 40
 
 
 class _TestPostgresRecordStore(PostgresRecordStore):
@@ -390,7 +410,320 @@ def _waiver_apply_payload(
     return payload
 
 
+def _tenant_admission_evaluation_result() -> TenantAdmissionControllerRunOnceResult:
+    candidate = TenantMergeCandidate(
+        product=PRODUCT,
+        context=CONTEXT,
+        repository_id=REPOSITORY_ID,
+        repository_owner_id=REPOSITORY_OWNER_ID,
+        repository=REPOSITORY,
+        pull_request_number=PULL_REQUEST_NUMBER,
+        head_sha=HEAD_SHA,
+    )
+    classification = _waiver_classification_record()
+    paths = TenantMergeEligibilityEvidenceInputs(
+        trusted_maintenance=_path_result(
+            kind="trusted_maintenance",
+            state="pending",
+            candidate=candidate,
+            classification=classification,
+        ),
+        technical_human_waiver=_path_result(
+            kind="technical_human_waiver",
+            state="pending",
+            candidate=candidate,
+            classification=classification,
+        ),
+        manager_preview_approval=_path_result(
+            kind="manager_preview_approval",
+            state="pending",
+            candidate=candidate,
+            classification=classification,
+        ),
+    )
+    decision = evaluate_tenant_merge_eligibility(
+        candidate=candidate,
+        classification_lookup=TenantRepositoryClassificationLookup(
+            status="available",
+            records=(classification,),
+        ),
+        evidence_inputs=paths,
+        evaluated_at=CLASSIFIED_AT,
+    )
+    admission = TenantAdmissionStatusReadModel(
+        category="pending",
+        classification_status="available",
+        classification_kind="tenant_ui",
+        classification_revision=classification.classification_revision,
+        classification_digest=classification.classification_digest,
+        decision=decision,
+        paths=paths,
+        generated_at=CLASSIFIED_AT,
+    )
+    technical_checks = TenantAdmissionTechnicalChecks(
+        head_sha=HEAD_SHA,
+        base_sha=BASE_SHA,
+        strict=False,
+        status="pass",
+        required_checks=(TenantAdmissionRequiredTechnicalCheck(name="ci-gate"),),
+        signals=(
+            TenantAdmissionTechnicalCheckSignal(
+                source="check_run",
+                name="ci-gate",
+                app_id=1,
+                state="pass",
+            ),
+        ),
+        evaluated_at=CLASSIFIED_AT,
+    )
+    return TenantAdmissionControllerRunOnceResult(
+        outcome="blocked",
+        candidate=candidate,
+        base_branch="main",
+        merge_method="merge",
+        pull_request_facts=TenantAdmissionPullRequestFacts(
+            repository=REPOSITORY,
+            pull_request_number=PULL_REQUEST_NUMBER,
+            pull_request_url=f"https://example.invalid/{REPOSITORY}/pull/{PULL_REQUEST_NUMBER}",
+            state="open",
+            merged=False,
+            draft=False,
+            mergeable=True,
+            head_sha=HEAD_SHA,
+            base_branch="main",
+            base_sha=BASE_SHA,
+        ),
+        admission=admission,
+        technical_checks=technical_checks,
+        detail="Tenant admission is pending and technical checks are pass for the exact current head.",
+    )
+
+
 class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_read_only_evaluation_exposes_human_actions_and_technical_checks(
+        self,
+    ) -> None:
+        evaluation = _tenant_admission_evaluation_result()
+        query = urlencode(
+            {
+                "product": PRODUCT,
+                "context": CONTEXT,
+                "repository_id": REPOSITORY_ID,
+                "repository_owner_id": REPOSITORY_OWNER_ID,
+                "repository": REPOSITORY,
+                "pull_request_number": PULL_REQUEST_NUMBER,
+                "head_sha": HEAD_SHA,
+                "base_branch": "main",
+            }
+        )
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(Path(tmp_dir), actions=("tenant_admission.read",))
+            with (
+                patch(
+                    "control_plane.http_app.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ),
+                patch(
+                    "control_plane.http_routes.tenant_admission.evaluate_tenant_admission_candidate",
+                    return_value=evaluation,
+                ),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_authz_policy(actions=("tenant_admission.read",)),
+                    record_store_factory=lambda: store,
+                )
+                response = await _asgi_get(
+                    app,
+                    f"/v1/work-graph/tenant-admission/evaluation?{query}",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        read_model = response.json()["read_model"]
+        self.assertFalse(read_model["agent_authoring_allowed"])
+        self.assertEqual(read_model["evaluation"]["outcome"], "blocked")
+        self.assertEqual(
+            read_model["evaluation"]["technical_checks"]["status"],
+            "pass",
+        )
+        actions = {action["action_kind"]: action for action in read_model["human_actions"]}
+        self.assertEqual(actions["manager_preview_approval"]["availability"], "available")
+        self.assertEqual(actions["technical_human_waiver"]["availability"], "available")
+        self.assertFalse(actions["technical_human_waiver"]["agent_authoring_allowed"])
+
+    async def test_agent_context_includes_exact_tenant_admission_without_dropping_sections(
+        self,
+    ) -> None:
+        evaluation = _tenant_admission_evaluation_result()
+        query = urlencode(
+            {
+                "repository": REPOSITORY,
+                "product": PRODUCT,
+                "context": CONTEXT,
+                "repository_id": REPOSITORY_ID,
+                "repository_owner_id": REPOSITORY_OWNER_ID,
+                "pull_request_number": PULL_REQUEST_NUMBER,
+                "head_sha": HEAD_SHA,
+                "base_branch": "main",
+            }
+        )
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(
+                Path(tmp_dir),
+                actions=("product_environment.read", "tenant_admission.read"),
+            )
+            with (
+                patch(
+                    "control_plane.http_app.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ),
+                patch(
+                    "control_plane.http_routes.products.evaluate_tenant_admission_candidate",
+                    return_value=evaluation,
+                ),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_authz_policy(
+                        actions=("product_environment.read", "tenant_admission.read")
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                response = await _asgi_get(
+                    app,
+                    f"/v1/agent/context?{query}",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        sections = response.json()["context"]["sections"]
+        self.assertEqual(sections["tenant_admission"]["status"], "available")
+        tenant_read_model = sections["tenant_admission"]["payload"]["evaluation"]
+        self.assertFalse(tenant_read_model["agent_authoring_allowed"])
+        self.assertEqual(tenant_read_model["evaluation"]["candidate"]["head_sha"], HEAD_SHA)
+        self.assertEqual(sections["repo_product_mapping"]["status"], "available")
+        self.assertEqual(sections["work_graph_snapshot"]["status"], "available")
+
+    async def test_agent_context_rejects_incomplete_exact_candidate(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(Path(tmp_dir), actions=("product_environment.read",))
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_authz_policy(actions=("product_environment.read",)),
+                record_store_factory=lambda: store,
+            )
+            response = await _asgi_get(
+                app,
+                f"/v1/agent/context?{urlencode({'repository': REPOSITORY, 'head_sha': HEAD_SHA})}",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_query")
+
+    async def test_read_only_evaluation_reports_github_token_unavailable(self) -> None:
+        query = urlencode(
+            {
+                "product": PRODUCT,
+                "context": CONTEXT,
+                "repository_id": REPOSITORY_ID,
+                "repository_owner_id": REPOSITORY_OWNER_ID,
+                "repository": REPOSITORY,
+                "pull_request_number": PULL_REQUEST_NUMBER,
+                "head_sha": HEAD_SHA,
+                "base_branch": "main",
+            }
+        )
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(Path(tmp_dir), actions=("tenant_admission.read",))
+            with patch(
+                "control_plane.http_app.resolve_launchplane_github_token",
+                side_effect=click.ClickException("token unavailable"),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_authz_policy(actions=("tenant_admission.read",)),
+                    record_store_factory=lambda: store,
+                )
+                response = await _asgi_get(
+                    app,
+                    f"/v1/work-graph/tenant-admission/evaluation?{query}",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "github_token_unavailable")
+
+    async def test_agent_context_preserves_other_sections_when_github_token_is_unavailable(
+        self,
+    ) -> None:
+        query = urlencode(
+            {
+                "repository": REPOSITORY,
+                "product": PRODUCT,
+                "context": CONTEXT,
+                "repository_id": REPOSITORY_ID,
+                "repository_owner_id": REPOSITORY_OWNER_ID,
+                "pull_request_number": PULL_REQUEST_NUMBER,
+                "head_sha": HEAD_SHA,
+                "base_branch": "main",
+            }
+        )
+        actions = ("product_environment.read", "tenant_admission.read")
+        with TemporaryDirectory() as tmp_dir:
+            store = _postgres_store(Path(tmp_dir), actions=actions)
+            with patch(
+                "control_plane.http_app.resolve_launchplane_github_token",
+                side_effect=click.ClickException("token unavailable"),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_authz_policy(actions=actions),
+                    record_store_factory=lambda: store,
+                )
+                response = await _asgi_get(
+                    app,
+                    f"/v1/agent/context?{query}",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        sections = response.json()["context"]["sections"]
+        self.assertEqual(sections["tenant_admission"]["status"], "unavailable")
+        self.assertEqual(
+            sections["tenant_admission"]["reason_code"],
+            "tenant_admission_github_unavailable",
+        )
+        self.assertEqual(sections["repo_product_mapping"]["status"], "available")
+        self.assertEqual(sections["work_graph_snapshot"]["status"], "available")
+
+    def test_openapi_includes_read_only_tenant_admission_evaluation(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_authz_policy(actions=()),
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=Path(tmp_dir)),
+            )
+            route = app.openapi()["paths"]["/v1/work-graph/tenant-admission/evaluation"]["get"]
+
+        self.assertEqual(route["operationId"], "read_tenant_admission_evaluation")
+        self.assertIn("TenantAdmissionEvaluationReadResponse", json.dumps(route))
+        parameter_names = {parameter["name"] for parameter in route["parameters"]}
+        self.assertTrue(
+            {
+                "base_branch",
+                "context",
+                "head_sha",
+                "merge_method",
+                "product",
+                "pull_request_number",
+                "repository",
+                "repository_id",
+                "repository_owner_id",
+            }.issubset(parameter_names),
+        )
+
     async def test_initial_create_applies_revision_1(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             store = _postgres_store(Path(tmp_dir))

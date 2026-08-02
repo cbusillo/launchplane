@@ -26,6 +26,8 @@ import type {
   RankWorkGraphSnapshotData,
   RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
+  ReadTenantAdmissionEvaluationData,
+  TenantAdmissionEvaluationReadResponse,
   WorkGraphIssueInboxResponse,
   WorkGraphSnapshot,
   WorkGraphSnapshotResponse,
@@ -333,6 +335,29 @@ export function readWorkGraphSnapshot(
 ): Promise<WorkGraphSnapshotResponse> {
   return requestJson<WorkGraphSnapshotResponse>(
     "/v1/work-graph/snapshot",
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function readTenantAdmissionEvaluation(
+  request: Pick<ReadTenantAdmissionEvaluationData, "query">,
+  signal?: AbortSignal,
+): Promise<TenantAdmissionEvaluationReadResponse> {
+  const params = new URLSearchParams({
+    product: request.query.product,
+    context: request.query.context,
+    repository_id: request.query.repository_id,
+    repository_owner_id: request.query.repository_owner_id,
+    repository: request.query.repository,
+    pull_request_number: String(request.query.pull_request_number),
+    head_sha: request.query.head_sha,
+    base_branch: request.query.base_branch,
+    merge_method: request.query.merge_method ?? "merge",
+  });
+  return requestJson<TenantAdmissionEvaluationReadResponse>(
+    `/v1/work-graph/tenant-admission/evaluation?${params.toString()}`,
     "GET",
     undefined,
     signal,

@@ -23,7 +23,8 @@ export type EngineeringView =
   | "work-graph"
   | "issue-inbox"
   | "every-code"
-  | "merge-train";
+  | "merge-train"
+  | "tenant-admission";
 
 export function productIndexPath(): string {
   return "/ui/products";
@@ -64,6 +65,9 @@ export function engineeringViewLabel(view: EngineeringView): string {
   if (view === "merge-train") {
     return "Merge train";
   }
+  if (view === "tenant-admission") {
+    return "Tenant admission";
+  }
   return "Engineering Ops";
 }
 
@@ -85,7 +89,13 @@ export function parseAppRoute(pathname: string): AppRoute {
     const view = routeSegments[0] as EngineeringView;
     if (
       routeSegments.length === 1 &&
-      ["work-graph", "issue-inbox", "every-code", "merge-train"].includes(view)
+      [
+        "work-graph",
+        "issue-inbox",
+        "every-code",
+        "merge-train",
+        "tenant-admission",
+      ].includes(view)
     ) {
       return { kind: "engineering", view };
     }
