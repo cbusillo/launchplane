@@ -10,6 +10,7 @@ from control_plane.odoo_instance_overrides import LAUNCHPLANE_INSTANCE_OVERRIDES
 from control_plane.odoo_instance_overrides import LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from control_plane.odoo_instance_overrides import build_post_deploy_environment
+from control_plane.odoo_instance_overrides import build_preview_website_bootstrap_environment
 from control_plane.odoo_instance_overrides import render_post_deploy_payload
 from control_plane.odoo_post_deploy_http import OdooWebsiteBootstrapOverrideRequest
 from click.testing import CliRunner, Result
@@ -376,6 +377,93 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         self.assertNotIn(
             LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
             environment.inline_environment,
+        )
+
+    def test_preview_website_bootstrap_environment_inherits_only_deploy_bootstrap(self) -> None:
+        record = OdooInstanceOverrideRecord(
+            context="cm",
+            instance="testing",
+            apply_on=("deploy", "promotion"),
+            config_parameters=(
+                OdooConfigParameterOverride(
+                    key="web.base.url",
+                    value=OdooOverrideValue(
+                        source="literal",
+                        value="https://cm-testing.example.com",
+                    ),
+                ),
+            ),
+            addon_settings=(
+                OdooAddonSettingOverride(
+                    addon="openai",
+                    setting="api_key",
+                    value=OdooOverrideValue(
+                        source="secret_binding",
+                        secret_binding_id="secret-cm-openai",
+                    ),
+                ),
+            ),
+            website_bootstrap=OdooWebsiteBootstrapPayload(
+                tenant="cm",
+                name="Cell Mechanic",
+                canonical_url="https://cm-testing.example.com",
+            ),
+            updated_at="2026-07-31T18:00:00Z",
+        )
+
+        environment = build_preview_website_bootstrap_environment(
+            record,
+            preview_url="https://pr-70.cm-preview.example.test/",
+        )
+
+        self.assertIsNotNone(environment)
+        assert environment is not None
+        decoded_payload = json.loads(
+            base64.b64decode(
+                environment.inline_environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]
+            ).decode("utf-8")
+        )
+        self.assertEqual(decoded_payload["config_parameters"], [])
+        self.assertEqual(decoded_payload["addon_settings"], [])
+        self.assertEqual(decoded_payload["website_bootstrap"]["name"], "Cell Mechanic")
+        self.assertEqual(
+            decoded_payload["website_bootstrap"]["canonical_url"],
+            "https://pr-70.cm-preview.example.test",
+        )
+        self.assertEqual(
+            environment.inline_environment[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY],
+            "true",
+        )
+        self.assertNotIn(
+            LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
+            environment.inline_environment,
+        )
+        assert record.website_bootstrap is not None
+        self.assertEqual(
+            record.website_bootstrap.canonical_url,
+            "https://cm-testing.example.com",
+        )
+
+    def test_preview_website_bootstrap_environment_requires_deploy_bootstrap(self) -> None:
+        preview_only_record = OdooInstanceOverrideRecord(
+            context="cm",
+            instance="testing",
+            apply_on=("preview",),
+            website_bootstrap=OdooWebsiteBootstrapPayload(name="Cell Mechanic"),
+            updated_at="2026-07-31T18:00:00Z",
+        )
+
+        self.assertIsNone(
+            build_preview_website_bootstrap_environment(
+                None,
+                preview_url="https://pr-70.cm-preview.example.test",
+            )
+        )
+        self.assertIsNone(
+            build_preview_website_bootstrap_environment(
+                preview_only_record,
+                preview_url="https://pr-70.cm-preview.example.test",
+            )
         )
 
     def test_cli_put_config_param_does_not_echo_plaintext_value(self) -> None:

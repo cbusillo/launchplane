@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -16,6 +17,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
+    OdooWebsiteBootstrapPayload,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimePlan
@@ -30,6 +32,11 @@ from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
 from control_plane.manager_preview_approval import build_current_manager_preview_approval_binding
+from control_plane.odoo_instance_overrides import (
+    LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
+    LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+)
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_PLAN_TTL_SECONDS,
     OdooPreviewApplyEnvelope,
@@ -1932,6 +1939,29 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                     source_label="test",
                 )
             )
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="cm",
+                    instance="testing",
+                    apply_on=("deploy", "promotion"),
+                    config_parameters=(
+                        OdooConfigParameterOverride(
+                            key="web.base.url",
+                            value=OdooOverrideValue(
+                                source="literal",
+                                value="https://cm-testing.example.com",
+                            ),
+                        ),
+                    ),
+                    website_bootstrap=OdooWebsiteBootstrapPayload(
+                        tenant="cm",
+                        name="Cell Mechanic",
+                        canonical_url="https://cm-testing.example.com",
+                    ),
+                    updated_at="2026-07-31T18:00:00Z",
+                    source_label="test",
+                )
+            )
             identity = self._identity(
                 repository="cbusillo/launchplane",
                 workflow_ref=(
@@ -2083,6 +2113,38 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             applied_request.environment_values["LAUNCHPLANE_DEPLOYMENT_RECORD_ID"],
             expected_runtime_identity.deployment_record_id,
+        )
+        decoded_override_payload = json.loads(
+            base64.b64decode(
+                applied_request.environment_values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]
+            ).decode("utf-8")
+        )
+        self.assertEqual(decoded_override_payload["config_parameters"], [])
+        self.assertEqual(decoded_override_payload["addon_settings"], [])
+        self.assertEqual(
+            decoded_override_payload["website_bootstrap"]["name"],
+            "Cell Mechanic",
+        )
+        self.assertEqual(
+            decoded_override_payload["website_bootstrap"]["canonical_url"],
+            "https://pr-42.cm-preview.example.test",
+        )
+        self.assertEqual(
+            applied_request.environment_values[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY],
+            "true",
+        )
+        self.assertNotIn(
+            LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
+            applied_request.environment_values,
+        )
+        stored_override_record = store.read_odoo_instance_override_record(
+            context_name="cm",
+            instance_name="testing",
+        )
+        assert stored_override_record.website_bootstrap is not None
+        self.assertEqual(
+            stored_override_record.website_bootstrap.canonical_url,
+            "https://cm-testing.example.com",
         )
         self.assertEqual(expected_runtime_identity.source_git_ref, _TEST_PREVIEW_HEAD_SHA)
         self.assertTrue(expected_runtime_identity.preview_generation_id)
