@@ -4165,6 +4165,8 @@ def create_launchplane_fastapi_app(
                 context_name=context,
             )
         ),
+        control_plane_root=resolved_control_plane_root,
+        github_token=resolve_launchplane_github_token,
     )
     driver_read_route_dependencies = DriverReadRouteDependencies(
         common=read_route_dependencies,
@@ -19607,7 +19609,11 @@ def create_launchplane_fastapi_app(
     )
     register_tenant_admission_read_routes(
         app,
-        dependencies=TenantAdmissionReadRouteDependencies(common=read_route_dependencies),
+        dependencies=TenantAdmissionReadRouteDependencies(
+            common=read_route_dependencies,
+            control_plane_root=resolved_control_plane_root,
+            github_token=resolve_launchplane_github_token,
+        ),
     )
 
     app.add_api_route(

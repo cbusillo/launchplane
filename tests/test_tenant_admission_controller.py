@@ -139,6 +139,33 @@ class TenantAdmissionControllerTests(unittest.TestCase):
         self.assertFalse(transport.merge_called)
         self.assertFalse(transport.technical_checks_read)
 
+    def test_pending_tenant_admission_still_reports_technical_readiness(self) -> None:
+        admission = _status_with_path_states(
+            trusted_state="pending",
+            waiver_state="pending",
+            manager_state="pending",
+        )
+        with TemporaryDirectory() as temporary_name:
+            transport = _TenantControllerTransport()
+            with patch(
+                "control_plane.tenant_admission_controller.get_tenant_admission_status",
+                return_value=admission,
+            ):
+                result = execute_tenant_admission_controller_run_once(
+                    request=_request(mutate=False),
+                    store=FilesystemRecordStore(state_dir=Path(temporary_name)),
+                    token="token",
+                    trace_id="trace-pending-admission",
+                    transport_factory=lambda _token: transport,
+                )
+
+        self.assertEqual(result.outcome, "blocked")
+        self.assertTrue(transport.technical_checks_read)
+        self.assertIsNotNone(result.technical_checks)
+        assert result.technical_checks is not None
+        self.assertEqual(result.technical_checks.status, "pass")
+        self.assertIn("Tenant admission is pending", result.detail)
+
     def test_failed_or_missing_technical_checks_block_merge(self) -> None:
         admission = _status_with_path_states(
             trusted_state="pending",

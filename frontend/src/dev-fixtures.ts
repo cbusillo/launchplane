@@ -26,6 +26,9 @@ import type {
   ProductPromotionWorkflowDispatchResponse,
   ProductSiteOverview,
   RuntimeIdentity,
+  TenantAdmissionEvaluationReadResponse,
+  TenantAdmissionPathResult,
+  TenantAdmissionTechnicalChecks,
   WorkGraphIssueInboxResponse,
   WorkGraphQueue,
   WorkGraphSnapshotResponse,
@@ -1723,6 +1726,212 @@ export function mergeTrainStatusForFixture(
     },
     status: "ok",
     trace_id: "fixture-merge-train-status",
+  };
+}
+
+export function tenantAdmissionForFixture(
+  fixture: DataFixtureMode,
+): TenantAdmissionEvaluationReadResponse {
+  assertEngineeringFixtureAvailable(fixture);
+  const classificationMissing = fixture === "empty";
+  const evidenceStale = fixture === "missing";
+  const classificationDigest = classificationMissing ? "" : "c".repeat(64);
+  const pathState = evidenceStale ? "stale" : "pending";
+  const admissionCategory = classificationMissing
+    ? "unavailable"
+    : evidenceStale
+      ? "stale"
+      : "pending";
+  const technicalStatus: TenantAdmissionTechnicalChecks["status"] = evidenceStale
+    ? "pending"
+    : "pass";
+  const candidate = {
+    context: "example-site",
+    head_sha: "a".repeat(40),
+    product: "example-site",
+    pull_request_number: 69,
+    repository: "example/tenant-site",
+    repository_id: "1001",
+    repository_owner_id: "2001",
+    schema_version: 1,
+  };
+  const paths = classificationMissing
+    ? {
+        manager_preview_approval: null,
+        schema_version: 1,
+        technical_human_waiver: null,
+        trusted_maintenance: null,
+      }
+    : {
+        manager_preview_approval: tenantAdmissionPath(
+          "manager_preview_approval",
+          pathState,
+          classificationDigest,
+        ),
+        schema_version: 1,
+        technical_human_waiver: tenantAdmissionPath(
+          "technical_human_waiver",
+          pathState,
+          classificationDigest,
+        ),
+        trusted_maintenance: tenantAdmissionPath(
+          "trusted_maintenance",
+          pathState,
+          classificationDigest,
+        ),
+      };
+  const technicalChecks = classificationMissing
+    ? null
+    : {
+        base_sha: "b".repeat(40),
+        base_up_to_date: true,
+        binding_sha256: "d".repeat(64),
+        evaluated_at: OBSERVED_AT,
+        excluded_contexts: ["manager-preview-approval", "tenant-admission"],
+        head_sha: candidate.head_sha,
+        required_checks: [
+          { app_id: 100, name: "ci-gate" },
+          { app_id: 101, name: "security-gate" },
+        ],
+        schema_version: 1,
+        signals: [
+          {
+            app_id: 100,
+            name: "ci-gate",
+            source: "check_run" as const,
+            state: technicalStatus,
+          },
+          {
+            app_id: 101,
+            name: "security-gate",
+            source: "check_run" as const,
+            state: "pass" as const,
+          },
+        ],
+        status: technicalStatus,
+        strict: true,
+      };
+  return {
+    read_model: {
+      agent_authoring_allowed: false,
+      evaluation: {
+        admission: {
+          category: admissionCategory,
+          classification_digest: classificationDigest,
+          classification_kind: classificationMissing ? "" : "tenant_ui",
+          classification_revision: classificationMissing ? 0 : 1,
+          classification_status: classificationMissing ? "missing" : "available",
+          decision: {
+            classification_digest: classificationDigest,
+            classification_kind: classificationMissing ? "" : "tenant_ui",
+            classification_revision: classificationMissing ? 0 : 1,
+            context: candidate.context,
+            decision_binding_sha256: "e".repeat(64),
+            detail: classificationMissing
+              ? "No repository classification record is available for this GitHub repository ID."
+              : evidenceStale
+                ? "Tenant admission evidence is stale for this exact head."
+                : "Tenant UI repository requires one current admission path.",
+            evaluated_at: OBSERVED_AT,
+            evidence_digest: "",
+            evidence_id: "",
+            evidence_kind: evidenceStale ? "manager_preview_approval" : "none",
+            head_sha: candidate.head_sha,
+            product: candidate.product,
+            pull_request_number: candidate.pull_request_number,
+            reason_code: classificationMissing
+              ? "classification_missing"
+              : evidenceStale
+                ? "evidence_stale"
+                : "manager_preview_required",
+            repository: candidate.repository,
+            repository_id: candidate.repository_id,
+            repository_owner_id: candidate.repository_owner_id,
+            schema_version: 1,
+            status: "blocked",
+          },
+          generated_at: OBSERVED_AT,
+          paths,
+          schema_version: 1,
+        },
+        base_branch: "main",
+        candidate,
+        detail: classificationMissing
+          ? "Tenant admission is unavailable for the exact current head."
+          : `Tenant admission is ${admissionCategory} and technical checks are ${technicalStatus} for the exact current head.`,
+        merge_commit_sha: "",
+        merge_method: "merge",
+        mutated: false,
+        outcome: "blocked",
+        pull_request_facts: {
+          base_branch: "main",
+          base_sha: "b".repeat(40),
+          draft: false,
+          head_sha: candidate.head_sha,
+          merge_commit_sha: "",
+          mergeable: true,
+          merged: false,
+          pull_request_number: candidate.pull_request_number,
+          pull_request_url: "https://example.invalid/example/tenant-site/pull/69",
+          repository: candidate.repository,
+          state: "open",
+        },
+        schema_version: 1,
+        technical_checks: technicalChecks,
+      },
+      generated_at: OBSERVED_AT,
+      human_actions: classificationMissing
+        ? []
+        : [
+            {
+              action_kind: "manager_preview_approval",
+              agent_authoring_allowed: false,
+              availability: "available",
+              detail: evidenceStale
+                ? "The prior manager approval is stale; review and approve the current preview fingerprint."
+                : "The manager can review the current preview and approve its exact fingerprint.",
+              path_state: pathState,
+              requires_human: true,
+              schema_version: 1,
+              title: "Manager preview approval",
+            },
+            {
+              action_kind: "technical_human_waiver",
+              agent_authoring_allowed: false,
+              availability: "available",
+              detail: evidenceStale
+                ? "The prior waiver is stale; an authorized repository owner can review the current head."
+                : "An authorized repository owner can issue a reasoned waiver for this exact head.",
+              path_state: pathState,
+              requires_human: true,
+              schema_version: 1,
+              title: "Repository-owner technical waiver",
+            },
+          ],
+      schema_version: 1,
+    },
+    status: "ok",
+    trace_id: "fixture-tenant-admission",
+  };
+}
+
+function tenantAdmissionPath(
+  pathKind: TenantAdmissionPathResult["path_kind"],
+  state: "pending" | "stale",
+  classificationDigest: string,
+): TenantAdmissionPathResult {
+  return {
+    classification_digest: classificationDigest,
+    evidence_digest: "",
+    evidence_id: "",
+    head_sha: "a".repeat(40),
+    path_kind: pathKind,
+    pull_request_number: 69,
+    repository: "example/tenant-site",
+    repository_id: "1001",
+    repository_owner_id: "2001",
+    schema_version: 1,
+    state,
   };
 }
 

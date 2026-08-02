@@ -67,10 +67,24 @@ It aggregates existing read models into named sections:
 - work graph snapshot and ranked queue
 - Every Code summary
 - preview readiness
+- exact tenant admission evaluation when the caller supplies the complete
+  product, context, numeric repository and owner IDs, repository, pull-request
+  number, head SHA, and base branch
 
 Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
 writes no records, fetches no issue bodies, and should preserve the underlying
 read models' redaction, freshness, and provenance fields.
+
+The optional `tenant_admission` section reports exact pull-request facts,
+repository classification, all three admission paths, GitHub mergeability,
+required technical-check readiness, and the two possible human actions:
+manager preview approval or repository-owner technical waiver. Trusted
+maintenance remains automatic evidence rather than a human action. Every human
+action explicitly reports `agent_authoring_allowed=false`; agent context can
+explain or recommend a path but cannot create, revoke, delegate, approve, or
+waive anything. Incomplete candidate queries fail rather than falling back to
+repository-name or file heuristics. Section-level authorization or provider
+failure leaves the other context sections available.
 
 Agents may call lower-level read models directly when they need a narrower
 surface:
@@ -80,6 +94,7 @@ surface:
 - `POST /v1/work-graph/rank`
 - `GET /v1/every-code/summary`
 - `GET /v1/previews/readiness`
+- `GET /v1/work-graph/tenant-admission/evaluation`
 
 ## Scoped Intents
 

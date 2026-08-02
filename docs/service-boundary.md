@@ -3032,6 +3032,20 @@ or blanket bot status.
   The route is included in the shared exact-length JSON body guard, so the
   64 KiB limit is enforced before FastAPI/Pydantic parsing.
 
+`GET /v1/work-graph/tenant-admission/evaluation` exposes one read-only exact-PR
+operator/agent evaluation. Its query extends the complete candidate binding
+with the exact base branch and optional merge method. It requires
+`tenant_admission.read`, resolves the managed GitHub credential, and reuses the
+controller's `mutate=false` path, so it verifies current numeric repository and
+owner identity, head, base, open/merged state, draft/mergeability, admission,
+and live required-check policy without acquiring a controller lease or writing
+GitHub/provider state. Mergeable tenant UI PRs report required technical-check
+readiness even while manager approval or owner waiver remains pending.
+Engineering returns `not_applicable` and no human actions. The response adds a
+public-safe guidance projection for manager preview approval and repository-
+owner technical waiver, with `agent_authoring_allowed=false`; trusted
+maintenance remains automatic evidence.
+
 `GET /v1/work-graph/tenant-admission/status` exposes the public-safe unified
 tenant-admission read model. The query supplies the complete candidate binding:
 product, context, numeric repository ID, numeric repository-owner ID,
@@ -3044,6 +3058,16 @@ GitHub commit status as decision authority. Engineering returns the normal-flow
 category. Tenant UI returns `pending`, `manager-approved`, `technical-waived`,
 `maintenance-admitted`, `stale`, `denied`, or `unavailable` and exposes no human
 membership, private policy, credential, or provider-topology detail.
+
+`GET /v1/agent/context` may include the same evaluation as a named
+`tenant_admission` section when the caller supplies every exact candidate field
+and base branch. Ordinary repository-only agent context requests remain
+compatible and omit that section. Incomplete candidate input returns HTTP 400;
+tenant-admission authorization, storage, stale-head, or GitHub failures are
+reported on that section without dropping unrelated read-model sections. The
+agent endpoint never gains technical-waiver, role-policy, delegation, manager-
+approval, maintenance-policy, reconciliation, controller, or merge write
+authority.
 
 `POST /v1/tenant-admission/status/reconcile` accepts a strict schema-v1 envelope
 containing that candidate. It is bearer-only, rejects terminal-agent identities,

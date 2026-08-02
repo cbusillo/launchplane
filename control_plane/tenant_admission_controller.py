@@ -619,6 +619,25 @@ def tenant_admission_controller_operation_id(
     return f"tenant-admission-merge-{digest}"
 
 
+def evaluate_tenant_admission_candidate(
+    *,
+    request: TenantAdmissionControllerRunOnceEnvelope,
+    store: TenantAdmissionStatusStore,
+    token: str,
+    transport_factory: TransportFactory = lambda value: UrllibMergeTrainGitHubTransport(
+        token=value
+    ),
+) -> TenantAdmissionControllerRunOnceResult:
+    if request.mutate:
+        raise ValueError("Tenant admission evaluation requires mutate=false.")
+    client = TenantAdmissionControllerGitHubClient(transport=transport_factory(token))
+    return _evaluate_tenant_admission_candidate(
+        request=request,
+        store=store,
+        client=client,
+    )
+
+
 def execute_tenant_admission_controller_run_once(
     *,
     request: TenantAdmissionControllerRunOnceEnvelope,
@@ -629,14 +648,15 @@ def execute_tenant_admission_controller_run_once(
         token=value
     ),
 ) -> TenantAdmissionControllerRunOnceResult:
-    client = TenantAdmissionControllerGitHubClient(transport=transport_factory(token))
     if not request.mutate:
-        return _evaluate_tenant_admission_candidate(
+        return evaluate_tenant_admission_candidate(
             request=request,
             store=store,
-            client=client,
+            token=token,
+            transport_factory=transport_factory,
         )
 
+    client = TenantAdmissionControllerGitHubClient(transport=transport_factory(token))
     operation_id = tenant_admission_controller_operation_id(request)
     lease_owner = merge_train_controller_lease_owner(trace_id=trace_id)
     controller_state = store.acquire_merge_train_controller_state_record(
@@ -851,7 +871,7 @@ def _execute_tenant_admission_merge(
 def _evaluate_tenant_admission_candidate(
     *,
     request: TenantAdmissionControllerRunOnceEnvelope,
-    store: TenantAdmissionControllerStore,
+    store: TenantAdmissionStatusStore,
     client: TenantAdmissionControllerGitHubClient,
 ) -> TenantAdmissionControllerRunOnceResult:
     facts = client.read_pull_request(
@@ -893,7 +913,7 @@ def _evaluate_tenant_admission_candidate(
             admission=admission,
             detail="Engineering repositories retain their existing merge flow.",
         )
-    if admission.category not in _ADMITTED_CATEGORIES or not admission.decision.admitted:
+    if admission.classification_kind != "tenant_ui":
         return TenantAdmissionControllerRunOnceResult(
             outcome="blocked",
             candidate=request.candidate,
@@ -921,6 +941,20 @@ def _evaluate_tenant_admission_candidate(
         head_sha=request.candidate.head_sha,
         evaluated_at=utc_now_timestamp(),
     )
+    if admission.category not in _ADMITTED_CATEGORIES or not admission.decision.admitted:
+        return TenantAdmissionControllerRunOnceResult(
+            outcome="blocked",
+            candidate=request.candidate,
+            base_branch=request.base_branch,
+            merge_method=request.merge_method,
+            pull_request_facts=facts,
+            admission=admission,
+            technical_checks=checks,
+            detail=(
+                f"Tenant admission is {admission.category} and technical checks are "
+                f"{checks.status} for the exact current head."
+            ),
+        )
     if checks.status != "pass":
         return TenantAdmissionControllerRunOnceResult(
             outcome="blocked",

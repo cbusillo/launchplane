@@ -3,12 +3,14 @@ import {
   Boxes,
   GitPullRequestArrow,
   Network,
+  ShieldCheck,
   Wrench,
 } from "lucide-react";
 
 import { EngineeringEveryCodeRoute } from "./EngineeringEveryCodeRoute";
 import { EngineeringIssueInboxRoute } from "./EngineeringIssueInboxRoute";
 import { EngineeringMergeTrainRoute } from "./EngineeringMergeTrainRoute";
+import { EngineeringTenantAdmissionRoute } from "./EngineeringTenantAdmissionRoute";
 import { EngineeringRouteFrame } from "./EngineeringRouteUi";
 import { EngineeringWorkGraphRoute } from "./EngineeringWorkGraphRoute";
 import {
@@ -52,6 +54,14 @@ const ENGINEERING_SURFACES = [
     title: "Merge train",
     view: "merge-train" as const,
   },
+  {
+    detail:
+      "Inspect exact-head tenant classification, human admission paths, mergeability, and required technical checks.",
+    icon: ShieldCheck,
+    label: "Read only",
+    title: "Tenant admission",
+    view: "tenant-admission" as const,
+  },
 ];
 
 export function EngineeringOpsRoute({
@@ -73,6 +83,9 @@ export function EngineeringOpsRoute({
   if (view === "merge-train") {
     return <EngineeringMergeTrainRoute fixtureMode={fixtureMode} />;
   }
+  if (view === "tenant-admission") {
+    return <EngineeringTenantAdmissionRoute fixtureMode={fixtureMode} />;
+  }
   return <EngineeringOpsHub />;
 }
 
@@ -85,7 +98,7 @@ function EngineeringOpsHub() {
       view="hub"
     >
       <div className="engineering-hub-intro">
-        <strong>Four independent evidence routes</strong>
+        <strong>Five independent evidence routes</strong>
         <p>
           Each surface owns its own request lifecycle, direct link, stale-data
           disclosure, refresh failure, and cancellation state. Browser controls

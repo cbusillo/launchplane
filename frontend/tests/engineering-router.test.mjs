@@ -12,7 +12,13 @@ test("engineering hub and every child route deep-link exactly", () => {
     kind: "engineering",
     view: "hub",
   });
-  for (const view of ["work-graph", "issue-inbox", "every-code", "merge-train"]) {
+  for (const view of [
+    "work-graph",
+    "issue-inbox",
+    "every-code",
+    "merge-train",
+    "tenant-admission",
+  ]) {
     assert.equal(engineeringPath(view), `/ui/engineering/${view}`);
     assert.deepEqual(parseAppRoute(engineeringPath(view)), {
       kind: "engineering",
@@ -36,4 +42,5 @@ test("engineering labels are route-specific", () => {
   assert.equal(engineeringViewLabel("hub"), "Engineering Ops");
   assert.equal(engineeringViewLabel("issue-inbox"), "Issue inbox");
   assert.equal(engineeringViewLabel("every-code"), "Every Code");
+  assert.equal(engineeringViewLabel("tenant-admission"), "Tenant admission");
 });

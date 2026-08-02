@@ -2209,6 +2209,151 @@ export type StructuredHealthEvidence = {
     version: string;
 };
 
+export type TenantAdmissionControllerRunOnceResult = {
+    admission: TenantAdmissionStatusReadModel | null;
+    base_branch: string;
+    candidate: TenantMergeCandidate;
+    detail: string;
+    merge_commit_sha: string;
+    merge_method: 'merge' | 'squash' | 'rebase';
+    mutated: boolean;
+    outcome: 'ready' | 'merged' | 'adopted' | 'already_merged' | 'blocked' | 'not_applicable';
+    pull_request_facts: TenantAdmissionPullRequestFacts;
+    schema_version: number;
+    technical_checks: TenantAdmissionTechnicalChecks | null;
+};
+
+export type TenantAdmissionEvaluationReadModel = {
+    agent_authoring_allowed: false;
+    evaluation: TenantAdmissionControllerRunOnceResult;
+    generated_at: string;
+    human_actions: Array<TenantAdmissionHumanActionReadModel>;
+    schema_version: number;
+};
+
+export type TenantAdmissionEvaluationReadResponse = {
+    read_model: TenantAdmissionEvaluationReadModel;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type TenantAdmissionHumanActionReadModel = {
+    action_kind: 'manager_preview_approval' | 'technical_human_waiver';
+    agent_authoring_allowed: false;
+    availability: 'available' | 'satisfied' | 'unavailable';
+    detail: string;
+    path_state: 'satisfied' | 'pending' | 'denied' | 'stale' | 'unavailable';
+    requires_human: true;
+    schema_version: number;
+    title: string;
+};
+
+export type TenantAdmissionPathResult = {
+    classification_digest: string;
+    evidence_digest: string;
+    evidence_id: string;
+    head_sha: string;
+    path_kind: 'trusted_maintenance' | 'technical_human_waiver' | 'manager_preview_approval';
+    pull_request_number: number;
+    repository: string;
+    repository_id: string;
+    repository_owner_id: string;
+    schema_version: number;
+    state: 'satisfied' | 'pending' | 'denied' | 'stale' | 'unavailable';
+};
+
+export type TenantAdmissionPullRequestFacts = {
+    base_branch: string;
+    base_sha: string;
+    draft: boolean;
+    head_sha: string;
+    merge_commit_sha: string;
+    mergeable: boolean | null;
+    merged: boolean;
+    pull_request_number: number;
+    pull_request_url: string;
+    repository: string;
+    state: 'open' | 'closed';
+};
+
+export type TenantAdmissionRequiredTechnicalCheck = {
+    app_id: number | null;
+    name: string;
+};
+
+export type TenantAdmissionStatusReadModel = {
+    category: 'engineering' | 'pending' | 'manager-approved' | 'technical-waived' | 'maintenance-admitted' | 'stale' | 'denied' | 'unavailable';
+    classification_digest: string;
+    classification_kind: 'engineering' | 'tenant_ui' | '';
+    classification_revision: number;
+    classification_status: 'available' | 'missing' | 'ambiguous' | 'unknown';
+    decision: TenantMergeEligibilityDecision;
+    generated_at: string;
+    paths: TenantMergeEligibilityEvidenceInputs;
+    schema_version: number;
+};
+
+export type TenantAdmissionTechnicalCheckSignal = {
+    app_id: number | null;
+    name: string;
+    source: 'commit_status' | 'check_run';
+    state: 'pass' | 'pending' | 'fail' | 'unavailable';
+};
+
+export type TenantAdmissionTechnicalChecks = {
+    base_sha: string;
+    base_up_to_date: boolean | null;
+    binding_sha256: string;
+    evaluated_at: string;
+    excluded_contexts: Array<string>;
+    head_sha: string;
+    required_checks: Array<TenantAdmissionRequiredTechnicalCheck>;
+    schema_version: number;
+    signals: Array<TenantAdmissionTechnicalCheckSignal>;
+    status: 'pass' | 'pending' | 'fail' | 'unavailable';
+    strict: boolean;
+};
+
+export type TenantMergeCandidate = {
+    context: string;
+    head_sha: string;
+    product: string;
+    pull_request_number: number;
+    repository: string;
+    repository_id: string;
+    repository_owner_id: string;
+    schema_version: number;
+};
+
+export type TenantMergeEligibilityDecision = {
+    classification_digest: string;
+    classification_kind: 'engineering' | 'tenant_ui' | '';
+    classification_revision: number;
+    context: string;
+    decision_binding_sha256: string;
+    detail: string;
+    evaluated_at: string;
+    evidence_digest: string;
+    evidence_id: string;
+    evidence_kind: 'none' | 'trusted_maintenance' | 'technical_human_waiver' | 'manager_preview_approval';
+    head_sha: string;
+    product: string;
+    pull_request_number: number;
+    reason_code: 'engineering_normal_flow' | 'trusted_maintenance_admitted' | 'technical_human_waiver_admitted' | 'manager_preview_approved' | 'manager_preview_required' | 'evidence_denied' | 'evidence_stale' | 'evidence_unavailable' | 'evidence_identity_drift' | 'evidence_head_mismatch' | 'evidence_policy_drift' | 'classification_missing' | 'classification_unknown' | 'classification_ambiguous' | 'classification_identity_drift';
+    repository: string;
+    repository_id: string;
+    repository_owner_id: string;
+    schema_version: number;
+    status: 'admitted' | 'blocked';
+};
+
+export type TenantMergeEligibilityEvidenceInputs = {
+    manager_preview_approval: TenantAdmissionPathResult | null;
+    schema_version: number;
+    technical_human_waiver: TenantAdmissionPathResult | null;
+    trusted_maintenance: TenantAdmissionPathResult | null;
+};
+
 export type WorkGraphIssueInboxResponse = {
     configured: boolean;
     inbox: GitHubIssueInboxReadModel;
@@ -2915,6 +3060,7 @@ export type ReadRepoProductMappingData = {
 };
 
 export type ReadRepoProductMappingErrors = {
+    400: LaunchplaneErrorResponse;
     401: LaunchplaneErrorResponse;
     403: LaunchplaneErrorResponse;
     409: LaunchplaneErrorResponse;
@@ -3037,6 +3183,43 @@ export type ReadWorkGraphSnapshotResponses = {
 };
 
 export type ReadWorkGraphSnapshotResponse = ReadWorkGraphSnapshotResponses[keyof ReadWorkGraphSnapshotResponses];
+
+export type ReadTenantAdmissionEvaluationData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query: {
+        product: string;
+        context: string;
+        repository_id: string;
+        repository_owner_id: string;
+        repository: string;
+        pull_request_number: number;
+        head_sha: string;
+        base_branch: string;
+        merge_method?: 'merge' | 'squash' | 'rebase';
+    };
+    url: '/v1/work-graph/tenant-admission/evaluation';
+};
+
+export type ReadTenantAdmissionEvaluationErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadTenantAdmissionEvaluationError = ReadTenantAdmissionEvaluationErrors[keyof ReadTenantAdmissionEvaluationErrors];
+
+export type ReadTenantAdmissionEvaluationResponses = {
+    200: TenantAdmissionEvaluationReadResponse;
+};
+
+export type ReadTenantAdmissionEvaluationResponse = ReadTenantAdmissionEvaluationResponses[keyof ReadTenantAdmissionEvaluationResponses];
 
 export type ApplyProductEnvironmentConfigData = {
     body: {

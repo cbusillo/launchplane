@@ -679,6 +679,64 @@ test.describe("operator journeys", () => {
     await captureScreenshot(page, testInfo, "safe-change-confirmation");
     diagnostics.assertClean();
   });
+
+  test("operator can inspect exact tenant admission without a browser mutation", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/tenant-admission?fixture=products");
+
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Tenant admission" }),
+    ).toBeFocused();
+    await expect(
+      page.getByRole("heading", { name: "Waiting for one current admission path" }),
+    ).toBeVisible();
+    await expect(page.getByText("Agent authoring disabled", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Manager preview approval", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Repository-owner technical waiver", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Required checks" })).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "tenant-admission-exact-head");
+    diagnostics.assertClean();
+  });
+
+  test("tenant admission remains readable at narrow width", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+
+    await page.goto("/ui/engineering/tenant-admission?fixture=products");
+
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Tenant admission" }),
+    ).toBeFocused();
+    await expect(
+      page.getByRole("heading", { name: "One current human action is enough" }),
+    ).toBeVisible();
+    await expect(page.getByText("ci-gate", { exact: true })).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "tenant-admission-narrow");
+    diagnostics.assertClean();
+  });
+
+  test("tenant admission never labels missing classification as engineering", async ({
+    page,
+  }) => {
+    await page.goto("/ui/engineering/tenant-admission?fixture=empty");
+
+    await expect(
+      page.getByText("Classification evidence unavailable", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("No manager gate for engineering")).toHaveCount(0);
+    await expect(page.getByText("Engineering normal flow")).toHaveCount(0);
+  });
 });
 
 function monitorBrowser(

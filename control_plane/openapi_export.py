@@ -181,6 +181,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/github/issues": "read_work_graph_issue_inbox",
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
+    "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation",
 }
 
 

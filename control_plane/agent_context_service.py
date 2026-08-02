@@ -65,6 +65,7 @@ def build_agent_context_service_payload(
     preview_readiness_store: object,
     action_allowed: ActionAllowed,
     planning_facts_provider: WorkGraphPlanningFactsProvider | None,
+    tenant_admission_section: AgentContextSection | None = None,
 ) -> AgentContextPayload:
     normalized_repository = repository.strip()
     sections = {
@@ -105,6 +106,8 @@ def build_agent_context_service_payload(
             }
         ),
     }
+    if tenant_admission_section is not None:
+        sections["tenant_admission"] = tenant_admission_section
     return AgentContextPayload(
         generated_at=generated_at,
         repository=normalized_repository,

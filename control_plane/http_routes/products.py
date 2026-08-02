@@ -1,7 +1,9 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path as FileSystemPath
 from typing import Annotated, Literal, Protocol, cast
 
+import click
 from fastapi import Depends, Path, Query
 from pydantic import BaseModel, ConfigDict
 
@@ -12,11 +14,13 @@ from control_plane import (
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane.agent_context_service import (
     AgentContextPayload,
+    AgentContextSection,
     build_agent_context_service_payload,
 )
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
+from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.product_environment_read_model import (
     ProductActivityReadModel,
     ProductEnvironmentConfigStatus,
@@ -43,6 +47,7 @@ from control_plane.contracts.protected_artifacts import (
     build_protected_artifact_set,
 )
 from control_plane.contracts.repo_product_mapping_read_model import RepoProductMapping
+from control_plane.contracts.tenant_merge_eligibility import TenantMergeCandidate
 from control_plane.http_routes.support import (
     LAUNCHPLANE_SERVICE_CONTEXT,
     ApiRouteRegistrar,
@@ -53,6 +58,7 @@ from control_plane.service_auth import (
     LaunchplaneIdentity,
     TerminalAgentIdentity,
 )
+from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.product_promotion_http import (
     PRODUCT_PROMOTION_STATUS_ROUTE,
     PRODUCT_PROMOTION_WORKFLOW_STATUS_ROUTE,
@@ -63,6 +69,19 @@ from control_plane.product_promotion_http import (
     resolve_product_promotion_target,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.tenant_admission_context import (
+    build_tenant_admission_evaluation_read_model,
+)
+from control_plane.tenant_admission_controller import (
+    TenantAdmissionControllerError,
+    TenantAdmissionControllerRunOnceEnvelope,
+    TenantAdmissionControllerStaleCandidateError,
+    evaluate_tenant_admission_candidate,
+)
+from control_plane.tenant_admission_status import (
+    TENANT_ADMISSION_STATUS_READ_ACTION,
+    require_tenant_admission_status_store,
+)
 from control_plane.work_graph_service import (
     WorkGraphPlanningFactsProvider,
     build_repo_product_mapping_service_payload,
@@ -76,6 +95,8 @@ class ProductReadRouteDependencies:
     read_product_profile_list_identity: Callable[..., LaunchplaneIdentity | None]
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None
     workflow_credentials_ready: Callable[[str], bool]
+    control_plane_root: FileSystemPath
+    github_token: Callable[..., str]
 
 
 class ProductEnvironmentConfigStatusResponse(BaseModel):
@@ -559,6 +580,127 @@ def _require_agent_context_read_store(
     return cast(AgentContextReadStore, record_store)
 
 
+def _tenant_admission_agent_context_request(
+    *,
+    repository: str,
+    product: str,
+    context: str,
+    repository_id: str,
+    repository_owner_id: str,
+    pull_request_number: int | None,
+    head_sha: str,
+    base_branch: str,
+    merge_method: MergeTrainMergeMethod,
+) -> TenantAdmissionControllerRunOnceEnvelope | None:
+    candidate_values = {
+        "product": product,
+        "context": context,
+        "repository_id": repository_id,
+        "repository_owner_id": repository_owner_id,
+        "pull_request_number": pull_request_number,
+        "head_sha": head_sha,
+        "base_branch": base_branch,
+    }
+    if not any(value not in {"", None} for value in candidate_values.values()):
+        return None
+    missing_fields = tuple(
+        field_name for field_name, value in candidate_values.items() if value in {"", None}
+    )
+    if not repository.strip():
+        missing_fields = ("repository", *missing_fields)
+    if missing_fields:
+        raise ValueError(
+            "Exact tenant admission agent context requires: " + ", ".join(missing_fields) + "."
+        )
+    return TenantAdmissionControllerRunOnceEnvelope(
+        candidate=TenantMergeCandidate(
+            product=product,
+            context=context,
+            repository_id=repository_id,
+            repository_owner_id=repository_owner_id,
+            repository=repository,
+            pull_request_number=cast(int, pull_request_number),
+            head_sha=head_sha,
+        ),
+        base_branch=base_branch,
+        merge_method=merge_method,
+        mutate=False,
+    )
+
+
+def _tenant_admission_agent_context_section(
+    *,
+    request: TenantAdmissionControllerRunOnceEnvelope,
+    identity: LaunchplaneIdentity,
+    record_store: object,
+    dependencies: ProductReadRouteDependencies,
+) -> AgentContextSection:
+    candidate = request.candidate
+    if not dependencies.common.authorization_allows(
+        identity=identity,
+        action=TENANT_ADMISSION_STATUS_READ_ACTION,
+        product=candidate.product,
+        context=candidate.context,
+        target=AuthorizationTarget(scope="context"),
+    ):
+        return AgentContextSection(
+            status="unauthorized",
+            reason_code="tenant_admission_unauthorized",
+        )
+    try:
+        store = require_tenant_admission_status_store(record_store)
+    except TypeError:
+        return AgentContextSection(
+            status="unavailable",
+            reason_code="tenant_admission_storage_unavailable",
+        )
+    try:
+        token = dependencies.github_token(
+            control_plane_root=dependencies.control_plane_root,
+            context_name=candidate.context,
+        ).strip()
+    except click.ClickException:
+        return AgentContextSection(
+            status="unavailable",
+            reason_code="tenant_admission_github_unavailable",
+        )
+    if not token:
+        return AgentContextSection(
+            status="unavailable",
+            reason_code="tenant_admission_github_unavailable",
+        )
+    try:
+        evaluation = evaluate_tenant_admission_candidate(
+            request=request,
+            store=store,
+            token=token,
+        )
+    except TenantAdmissionControllerStaleCandidateError:
+        return AgentContextSection(
+            status="unavailable",
+            reason_code="tenant_admission_stale_candidate",
+        )
+    except (
+        TenantAdmissionControllerError,
+        MergeTrainGitHubError,
+        LookupError,
+        TypeError,
+        ValueError,
+    ):
+        return AgentContextSection(
+            status="unavailable",
+            reason_code="tenant_admission_unavailable",
+        )
+    return AgentContextSection(
+        status="available",
+        payload={
+            "evaluation": build_tenant_admission_evaluation_read_model(
+                evaluation=evaluation,
+            ).model_dump(mode="json")
+        },
+    )
+
+
 def register_protected_artifact_read_routes(
     app: ApiRouteRegistrar,
     *,
@@ -668,6 +810,14 @@ def register_agent_context_read_routes(
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         repository: Annotated[str, Query()] = "",
+        product: Annotated[str, Query()] = "",
+        context: Annotated[str, Query()] = "",
+        repository_id: Annotated[str, Query()] = "",
+        repository_owner_id: Annotated[str, Query()] = "",
+        pull_request_number: Annotated[int | None, Query(ge=1)] = None,
+        head_sha: Annotated[str, Query()] = "",
+        base_branch: Annotated[str, Query()] = "",
+        merge_method: Annotated[MergeTrainMergeMethod, Query()] = "merge",
     ) -> AgentContextResponse:
         trace_id = common.next_trace_id()
         _require_agent_context_read_authorization(
@@ -680,6 +830,35 @@ def register_agent_context_read_routes(
             record_store,
             dependencies=common,
             trace_id=trace_id,
+        )
+        try:
+            tenant_admission_request = _tenant_admission_agent_context_request(
+                repository=repository,
+                product=product,
+                context=context,
+                repository_id=repository_id,
+                repository_owner_id=repository_owner_id,
+                pull_request_number=pull_request_number,
+                head_sha=head_sha,
+                base_branch=base_branch,
+                merge_method=merge_method,
+            )
+        except ValueError as error:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        tenant_admission_section = (
+            _tenant_admission_agent_context_section(
+                request=tenant_admission_request,
+                identity=identity,
+                record_store=record_store,
+                dependencies=dependencies,
+            )
+            if tenant_admission_request is not None
+            else None
         )
 
         def action_allowed(
@@ -700,7 +879,7 @@ def register_agent_context_read_routes(
                 ),
             )
 
-        context = build_agent_context_service_payload(
+        context_payload = build_agent_context_service_payload(
             generated_at=utc_now_timestamp(),
             repository=repository,
             product_store=context_store,
@@ -708,10 +887,12 @@ def register_agent_context_read_routes(
             preview_readiness_store=context_store,
             action_allowed=action_allowed,
             planning_facts_provider=dependencies.work_graph_planning_facts_provider,
+            tenant_admission_section=tenant_admission_section,
         )
-        return AgentContextResponse(trace_id=trace_id, context=context)
+        return AgentContextResponse(trace_id=trace_id, context=context_payload)
 
     error_responses: dict[int | str, dict[str, object]] = {
+        400: {"model": common.error_response_model},
         401: {"model": common.error_response_model},
         403: {"model": common.error_response_model},
         503: {"model": common.error_response_model},
