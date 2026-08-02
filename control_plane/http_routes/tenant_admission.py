@@ -7,6 +7,11 @@ import click
 from fastapi import Depends, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerAdoptionRejectedError,
+    MergeTrainControllerLeaseHeldError,
+    MergeTrainControllerLeaseLostError,
+)
 from control_plane.http_routes.mutation_support import (
     idempotency_scope,
     request_fingerprint,
@@ -53,6 +58,17 @@ from control_plane.service_auth import (
 )
 from control_plane.service_auth import AuthorizationTarget
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
+from control_plane.merge_train_github import MergeTrainGitHubError
+from control_plane.tenant_admission_controller import (
+    TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ACTION,
+    TenantAdmissionControllerError,
+    TenantAdmissionControllerReconciliationError,
+    TenantAdmissionControllerRunOnceEnvelope,
+    TenantAdmissionControllerRunOnceResult,
+    TenantAdmissionControllerStaleCandidateError,
+    execute_tenant_admission_controller_run_once,
+    require_tenant_admission_controller_store,
+)
 from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationApplyEnvelope,
     TenantRepositoryClassificationApplyResult,
@@ -109,6 +125,7 @@ TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE = "/v1/tenant-admission/trusted-maintenan
 TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE = "/v1/tenant-admission/technical-human-waivers/apply"
 TENANT_ADMISSION_STATUS_READ_ROUTE = "/v1/work-graph/tenant-admission/status"
 TENANT_ADMISSION_STATUS_RECONCILE_ROUTE = "/v1/tenant-admission/status/reconcile"
+TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE = "/v1/work-graph/tenant-admission/controller/run-once"
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +257,14 @@ class TenantAdmissionStatusReconcileResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     result: TenantAdmissionStatusReconcileResult
+
+
+class TenantAdmissionControllerRunOnceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["accepted"] = "accepted"
+    trace_id: str
+    result: TenantAdmissionControllerRunOnceResult
 
 
 def register_tenant_admission_read_routes(
@@ -539,6 +564,100 @@ def register_tenant_admission_write_routes(
 ) -> None:
     def _human_waiver_idempotency_scope(identity: GitHubHumanIdentity) -> str:
         return f"github-human-id|{identity.github_id}"
+
+    async def run_tenant_admission_controller_once_route(
+        envelope: TenantAdmissionControllerRunOnceEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_write_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+    ) -> TenantAdmissionControllerRunOnceResponse:
+        trace_id = dependencies.next_trace_id()
+        candidate = envelope.candidate
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action=TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ACTION,
+            product=candidate.product,
+            context=candidate.context,
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot run the tenant admission controller for this context.",
+            )
+        try:
+            store = require_tenant_admission_controller_store(record_store)
+        except TypeError as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="record_storage_unavailable",
+                message=str(error),
+            ) from error
+        token = dependencies.github_token(
+            control_plane_root=dependencies.control_plane_root,
+            context_name=candidate.context,
+        ).strip()
+        if not token:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_token_unavailable",
+                message="Tenant admission controller cannot resolve a GitHub token.",
+            )
+        try:
+            result = execute_tenant_admission_controller_run_once(
+                request=envelope,
+                store=store,
+                token=token,
+                trace_id=trace_id,
+            )
+        except TenantAdmissionControllerStaleCandidateError as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="tenant_admission_stale_candidate",
+                message=str(error),
+            ) from error
+        except MergeTrainControllerLeaseHeldError as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="tenant_admission_controller_busy",
+                message=str(error),
+            ) from error
+        except MergeTrainControllerAdoptionRejectedError as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="tenant_admission_reconciliation_required",
+                message=str(error),
+            ) from error
+        except TenantAdmissionControllerReconciliationError as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="tenant_admission_reconciliation_required",
+                message=str(error),
+            ) from error
+        except (
+            TenantAdmissionControllerError,
+            MergeTrainControllerLeaseLostError,
+            MergeTrainGitHubError,
+            LookupError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="tenant_admission_controller_unavailable",
+                message="Tenant admission controller could not verify or complete the exact merge.",
+            ) from error
+        return TenantAdmissionControllerRunOnceResponse(
+            trace_id=trace_id,
+            result=result,
+        )
 
     async def reconcile_tenant_admission_status_route(
         envelope: TenantAdmissionStatusReconcileEnvelope,
@@ -1508,6 +1627,23 @@ def register_tenant_admission_write_routes(
             trace_id=trace_id,
             result=result,
         )
+
+    app.add_api_route(
+        TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE,
+        run_tenant_admission_controller_once_route,
+        methods=["POST"],
+        status_code=202,
+        response_model=TenantAdmissionControllerRunOnceResponse,
+        operation_id="run_tenant_admission_controller_once",
+        summary="Re-evaluate and merge one exact admitted tenant pull request",
+        responses={
+            400: {"model": dependencies.error_response_model},
+            401: {"model": dependencies.error_response_model},
+            403: {"model": dependencies.error_response_model},
+            409: {"model": dependencies.error_response_model},
+            503: {"model": dependencies.error_response_model},
+        },
+    )
 
     app.add_api_route(
         TENANT_ADMISSION_STATUS_RECONCILE_ROUTE,

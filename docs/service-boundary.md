@@ -3059,12 +3059,57 @@ target URL replay without another write. A provider failure or mismatched write
 response never returns success. Engineering is reported as not requiring the
 tenant status and performs no status write.
 
-The GitHub status is projection only. Merge-controller enforcement, branch
-protection, portfolio rollout, UI, and checked-in real repository or actor
-policy values remain deferred. Trusted maintenance is never inferred from a Bot
-type alone, and no admission decision uses changed files, repository names,
-branches, titles, labels, or commit text. Preview refresh, verification, destroy,
-and cleanup remain independent from admission and projection delivery.
+`POST /v1/work-graph/tenant-admission/controller/run-once` accepts a strict
+schema-v1 candidate plus exact base branch, merge method, and `mutate` intent.
+It is bearer-only, requires `tenant_admission.controller.run_once` authorization
+for the candidate product/context, and is covered by the exact-length JSON body
+guard at 64 KiB. An explicitly authorized terminal agent may invoke this route:
+the caller cannot create manager, waiver, or maintenance authority, and the
+controller independently recomputes those DB-backed records before every merge
+effect. This is a dedicated privileged controller action: its context-scoped
+grant intentionally authorizes a central controller or operator whose source
+repository need not equal the target tenant repository. The submitted target
+still gains no authority from the caller and must independently satisfy exact
+GitHub identity, DB admission, mergeability, and required-check policy.
+
+The controller is tenant-only. An `engineering` classification returns
+`not_applicable` without a merge call. For `tenant_ui`, only
+`manager-approved`, `technical-waived`, or `maintenance-admitted` may proceed.
+Launchplane re-fetches the open PR and requires exact numeric base repository
+ID, numeric owner ID, full repository name, same-repository head, requested base
+branch, and head SHA. It then evaluates technical commit statuses and check runs
+on that exact head against the target branch's live GitHub required-status-check
+policy while excluding only the `tenant-admission` and
+`manager-preview-approval` contexts. App-bound required checks must be produced
+by the exact numeric GitHub App. At least one non-excluded required check must
+exist, and every required check must have a matching current passing signal;
+missing policy, missing signals, pending, failed, app-mismatched, or
+unrecognized evidence blocks without a provider mutation. Open PRs must also be
+non-draft and currently mergeable. When the live required-check policy is
+strict, the exact PR head must also contain the current base SHA; missing or
+malformed strict-policy and draft evidence fails closed.
+
+For `mutate=true`, Launchplane uses the existing repository/base controller
+lease only as a shared mutation and crash-reconciliation fence; it does not
+enqueue the PR or borrow merge-train scheduler, label, batch, or stack policy.
+After the first evaluation it re-fetches PR/base facts, recomputes admission,
+and re-reads technical checks immediately before checkpointing and issuing the
+GitHub merge request with the exact expected head SHA. Provider uncertainty
+leaves the exact request, admission decision, technical-check digest, and merge
+phase in durable controller state. A retry adopts success only when GitHub shows
+that exact head merged into the requested base and the target branch contains
+the merge commit; otherwise it re-evaluates the still-open exact candidate or
+remains fail-closed for reconciliation. A reconcile-required row owned by a
+different merge-train action is rejected atomically without rewriting that
+action's policy or recovery evidence.
+
+The GitHub status remains projection only and is never read as controller
+authority. Branch protection, workflow wiring, portfolio rollout, UI, and real
+repository policy values remain deferred to staged rollout. Trusted maintenance
+is never inferred from a Bot type alone, and no admission decision uses changed
+files, repository names, branches, titles, labels, or commit text. Preview
+refresh, verification, destroy, and cleanup remain independent from admission,
+projection delivery, and merge-controller results.
 
 The CM tenant preview workflow uses tenant-product scope for both artifact
 publish input/evidence and preview lifecycle requests. Artifact publish still

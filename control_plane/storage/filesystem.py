@@ -48,6 +48,7 @@ from control_plane.contracts.manager_preview_approval import (
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
     MergeTrainControllerLeaseLostError,
     MergeTrainControllerStateRecord,
@@ -1236,12 +1237,26 @@ class FilesystemRecordStore:
         policy_sha256: str,
         lease_owner: str,
         lease_seconds: int,
+        initial_active_action: str,
+        initial_active_phase: str,
+        adoptable_active_actions: tuple[str, ...],
     ) -> MergeTrainControllerStateRecord:
         from control_plane.contracts.merge_train_controller_state import (
             build_merge_train_controller_key,
             build_merge_train_controller_state_record,
         )
 
+        normalized_initial_action = initial_active_action.strip()
+        normalized_initial_phase = initial_active_phase.strip()
+        normalized_adoptable_actions = tuple(
+            dict.fromkeys(action.strip() for action in adoptable_active_actions if action.strip())
+        )
+        if not normalized_initial_action or not normalized_initial_phase:
+            raise ValueError("merge train controller acquisition requires initial action and phase")
+        if normalized_initial_action not in normalized_adoptable_actions:
+            raise ValueError(
+                "initial controller action must be adoptable by the acquiring controller"
+            )
         record_type = "launchplane_merge_train_controller_states"
         controller_key = build_merge_train_controller_key(
             repository=repository,
@@ -1277,6 +1292,10 @@ class FilesystemRecordStore:
             adopting = current_record.status == "reconcile_required" or bool(
                 current_record.active_action and current_record.active_phase
             )
+            if adopting and current_record.active_action not in normalized_adoptable_actions:
+                raise MergeTrainControllerAdoptionRejectedError(
+                    "merge train controller state belongs to a different active action"
+                )
             leased_record = current_record.model_copy(
                 update={
                     "policy_key": policy_key,
@@ -1290,8 +1309,8 @@ class FilesystemRecordStore:
                         lease_seconds=lease_seconds,
                     ),
                     "heartbeat_at": observed_at,
-                    "active_action": current_record.active_action or "controller_run_once",
-                    "active_phase": current_record.active_phase or "select_next_action",
+                    "active_action": current_record.active_action or normalized_initial_action,
+                    "active_phase": current_record.active_phase or normalized_initial_phase,
                     "reconciliation_status": "adopted" if adopting else "clean",
                     "reconciliation_detail": (
                         build_merge_train_controller_resume_detail(current_record)

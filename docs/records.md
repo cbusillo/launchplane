@@ -429,6 +429,16 @@ an ORM column/table or remains only in the evidence payload.
   database clock for lease expiry; a stale owner cannot overwrite or release a
   successor lease. Runtime repository/base authority still comes from the active
   merge-train policy record and live request scope, not from checked-in config.
+  The tenant admission controller reuses this repository/base row only as a
+  shared mutation fence. Its `tenant_admission_merge` checkpoint carries the
+  exact request candidate, base branch, admission decision, technical-check
+  digest, and provider phase needed to reconcile an uncertain merge. That state
+  does not become admission authority, does not enqueue the PR, and is cleared
+  only after an exact merged result is confirmed or a pre-effect block is
+  recorded cleanly. Every shared-fence acquisition atomically writes a
+  controller-specific initial action and declares which active actions it can
+  resume, so either controller rejects an unfinished foreign action before any
+  row fields are rewritten.
 - Dokploy target id: modeled fields are `context`, `instance`, `target_id`, and
   `updated_at`. Provider lookup/import evidence stays payload-only.
 - Dokploy target: modeled fields are `context`, `instance`, and `updated_at`.

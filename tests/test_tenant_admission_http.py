@@ -2038,7 +2038,7 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
             "Tenant technical human waiver request body is too large.",
         )
 
-    async def test_no_unified_controller_or_legacy_trusted_maintenance_route(self) -> None:
+    async def test_no_legacy_trusted_maintenance_route(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             store = _postgres_store(Path(tmp_dir))
             app = create_launchplane_fastapi_app(
@@ -2051,22 +2051,14 @@ class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 record_store_factory=lambda: store,
             )
-            routes = [
-                ("POST", "/v1/work-graph/tenant-admission/controller/run-once"),
-                ("GET", "/v1/work-graph/tenant-admission/trusted-maintenance"),
-            ]
-            results = []
-            for method, path in routes:
-                res = await _asgi_request(
-                    app,
-                    method,
-                    path,
-                    headers={"Authorization": "Bearer valid-token"},
-                )
-                results.append(res.status_code)
+            response = await _asgi_request(
+                app,
+                "GET",
+                "/v1/work-graph/tenant-admission/trusted-maintenance",
+                headers={"Authorization": "Bearer valid-token"},
+            )
 
-        for status_code in results:
-            self.assertEqual(status_code, 404)
+        self.assertEqual(response.status_code, 404)
 
 
 def _authz_policy(*, actions: tuple[str, ...]) -> LaunchplaneAuthzPolicy:

@@ -6,11 +6,20 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import urlencode
 
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerAdoptionRejectedError,
+)
 from control_plane.contracts.tenant_merge_eligibility import (
+    TenantMergeCandidate,
     TenantRepositoryClassificationKind,
     TenantRepositoryClassificationRecord,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.tenant_admission_controller import (
+    TenantAdmissionControllerRunOnceResult,
+    TenantAdmissionControllerStaleCandidateError,
+    TenantAdmissionPullRequestFacts,
+)
 from control_plane.tenant_admission_projection import TenantAdmissionProjectionError
 from tests.http_app_test_support import _asgi_get, _asgi_request
 from tests.support.auth import _StubVerifier, _identity
@@ -30,6 +39,135 @@ PULL_REQUEST_NUMBER = 17
 
 
 class TenantAdmissionStatusHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_controller_run_once_requires_scoped_authorization(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = _postgres_store(Path(temporary_directory_name), actions=())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_authz_policy(actions=()),
+                record_store_factory=lambda: store,
+            )
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/work-graph/tenant-admission/controller/run-once",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_controller_payload(),
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_controller_run_once_returns_public_result(self) -> None:
+        expected_result = _controller_result()
+        with TemporaryDirectory() as temporary_directory_name:
+            store = _postgres_store(
+                Path(temporary_directory_name),
+                actions=("tenant_admission.controller.run_once",),
+            )
+            with (
+                patch(
+                    "control_plane.http_app.resolve_launchplane_github_token",
+                    return_value="managed-token",
+                ),
+                patch(
+                    "control_plane.http_routes.tenant_admission."
+                    "execute_tenant_admission_controller_run_once",
+                    return_value=expected_result,
+                ) as execute,
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_authz_policy(actions=("tenant_admission.controller.run_once",)),
+                    record_store_factory=lambda: store,
+                )
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/work-graph/tenant-admission/controller/run-once",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload=_controller_payload(),
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["outcome"], "not_applicable")
+        self.assertEqual(execute.call_args.kwargs["token"], "managed-token")
+        self.assertFalse(execute.call_args.kwargs["request"].mutate)
+
+    async def test_controller_run_once_maps_stale_candidate_to_conflict(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = _postgres_store(
+                Path(temporary_directory_name),
+                actions=("tenant_admission.controller.run_once",),
+            )
+            with (
+                patch(
+                    "control_plane.http_app.resolve_launchplane_github_token",
+                    return_value="managed-token",
+                ),
+                patch(
+                    "control_plane.http_routes.tenant_admission."
+                    "execute_tenant_admission_controller_run_once",
+                    side_effect=TenantAdmissionControllerStaleCandidateError("head moved"),
+                ),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_authz_policy(actions=("tenant_admission.controller.run_once",)),
+                    record_store_factory=lambda: store,
+                )
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/work-graph/tenant-admission/controller/run-once",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload=_controller_payload(mutate=True),
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "tenant_admission_stale_candidate",
+        )
+
+    async def test_controller_run_once_preserves_foreign_reconciliation_state(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = _postgres_store(
+                Path(temporary_directory_name),
+                actions=("tenant_admission.controller.run_once",),
+            )
+            with (
+                patch(
+                    "control_plane.http_app.resolve_launchplane_github_token",
+                    return_value="managed-token",
+                ),
+                patch(
+                    "control_plane.http_routes.tenant_admission."
+                    "execute_tenant_admission_controller_run_once",
+                    side_effect=MergeTrainControllerAdoptionRejectedError(
+                        "state belongs to a different active action"
+                    ),
+                ),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_authz_policy(actions=("tenant_admission.controller.run_once",)),
+                    record_store_factory=lambda: store,
+                )
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/work-graph/tenant-admission/controller/run-once",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload=_controller_payload(mutate=True),
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "tenant_admission_reconciliation_required",
+        )
+
     async def test_reads_engineering_status_from_numeric_classification(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = _postgres_store(
@@ -218,6 +356,38 @@ def _candidate_payload() -> dict[str, object]:
         "pull_request_number": PULL_REQUEST_NUMBER,
         "head_sha": HEAD_SHA,
     }
+
+
+def _controller_payload(*, mutate: bool = False) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "candidate": _candidate_payload(),
+        "base_branch": "main",
+        "merge_method": "merge",
+        "mutate": mutate,
+    }
+
+
+def _controller_result() -> TenantAdmissionControllerRunOnceResult:
+    candidate = TenantMergeCandidate.model_validate(_candidate_payload())
+    facts = TenantAdmissionPullRequestFacts(
+        repository=REPOSITORY,
+        pull_request_number=PULL_REQUEST_NUMBER,
+        pull_request_url=f"https://github.com/{REPOSITORY}/pull/{PULL_REQUEST_NUMBER}",
+        state="open",
+        merged=False,
+        head_sha=HEAD_SHA,
+        base_branch="main",
+        base_sha="b" * 40,
+    )
+    return TenantAdmissionControllerRunOnceResult(
+        outcome="not_applicable",
+        candidate=candidate,
+        base_branch="main",
+        merge_method="merge",
+        pull_request_facts=facts,
+        detail="Engineering repositories retain their existing merge flow.",
+    )
 
 
 def _pull_request_payload(*, head_sha: str = HEAD_SHA) -> dict[str, object]:
