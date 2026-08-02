@@ -22062,6 +22062,155 @@
         "title": "StructuredHealthEvidence",
         "type": "object"
       },
+      "TenantAdmissionControllerRunOnceEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/TenantMergeCandidate"
+          },
+          "merge_method": {
+            "default": "merge",
+            "enum": [
+              "merge",
+              "squash",
+              "rebase"
+            ],
+            "title": "Merge Method",
+            "type": "string"
+          },
+          "mutate": {
+            "default": false,
+            "title": "Mutate",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "candidate",
+          "base_branch"
+        ],
+        "title": "TenantAdmissionControllerRunOnceEnvelope",
+        "type": "object"
+      },
+      "TenantAdmissionControllerRunOnceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/TenantAdmissionControllerRunOnceResult"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "TenantAdmissionControllerRunOnceResponse",
+        "type": "object"
+      },
+      "TenantAdmissionControllerRunOnceResult": {
+        "additionalProperties": false,
+        "properties": {
+          "admission": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TenantAdmissionStatusReadModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/TenantMergeCandidate"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "merge_commit_sha": {
+            "default": "",
+            "title": "Merge Commit Sha",
+            "type": "string"
+          },
+          "merge_method": {
+            "enum": [
+              "merge",
+              "squash",
+              "rebase"
+            ],
+            "title": "Merge Method",
+            "type": "string"
+          },
+          "mutated": {
+            "default": false,
+            "title": "Mutated",
+            "type": "boolean"
+          },
+          "outcome": {
+            "enum": [
+              "ready",
+              "merged",
+              "adopted",
+              "already_merged",
+              "blocked",
+              "not_applicable"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "pull_request_facts": {
+            "$ref": "#/components/schemas/TenantAdmissionPullRequestFacts"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "technical_checks": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TenantAdmissionTechnicalChecks"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "outcome",
+          "candidate",
+          "base_branch",
+          "merge_method",
+          "pull_request_facts",
+          "detail"
+        ],
+        "title": "TenantAdmissionControllerRunOnceResult",
+        "type": "object"
+      },
       "TenantAdmissionGitHubProjection": {
         "additionalProperties": false,
         "properties": {
@@ -22263,6 +22412,107 @@
         "title": "TenantAdmissionProjectionWriteResult",
         "type": "object"
       },
+      "TenantAdmissionPullRequestFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "base_sha": {
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "draft": {
+            "default": false,
+            "title": "Draft",
+            "type": "boolean"
+          },
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "merge_commit_sha": {
+            "default": "",
+            "title": "Merge Commit Sha",
+            "type": "string"
+          },
+          "mergeable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mergeable"
+          },
+          "merged": {
+            "title": "Merged",
+            "type": "boolean"
+          },
+          "pull_request_number": {
+            "minimum": 1.0,
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "pull_request_url": {
+            "title": "Pull Request Url",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "pull_request_number",
+          "pull_request_url",
+          "state",
+          "merged",
+          "head_sha",
+          "base_branch",
+          "base_sha"
+        ],
+        "title": "TenantAdmissionPullRequestFacts",
+        "type": "object"
+      },
+      "TenantAdmissionRequiredTechnicalCheck": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Id"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "TenantAdmissionRequiredTechnicalCheck",
+        "type": "object"
+      },
       "TenantAdmissionStatusReadModel": {
         "additionalProperties": false,
         "properties": {
@@ -22424,6 +22674,141 @@
           "write_result"
         ],
         "title": "TenantAdmissionStatusReconcileResult",
+        "type": "object"
+      },
+      "TenantAdmissionTechnicalCheckSignal": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Id"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "commit_status",
+              "check_run"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pass",
+              "pending",
+              "fail",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "name",
+          "state"
+        ],
+        "title": "TenantAdmissionTechnicalCheckSignal",
+        "type": "object"
+      },
+      "TenantAdmissionTechnicalChecks": {
+        "additionalProperties": false,
+        "properties": {
+          "base_sha": {
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "base_up_to_date": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Up To Date"
+          },
+          "binding_sha256": {
+            "default": "",
+            "title": "Binding Sha256",
+            "type": "string"
+          },
+          "evaluated_at": {
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "excluded_contexts": {
+            "default": [
+              "manager-preview-approval",
+              "tenant-admission"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "title": "Excluded Contexts",
+            "type": "array"
+          },
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "required_checks": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TenantAdmissionRequiredTechnicalCheck"
+            },
+            "title": "Required Checks",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "signals": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TenantAdmissionTechnicalCheckSignal"
+            },
+            "title": "Signals",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "pending",
+              "fail",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "strict": {
+            "title": "Strict",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "head_sha",
+          "base_sha",
+          "strict",
+          "status",
+          "evaluated_at"
+        ],
+        "title": "TenantAdmissionTechnicalChecks",
         "type": "object"
       },
       "TenantMergeCandidate": {
@@ -55694,6 +56079,96 @@
           }
         },
         "summary": "Read Launchplane work graph snapshot"
+      }
+    },
+    "/v1/work-graph/tenant-admission/controller/run-once": {
+      "post": {
+        "operationId": "run_tenant_admission_controller_once",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantAdmissionControllerRunOnceEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantAdmissionControllerRunOnceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Re-evaluate and merge one exact admitted tenant pull request"
       }
     },
     "/v1/work-graph/tenant-admission/repository-classification": {

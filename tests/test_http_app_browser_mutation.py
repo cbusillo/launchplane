@@ -56,6 +56,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/tenant-admission/repository-classifications/apply",
             "/v1/tenant-admission/repository-human-role-policies/apply",
             "/v1/tenant-admission/status/reconcile",
+            "/v1/work-graph/tenant-admission/controller/run-once",
         }
         actual_routes = {"/auth/logout"}
         actual_bearer_only_routes: set[str] = set()

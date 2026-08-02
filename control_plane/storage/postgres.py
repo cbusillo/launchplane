@@ -78,6 +78,7 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchLandingPlanRecord,
 )
 from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
     MergeTrainControllerLeaseLostError,
     MergeTrainControllerStateRecord,
@@ -10598,7 +10599,21 @@ class PostgresRecordStore(HumanSessionStore):
         policy_sha256: str,
         lease_owner: str,
         lease_seconds: int,
+        initial_active_action: str,
+        initial_active_phase: str,
+        adoptable_active_actions: tuple[str, ...],
     ) -> MergeTrainControllerStateRecord:
+        normalized_initial_action = initial_active_action.strip()
+        normalized_initial_phase = initial_active_phase.strip()
+        normalized_adoptable_actions = tuple(
+            dict.fromkeys(action.strip() for action in adoptable_active_actions if action.strip())
+        )
+        if not normalized_initial_action or not normalized_initial_phase:
+            raise ValueError("merge train controller acquisition requires initial action and phase")
+        if normalized_initial_action not in normalized_adoptable_actions:
+            raise ValueError(
+                "initial controller action must be adoptable by the acquiring controller"
+            )
         controller_key = build_merge_train_controller_key(
             repository=repository,
             base_branch=base_branch,
@@ -10631,8 +10646,8 @@ class PostgresRecordStore(HumanSessionStore):
                         "lease_acquired_at": observed_at,
                         "lease_expires_at": lease_expires_at,
                         "heartbeat_at": observed_at,
-                        "active_action": "controller_run_once",
-                        "active_phase": "select_next_action",
+                        "active_action": normalized_initial_action,
+                        "active_phase": normalized_initial_phase,
                     }
                 )
                 leased_record = MergeTrainControllerStateRecord.model_validate(
@@ -10671,6 +10686,10 @@ class PostgresRecordStore(HumanSessionStore):
             adopting = current_record.status == "reconcile_required" or bool(
                 current_record.active_action and current_record.active_phase
             )
+            if adopting and current_record.active_action not in normalized_adoptable_actions:
+                raise MergeTrainControllerAdoptionRejectedError(
+                    "merge train controller state belongs to a different active action"
+                )
             leased_record = current_record.model_copy(
                 update={
                     "policy_key": policy_key,
@@ -10681,8 +10700,8 @@ class PostgresRecordStore(HumanSessionStore):
                     "lease_acquired_at": observed_at,
                     "lease_expires_at": lease_expires_at,
                     "heartbeat_at": observed_at,
-                    "active_action": current_record.active_action or "controller_run_once",
-                    "active_phase": current_record.active_phase or "select_next_action",
+                    "active_action": current_record.active_action or normalized_initial_action,
+                    "active_phase": current_record.active_phase or normalized_initial_phase,
                     "reconciliation_status": "adopted" if adopting else "clean",
                     "reconciliation_detail": (
                         build_merge_train_controller_resume_detail(current_record)

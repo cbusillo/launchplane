@@ -13,6 +13,10 @@ class MergeTrainControllerLeaseHeldError(RuntimeError):
     pass
 
 
+class MergeTrainControllerAdoptionRejectedError(RuntimeError):
+    pass
+
+
 class MergeTrainControllerLeaseLostError(RuntimeError):
     pass
 

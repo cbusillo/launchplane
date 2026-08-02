@@ -95,6 +95,7 @@ from control_plane.http_routes import (
     register_protected_artifact_read_routes,
     register_runner_host_hygiene_read_routes,
     REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
+    TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE,
     TENANT_ADMISSION_STATUS_RECONCILE_ROUTE,
     TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE,
     TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
@@ -210,6 +211,7 @@ from control_plane.merge_train_batch_candidate import (
     require_merge_train_batch_candidate_record_store,
 )
 from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
     MergeTrainControllerLeaseLostError,
     MergeTrainControllerReconciliationRequiredError,
@@ -719,6 +721,7 @@ _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES = 64 * 1024
 _REPOSITORY_HUMAN_ROLE_POLICY_MAX_BODY_BYTES = 64 * 1024
 _TENANT_TECHNICAL_HUMAN_WAIVER_MAX_BODY_BYTES = 64 * 1024
+_TENANT_ADMISSION_CONTROLLER_RUN_ONCE_MAX_BODY_BYTES = 64 * 1024
 _TENANT_ADMISSION_STATUS_RECONCILE_MAX_BODY_BYTES = 64 * 1024
 _TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
@@ -785,6 +788,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE: (
         "Tenant technical human waiver",
         _TENANT_TECHNICAL_HUMAN_WAIVER_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE: (
+        "Tenant admission controller run",
+        _TENANT_ADMISSION_CONTROLLER_RUN_ONCE_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -5054,6 +5063,7 @@ def create_launchplane_fastapi_app(
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
             MergeTrainControllerReconciliationRequiredError,
+            MergeTrainControllerAdoptionRejectedError,
         ) as error:
             raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         except MergeTrainBatchCandidateRecordNotFoundError as error:
@@ -5219,6 +5229,7 @@ def create_launchplane_fastapi_app(
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
             MergeTrainControllerReconciliationRequiredError,
+            MergeTrainControllerAdoptionRejectedError,
         ) as error:
             raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         except (MergeTrainControllerRequestError, ValueError, click.ClickException) as error:
@@ -8821,6 +8832,7 @@ def create_launchplane_fastapi_app(
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
             MergeTrainControllerReconciliationRequiredError,
+            MergeTrainControllerAdoptionRejectedError,
         ) as error:
             raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         except MergeTrainStackCollapseBatchCandidateStoreMissingError as error:
@@ -9014,6 +9026,7 @@ def create_launchplane_fastapi_app(
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
             MergeTrainControllerReconciliationRequiredError,
+            MergeTrainControllerAdoptionRejectedError,
         ) as error:
             raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         except (
@@ -9204,6 +9217,7 @@ def create_launchplane_fastapi_app(
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
             MergeTrainControllerReconciliationRequiredError,
+            MergeTrainControllerAdoptionRejectedError,
         ) as error:
             raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         if controller_state_store is None:
@@ -20708,14 +20722,17 @@ def merge_train_controller_fence_http_error(
         MergeTrainControllerLeaseHeldError
         | MergeTrainControllerLeaseLostError
         | MergeTrainControllerReconciliationRequiredError
+        | MergeTrainControllerAdoptionRejectedError
     ),
 ) -> HTTPException:
     if isinstance(error, MergeTrainControllerLeaseHeldError):
         code = "merge_train_controller_lease_held"
     elif isinstance(error, MergeTrainControllerLeaseLostError):
         code = "merge_train_controller_lease_lost"
-    else:
+    elif isinstance(error, MergeTrainControllerReconciliationRequiredError):
         code = "merge_train_controller_reconciliation_required"
+    else:
+        code = "merge_train_controller_foreign_action"
     return _launchplane_http_error(
         status_code=409,
         trace_id=trace_id,

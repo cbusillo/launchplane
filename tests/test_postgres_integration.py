@@ -39,6 +39,7 @@ from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalEventRecord,
 )
 from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
     MergeTrainControllerLeaseLostError,
     MergeTrainControllerStateRecord,
@@ -3313,6 +3314,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     policy_sha256="policy-sha",
                     lease_owner="controller-a",
                     lease_seconds=30,
+                    initial_active_action="postgres_store_test",
+                    initial_active_phase="acquire",
+                    adoptable_active_actions=("postgres_store_test",),
                 )
                 with self.assertRaisesRegex(
                     MergeTrainControllerLeaseHeldError,
@@ -3325,6 +3329,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         policy_sha256="policy-sha",
                         lease_owner="controller-b",
                         lease_seconds=30,
+                        initial_active_action="postgres_store_test",
+                        initial_active_phase="acquire",
+                        adoptable_active_actions=("postgres_store_test",),
                     )
             finally:
                 second_store.close()
@@ -3342,6 +3349,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     policy_sha256="policy-sha",
                     lease_owner="controller-a",
                     lease_seconds=1,
+                    initial_active_action="postgres_store_test",
+                    initial_active_phase="acquire",
+                    adoptable_active_actions=("postgres_store_test",),
                 )
                 time.sleep(1.1)
                 renewed = second_store.acquire_merge_train_controller_state_record(
@@ -3351,6 +3361,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     policy_sha256="policy-sha",
                     lease_owner="controller-b",
                     lease_seconds=30,
+                    initial_active_action="postgres_store_test",
+                    initial_active_phase="acquire",
+                    adoptable_active_actions=("postgres_store_test",),
                 )
                 with self.assertRaisesRegex(
                     MergeTrainControllerLeaseLostError,
@@ -3391,6 +3404,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         policy_sha256="policy-sha",
                         lease_owner=owner,
                         lease_seconds=30,
+                        initial_active_action="postgres_store_test",
+                        initial_active_phase="acquire",
+                        adoptable_active_actions=("postgres_store_test",),
                     )
                 except BaseException as error:  # noqa: BLE001
                     return error
@@ -3420,6 +3436,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 policy_sha256="policy-sha",
                 lease_owner="controller-a",
                 lease_seconds=1,
+                initial_active_action="postgres_store_test",
+                initial_active_phase="acquire",
+                adoptable_active_actions=("postgres_store_test",),
             )
             checkpointed = store.compare_and_set_merge_train_controller_state_record(
                 record=first.model_copy(
@@ -3442,6 +3461,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 policy_sha256="policy-sha",
                 lease_owner="controller-b",
                 lease_seconds=30,
+                initial_active_action="postgres_store_test",
+                initial_active_phase="acquire",
+                adoptable_active_actions=("postgres_store_test", "land_batch"),
             )
 
         self.assertEqual(checkpointed.active_phase, "cleanup_candidate_ref")
@@ -3458,6 +3480,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 policy_sha256="policy-sha",
                 lease_owner="controller-a",
                 lease_seconds=30,
+                initial_active_action="postgres_store_test",
+                initial_active_phase="acquire",
+                adoptable_active_actions=("postgres_store_test",),
             )
             store.compare_and_set_merge_train_controller_state_record(
                 record=acquired.model_copy(
@@ -3485,12 +3510,69 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 policy_sha256="policy-sha",
                 lease_owner="controller-b",
                 lease_seconds=30,
+                initial_active_action="postgres_store_test",
+                initial_active_phase="acquire",
+                adoptable_active_actions=(
+                    "postgres_store_test",
+                    "execute_stack_collapse",
+                ),
             )
 
         self.assertEqual(adopted.lease_owner, "controller-b")
         self.assertEqual(adopted.reconciliation_status, "adopted")
         self.assertEqual(adopted.active_phase, "merge_stack_branches")
         self.assertIn("operator_required:github_request_rejected", adopted.reconciliation_detail)
+
+    def test_merge_train_controller_rejects_foreign_action_without_rewrite(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            acquired = store.acquire_merge_train_controller_state_record(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                policy_key="merge-train-policy",
+                policy_sha256="merge-train-policy-sha",
+                lease_owner="controller-a",
+                lease_seconds=30,
+                initial_active_action="merge_train_controller_run_once",
+                initial_active_phase="select_next_action",
+                adoptable_active_actions=("merge_train_controller_run_once",),
+            )
+            foreign_state = store.compare_and_set_merge_train_controller_state_record(
+                record=acquired.model_copy(
+                    update={
+                        "status": "reconcile_required",
+                        "lease_owner": "",
+                        "lease_acquired_at": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                        "active_action": "land_batch",
+                        "active_phase": "confirm_merge",
+                        "reconciliation_status": "required",
+                        "reconciliation_detail": "retryable:land_batch:confirm_merge",
+                    }
+                ),
+                expected_lease_owner=acquired.lease_owner,
+                expected_lease_acquired_at=acquired.lease_acquired_at,
+                lease_seconds=30,
+            )
+
+            with self.assertRaises(MergeTrainControllerAdoptionRejectedError):
+                store.acquire_merge_train_controller_state_record(
+                    repository="cbusillo/sellyouroutboard",
+                    base_branch="main",
+                    policy_key="tenant-policy",
+                    policy_sha256="tenant-policy-sha",
+                    lease_owner="controller-b",
+                    lease_seconds=30,
+                    initial_active_action="tenant_admission_merge",
+                    initial_active_phase="evaluate_candidate",
+                    adoptable_active_actions=("tenant_admission_merge",),
+                )
+            observed = store.list_merge_train_controller_state_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+            )[0]
+
+        self.assertEqual(observed, foreign_state)
 
     def test_row_lock_blocks_stale_owner_completion_until_claim_commits(self) -> None:
         with _store_for_fresh_head_database() as store:

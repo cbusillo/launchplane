@@ -39,7 +39,9 @@ Tenant merge eligibility (`evaluate_tenant_merge_eligibility`) and repository cl
 - Repository classifications explicitly categorize repositories as `engineering` (taking the normal engineering fast path) or `tenant_ui` (requiring one exact-head manager-preview, technical-human-waiver, or trusted-maintenance path).
 - Repository classifications use exact immutable identity and CAS operator recovery without heuristics or PR label fallback.
 - Unified tenant admission is recomputed from DB records. The GitHub `tenant-admission` commit status is a public projection, not merge authority.
-- Pure tenant merge evaluation is kept separate from scheduler merge train admission and does not alter queueing or batch landing semantics. A later controller slice must independently re-fetch the exact current candidate and re-evaluate admission immediately before landing instead of trusting a previously green status.
+- The tenant admission controller is a separate exact-PR landing path. It re-fetches current GitHub identity/head/mergeability facts, recomputes admission, reads the live required-status-check policy, filters admission projection contexts out of that policy, enforces strict base freshness when configured, and rechecks all three immediately before an expected-SHA merge. Missing or malformed required-check policy or evidence fails closed. It does not enqueue work or reuse scheduler ordering, labels, batch candidates, stack collapse, or failure policy.
+- The tenant controller and merge train share the repository/base controller-state row only as a mutual-exclusion and crash-reconciliation fence. Acquisition writes a controller-specific initial action atomically and adoption is action-aware, so one controller cannot rewrite another controller's unfinished recovery state even before its first checkpoint. The row cannot make a tenant admission decision and a green GitHub status is never merge authority.
+- Engineering repositories remain on their existing flow; invoking the tenant controller for an engineering classification returns not-applicable without merging.
 
 ## Controller Lease And Resume State
 

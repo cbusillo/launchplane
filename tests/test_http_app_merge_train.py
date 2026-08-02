@@ -18,6 +18,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
     execute_merge_train_stack_collapse_plan,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.merge_train_controller_run_once import MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
@@ -2173,6 +2174,58 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             "merge_train_controller_lease_held",
         )
 
+    async def test_merge_train_rejects_tenant_reconciliation_state_without_rewrite(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            tenant_state = build_merge_train_controller_state_record(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                policy_key="tenant-policy",
+                policy_sha256="tenant-policy-sha",
+                updated_at="2026-08-02T00:00:00Z",
+            ).model_copy(
+                update={
+                    "status": "reconcile_required",
+                    "active_action": "tenant_admission_merge",
+                    "active_phase": "confirm_merge",
+                    "active_record_id": "tenant-operation",
+                    "reconciliation_status": "required",
+                    "reconciliation_detail": ("retryable:tenant_admission_merge:confirm_merge"),
+                }
+            )
+            store.write_merge_train_controller_state_record(tenant_state)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_merge_train_controller_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                    "mutate": True,
+                },
+            )
+            observed = store.list_merge_train_controller_state_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+            )[0]
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "merge_train_controller_foreign_action",
+        )
+        self.assertEqual(observed, tenant_state)
+
     async def test_release_failure_does_not_mask_github_failure(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -2268,7 +2321,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(controller_state.status, "reconcile_required")
-        self.assertEqual(controller_state.active_action, "controller_run_once")
+        self.assertEqual(controller_state.active_action, MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION)
         self.assertEqual(controller_state.active_phase, "select_next_action")
         self.assertEqual(controller_state.reconciliation_status, "required")
 
@@ -2332,6 +2385,9 @@ class FastApiMergeTrainMutationFenceTests(unittest.IsolatedAsyncioTestCase):
                 policy_sha256=policy_record.policy_sha256,
                 lease_owner="controller-active",
                 lease_seconds=300,
+                initial_active_action="mutation_fence_test",
+                initial_active_phase="hold_lease",
+                adoptable_active_actions=("mutation_fence_test",),
             )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_merge_train_service_identity()),

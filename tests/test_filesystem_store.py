@@ -2427,6 +2427,9 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 policy_sha256="policy-sha",
                 lease_owner="controller-a",
                 lease_seconds=30,
+                initial_active_action="filesystem_store_test",
+                initial_active_phase="acquire",
+                adoptable_active_actions=("filesystem_store_test",),
             )
 
             listed_records = store.list_merge_train_controller_state_records(
@@ -2452,6 +2455,9 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                         policy_sha256="policy-sha",
                         lease_owner=owner,
                         lease_seconds=30,
+                        initial_active_action="filesystem_store_test",
+                        initial_active_phase="acquire",
+                        adoptable_active_actions=("filesystem_store_test",),
                     )
                 except BaseException as error:  # noqa: BLE001
                     return error
@@ -2488,6 +2494,9 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     policy_sha256="policy-sha",
                     lease_owner="controller-a",
                     lease_seconds=1,
+                    initial_active_action="filesystem_store_test",
+                    initial_active_phase="acquire",
+                    adoptable_active_actions=("filesystem_store_test",),
                 )
             with (
                 patch(
@@ -2530,6 +2539,9 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     policy_sha256="policy-sha",
                     lease_owner="controller-a",
                     lease_seconds=30,
+                    initial_active_action="filesystem_store_test",
+                    initial_active_phase="acquire",
+                    adoptable_active_actions=("filesystem_store_test",),
                 )
                 store.compare_and_set_merge_train_controller_state_record(
                     record=acquired.model_copy(
@@ -2556,6 +2568,12 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     policy_sha256="policy-sha",
                     lease_owner="controller-b",
                     lease_seconds=30,
+                    initial_active_action="filesystem_store_test",
+                    initial_active_phase="acquire",
+                    adoptable_active_actions=(
+                        "filesystem_store_test",
+                        "execute_stack_collapse",
+                    ),
                 )
 
         self.assertEqual(adopted.lease_owner, "controller-b")

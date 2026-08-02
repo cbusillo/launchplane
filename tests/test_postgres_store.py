@@ -2938,6 +2938,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     response_trace_id="trace-waiver-revoke",
                 ),
             )
+            assert revoked.event_record is not None
             with self.assertRaises(TenantTechnicalHumanWaiverRevokeCurrentError):
                 store.compare_and_write_tenant_technical_human_waiver_event(
                     identity=_tenant_technical_human_waiver_identity(),
@@ -2956,16 +2957,29 @@ class PostgresRecordStoreTests(unittest.TestCase):
                         response_trace_id="trace-waiver-revoke-stale-cas",
                     ),
                 )
-            with self.assertRaises(TenantTechnicalHumanWaiverRevokeCurrentError):
-                store.compare_and_write_tenant_technical_human_waiver_event(
-                    identity=_tenant_technical_human_waiver_identity(),
-                    envelope=revoke_envelope,
-                    mutation=_tenant_technical_human_waiver_mutation(
-                        idempotency_key="tenant-waiver-revoke-stale-event",
-                        request_fingerprint="tenant-waiver-revoke-stale-event-fingerprint",
-                        response_trace_id="trace-waiver-revoke-stale-event",
-                    ),
+            stale_revoke_timestamp = (
+                (
+                    datetime.fromisoformat(revoked.event_record.occurred_at.replace("Z", "+00:00"))
+                    + timedelta(seconds=1)
                 )
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                return_value=stale_revoke_timestamp,
+            ):
+                with self.assertRaises(TenantTechnicalHumanWaiverRevokeCurrentError):
+                    store.compare_and_write_tenant_technical_human_waiver_event(
+                        identity=_tenant_technical_human_waiver_identity(),
+                        envelope=revoke_envelope,
+                        mutation=_tenant_technical_human_waiver_mutation(
+                            idempotency_key="tenant-waiver-revoke-stale-event",
+                            request_fingerprint="tenant-waiver-revoke-stale-event-fingerprint",
+                            response_trace_id="trace-waiver-revoke-stale-event",
+                        ),
+                    )
             records = store.list_tenant_technical_human_waiver_event_records(
                 repository_id="1001",
                 product="example-product",
