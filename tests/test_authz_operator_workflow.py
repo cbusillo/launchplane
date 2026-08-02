@@ -33,6 +33,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 "primary",
                 "authz-policy-reconcile",
                 "manager-preview-approval",
+                "generic-web-preview",
                 "product-health-monitoring",
                 "odoo-route-binding",
                 "odoo-external-route-binding",
@@ -58,6 +59,10 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             "reconcile-manager-preview-approval": (
                 "${{ inputs.managed_set == 'manager-preview-approval' }}",
                 "${{ secrets.LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-generic-web-preview": (
+                "${{ inputs.managed_set == 'generic-web-preview' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_GENERIC_WEB_PREVIEW_MANAGED_SET_JSON }}",
             ),
             "reconcile-product-health-monitoring": (
                 "${{ inputs.managed_set == 'product-health-monitoring' }}",
@@ -124,6 +129,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 expected_managed_set_ids = {
                     "reconcile-authz-policy-reconcile": "operator.authz-policy-reconcile",
                     "reconcile-manager-preview-approval": "operator.manager-preview-approval",
+                    "reconcile-generic-web-preview": "operator.generic-web-preview",
                 }
                 if job_name in expected_managed_set_ids:
                     self.assertEqual(
