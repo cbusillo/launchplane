@@ -1,0 +1,532 @@
+---
+name: Reusable Generic Web Preview
+
+"on":
+  workflow_call:
+    inputs:
+      preview_label:
+        description: Pull request label that enables preview refreshes.
+        required: false
+        default: preview
+        type: string
+      image_repository:
+        description: >-
+          GHCR image repository without a tag or digest. Defaults to
+          ghcr.io/<caller-owner>/<caller-repository>.
+        required: false
+        default: ""
+        type: string
+      docker_context:
+        description: Docker build context.
+        required: false
+        default: .
+        type: string
+      dockerfile:
+        description: Dockerfile path relative to the repository root.
+        required: false
+        default: Dockerfile
+        type: string
+      docker_target:
+        description: Optional Docker build target.
+        required: false
+        default: ""
+        type: string
+      build_args:
+        description: Optional newline-delimited Docker build arguments.
+        required: false
+        default: ""
+        type: string
+      verification_command:
+        description: >-
+          Product-owned command that verifies the deployed preview. Launchplane
+          supplies LAUNCHPLANE_PREVIEW_URL and expected artifact identity env.
+        required: true
+        type: string
+      timeout-seconds:
+        description: Preview lifecycle timeout in seconds.
+        required: false
+        default: "300"
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "1800000"
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      operation:
+        description: >-
+          Resolved preview operation: refresh, destroy, or noop.
+        value: ${{ jobs.resolve.outputs.operation }}
+      image_reference:
+        description: Exact preview image digest published for refresh operations.
+        value: ${{ jobs.build.outputs.image_reference }}
+      preview_url:
+        description: Ready preview URL returned by Launchplane.
+        value: ${{ jobs.provision.outputs.preview_url }}
+      feedback_status:
+        description: Preview feedback status returned by Launchplane.
+        value: >-
+          ${{ jobs.feedback-refresh.outputs.feedback_status ||
+            jobs.feedback-cleanup.outputs.feedback_status }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    launchplane-generic-web-preview-${{ github.repository }}-${{
+      github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      anchor_pr_number: ${{ steps.request.outputs.anchor_pr_number }}
+      anchor_pr_url: ${{ steps.request.outputs.anchor_pr_url }}
+      destroy_reason: ${{ steps.request.outputs.destroy_reason }}
+      floating_image_reference: ${{ steps.request.outputs.floating_image_reference }}
+      floating_tag: ${{ steps.request.outputs.floating_tag }}
+      head_sha: ${{ steps.request.outputs.head_sha }}
+      image_repository: ${{ steps.request.outputs.image_repository }}
+      immutable_tag: ${{ steps.request.outputs.immutable_tag }}
+      operation: ${{ steps.request.outputs.operation }}
+      run_url: ${{ steps.request.outputs.run_url }}
+    steps:
+      - name: Resolve generic-web preview request
+        id: request
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          IMAGE_REPOSITORY: ${{ inputs.image_repository }}
+          PREVIEW_LABEL: ${{ inputs.preview_label }}
+          RUN_URL: >-
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{
+              github.run_id }}
+          VERIFICATION_COMMAND: ${{ inputs.verification_command }}
+        with:
+          script: |
+            if (context.eventName !== 'pull_request') {
+              throw new Error('reusable-generic-web-preview must run from pull_request.');
+            }
+
+            const pullRequest = context.payload.pull_request;
+            if (!pullRequest) {
+              throw new Error('pull_request payload is required.');
+            }
+
+            const previewLabel = String(process.env.PREVIEW_LABEL || 'preview')
+              .trim()
+              .toLowerCase();
+            if (!previewLabel) {
+              throw new Error('preview_label must not be empty.');
+            }
+
+            const repository = String(context.payload.repository?.full_name || '')
+              .trim()
+              .toLowerCase();
+            const headRepository = String(pullRequest.head.repo?.full_name || '')
+              .trim()
+              .toLowerCase();
+            const author = String(pullRequest.user?.login || '').trim().toLowerCase();
+            const sameRepository = Boolean(repository) && repository === headRepository;
+            const trustedPreview = sameRepository && author !== 'dependabot[bot]';
+            const action = String(context.payload.action || '').trim().toLowerCase();
+            const changedLabel = String(context.payload.label?.name || '')
+              .trim()
+              .toLowerCase();
+            const labels = (pullRequest.labels || []).map((label) =>
+              String(typeof label === 'string' ? label : label?.name || '')
+                .trim()
+                .toLowerCase(),
+            );
+            const previewRequested = labels.includes(previewLabel);
+
+            let operation = 'noop';
+            let destroyReason = '';
+            if (trustedPreview && action === 'closed') {
+              operation = 'destroy';
+              destroyReason = 'pr_closed';
+            } else if (
+              trustedPreview &&
+              action === 'unlabeled' &&
+              changedLabel === previewLabel
+            ) {
+              operation = 'destroy';
+              destroyReason = 'preview_label_removed';
+            } else if (
+              trustedPreview &&
+              ((['opened', 'reopened', 'synchronize', 'edited'].includes(action) &&
+                previewRequested) ||
+                (action === 'labeled' && changedLabel === previewLabel))
+            ) {
+              operation = 'refresh';
+            }
+
+            const anchorPrNumber = Number(pullRequest.number);
+            if (!Number.isInteger(anchorPrNumber) || anchorPrNumber < 1) {
+              throw new Error('pull request number must be a positive integer.');
+            }
+            const headSha = String(pullRequest.head.sha || '').trim().toLowerCase();
+            if (!/^[0-9a-f]{40}$/.test(headSha)) {
+              throw new Error('pull request head SHA must be a full hexadecimal commit SHA.');
+            }
+
+            let imageRepository = String(process.env.IMAGE_REPOSITORY || '')
+              .trim()
+              .toLowerCase();
+            if (!imageRepository) {
+              imageRepository = `ghcr.io/${repository}`;
+            }
+            if (
+              !/^ghcr\.io\/[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)+$/.test(
+                imageRepository,
+              )
+            ) {
+              throw new Error(
+                'image_repository must be an untagged lowercase GHCR repository.',
+              );
+            }
+            if (operation === 'refresh' && !String(process.env.VERIFICATION_COMMAND || '').trim()) {
+              throw new Error('verification_command is required for preview refresh.');
+            }
+
+            const immutableTag = `pr-${anchorPrNumber}-sha-${headSha}`;
+            const floatingTag = `pr-${anchorPrNumber}`;
+            core.setOutput('anchor_pr_number', String(anchorPrNumber));
+            core.setOutput('anchor_pr_url', String(pullRequest.html_url || ''));
+            core.setOutput('destroy_reason', destroyReason);
+            core.setOutput(
+              'floating_image_reference',
+              `${imageRepository}:${floatingTag}`,
+            );
+            core.setOutput('floating_tag', floatingTag);
+            core.setOutput('head_sha', headSha);
+            core.setOutput('image_repository', imageRepository);
+            core.setOutput('immutable_tag', immutableTag);
+            core.setOutput('operation', operation);
+            core.setOutput('run_url', process.env.RUN_URL);
+
+  build:
+    if: ${{ needs.resolve.outputs.operation == 'refresh' }}
+    needs: resolve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_reference: ${{ steps.image.outputs.image_reference }}
+    steps:
+      - name: Check out exact preview source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.head_sha }}
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build and publish exact preview image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ inputs.docker_context }}
+          file: ${{ inputs.dockerfile }}
+          target: ${{ inputs.docker_target }}
+          push: true
+          tags: |
+            ${{ needs.resolve.outputs.image_repository }}:${{ needs.resolve.outputs.immutable_tag }}
+            ${{ needs.resolve.outputs.floating_image_reference }}
+          build-args: |
+            ${{ inputs.build_args }}
+            LAUNCHPLANE_BUILD_TAG=${{ needs.resolve.outputs.immutable_tag }}
+            LAUNCHPLANE_BUILD_REVISION=${{ needs.resolve.outputs.head_sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.head_sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Resolve exact preview image reference
+        id: image
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_REPOSITORY: ${{ needs.resolve.outputs.image_repository }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "docker/build-push-action did not return an exact image digest." >&2
+            exit 1
+          fi
+          echo "image_reference=${IMAGE_REPOSITORY}@${IMAGE_DIGEST}" >>"$GITHUB_OUTPUT"
+
+  provision:
+    if: ${{ needs.resolve.outputs.operation == 'refresh' }}
+    needs:
+      - resolve
+      - build
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-generic-web-preview-lifecycle.yml
+    with:
+      operation: refresh
+      anchor_pr_number: ${{ needs.resolve.outputs.anchor_pr_number }}
+      anchor_pr_url: ${{ needs.resolve.outputs.anchor_pr_url }}
+      anchor_head_sha: ${{ needs.resolve.outputs.head_sha }}
+      image_reference: ${{ needs.build.outputs.image_reference }}
+      timeout-seconds: ${{ inputs['timeout-seconds'] }}
+      timeout-ms: ${{ inputs['timeout-ms'] }}
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
+
+  destroy:
+    if: ${{ needs.resolve.outputs.operation == 'destroy' }}
+    needs: resolve
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-generic-web-preview-lifecycle.yml
+    with:
+      operation: destroy
+      anchor_pr_number: ${{ needs.resolve.outputs.anchor_pr_number }}
+      anchor_pr_url: ${{ needs.resolve.outputs.anchor_pr_url }}
+      anchor_head_sha: ${{ needs.resolve.outputs.head_sha }}
+      destroy_reason: ${{ needs.resolve.outputs.destroy_reason }}
+      timeout-seconds: ${{ inputs['timeout-seconds'] }}
+      timeout-ms: ${{ inputs['timeout-ms'] }}
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
+
+  verify:
+    if: ${{ needs.provision.result == 'success' }}
+    needs:
+      - resolve
+      - build
+      - provision
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      checked_urls: ${{ steps.verify.outputs.checked_urls }}
+      exit_code: ${{ steps.verify.outputs.exit_code }}
+      failure_summary: ${{ steps.verify.outputs.failure_summary }}
+      verified_at: ${{ steps.verify.outputs.verified_at }}
+    steps:
+      - name: Check out exact preview source without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.head_sha }}
+          persist-credentials: false
+
+      - name: Run product-owned preview verification
+        id: verify
+        env:
+          LAUNCHPLANE_EXPECTED_ARTIFACT_ID: ${{ needs.build.outputs.image_reference }}
+          LAUNCHPLANE_EXPECTED_BUILD_REVISION: ${{ needs.resolve.outputs.head_sha }}
+          LAUNCHPLANE_EXPECTED_BUILD_TAG: ${{ needs.resolve.outputs.immutable_tag }}
+          LAUNCHPLANE_PREVIEW_URL: ${{ needs.provision.outputs.preview_url }}
+          LAUNCHPLANE_RUN_URL: ${{ needs.resolve.outputs.run_url }}
+          VERIFICATION_COMMAND: ${{ inputs.verification_command }}
+        run: |
+          set -euo pipefail
+          set +e
+          bash -lc "$VERIFICATION_COMMAND"
+          exit_code="$?"
+          set -e
+          verified_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          checked_urls="$(node -e \
+            'process.stdout.write(JSON.stringify([process.argv[1]]))' \
+            "$LAUNCHPLANE_PREVIEW_URL")"
+          failure_summary=''
+          if [ "$exit_code" -ne 0 ]; then
+            failure_summary="Product preview verification command failed with exit code ${exit_code}."
+          fi
+          {
+            echo "checked_urls=$checked_urls"
+            echo "exit_code=$exit_code"
+            echo "failure_summary=$failure_summary"
+            echo "verified_at=$verified_at"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Fail when product preview verification failed
+        if: ${{ steps.verify.outputs.exit_code != '0' }}
+        env:
+          FAILURE_SUMMARY: ${{ steps.verify.outputs.failure_summary }}
+        run: |
+          echo "$FAILURE_SUMMARY" >&2
+          exit 1
+
+  record-verification-pass:
+    if: ${{ needs.verify.result == 'success' }}
+    needs:
+      - resolve
+      - provision
+      - verify
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-generic-web-preview-verification.yml
+    with:
+      anchor_pr_number: ${{ needs.resolve.outputs.anchor_pr_number }}
+      verification_status: pass
+      verified_at: ${{ needs.verify.outputs.verified_at }}
+      checked_urls: ${{ needs.verify.outputs.checked_urls }}
+      timeout-ms: ${{ inputs['timeout-ms'] }}
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
+
+  record-verification-fail:
+    if: ${{ always() && needs.provision.result == 'success' && needs.verify.result == 'failure' }}
+    needs:
+      - resolve
+      - provision
+      - verify
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-generic-web-preview-verification.yml
+    with:
+      anchor_pr_number: ${{ needs.resolve.outputs.anchor_pr_number }}
+      verification_status: fail
+      verified_at: ${{ needs.verify.outputs.verified_at }}
+      checked_urls: ${{ needs.verify.outputs.checked_urls }}
+      failure_summary: ${{ needs.verify.outputs.failure_summary }}
+      timeout-ms: ${{ inputs['timeout-ms'] }}
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
+
+  verification-outcome:
+    if: ${{ always() && needs.resolve.outputs.operation == 'refresh' }}
+    needs:
+      - resolve
+      - provision
+      - verify
+      - record-verification-pass
+      - record-verification-fail
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      failure_summary: ${{ steps.outcome.outputs.failure_summary }}
+      result: ${{ steps.outcome.outputs.result }}
+    steps:
+      - name: Resolve verification evidence outcome
+        id: outcome
+        env:
+          FAILURE_SUMMARY: ${{ needs.verify.outputs.failure_summary }}
+          PROVISION_RESULT: ${{ needs.provision.result }}
+          RECORD_FAIL_RESULT: ${{ needs.record-verification-fail.result }}
+          RECORD_PASS_RESULT: ${{ needs.record-verification-pass.result }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          set -euo pipefail
+          result=skipped
+          failure_summary=''
+          if [ "$PROVISION_RESULT" = success ]; then
+            case "$VERIFY_RESULT" in
+              success)
+                if [ "$RECORD_PASS_RESULT" = success ]; then
+                  result=success
+                else
+                  result=failure
+                  failure_summary='Launchplane preview verification evidence write failed.'
+                fi
+                ;;
+              failure)
+                result=failure
+                failure_summary="${FAILURE_SUMMARY:-Product preview verification failed.}"
+                if [ "$RECORD_FAIL_RESULT" != success ]; then
+                  failure_summary="${failure_summary} Launchplane failed to record the failure evidence."
+                fi
+                ;;
+              cancelled)
+                result=cancelled
+                failure_summary='Product preview verification was cancelled.'
+                ;;
+              *)
+                result=skipped
+                failure_summary='Product preview verification did not run.'
+                ;;
+            esac
+          fi
+          {
+            echo "failure_summary=$failure_summary"
+            echo "result=$result"
+          } >>"$GITHUB_OUTPUT"
+
+  feedback-refresh:
+    if: ${{ always() && needs.resolve.outputs.operation == 'refresh' }}
+    needs:
+      - resolve
+      - build
+      - provision
+      - verify
+      - record-verification-pass
+      - record-verification-fail
+      - verification-outcome
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-preview-feedback-status.yml
+    with:
+      mode: refresh
+      anchor_pr_number: ${{ needs.resolve.outputs.anchor_pr_number }}
+      anchor_pr_url: ${{ needs.resolve.outputs.anchor_pr_url }}
+      publish_result: ${{ needs.build.result }}
+      provision_result: ${{ needs.provision.result }}
+      verification_result: ${{ needs.verification-outcome.outputs.result }}
+      provision_failure_summary: >-
+        ${{ needs.provision.outputs.error_message ||
+          'Launchplane preview lifecycle failed; see workflow run logs.' }}
+      verification_failure_summary: >-
+        ${{ needs.verification-outcome.outputs.failure_summary }}
+      preview_url: ${{ needs.provision.outputs.preview_url }}
+      immutable_image_reference: ${{ needs.build.outputs.image_reference }}
+      refresh_image_reference: ${{ needs.resolve.outputs.floating_image_reference }}
+      revision: ${{ needs.resolve.outputs.head_sha }}
+      run_url: ${{ needs.resolve.outputs.run_url }}
+      timeout-ms: ${{ inputs['timeout-ms'] }}
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
+
+  feedback-cleanup:
+    if: ${{ always() && needs.resolve.outputs.operation == 'destroy' }}
+    needs:
+      - resolve
+      - destroy
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-preview-feedback-status.yml
+    with:
+      mode: cleanup
+      anchor_pr_number: ${{ needs.resolve.outputs.anchor_pr_number }}
+      anchor_pr_url: ${{ needs.resolve.outputs.anchor_pr_url }}
+      cleanup_result: ${{ needs.destroy.result }}
+      cleanup_failure_summary: >-
+        ${{ needs.destroy.outputs.error_message ||
+          'Launchplane preview cleanup failed; see workflow run logs.' }}
+      revision: ${{ needs.resolve.outputs.head_sha }}
+      run_url: ${{ needs.resolve.outputs.run_url }}
+      timeout-ms: ${{ inputs['timeout-ms'] }}
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}

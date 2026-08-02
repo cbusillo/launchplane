@@ -168,9 +168,19 @@ The Launchplane trigger steps should use GitHub Actions OIDC and pass minimal
 facts only: product key, source ref or SHA, PR number when relevant, immutable
 artifact reference, and optional run URL.
 
+For a conventional generic-web product, use the thin preview facade documented
+in [product-repo-contract.md](product-repo-contract.md). One same-repository
+`pull_request` caller delegates image publication, preview refresh or destroy,
+product-owned verification, evidence, and feedback to
+`reusable-generic-web-preview.yml`. A second `pull_request_target` caller uses
+`reusable-preview-request-notice.yml` only for fork and Dependabot notices. Pin
+both reusable workflows to full reviewed Launchplane commit SHAs. Do not grant
+OIDC to product build or verification jobs; the reusable workflows scope OIDC
+to Launchplane requests that do not check out untrusted code.
+
 When a product workflow needs to turn local publish/provision/verification or
 cleanup job results into preview feedback status, call
-`cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@main`.
+`cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@<launchplane-sha>`.
 Keep product-owned smoke facts local, pass primitive job results and failure
 summaries to the reusable workflow, and let Launchplane derive the final
 `status` and `failure_summary` before it calls `reusable-preview-pr-feedback`.
@@ -186,7 +196,7 @@ that request-shaping layer too.
 If a product-owned smoke test creates dynamic users and needs Launchplane to
 grant, promote, or clean them up during the same browser run, install the
 Launchplane-owned smoke maintenance client with
-`cbusillo/launchplane/.github/actions/setup-smoke-maintenance-client@main` and
+`cbusillo/launchplane/.github/actions/setup-smoke-maintenance-client@<launchplane-sha>` and
 import the generated client from the smoke script. The workflow job must grant
 `id-token: write` for the client to authenticate to Launchplane. Do not copy
 Launchplane OIDC, route, payload, driver intent, idempotency, or retry helpers

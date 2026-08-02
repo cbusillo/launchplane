@@ -457,6 +457,67 @@ stable deploy workflow derives
 the product key from the caller repository name by default and uses the
 `testing` stable lane unless the caller supplies a narrower operator override.
 
+For ordinary same-repository pull requests, prefer the preview facade instead
+of composing image publication, preview lifecycle, product verification, and
+feedback jobs in the product repo:
+
+```yaml
+name: Launchplane Preview
+
+"on":
+  pull_request:
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview.yml@<launchplane-sha>
+    with:
+      verification_command: >-
+        curl --fail --silent --show-error
+        "${LAUNCHPLANE_PREVIEW_URL}/healthz"
+```
+
+The facade derives the product key and default GHCR image repository from the
+caller repository. It publishes an exact digest, invokes the typed generic-web
+preview lifecycle, runs the product-owned verification command in a job without
+OIDC, records verification evidence, and delegates feedback status to the
+existing Launchplane workflow. The caller may override code-adjacent build facts
+such as Dockerfile path, build target, build arguments, or image repository; it
+must not pass provider targets, domains, lane topology, secret values, or
+Launchplane record IDs.
+
+Fork and Dependabot notices stay in a separate trusted workflow so
+`pull_request_target` never reaches an untrusted checkout or preview refresh:
+
+```yaml
+name: Launchplane Preview Notice
+
+"on":
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  notice:
+    permissions:
+      contents: read
+      id-token: write
+    uses: cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@<launchplane-sha>
+```
+
+Both callers must pin the full reviewed Launchplane commit SHA. Production
+promotion, rollback, and other high-risk operations remain separate explicit
+workflows and are not part of the preview facade.
+
 Stable deploy uses:
 
 ```yaml

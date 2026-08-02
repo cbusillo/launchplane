@@ -312,6 +312,117 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("payload", workflow_inputs)
         self.assertNotIn("route-path", workflow_inputs)
 
+    def test_reusable_generic_web_preview_facade_keeps_repo_contract_thin(self) -> None:
+        workflow_path = REPO_ROOT / ".github/workflows/reusable-generic-web-preview.yml"
+        workflow = load_workflow(workflow_path)
+        workflow_inputs = workflow_call_inputs(workflow)
+
+        self.assertEqual(
+            workflow_inputs,
+            {
+                "build_args",
+                "docker_context",
+                "docker_target",
+                "dockerfile",
+                "image_repository",
+                "launchplane_audience",
+                "launchplane_url",
+                "preview_label",
+                "timeout-ms",
+                "timeout-seconds",
+                "verification_command",
+            },
+        )
+        self.assertNotIn("product", workflow_inputs)
+        self.assertNotIn("context", workflow_inputs)
+        self.assertNotIn("health_path", workflow_inputs)
+        self.assertNotIn("port", workflow_inputs)
+        self.assertNotIn("target_id", workflow_inputs)
+        self.assertNotIn("domain", workflow_inputs)
+        self.assertNotIn("skip_teardown", workflow_inputs)
+
+    def test_reusable_generic_web_preview_facade_isolates_untrusted_jobs(self) -> None:
+        workflow = load_workflow(REPO_ROOT / ".github/workflows/reusable-generic-web-preview.yml")
+
+        self.assertEqual(workflow.permissions, {"contents": "read"})
+        self.assertEqual(workflow.job_permissions("resolve"), {"contents": "read"})
+        self.assertEqual(
+            workflow.job_permissions("build"),
+            {"contents": "read", "packages": "write"},
+        )
+        self.assertEqual(workflow.job_permissions("verify"), {"contents": "read"})
+        self.assertEqual(workflow.job_permissions("verification-outcome"), {"contents": "read"})
+        for job_id in (
+            "provision",
+            "destroy",
+            "record-verification-pass",
+            "record-verification-fail",
+            "feedback-refresh",
+            "feedback-cleanup",
+        ):
+            self.assertEqual(
+                workflow.job_permissions(job_id),
+                {"contents": "read", "id-token": "write"},
+                job_id,
+            )
+
+        for job_id in ("build", "verify"):
+            checkout = workflow.step_named(
+                job_id,
+                next(
+                    step.name
+                    for step in workflow.steps(job_id)
+                    if step.uses.startswith("actions/checkout@")
+                ),
+            )
+            self.assertIsNotNone(checkout)
+            assert checkout is not None
+            self.assertEqual(checkout.with_values.get("persist-credentials"), False)
+
+    def test_reusable_generic_web_preview_facade_composes_typed_stages(self) -> None:
+        workflow_path = REPO_ROOT / ".github/workflows/reusable-generic-web-preview.yml"
+        workflow = load_workflow(workflow_path)
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+
+        self.assertEqual(
+            workflow.job_uses("provision"),
+            "./.github/workflows/reusable-generic-web-preview-lifecycle.yml",
+        )
+        self.assertEqual(
+            workflow.job_uses("destroy"),
+            "./.github/workflows/reusable-generic-web-preview-lifecycle.yml",
+        )
+        for job_id in ("record-verification-pass", "record-verification-fail"):
+            self.assertEqual(
+                workflow.job_uses(job_id),
+                "./.github/workflows/reusable-generic-web-preview-verification.yml",
+            )
+        for job_id in ("feedback-refresh", "feedback-cleanup"):
+            self.assertEqual(
+                workflow.job_uses(job_id),
+                "./.github/workflows/reusable-preview-feedback-status.yml",
+            )
+
+        resolver = workflow.step_named("resolve", "Resolve generic-web preview request")
+        self.assertIsNotNone(resolver)
+        assert resolver is not None
+        resolver_script = cast(str, resolver.with_values["script"])
+        self.assertIn("context.eventName !== 'pull_request'", resolver_script)
+        self.assertIn("repository === headRepository", resolver_script)
+        self.assertIn("author !== 'dependabot[bot]'", resolver_script)
+        self.assertIn("action === 'closed'", resolver_script)
+        self.assertIn("action === 'unlabeled'", resolver_script)
+        self.assertNotIn("pull_request_target", workflow_text)
+        self.assertIn("image_reference=${IMAGE_REPOSITORY}@${IMAGE_DIGEST}", workflow_text)
+        self.assertLess(
+            workflow_text.index("${{ inputs.build_args }}"),
+            workflow_text.index("LAUNCHPLANE_BUILD_REVISION="),
+        )
+        self.assertIn("preview lifecycle failed; see workflow run logs", workflow_text)
+        self.assertIn("preview cleanup failed; see workflow run logs", workflow_text)
+        self.assertIn("mode: refresh", workflow_text)
+        self.assertIn("mode: cleanup", workflow_text)
+
     def test_generic_web_preview_requests_accept_anchor_pr_number_without_slug(
         self,
     ) -> None:
