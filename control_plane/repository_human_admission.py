@@ -664,11 +664,11 @@ def build_tenant_technical_human_waiver_apply_result(
         recorded_at=normalized_observed_at,
         expires_at=envelope.expires_at,
     )
-    append_plan = plan_tenant_technical_human_waiver_event_append(
-        records=events,
-        record=captured.record,
-    )
     if envelope.action == "created":
+        append_plan = plan_tenant_technical_human_waiver_event_append(
+            records=events,
+            record=captured.record,
+        )
         if append_plan.status == "replayed":
             _require_replayed_create_current(
                 path_result=current_path,
@@ -686,6 +686,10 @@ def build_tenant_technical_human_waiver_apply_result(
         _require_expected_current_waiver(
             path_result=current_path,
             expected_current=envelope.expected_current,
+        )
+        append_plan = plan_tenant_technical_human_waiver_event_append(
+            records=events,
+            record=captured.record,
         )
     all_events = (
         tuple(events) if append_plan.status == "replayed" else tuple(events) + (captured.record,)
