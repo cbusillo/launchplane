@@ -11,6 +11,7 @@ import click
 
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -132,6 +133,9 @@ def _module_update_evidence() -> dict[str, str]:
         "odoo_module_update_completed": "true",
         "odoo_module_update_image_match": "true",
         "odoo_module_update_modules_configured": "true",
+        "website_bootstrap_applied": "true",
+        "website_bootstrap_domain_matches_canonical": "true",
+        "website_bootstrap_web_base_url_matches": "true",
     }
 
 
@@ -1734,6 +1738,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                     manifest=manifest,
                     environment_values={
                         **_environment_values(),
+                        dokploy_post_deploy.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "payload",
+                        dokploy_post_deploy.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true",
                         "ODOO_ADDONS_PATH": (
                             "/opt/project/addons,/opt/launchplane/addons,/odoo/addons"
                         ),
@@ -1792,6 +1798,13 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         wait_deploy.assert_called_once()
         module_update.assert_called_once()
+        self.assertEqual(
+            module_update.call_args.kwargs["workflow_environment_overrides"],
+            {
+                dokploy_post_deploy.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "payload",
+                dokploy_post_deploy.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true",
+            },
+        )
         self.assertEqual(result.module_install_update_status, "pass")
         self.assertEqual(result.module_install_update_evidence, _module_update_evidence())
         self.assertIn("module_install_update", [step.name for step in result.steps])

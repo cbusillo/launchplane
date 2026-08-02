@@ -1628,6 +1628,11 @@ def _execute_refresh(
                     timeout_seconds=request.timeout_seconds,
                 )
         module_install_update_status = "fail"
+        runtime_override_environment = {
+            key: request.environment_values[key]
+            for key in dokploy_post_deploy.ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS
+            if request.environment_values.get(key, "").strip()
+        }
         module_install_update_evidence = dokploy_post_deploy.run_compose_post_deploy_update(
             host=host,
             token=token,
@@ -1639,12 +1644,23 @@ def _execute_refresh(
                 deploy_timeout_seconds=request.timeout_seconds,
             ),
             env_file=None,
+            workflow_environment_overrides=runtime_override_environment,
             before_provider_mutation=checkpoint_provider_effect,
             deployment_title=provider_operation_title,
         )
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             module_install_update_evidence
         )
+        if (
+            runtime_override_environment.get(
+                dokploy_post_deploy.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+                "",
+            ).lower()
+            == "true"
+        ):
+            dokploy_post_deploy.require_odoo_website_bootstrap_readback_evidence(
+                module_install_update_evidence
+            )
         module_install_update_status = "pass"
         steps.append(_step("module_install_update", compose_id))
         if request.smoke_check:

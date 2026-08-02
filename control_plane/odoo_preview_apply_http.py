@@ -8,6 +8,7 @@ import re
 import click
 from pydantic import Field, model_validator
 
+from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_dependency_provenance import (
     normalize_artifact_git_commit,
@@ -351,6 +352,7 @@ def execute_odoo_preview_apply_result(
         raise ValueError("Odoo preview apply repository does not match product profile.")
     resolved_environment_values = _odoo_preview_service_environment_values(
         control_plane_root_path=control_plane_root_path,
+        record_store=record_store,
         profile=profile,
         apply_request=current_request.apply,
         database_url=database_url,
@@ -888,6 +890,7 @@ def driver_result_contains_status(
 def _odoo_preview_service_environment_values(
     *,
     control_plane_root_path: Path,
+    record_store: object,
     profile: LaunchplaneProductProfileRecord,
     apply_request: OdooPreviewDokployApplyRequest,
     database_url: str | None,
@@ -904,6 +907,21 @@ def _odoo_preview_service_environment_values(
         database_url=database_url,
     )
     environment_values.update(preview_profile.override_env)
+    try:
+        template_override_record = cast(Any, record_store).read_odoo_instance_override_record(
+            context_name=preview_profile.context,
+            instance_name=template_instance,
+        )
+    except FileNotFoundError:
+        template_override_record = None
+    preview_bootstrap_environment = (
+        control_plane_odoo_instance_overrides.build_preview_website_bootstrap_environment(
+            template_override_record,
+            preview_url=plan.preview_url,
+        )
+    )
+    if preview_bootstrap_environment is not None:
+        environment_values.update(preview_bootstrap_environment.inline_environment)
     environment_values["ODOO_PROJECT_NAME"] = plan.compose_name
     environment_values["ODOO_STACK_NAME"] = plan.compose_name
     environment_values["ODOO_DB_NAME"] = _odoo_preview_identifier(plan.compose_name, suffix="db")
