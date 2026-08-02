@@ -422,16 +422,6 @@ policy-admin worker rules for the standalone authz wrapper and must declare the
 `LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` owns the generic
 GitHub-human manager preview approval writer set and must declare the exact
 `operator.manager-preview-approval` managed-set identity;
-`LAUNCHPLANE_AUTHZ_GENERIC_WEB_PREVIEW_MANAGED_SET_JSON` owns generic-web
-product preview caller grants and must declare the exact
-`operator.generic-web-preview` managed-set identity. Keep product repositories,
-numeric repository identities, caller workflow refs, immutable Launchplane
-worker refs, products, contexts, events, and actions inside that protected
-desired set rather than adding product-specific wrapper jobs;
-relative nested reusable-workflow calls resolve at the caller's immutable
-Launchplane commit, so rotate lifecycle, verification, notice, and feedback
-worker rules through the reviewed overlap procedure before repinning product
-callers;
 `LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON` owns the generic
 Product Health Monitoring wrapper's exact immutable worker grant;
 `LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
