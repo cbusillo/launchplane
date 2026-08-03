@@ -214,6 +214,40 @@ jobs:
       refresh_status: ${{ steps.lp.outputs.refresh_status }}
     runs-on: ubuntu-latest
     steps:
+      - name: Print Launchplane OIDC identity
+        env:
+          OIDC_AUDIENCE: >-
+            ${{ inputs.launchplane_audience || vars.LAUNCHPLANE_PUBLIC_URL }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const endpoint = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
+          endpoint.searchParams.set('audience', process.env.OIDC_AUDIENCE);
+          const response = await fetch(endpoint, {
+            headers: {
+              Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}`,
+            },
+          });
+          if (!response.ok) {
+            throw new Error(`OIDC token request failed with HTTP ${response.status}.`);
+          }
+          const token = (await response.json()).value;
+          const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+          const selectedClaims = Object.fromEntries(
+            [
+              'aud',
+              'event_name',
+              'ref',
+              'repository',
+              'repository_id',
+              'repository_owner_id',
+              'workflow_ref',
+              'job_workflow_ref',
+            ].map((name) => [name, claims[name] || '']),
+          );
+          console.log(JSON.stringify(selectedClaims));
+          NODE
+
       - name: Request Launchplane generic-web preview refresh
         id: lp
         uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
