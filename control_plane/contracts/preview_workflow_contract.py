@@ -108,6 +108,30 @@ def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWor
         )
 
     if event.event_name == "pull_request_target":
+        if execution_trust == "same_repo" and event.action == "closed":
+            return PreviewWorkflowDecision(
+                operation="destroy",
+                reason="pull_request_closed",
+                execution_trust=execution_trust,
+                label_enabled=label_enabled,
+                launchplane_route_path="/v1/drivers/generic-web/preview-destroy",
+                feedback_status="destroyed",
+                launchplane_feedback_required=True,
+            )
+        if (
+            execution_trust == "same_repo"
+            and event.action == "unlabeled"
+            and event.action_label == event.preview_label
+        ):
+            return PreviewWorkflowDecision(
+                operation="destroy",
+                reason="preview_label_removed",
+                execution_trust=execution_trust,
+                label_enabled=False,
+                launchplane_route_path="/v1/drivers/generic-web/preview-destroy",
+                feedback_status="destroyed",
+                launchplane_feedback_required=True,
+            )
         if _needs_unsupported_notice(event=event, label_enabled=label_enabled):
             return PreviewWorkflowDecision(
                 operation="unsupported_notice",
@@ -120,7 +144,7 @@ def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWor
             )
         return PreviewWorkflowDecision(
             operation="ignore",
-            reason="pull_request_target_is_only_for_unsupported_notices",
+            reason="pull_request_target_does_not_change_preview",
             execution_trust=execution_trust,
             label_enabled=label_enabled,
         )
@@ -135,24 +159,18 @@ def decide_preview_workflow_operation(event: PreviewWorkflowEvent) -> PreviewWor
 
     if event.action == "closed":
         return PreviewWorkflowDecision(
-            operation="destroy",
-            reason="pull_request_closed",
+            operation="ignore",
+            reason="pull_request_cleanup_runs_on_target",
             execution_trust=execution_trust,
             label_enabled=label_enabled,
-            launchplane_route_path="/v1/drivers/generic-web/preview-destroy",
-            feedback_status="destroyed",
-            launchplane_feedback_required=True,
         )
 
     if event.action == "unlabeled" and event.action_label == event.preview_label:
         return PreviewWorkflowDecision(
-            operation="destroy",
-            reason="preview_label_removed",
+            operation="ignore",
+            reason="pull_request_cleanup_runs_on_target",
             execution_trust=execution_trust,
             label_enabled=False,
-            launchplane_route_path="/v1/drivers/generic-web/preview-destroy",
-            feedback_status="destroyed",
-            launchplane_feedback_required=True,
         )
 
     if not label_enabled:

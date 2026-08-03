@@ -170,13 +170,14 @@ artifact reference, and optional run URL.
 
 For a conventional generic-web product, use the thin preview facade documented
 in [product-repo-contract.md](product-repo-contract.md). One same-repository
-`pull_request` caller delegates image publication, preview refresh or destroy,
+`pull_request` caller delegates image publication, preview refresh,
 product-owned verification, evidence, and feedback to
 `reusable-generic-web-preview.yml`. A second `pull_request_target` caller uses
-`reusable-preview-request-notice.yml` only for fork and Dependabot notices. Pin
-both reusable workflows to full reviewed Launchplane commit SHAs. Do not grant
-OIDC to product build or verification jobs; the reusable workflows scope OIDC
-to Launchplane requests that do not check out untrusted code.
+`reusable-preview-request-notice.yml` for trusted same-repository cleanup and
+fork/Dependabot notices. Pin both reusable workflows to full reviewed
+Launchplane commit SHAs. Do not grant OIDC to product build or verification
+jobs; the reusable workflows scope OIDC to Launchplane requests that do not
+check out untrusted code.
 
 When a product workflow needs to turn local publish/provision/verification or
 cleanup job results into preview feedback status, call

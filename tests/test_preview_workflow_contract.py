@@ -60,9 +60,14 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertTrue(decision.product_build_required)
         self.assertTrue(decision.launchplane_feedback_required)
 
-    def test_same_repo_preview_label_removal_destroys_preview(self) -> None:
+    def test_same_repo_preview_label_removal_uses_trusted_cleanup(self) -> None:
         decision = decide_preview_workflow_operation(
-            _event(action="unlabeled", action_label="preview", label_names=("bug",))
+            _event(
+                event_name="pull_request_target",
+                action="unlabeled",
+                action_label="preview",
+                label_names=("bug",),
+            )
         )
 
         self.assertEqual(decision.operation, "destroy")
@@ -93,11 +98,28 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertFalse(decision.checkout_untrusted_head)
         self.assertFalse(decision.product_build_required)
 
-    def test_pull_request_target_same_repo_is_ignored(self) -> None:
+    def test_pull_request_target_same_repo_closed_destroys_preview(self) -> None:
+        decision = decide_preview_workflow_operation(
+            _event(event_name="pull_request_target", action="closed")
+        )
+
+        self.assertEqual(decision.operation, "destroy")
+        self.assertEqual(decision.reason, "pull_request_closed")
+        self.assertEqual(decision.feedback_status, "destroyed")
+
+    def test_pull_request_target_same_repo_refresh_is_ignored(self) -> None:
         decision = decide_preview_workflow_operation(_event(event_name="pull_request_target"))
 
         self.assertEqual(decision.operation, "ignore")
-        self.assertEqual(decision.reason, "pull_request_target_is_only_for_unsupported_notices")
+        self.assertEqual(decision.reason, "pull_request_target_does_not_change_preview")
+
+    def test_pull_request_cleanup_is_ignored(self) -> None:
+        decision = decide_preview_workflow_operation(
+            _event(action="unlabeled", action_label="preview", label_names=("bug",))
+        )
+
+        self.assertEqual(decision.operation, "ignore")
+        self.assertEqual(decision.reason, "pull_request_cleanup_runs_on_target")
 
     def test_dependabot_pull_request_event_fails_closed(self) -> None:
         with self.assertRaises(ValidationError):
@@ -209,10 +231,6 @@ class PreviewWorkflowContractTests(unittest.TestCase):
             "uses: ./.github/workflows/reusable-preview-pr-feedback.yml",
             workflow,
         )
-        self.assertIn("status: ${{ needs.resolve.outputs.status }}", workflow)
-        self.assertIn("failure_summary: ${{ needs.resolve.outputs.failure_summary }}", workflow)
-        self.assertIn("timeout-ms: ${{ inputs['timeout-ms'] }}", workflow)
-        self.assertNotIn("timeout-ms: ${{ inputs.timeout-ms }}", workflow)
 
         self.assertNotIn("marker", workflow_inputs)
         self.assertNotIn("idempotency-key", workflow_inputs)
@@ -237,7 +255,19 @@ class PreviewWorkflowContractTests(unittest.TestCase):
             "uses: ./.github/workflows/reusable-preview-pr-feedback.yml",
             workflow,
         )
+        self.assertEqual(
+            parsed_workflow.job_uses("cleanup"),
+            "./.github/workflows/reusable-generic-web-preview-lifecycle.yml",
+        )
+        self.assertEqual(
+            parsed_workflow.job_uses("feedback-cleanup"),
+            "./.github/workflows/reusable-preview-feedback-status.yml",
+        )
         self.assertIn("status: ${{ needs.resolve.outputs.status }}", workflow)
+        self.assertIn("operation: destroy", workflow)
+        self.assertIn("mode: cleanup", workflow)
+        self.assertIn("const shouldCleanup =", workflow)
+        self.assertIn("executionTrust === 'same_repo'", workflow)
         self.assertIn("failure_summary: ${{ needs.resolve.outputs.failure_summary }}", workflow)
         self.assertIn("const unsupportedTrust =", workflow)
         self.assertIn("action === 'edited'", workflow)
@@ -354,11 +384,9 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertEqual(workflow.job_permissions("verification-outcome"), {"contents": "read"})
         for job_id in (
             "provision",
-            "destroy",
             "record-verification-pass",
             "record-verification-fail",
             "feedback-refresh",
-            "feedback-cleanup",
         ):
             self.assertEqual(
                 workflow.job_permissions(job_id),
@@ -388,20 +416,15 @@ class PreviewWorkflowContractTests(unittest.TestCase):
             workflow.job_uses("provision"),
             "./.github/workflows/reusable-generic-web-preview-lifecycle.yml",
         )
-        self.assertEqual(
-            workflow.job_uses("destroy"),
-            "./.github/workflows/reusable-generic-web-preview-lifecycle.yml",
-        )
         for job_id in ("record-verification-pass", "record-verification-fail"):
             self.assertEqual(
                 workflow.job_uses(job_id),
                 "./.github/workflows/reusable-generic-web-preview-verification.yml",
             )
-        for job_id in ("feedback-refresh", "feedback-cleanup"):
-            self.assertEqual(
-                workflow.job_uses(job_id),
-                "./.github/workflows/reusable-preview-feedback-status.yml",
-            )
+        self.assertEqual(
+            workflow.job_uses("feedback-refresh"),
+            "./.github/workflows/reusable-preview-feedback-status.yml",
+        )
 
         resolver = workflow.step_named("resolve", "Resolve generic-web preview request")
         self.assertIsNotNone(resolver)
@@ -410,8 +433,8 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertIn("context.eventName !== 'pull_request'", resolver_script)
         self.assertIn("repository === headRepository", resolver_script)
         self.assertIn("author !== 'dependabot[bot]'", resolver_script)
-        self.assertIn("action === 'closed'", resolver_script)
-        self.assertIn("action === 'unlabeled'", resolver_script)
+        self.assertNotIn("action === 'closed'", resolver_script)
+        self.assertNotIn("action === 'unlabeled'", resolver_script)
         self.assertNotIn("pull_request_target", workflow_text)
         self.assertIn("image_reference=${IMAGE_REPOSITORY}@${IMAGE_DIGEST}", workflow_text)
         self.assertLess(
@@ -419,9 +442,8 @@ class PreviewWorkflowContractTests(unittest.TestCase):
             workflow_text.index("LAUNCHPLANE_BUILD_REVISION="),
         )
         self.assertIn("preview lifecycle failed; see workflow run logs", workflow_text)
-        self.assertIn("preview cleanup failed; see workflow run logs", workflow_text)
         self.assertIn("mode: refresh", workflow_text)
-        self.assertIn("mode: cleanup", workflow_text)
+        self.assertNotIn("mode: cleanup", workflow_text)
 
     def test_generic_web_preview_requests_accept_anchor_pr_number_without_slug(
         self,

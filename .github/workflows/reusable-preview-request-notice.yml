@@ -41,7 +41,9 @@ name: Reusable Preview Request Notice
     outputs:
       feedback_status:
         description: Preview feedback status returned by Launchplane.
-        value: ${{ jobs.feedback.outputs.feedback_status }}
+        value: >-
+          ${{ jobs.feedback.outputs.feedback_status ||
+            jobs.feedback-cleanup.outputs.feedback_status }}
       notice_status:
         description: Resolved notice status.
         value: ${{ jobs.resolve.outputs.status }}
@@ -58,8 +60,10 @@ jobs:
     outputs:
       anchor_pr_number: ${{ steps.notice.outputs.anchor_pr_number }}
       anchor_pr_url: ${{ steps.notice.outputs.anchor_pr_url }}
+      cleanup_reason: ${{ steps.notice.outputs.cleanup_reason }}
       failure_summary: ${{ steps.notice.outputs.failure_summary }}
       run_url: ${{ steps.notice.outputs.run_url }}
+      should_cleanup: ${{ steps.notice.outputs.should_cleanup }}
       should_record: ${{ steps.notice.outputs.should_record }}
       status: ${{ steps.notice.outputs.status }}
     runs-on: ubuntu-latest
@@ -131,6 +135,14 @@ jobs:
             const shouldClear =
               unsupportedTrust &&
               (closed || (action === 'unlabeled' && previewLabelChanged));
+            const shouldCleanup =
+              executionTrust === 'same_repo' &&
+              (closed || (action === 'unlabeled' && previewLabelChanged));
+            const cleanupReason = closed
+              ? 'pr_closed'
+              : shouldCleanup
+                ? 'preview_label_removed'
+                : '';
             const shouldRecord = shouldSetUnsupported || shouldClear;
 
             let status = 'cleared';
@@ -145,10 +157,30 @@ jobs:
 
             core.setOutput('anchor_pr_number', String(pullRequest.number));
             core.setOutput('anchor_pr_url', String(pullRequest.html_url || ''));
+            core.setOutput('cleanup_reason', cleanupReason);
             core.setOutput('failure_summary', failureSummary);
             core.setOutput('run_url', process.env.RUN_URL);
+            core.setOutput('should_cleanup', String(shouldCleanup));
             core.setOutput('should_record', String(shouldRecord));
             core.setOutput('status', status);
+
+  cleanup:
+    if: ${{ needs.resolve.outputs.should_cleanup == 'true' }}
+    needs: resolve
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-generic-web-preview-lifecycle.yml
+    with:
+      operation: destroy
+      product: ${{ inputs.product }}
+      context: ${{ inputs.context }}
+      anchor_pr_number: ${{ needs.resolve.outputs.anchor_pr_number }}
+      anchor_pr_url: ${{ needs.resolve.outputs.anchor_pr_url }}
+      destroy_reason: ${{ needs.resolve.outputs.cleanup_reason }}
+      timeout-ms: ${{ inputs['timeout-ms'] }}
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
 
   feedback:
     if: ${{ needs.resolve.outputs.should_record == 'true' }}
@@ -162,6 +194,28 @@ jobs:
       status: ${{ needs.resolve.outputs.status }}
       run_url: ${{ needs.resolve.outputs.run_url }}
       failure_summary: ${{ needs.resolve.outputs.failure_summary }}
+      timeout-ms: ${{ inputs['timeout-ms'] }}
+      launchplane_url: ${{ inputs.launchplane_url }}
+      launchplane_audience: ${{ inputs.launchplane_audience }}
+
+  feedback-cleanup:
+    if: ${{ always() && needs.resolve.outputs.should_cleanup == 'true' }}
+    needs:
+      - resolve
+      - cleanup
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-preview-feedback-status.yml
+    with:
+      mode: cleanup
+      anchor_pr_number: ${{ needs.resolve.outputs.anchor_pr_number }}
+      anchor_pr_url: ${{ needs.resolve.outputs.anchor_pr_url }}
+      cleanup_result: ${{ needs.cleanup.result }}
+      cleanup_failure_summary: >-
+        ${{ needs.cleanup.outputs.error_message ||
+          'Launchplane preview cleanup failed; see workflow run logs.' }}
+      run_url: ${{ needs.resolve.outputs.run_url }}
       timeout-ms: ${{ inputs['timeout-ms'] }}
       launchplane_url: ${{ inputs.launchplane_url }}
       launchplane_audience: ${{ inputs.launchplane_audience }}

@@ -136,23 +136,24 @@ markdown, provider targets, or runtime facts from callers.
 
 ## Required Workflow Shape
 
-Same-repository PRs use `pull_request` because the workflow may check out and
-build the PR head:
+Same-repository PR refresh uses `pull_request` because the workflow may check
+out and build the PR head:
 
 - `opened`, `reopened`, `synchronize`, `edited`, or adding the preview label
   with the label present: `refresh`.
-- `closed`: `destroy`.
-- Removing the preview label: `destroy`.
 - Any PR without the preview label: `ignore`.
 
-Fork and Dependabot PRs use `pull_request_target` only for an unsupported notice.
-That job must run from the base branch and call
+Same-repository preview cleanup uses `pull_request_target`: closing the PR or
+removing the preview label runs `destroy` from the base-branch workflow. This
+gives destructive cleanup an exact GitHub OIDC `workflow_ref`; it does not
+check out or execute pull-request code. Fork and Dependabot PRs use the same
+trusted workflow only for unsupported or cleared notices. The job must call
 `cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@<launchplane-sha>`.
-The reusable workflow owns the trusted event decision, unsupported/cleared
-status selection, failure summary, and `/v1/previews/pr-feedback` handoff.
+The reusable workflow owns the trusted event decision, cleanup lifecycle and
+feedback handoff, unsupported/cleared status selection, and failure summary.
 Product repos must not check out code, choose a checkout ref, render feedback
 markdown, build request payloads, or call `POST /v1/previews/pr-feedback`
-directly from their own fork/Dependabot notice workflows.
+directly from their own trusted notice workflows.
 
 Manual `workflow_dispatch` may request `refresh` or `destroy` when a product repo
 needs an operator retry path. Manual refresh still follows the same build,
