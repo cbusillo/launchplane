@@ -1668,6 +1668,11 @@ run` is the foreground loop intended for an external process supervisor, and
   to the Launchplane-resolved stable target base URL before post-deploy renders
   the payload, so local tenant bootstrap defaults do not become stable lane URL
   authority.
+- Isolated Odoo previews inherit only `website_bootstrap` from the preview
+  template instance when that record applies on deploy. Launchplane renders an
+  ephemeral payload with the preview URL as `canonical_url`; it does not persist
+  the PR-specific URL or inherit stable config parameters, addon settings, or
+  their secret bindings into the preview.
 - `apply_on` records the phases where the override is intended to apply, and
   `last_apply` records the latest driver result without making the addon layer
   the durable audit surface.

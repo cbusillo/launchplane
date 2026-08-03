@@ -338,6 +338,19 @@ false, or unavailable schedule-log evidence fails the refresh. A terminal
 provider deployment alone remains an unknown recovery outcome because it does
 not prove that database-backed views were upgraded.
 
+When the preview template instance has a deploy-enabled website-bootstrap
+record, refresh also renders a preview-scoped copy of that website intent,
+replaces its canonical URL with the exact preview URL, and passes it through the
+same devkit application/readback path used by stable lanes. The copy excludes
+stable config parameters, addon settings, and secret bindings, and never writes
+the PR-specific canonical URL back to the stable record. The refresh fails when
+the required website-bootstrap application and canonical readback markers are
+missing or false.
+Like resolved runtime-environment values and managed secrets, the bootstrap
+contents come from current DB authority during apply; plan provenance binds the
+preview route, target, and artifact facts rather than freezing mutable runtime
+configuration values for the plan lifetime.
+
 Ready Odoo apply-inputs responses also include the normalized `plan_request`
 and `plan_provenance`: a service-derived plan id, canonical SHA-256 fingerprint,
 issuance time, and 30-minute expiry. Launchplane persists that response under the

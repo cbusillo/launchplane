@@ -287,6 +287,28 @@ def build_post_deploy_environment(
     )
 
 
+def build_preview_website_bootstrap_environment(
+    record: OdooInstanceOverrideRecord | None,
+    *,
+    preview_url: str,
+) -> PostDeployOverrideEnvironment | None:
+    if record is None or "deploy" not in record.apply_on or record.website_bootstrap is None:
+        return None
+    normalized_preview_url = preview_url.strip().rstrip("/")
+    if not normalized_preview_url:
+        raise click.ClickException("Odoo preview website bootstrap requires preview_url.")
+    preview_record = record.model_copy(
+        update={
+            "config_parameters": (),
+            "addon_settings": (),
+            "website_bootstrap": record.website_bootstrap.model_copy(
+                update={"canonical_url": normalized_preview_url}
+            ),
+        }
+    )
+    return build_post_deploy_environment(preview_record, workflow_intent="deploy")
+
+
 def render_post_deploy_environment(
     record: OdooInstanceOverrideRecord,
     *,

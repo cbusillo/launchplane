@@ -2300,6 +2300,30 @@ domains = ["cm-testing.shinycomputers.com"]
                 }
             )
 
+    def test_require_odoo_website_bootstrap_readback_evidence_accepts_complete_proof(
+        self,
+    ) -> None:
+        dokploy_post_deploy.require_odoo_website_bootstrap_readback_evidence(
+            {
+                "log_available": "true",
+                "website_bootstrap_applied": "true",
+                "website_bootstrap_domain_matches_canonical": "true",
+                "website_bootstrap_web_base_url_matches": "true",
+            }
+        )
+
+    def test_require_odoo_website_bootstrap_readback_evidence_rejects_missing_marker(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(click.ClickException, "did not prove"):
+            dokploy_post_deploy.require_odoo_website_bootstrap_readback_evidence(
+                {
+                    "log_available": "true",
+                    "website_bootstrap_applied": "true",
+                    "website_bootstrap_domain_matches_canonical": "true",
+                }
+            )
+
     def test_compose_data_workflow_quiescence_rejects_running_schedule(self) -> None:
         target_definition = control_plane_dokploy.DokployTargetDefinition(
             context="odoo-tenant-cm",
