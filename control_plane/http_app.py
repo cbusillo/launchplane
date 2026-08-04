@@ -3293,6 +3293,23 @@ class LaunchplaneAuthzPolicyRuntime:
     def revision(self) -> int:
         return self._revision
 
+    def allows(
+        self,
+        *,
+        identity: LaunchplaneIdentity,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None = None,
+    ) -> bool:
+        return self._policy.allows(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+            target=target,
+        )
+
     def policy_record(self, *, updated_at: str) -> LaunchplaneAuthzPolicyRecord:
         record_id = self._record_id or f"runtime-authz-policy-{self._policy_sha256[:12]}"
         return LaunchplaneAuthzPolicyRecord(
@@ -4124,27 +4141,11 @@ def create_launchplane_fastapi_app(
             raise _authentication_required_error("Mutation routes require GitHub Actions OIDC.")
         return oidc_identity
 
-    def read_route_authorization_allows(
-        *,
-        identity: LaunchplaneIdentity,
-        action: str,
-        product: str,
-        context: str,
-        target: AuthorizationTarget | None = None,
-    ) -> bool:
-        return resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=action,
-            product=product,
-            context=context,
-            target=target,
-        )
-
     read_route_dependencies = ReadRouteDependencies(
         read_identity=read_identity,
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
-        authorization_allows=read_route_authorization_allows,
+        authorization_allows=resolved_authz_policy_runtime.allows,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
     )
@@ -4152,7 +4153,7 @@ def create_launchplane_fastapi_app(
         read_write_identity=read_write_identity,
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
-        authorization_allows=read_route_authorization_allows,
+        authorization_allows=resolved_authz_policy_runtime.allows,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
         control_plane_root=resolved_control_plane_root,
@@ -18197,7 +18198,7 @@ def create_launchplane_fastapi_app(
         read_browser_mutation_identity=read_browser_mutation_identity,
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
-        authorization_allows=resolved_authz_policy_runtime.policy.allows,
+        authorization_allows=resolved_authz_policy_runtime.allows,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
         control_plane_root=resolved_control_plane_root,
@@ -20586,7 +20587,7 @@ def create_launchplane_fastapi_app(
         read_browser_mutation_identity=read_browser_mutation_identity,
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
-        authorization_allows=read_route_authorization_allows,
+        authorization_allows=resolved_authz_policy_runtime.allows,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
         control_plane_root=resolved_control_plane_root,
