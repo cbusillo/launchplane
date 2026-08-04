@@ -77,7 +77,8 @@ duplicating event semantics.
 
 Same-repository preview build jobs that need an importable helper for GitHub
 event labels and image tags should use
-`cbusillo/launchplane/.github/actions/setup-preview-prepare-client@main`. The
+`cbusillo/launchplane/.github/actions/setup-preview-prepare-client@<launchplane-sha>`.
+The
 generated client is read-only and product-agnostic: callers pass the current
 repository, head repository, PR author, PR number, source SHA, image name,
 labels, and run URL; the client returns refresh/unsupported/noop mode, same-repo
@@ -92,7 +93,7 @@ of constructing route payloads locally:
 ```yaml
 jobs:
   launchplane-preview:
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@main
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@<launchplane-sha>
     with:
       operation: refresh
       anchor_pr_number: ${{ github.event.pull_request.number }}
@@ -108,6 +109,13 @@ destroy status, or feedback status as job outputs. Callers should omit preview
 context so Launchplane can derive it from the product profile before
 authorization and recording. It does not accept `preview_slug`, `preview_url`,
 provider target ids, feedback markdown, or idempotency keys as caller inputs.
+
+When a generic-web refresh receives `403`, the lifecycle worker makes one
+same-identity call to the redacted GitHub Actions authz diagnostic route before
+failing the original refresh. That diagnostic still requires a separate,
+narrow `authz_diagnostic.evaluate` grant; without it, the workflow retains the
+ordinary generic denial. Its response contains only selector categories and
+opaque fingerprints, never policy selectors or other principal rules.
 When the stored product profile declares `preview.data_transport_mode="driver"`,
 the generic-web lifecycle route delegates refresh and destroy execution to the
 registered product-driver extension. This keeps product-specific database,
@@ -116,7 +124,7 @@ product workflow remains a thin reusable-workflow caller. Missing driver
 extensions fail closed instead of falling back to generic environment copying.
 
 Preview comment updates that are not part of the lifecycle workflow use
-`cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@main`.
+`cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@<launchplane-sha>`.
 Callers provide only primitive display facts such as PR number, status, preview
 URL, image references, revision, run URL, and failure summary. The reusable
 feedback workflow owns the `/v1/previews/pr-feedback` route, marker, payload
@@ -126,7 +134,7 @@ authorization and recording.
 
 Product workflows that still need to translate local job results into a preview
 feedback `status` and `failure_summary` should call
-`cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@main`.
+`cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@<launchplane-sha>`.
 The reusable workflow maps refresh publish, provision, and product verification
 results to `ready` or `failed`, and maps cleanup results to `destroyed` or
 `cleanup_failed`, before delegating to the reusable preview feedback workflow. It
@@ -135,23 +143,24 @@ markdown, provider targets, or runtime facts from callers.
 
 ## Required Workflow Shape
 
-Same-repository PRs use `pull_request` because the workflow may check out and
-build the PR head:
+Same-repository PR refresh uses `pull_request` because the workflow may check
+out and build the PR head:
 
 - `opened`, `reopened`, `synchronize`, `edited`, or adding the preview label
   with the label present: `refresh`.
-- `closed`: `destroy`.
-- Removing the preview label: `destroy`.
 - Any PR without the preview label: `ignore`.
 
-Fork and Dependabot PRs use `pull_request_target` only for an unsupported notice.
-That job must run from the base branch and call
-`cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@main`.
-The reusable workflow owns the trusted event decision, unsupported/cleared
-status selection, failure summary, and `/v1/previews/pr-feedback` handoff.
+Same-repository preview cleanup uses `pull_request_target`: closing the PR or
+removing the preview label runs `destroy` from the base-branch workflow. This
+gives destructive cleanup an exact GitHub OIDC `workflow_ref`; it does not
+check out or execute pull-request code. Fork and Dependabot PRs use the same
+trusted workflow only for unsupported or cleared notices. The job must call
+`cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@<launchplane-sha>`.
+The reusable workflow owns the trusted event decision, cleanup lifecycle and
+feedback handoff, unsupported/cleared status selection, and failure summary.
 Product repos must not check out code, choose a checkout ref, render feedback
 markdown, build request payloads, or call `POST /v1/previews/pr-feedback`
-directly from their own fork/Dependabot notice workflows.
+directly from their own trusted notice workflows.
 
 Manual `workflow_dispatch` may request `refresh` or `destroy` when a product repo
 needs an operator retry path. Manual refresh still follows the same build,
@@ -273,7 +282,7 @@ keys, and service-issued apply key for `artifact-publish-inputs`,
 `preview-apply-inputs`, and `preview-apply` are Launchplane contract fixtures.
 New or migrated tenant
 preview workflows should install
-`cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@main`
+`cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@<launchplane-sha>`
 and either use its `request-kind` render mode or import the generated ESM client
 to render `launchplane-request` inputs instead of copying inline route paths,
 JSON request bodies, file bindings, fail paths, or idempotency key templates.
@@ -370,7 +379,7 @@ provenance and are not persisted as issued plans, so a later retry can
 re-evaluate recovered dependencies.
 If a later browser or product-specific smoke workflow needs to publish common
 preview evidence, it should call
-`cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@main`
+`cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@<launchplane-sha>`
 with the PR number, `verification_status`, `verified_at`, optional checked URLs
 plus timeout, and optional failure summary. The reusable workflow owns the
 `POST /v1/drivers/generic-web/preview-verification` payload, route handoff, and
@@ -401,8 +410,10 @@ Product repos should call the reusable preview feedback workflow instead of
 assembling `/v1/previews/pr-feedback` payloads, markers, or idempotency keys in
 repo-local scripts.
 
-Use `cbusillo/launchplane/.github/actions/launchplane-request@main` for the OIDC
-transport only when a Launchplane-owned reusable workflow does not exist yet.
+Use
+`cbusillo/launchplane/.github/actions/launchplane-request@<launchplane-sha>`
+for the OIDC transport only when a Launchplane-owned reusable workflow does not
+exist yet. Pin the full reviewed Launchplane commit SHA.
 
 ## Migration Checklist
 
@@ -411,17 +422,27 @@ transport only when a Launchplane-owned reusable workflow does not exist yet.
   `pull_request_target` job that does not check out PR code.
 - Replace bespoke refresh/destroy event branching with the shared decision
   contract.
-- Keep product build/publish/smoke logic local until a Launchplane driver route
-  owns the equivalent facts.
+- For conventional generic-web products, call
+  `reusable-generic-web-preview.yml@<launchplane-sha>` so Launchplane owns the
+  build/publish/lifecycle/evidence composition while the product repo supplies
+  only code-adjacent Docker inputs and its verification command.
+- Keep the product verification command and domain behavior product-owned; the
+  facade runs it without OIDC and records only its primitive result facts.
 - Use run-scoped idempotency keys for every Launchplane mutation.
 - Keep product configuration, preview URL policy, provider credentials, and
   cleanup truth in Launchplane records rather than product-repo files.
 - Verify one refresh, one destroy, and one unsupported-notice path per migrated
   product repo.
+- Treat preview operations for one pull request as serialized rather than
+  cancelable. A close followed immediately by reopen may complete destroy before
+  the subsequent refresh; the final event converges the preview to the current
+  requested state without canceling cleanup in progress.
 
 ## Source Workflows
 
 This contract was shaped from the current preview paths in SYO, VeriReel, and
 Odoo CM. Odoo CM is the reference thin workflow after its preview feedback moved
-to Launchplane. SYO and VeriReel should migrate toward the same event contract
-before deleting their bespoke preview-control-plane logic.
+to Launchplane. The generic-web preview facade is the bounded proof for moving
+the remaining build, lifecycle, verification-evidence, and feedback composition
+behind one reusable entrypoint. SYO and VeriReel should not delete bespoke
+preview-control-plane logic until that proof passes against a disposable canary.

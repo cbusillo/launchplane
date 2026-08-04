@@ -425,12 +425,15 @@ class DocsContractsTests(TestCase):
         self.assertIn("anchor_pr_number` and omit", preview_contract)
         self.assertIn("conflicts with the", preview_contract)
         self.assertIn("derived value", preview_contract)
-        self.assertIn("reusable-generic-web-preview-lifecycle.yml@main", preview_contract)
-        self.assertIn("reusable-preview-feedback-status.yml@main", preview_contract)
+        self.assertIn(
+            "reusable-generic-web-preview-lifecycle.yml@<launchplane-sha>",
+            preview_contract,
+        )
+        self.assertIn("reusable-preview-feedback-status.yml@<launchplane-sha>", preview_contract)
         self.assertIn(
             "reusable-preview-feedback-status.yml@<launchplane-sha>", product_repo_contract
         )
-        self.assertIn("setup-preview-prepare-client@main", preview_contract)
+        self.assertIn("setup-preview-prepare-client@<launchplane-sha>", preview_contract)
         self.assertIn("setup-preview-prepare-client@<launchplane-sha>", product_repo_contract)
         self.assertIn("does not accept", preview_contract)
         self.assertIn("idempotency keys as caller inputs", preview_contract)
