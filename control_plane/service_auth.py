@@ -682,7 +682,9 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
         return "destructive"
     if "prod" in action_parts or "promotion" in action_parts:
         return "prod"
-    if normalized_action.endswith(".read") or normalized_action == "work_graph.rank":
+    if normalized_action in {"authz_diagnostic.evaluate", "work_graph.rank"} or (
+        normalized_action.endswith(".read")
+    ):
         return "read"
     if (
         normalized_action.endswith(".write")
