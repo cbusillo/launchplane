@@ -989,6 +989,211 @@
         "title": "AuthSessionResponse",
         "type": "object"
       },
+      "AuthorizationTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "instances": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Instances",
+            "type": "array"
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "context",
+              "instance",
+              "preview"
+            ],
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope"
+        ],
+        "title": "AuthorizationTarget",
+        "type": "object"
+      },
+      "AuthzDiagnosticEvaluateEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "target": {
+            "$ref": "#/components/schemas/AuthorizationTarget"
+          }
+        },
+        "required": [
+          "action",
+          "product",
+          "context"
+        ],
+        "title": "AuthzDiagnosticEvaluateEnvelope",
+        "type": "object"
+      },
+      "AuthzDiagnosticEvaluateResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "evaluation": {
+            "$ref": "#/components/schemas/AuthzDiagnosticEvaluation"
+          },
+          "policy_record_id": {
+            "title": "Policy Record Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "policy_record_id",
+          "policy_revision",
+          "policy_sha256",
+          "evaluation"
+        ],
+        "title": "AuthzDiagnosticEvaluateResponse",
+        "type": "object"
+      },
+      "AuthzDiagnosticEvaluation": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "allowed",
+              "denied"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "failure_categories": {
+            "items": {
+              "enum": [
+                "repository",
+                "repository_id",
+                "repository_owner_id",
+                "workflow_ref",
+                "job_workflow_ref",
+                "event_name",
+                "ref",
+                "environment",
+                "product",
+                "context",
+                "target",
+                "action",
+                "policy_schema"
+              ],
+              "type": "string"
+            },
+            "title": "Failure Categories",
+            "type": "array"
+          },
+          "identity_sha256": {
+            "title": "Identity Sha256",
+            "type": "string"
+          },
+          "rule_evaluations": {
+            "items": {
+              "$ref": "#/components/schemas/AuthzDiagnosticRuleEvaluation"
+            },
+            "title": "Rule Evaluations",
+            "type": "array"
+          },
+          "rule_evaluations_truncated": {
+            "title": "Rule Evaluations Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "decision",
+          "failure_categories",
+          "identity_sha256",
+          "rule_evaluations",
+          "rule_evaluations_truncated"
+        ],
+        "title": "AuthzDiagnosticEvaluation",
+        "type": "object"
+      },
+      "AuthzDiagnosticRuleEvaluation": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "allowed",
+              "denied"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "failure_categories": {
+            "items": {
+              "enum": [
+                "repository",
+                "repository_id",
+                "repository_owner_id",
+                "workflow_ref",
+                "job_workflow_ref",
+                "event_name",
+                "ref",
+                "environment",
+                "product",
+                "context",
+                "target",
+                "action",
+                "policy_schema"
+              ],
+              "type": "string"
+            },
+            "title": "Failure Categories",
+            "type": "array"
+          },
+          "rule_sha256": {
+            "title": "Rule Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision",
+          "failure_categories",
+          "rule_sha256"
+        ],
+        "title": "AuthzDiagnosticRuleEvaluation",
+        "type": "object"
+      },
       "BackupGateEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -26898,6 +27103,96 @@
           }
         },
         "summary": "Read human auth session"
+      }
+    },
+    "/v1/authz-diagnostics/github-actions/evaluate": {
+      "post": {
+        "operationId": "evaluate_github_actions_authz_diagnostic",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthzDiagnosticEvaluateEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzDiagnosticEvaluateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Evaluate the calling GitHub Actions identity against active authorization"
       }
     },
     "/v1/authz-policies/active": {

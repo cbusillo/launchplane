@@ -26,6 +26,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from control_plane import authz_grant_service as control_plane_authz_grant_service
+from control_plane import authz_diagnostics as control_plane_authz_diagnostics
 from control_plane import ingress_route_scope as control_plane_ingress_route_scope
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
@@ -846,6 +847,7 @@ _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-conte
 _PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
 _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
+_AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE = "/v1/authz-diagnostics/github-actions/evaluate"
 _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE = "/v1/authz-policies/managed-rule-sets/reconcile"
 _AUTH_SESSION_ROUTE = "/v1/auth/session"
 _AUTH_GITHUB_LOGIN_ROUTE = "/auth/github/login"
@@ -13463,6 +13465,38 @@ def create_launchplane_fastapi_app(
             ),
         )
 
+    async def evaluate_github_actions_authz_diagnostic(
+        diagnostic_request: control_plane_authz_diagnostics.AuthzDiagnosticEvaluateEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
+    ) -> control_plane_authz_diagnostics.AuthzDiagnosticEvaluateResponse:
+        trace_id = next_trace_id()
+        if not isinstance(identity, GitHubActionsIdentity) or not (
+            resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="authz_diagnostic.evaluate",
+                product=diagnostic_request.product,
+                context=diagnostic_request.context,
+                target=diagnostic_request.target,
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot evaluate its Launchplane authorization.",
+            )
+        return control_plane_authz_diagnostics.AuthzDiagnosticEvaluateResponse(
+            trace_id=trace_id,
+            policy_record_id=resolved_authz_policy_runtime.record_id,
+            policy_revision=resolved_authz_policy_runtime.revision,
+            policy_sha256=resolved_authz_policy_runtime.policy_sha256,
+            evaluation=control_plane_authz_diagnostics.evaluate_github_actions_authz(
+                policy=resolved_authz_policy_runtime.policy,
+                identity=identity,
+                request=diagnostic_request,
+            ),
+        )
+
     async def reconcile_managed_authz_policy(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
@@ -20340,6 +20374,12 @@ def create_launchplane_fastapi_app(
         409: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
     }
+    authz_diagnostic_route_responses: dict[int | str, dict[str, Any]] = {
+        400: {"model": LaunchplaneErrorResponse},
+        401: {"model": LaunchplaneErrorResponse},
+        403: {"model": LaunchplaneErrorResponse},
+        503: {"model": LaunchplaneErrorResponse},
+    }
 
     app.add_api_route(
         _AUTHZ_POLICY_ACTIVE_ROUTE,
@@ -20379,6 +20419,17 @@ def create_launchplane_fastapi_app(
         operation_id="reconcile_managed_authz_policy",
         summary="Reconcile managed authz policy rules",
         responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
+        _AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE,
+        evaluate_github_actions_authz_diagnostic,
+        methods=["POST"],
+        response_model=control_plane_authz_diagnostics.AuthzDiagnosticEvaluateResponse,
+        response_model_exclude_none=True,
+        operation_id="evaluate_github_actions_authz_diagnostic",
+        summary="Evaluate the calling GitHub Actions identity against active authorization",
+        responses=authz_diagnostic_route_responses,
     )
 
     app.add_api_route(
