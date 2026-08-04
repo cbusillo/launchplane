@@ -373,6 +373,7 @@ Current implementation scope:
 - `POST /v1/evidence/previews/destroyed`
 - `GET /v1/authz-policies/active`
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
+- `POST /v1/authz-diagnostics/github-actions/evaluate`
 - `GET /v1/route-bindings/records/current`
 - `POST /v1/route-bindings/reconcile`
 - `POST /v1/route-bindings/odoo-testing/controller/run-once`
@@ -411,6 +412,14 @@ preserves signed-in GitHub human-session callers, and keeps dry-runs stateless.
 Apply atomically commits the active-policy compare-and-swap and completed
 `Idempotency-Key` replay evidence. Managed reconciliation is the sole policy
 write contract for every principal type.
+
+`POST /v1/authz-diagnostics/github-actions/evaluate` is a read-only diagnostic
+route for GitHub Actions callers. It evaluates only the calling OIDC identity
+against a requested action/product/context/target and requires the separately
+scoped `authz_diagnostic.evaluate` action first. Its response returns the
+active policy record/revision plus opaque identity and rule fingerprints and
+failed selector categories; it never returns workflow refs, repositories,
+policy values, or other principal rules. Ordinary route denials remain generic.
 
 Operators mutate shared or production authz through the deployed service, not
 through direct DB commands or a local CLI from an arbitrary checkout. Store the
@@ -784,6 +793,15 @@ per-rule grant/removal endpoints, deploy-time grant catalogs, or workflow inputs
 that bypass the managed desired-state review/apply contract. Use managed-set
 reconciliation for GitHub Actions, GitHub human, terminal-agent, local-operator,
 and local-admin policy changes.
+
+When a GitHub Actions route fails closed and the operator needs to distinguish a
+caller, reusable-worker, event, product, context, target, or action mismatch,
+grant the caller the narrow `authz_diagnostic.evaluate` action through its
+existing managed set. The diagnostic route evaluates only that calling identity
+and returns redacted category/fingerprint evidence. Do not replace exact route
+authority with wildcard execution grants merely to discover which selector
+failed; remove temporary diagnostic authority once the exact operational rule
+is confirmed.
 
 The #1049 compatibility cleanup removed stale
 `launchplane_service_deploy.execute` GitHub Actions rules for policy import

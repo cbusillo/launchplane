@@ -285,6 +285,7 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
 
     def test_action_safety_classifies_privileged_action_families(self) -> None:
         cases = {
+            "authz_diagnostic.evaluate": "read",
             "product_environment.read": "read",
             "work_graph.rank": "read",
             "preview_pr_feedback_notification_attempt.read": "read",
