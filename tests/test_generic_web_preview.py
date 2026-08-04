@@ -37,6 +37,7 @@ from control_plane.workflows.generic_web_preview import (
     execute_generic_web_preview_destroy,
     execute_generic_web_preview_inventory,
     execute_generic_web_preview_refresh,
+    _ensure_domain,
     preview_pr_number_from_slug,
     resolve_generic_web_preview_profile,
     resolve_generic_web_preview_slug,
@@ -304,6 +305,95 @@ class GenericWebPreviewTests(unittest.TestCase):
                 copied_env_keys=("SMTP_HOST",),
                 omitted_env_keys=("SMTP_HOST",),
             )
+
+    def test_ensure_domain_uses_plain_http_for_edge_terminated_preview(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            if kwargs["path"] == "/api/domain.byApplicationId":
+                return []
+            if kwargs["path"] == "/api/domain.create":
+                return {"domainId": "domain-preview"}
+            raise AssertionError(kwargs["path"])
+
+        with patch(
+            "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
+            side_effect=_fake_dokploy_request,
+        ):
+            created_domain_id, stale_domain_ids = _ensure_domain(
+                host="https://dokploy.example",
+                token="token",
+                application_id="app-preview",
+                preview_host="preview-42.example.test",
+                runtime_port=3000,
+                certificate_type="none",
+            )
+
+        self.assertEqual(created_domain_id, "domain-preview")
+        self.assertEqual(stale_domain_ids, ())
+        payload = cast(dict[str, object], requests[-1]["payload"])
+        self.assertFalse(payload["https"])
+        self.assertEqual(payload["certificateType"], "none")
+
+    def test_ensure_domain_uses_dokploy_tls_for_letsencrypt_preview(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            if kwargs["path"] == "/api/domain.byApplicationId":
+                return []
+            if kwargs["path"] == "/api/domain.create":
+                return {"domainId": "domain-preview"}
+            raise AssertionError(kwargs["path"])
+
+        with patch(
+            "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
+            side_effect=_fake_dokploy_request,
+        ):
+            _ensure_domain(
+                host="https://dokploy.example",
+                token="token",
+                application_id="app-preview",
+                preview_host="preview-42.example.test",
+                runtime_port=3000,
+                certificate_type="letsencrypt",
+            )
+
+        payload = cast(dict[str, object], requests[-1]["payload"])
+        self.assertTrue(payload["https"])
+        self.assertEqual(payload["certificateType"], "letsencrypt")
+
+    def test_ensure_domain_updates_existing_edge_terminated_preview(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            if kwargs["path"] == "/api/domain.byApplicationId":
+                return [{"domainId": "domain-preview", "host": "preview-42.example.test"}]
+            if kwargs["path"] == "/api/domain.update":
+                return {}
+            raise AssertionError(kwargs["path"])
+
+        with patch(
+            "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
+            side_effect=_fake_dokploy_request,
+        ):
+            created_domain_id, stale_domain_ids = _ensure_domain(
+                host="https://dokploy.example",
+                token="token",
+                application_id="app-preview",
+                preview_host="preview-42.example.test",
+                runtime_port=3000,
+                certificate_type="none",
+            )
+
+        self.assertEqual(created_domain_id, "")
+        self.assertEqual(stale_domain_ids, ())
+        payload = cast(dict[str, object], requests[-1]["payload"])
+        self.assertEqual(payload["domainId"], "domain-preview")
+        self.assertFalse(payload["https"])
+        self.assertEqual(payload["certificateType"], "none")
 
     def test_preview_pr_number_from_slug_uses_template(self) -> None:
         self.assertEqual(
@@ -1243,6 +1333,12 @@ class GenericWebPreviewTests(unittest.TestCase):
         ][0]
         update_application_payload = cast("dict[str, object]", update_application["payload"])
         self.assertEqual(update_application_payload["endpointSpecSwarm"], {"Mode": "dnsrr"})
+        create_domain = [
+            request for request in requests if request["path"] == "/api/domain.create"
+        ][0]
+        create_domain_payload = cast("dict[str, object]", create_domain["payload"])
+        self.assertFalse(create_domain_payload["https"])
+        self.assertEqual(create_domain_payload["certificateType"], "none")
         save_environment = [
             request for request in requests if request["path"] == "/api/application.saveEnvironment"
         ][0]

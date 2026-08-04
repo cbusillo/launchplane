@@ -109,6 +109,12 @@ destroy status, or feedback status as job outputs. Callers should omit preview
 context so Launchplane can derive it from the product profile before
 authorization and recording. It does not accept `preview_slug`, `preview_url`,
 provider target ids, feedback markdown, or idempotency keys as caller inputs.
+For generic-web application previews, `preview.domain_certificate_type="none"`
+means TLS terminates at the edge ingress: Launchplane creates the Dokploy domain
+on HTTP only, while the public preview URL remains HTTPS. `"letsencrypt"`
+instead makes Dokploy terminate TLS for that domain. This keeps one TLS owner
+per preview route and avoids publishing an inner TLS route when Dokploy has no
+certificate to serve.
 
 When a generic-web refresh receives `403`, the lifecycle worker makes one
 same-identity call to the redacted GitHub Actions authz diagnostic route before
@@ -116,6 +122,7 @@ failing the original refresh. That diagnostic still requires a separate,
 narrow `authz_diagnostic.evaluate` grant; without it, the workflow retains the
 ordinary generic denial. Its response contains only selector categories and
 opaque fingerprints, never policy selectors or other principal rules.
+
 When the stored product profile declares `preview.data_transport_mode="driver"`,
 the generic-web lifecycle route delegates refresh and destroy execution to the
 registered product-driver extension. This keeps product-specific database,

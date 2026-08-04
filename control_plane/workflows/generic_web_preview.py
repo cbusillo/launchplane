@@ -609,7 +609,13 @@ def _configure_application(
 
 
 def _ensure_domain(
-    *, host: str, token: str, application_id: str, preview_host: str, runtime_port: int
+    *,
+    host: str,
+    token: str,
+    application_id: str,
+    preview_host: str,
+    runtime_port: int,
+    certificate_type: Literal["none", "letsencrypt"],
 ) -> tuple[str, tuple[str, ...]]:
     raw_domains = dokploy_api.dokploy_request(
         host=host,
@@ -636,9 +642,9 @@ def _ensure_domain(
         "path": "/",
         "internalPath": "/",
         "port": runtime_port,
-        "https": True,
+        "https": certificate_type == "letsencrypt",
         "applicationId": application_id,
-        "certificateType": "none",
+        "certificateType": certificate_type,
         "customCertResolver": None,
         "composeId": None,
         "serviceName": None,
@@ -1348,6 +1354,7 @@ def execute_generic_web_preview_refresh(
             application_id=application_id,
             preview_host=_preview_host(preview_url),
             runtime_port=resolved_profile.runtime_port,
+            certificate_type=resolved_profile.preview.domain_certificate_type,
         )
         latest_before = dokploy_api.latest_deployment_for_target(
             host=host,
