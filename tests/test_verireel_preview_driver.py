@@ -23,6 +23,7 @@ from control_plane.workflows.verireel_preview_driver import _build_preview_datab
 from control_plane.workflows.verireel_preview_driver import (
     _enforce_verireel_preview_runtime_key_safety,
 )
+from control_plane.workflows.verireel_preview_driver import _ensure_application
 from control_plane.workflows.verireel_preview_driver import _preview_database_admin_module_source
 from control_plane.workflows.verireel_preview_driver import _resolve_preview_secret
 from control_plane.workflows.verireel_preview_driver import _resolve_preview_url
@@ -185,6 +186,89 @@ def _refresh_request() -> VeriReelPreviewRefreshRequest:
 
 
 class VeriReelPreviewDriverTests(unittest.TestCase):
+    def test_ensure_application_uses_default_server_when_template_omits_server_id(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def _create_application(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            return {"applicationId": "app-preview"}
+
+        with (
+            patch(
+                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.dokploy_api.dokploy_request",
+                side_effect=_create_application,
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._fetch_application",
+                return_value={"applicationId": "app-preview"},
+            ),
+        ):
+            application = _ensure_application(
+                host="https://dokploy.example",
+                token="token",
+                application_name="pr-71",
+                app_name="pr-71",
+                description="Launchplane preview",
+                template_application={"environmentId": "env-1"},
+            )
+
+        self.assertEqual(application, {"applicationId": "app-preview"})
+        self.assertEqual(requests[0]["path"], "/api/application.create")
+        self.assertEqual(
+            requests[0]["payload"],
+            {
+                "name": "pr-71",
+                "appName": "pr-71",
+                "description": "Launchplane preview",
+                "environmentId": "env-1",
+            },
+        )
+
+    def test_ensure_application_forwards_template_server_id(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def _create_application(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            return {"applicationId": "app-preview"}
+
+        with (
+            patch(
+                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.dokploy_api.dokploy_request",
+                side_effect=_create_application,
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._fetch_application",
+                return_value={"applicationId": "app-preview"},
+            ),
+        ):
+            _ensure_application(
+                host="https://dokploy.example",
+                token="token",
+                application_name="pr-71",
+                app_name="pr-71",
+                description="Launchplane preview",
+                template_application={"environmentId": "env-1", "serverId": "server-1"},
+            )
+
+        self.assertEqual(
+            requests[0]["payload"],
+            {
+                "name": "pr-71",
+                "appName": "pr-71",
+                "description": "Launchplane preview",
+                "environmentId": "env-1",
+                "serverId": "server-1",
+            },
+        )
+
     def test_build_preview_database_command_uses_bundled_temp_files(self) -> None:
         command = _build_preview_database_command(
             action="ensure",
