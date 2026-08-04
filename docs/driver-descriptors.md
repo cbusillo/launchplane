@@ -289,11 +289,13 @@ first, then creates or updates a stateless Dokploy application from the
 DB-backed template lane, derives the live preview URL from the context-level
 `LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record plus the preview slug,
 applies explicit settings transport, deploys the submitted image, and checks the
-product health path. Inventory scans Dokploy applications by the product
-profile's preview application-name prefix; destroy deletes matching stateless
-preview applications. Readiness validates the DB-backed preview template lane
-and provider/runtime inputs before refresh. Verification records common
-post-refresh smoke evidence
+product health path. Application preview creation always requires the template
+environment id and sends its server id only when the template declares a
+non-default server; otherwise Dokploy selects its default server. Inventory
+scans Dokploy applications by the product profile's preview application-name
+prefix; destroy deletes matching stateless preview applications. Readiness
+validates the DB-backed preview template lane and provider/runtime inputs before
+refresh. Verification records common post-refresh smoke evidence
 against the latest Launchplane preview generation and is available to any
 product profile that uses the generic-web base driver. These descriptor actions
 remain discoverable, but native FastAPI owns execution for refresh, inventory,
