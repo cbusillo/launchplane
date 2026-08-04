@@ -27,7 +27,7 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     GenericWebPreviewVerificationRequest,
 )
 from control_plane.generic_web_promotion_http import GenericWebProdPromotionResponse
-from control_plane.http_app import idempotency_request_fingerprint
+from control_plane.http_app import LaunchplaneAuthzPolicyRuntime, idempotency_request_fingerprint
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -94,6 +94,92 @@ def _generic_web_deploy_result(
 
 
 class GenericWebHttpTests(unittest.TestCase):
+    def test_generic_web_preview_refresh_uses_current_runtime_authz_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            identity = _identity(
+                repository="cbusillo/sellyouroutboard",
+                workflow_ref=(
+                    "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                    "@refs/heads/main"
+                ),
+            )
+            denied_policy = LaunchplaneAuthzPolicy()
+            allowed_policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": identity.repository,
+                            "workflow_refs": [identity.workflow_ref],
+                            "event_names": [identity.event_name],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(denied_policy)
+            app = create_launchplane_fastapi_test_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(identity),
+                authz_policy=denied_policy,
+                authz_policy_runtime=authz_policy_runtime,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "refresh": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "preview_slug": "pr-42",
+                    "preview_url": "https://pr-42.example.test",
+                    "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                },
+            }
+            authz_policy_runtime.update(allowed_policy, revision=2)
+
+            with patch(
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
+                return_value={
+                    "refresh_status": "pass",
+                    "refresh_started_at": "2026-05-03T15:00:00Z",
+                    "refresh_finished_at": "2026-05-03T15:05:00Z",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard-testing",
+                    "preview_slug": "pr-42",
+                    "application_name": "sellyouroutboard-pr-42",
+                    "application_id": "app-preview",
+                    "preview_url": "https://pr-42.example.test",
+                },
+            ) as refresh:
+                granted_status_code, _ = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:grant"},
+                )
+                authz_policy_runtime.update(denied_policy, revision=3)
+                revoked_status_code, revoked_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:revoke"},
+                )
+
+        self.assertEqual(granted_status_code, 202)
+        refresh.assert_called_once()
+        self.assertEqual(revoked_status_code, 403)
+        self.assertEqual(revoked_payload["error"]["code"], "authorization_denied")
+
     def test_terminal_agent_read_token_rejects_non_read_routes_even_if_policy_grants_action(
         self,
     ) -> None:

@@ -1235,6 +1235,11 @@ tokens.
 
 The first policy model should be allow-list based and fail closed.
 
+Native driver routes must evaluate authorization through the mutable active-policy
+runtime on every request. They must not capture a bound method from the bootstrap
+policy object: DB-backed policy revisions, including revocations, take effect
+without a service restart.
+
 ### Durable operation reauthorization
 
 Authorization at enqueue time does not grant permanent provider-mutation
