@@ -5498,6 +5498,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertIn("/v1/authz-policies/managed-rule-sets/reconcile", paths)
         self.assertIn("/v1/authz-policies/active", paths)
+        self.assertIn("/v1/authz-diagnostics/github-actions/evaluate", paths)
         self.assertTrue(
             {
                 "/v1/authz-policies/github-actions/grants",
@@ -5508,6 +5509,129 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "/v1/authz-policies/local-admins/grants",
             }.isdisjoint(paths)
         )
+
+    def test_github_actions_authz_diagnostic_is_redacted(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            identity = _identity(
+                repository="example-org/example-product",
+                repository_id="3001",
+                repository_owner_id="2001",
+                workflow_ref=(
+                    "example-org/example-product/.github/workflows/preview.yml@refs/pull/42/merge"
+                ),
+                job_workflow_ref="actual-worker",
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "repository": "example-org/example-product",
+                            "repository_id": "3001",
+                            "repository_owner_id": "2001",
+                            "workflow_refs": [
+                                "example-org/example-product/.github/workflows/preview.yml@refs/pull/*/merge"
+                            ],
+                            "actions": ["authz_diagnostic.evaluate"],
+                            "products": ["example-product"],
+                            "contexts": ["example-preview"],
+                        },
+                        {
+                            "repository": "example-org/example-product",
+                            "repository_id": "3001",
+                            "repository_owner_id": "2001",
+                            "workflow_refs": [
+                                "example-org/example-product/.github/workflows/preview.yml@refs/pull/*/merge"
+                            ],
+                            "job_workflow_refs": ["expected-worker"],
+                            "actions": ["preview_refresh.execute"],
+                            "products": ["example-product"],
+                            "contexts": ["example-preview"],
+                        },
+                    ],
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-diagnostics/github-actions/evaluate",
+                payload={
+                    "schema_version": 1,
+                    "action": "preview_refresh.execute",
+                    "product": "example-product",
+                    "context": "example-preview",
+                    "target": {"scope": "preview"},
+                },
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["evaluation"]["decision"], "denied")
+        self.assertIn(
+            "job_workflow_ref",
+            payload["evaluation"]["failure_categories"],
+        )
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("actual-worker", rendered)
+        self.assertNotIn("expected-worker", rendered)
+        self.assertNotIn("example-org/example-product", rendered)
+
+    def test_github_actions_authz_diagnostic_requires_diagnostic_authority(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            identity = _identity(
+                repository="example-org/example-product",
+                repository_id="3001",
+                repository_owner_id="2001",
+                workflow_ref=(
+                    "example-org/example-product/.github/workflows/preview.yml@refs/pull/42/merge"
+                ),
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "repository": "example-org/example-product",
+                            "repository_id": "3001",
+                            "repository_owner_id": "2001",
+                            "actions": ["preview_refresh.execute"],
+                            "products": ["example-product"],
+                            "contexts": ["example-preview"],
+                        }
+                    ],
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-diagnostics/github-actions/evaluate",
+                payload={
+                    "schema_version": 1,
+                    "action": "preview_refresh.execute",
+                    "product": "example-product",
+                    "context": "example-preview",
+                    "target": {"scope": "preview"},
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertNotIn("evaluation", payload)
 
     def test_service_refreshes_active_authz_policy_revision_before_authorization(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

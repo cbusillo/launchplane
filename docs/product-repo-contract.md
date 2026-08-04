@@ -147,16 +147,19 @@ Launchplane-owned reusable gate:
 jobs:
   launchplane-config-authority:
     uses: cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@<launchplane-sha>
+    with:
+      launchplane-revision: <launchplane-sha>
 ```
 
-The reusable workflow checks out the product repository and Launchplane's `main`
-audit tool, then runs the product-repo changed-file gate. Product repositories
-should not carry a pinned Launchplane tool checkout or run
-`uv run launchplane ...` themselves once they can call the reusable gate.
-The older pinned-checkout workflow remains a bounded compatibility bridge only:
-it may reference `${{ github.repository_owner }}/launchplane` and must pin `ref`
-to a 40-character commit SHA. Hard-coded owners, mutable branches, and
-non-checkout `repository` values are rejected by the product-repo profile.
+The reusable workflow validates `launchplane-revision` as a 40-character SHA,
+requires it to match GitHub's called-workflow commit SHA, checks out the product
+repository and that exact Launchplane audit-tool commit, then runs the product-repo
+changed-file gate. The input must match the SHA in the reusable-workflow `uses`
+reference, and the dedicated workflow must contain
+exactly one such call. Product repositories should not carry a
+pinned Launchplane tool checkout or run `uv run launchplane ...` themselves.
+The dedicated workflow fails closed when the reusable call is absent, duplicated,
+mutable, mismatched, or mixed with another reusable workflow call.
 
 ## What Product Repos Own
 
@@ -170,6 +173,29 @@ non-checkout `repository` values are rejected by the product-repo profile.
 - CI checks that validate the source artifact before Launchplane sees it: lint,
   typecheck, unit tests, app build, container build, and product-specific smoke
   checks.
+- Source-adjacent dependency scan evidence produced with explicit scanner,
+  advisory-revision, scope, and configuration provenance. Product repos own the
+  scan invocation; Launchplane owns normalized comparison semantics. See
+  [dependency-health-contract.md](dependency-health-contract.md).
+- Trusted baseline and candidate Trivy reports may be passed to the Launchplane
+  dependency-health action pinned at an immutable commit. The product workflow
+  still owns commit selection, scanner database reuse, scan configuration, and
+  artifact construction. Reports must be vulnerability-only and preserve full
+  package and suppression evidence as required by the dependency-health
+  contract.
+- The product-repo config-authority gate treats inputs structurally nested under
+  an immutable dependency-health action and a digest-pinned Trivy tool image as
+  scanner mechanics. Dependabot pull-request text must use the exact trusted
+  bot/dependency-type guard or a step output. Mutable action/image references,
+  unrelated action inputs, and runtime identities disguised as scanner
+  configuration remain rejected.
+- The reusable config-authority workflow validates and checks out the explicit
+  `launchplane-revision` SHA. Callers repeat the immutable `uses` SHA as that
+  input so the selected workflow and executed audit implementation stay bound.
+- A publish guard derived from `github.event.repository.default_branch` is a
+  workflow mechanic; a checked-in literal branch remains runtime authority.
+- Direct `${{ inputs.* }}` forwarding inside action metadata is connector
+  plumbing; composed expressions and literal runtime identities remain audited.
 - Publishing an immutable image or artifact reference that Launchplane can
   deploy.
 - A minimal GitHub Actions trigger that authenticates to Launchplane with OIDC
@@ -431,6 +457,69 @@ stable deploy workflow derives
 the product key from the caller repository name by default and uses the
 `testing` stable lane unless the caller supplies a narrower operator override.
 
+For ordinary same-repository pull requests, prefer the preview facade instead
+of composing image publication, preview lifecycle, product verification, and
+feedback jobs in the product repo:
+
+```yaml
+name: Launchplane Preview
+
+"on":
+  pull_request:
+    types: [opened, reopened, synchronize, edited, labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview.yml@<launchplane-sha>
+    with:
+      verification_command: >-
+        curl --fail --silent --show-error
+        "${LAUNCHPLANE_PREVIEW_URL}/healthz"
+```
+
+The facade derives the product key and default GHCR image repository from the
+caller repository. It publishes an exact digest, invokes the typed generic-web
+preview lifecycle, runs the product-owned verification command in a job without
+OIDC, records verification evidence, and delegates feedback status to the
+existing Launchplane workflow. The caller may override code-adjacent build facts
+such as Dockerfile path, build target, build arguments, or image repository; it
+must not pass provider targets, domains, lane topology, secret values, or
+Launchplane record IDs.
+
+Same-repository cleanup, fork notices, and Dependabot notices stay in a
+separate trusted workflow so `pull_request_target` never reaches an untrusted
+checkout or preview refresh. Cleanup runs there because destructive authz
+requires an exact base-branch caller workflow ref:
+
+```yaml
+name: Launchplane Preview Notice
+
+"on":
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  notice:
+    permissions:
+      contents: read
+      id-token: write
+    uses: cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@<launchplane-sha>
+```
+
+Both callers must pin the full reviewed Launchplane commit SHA. Production
+promotion, rollback, and other high-risk operations remain separate explicit
+workflows and are not part of the preview facade.
+
 Stable deploy uses:
 
 ```yaml
@@ -515,8 +604,9 @@ jobs:
       image_reference: ${{ needs.build.outputs.image_digest }}
 ```
 
-Destroy calls set `operation: destroy` and pass `destroy_reason`. Fork and
-Dependabot `unsupported_notice` handoffs call
+Destroy calls set `operation: destroy` and pass `destroy_reason`. The ordinary
+two-file preview contract delegates same-repository cleanup to the trusted
+notice workflow. Fork and Dependabot `unsupported_notice` handoffs also call
 `cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@<launchplane-sha>`
 from a trusted `pull_request_target` workflow. Product repos do not choose a
 trusted checkout ref, pass preview slugs, preview URLs, provider application

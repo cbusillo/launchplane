@@ -23,6 +23,7 @@ const ENGINEERING_VIEWS: Exclude<EngineeringView, "hub">[] = [
   "issue-inbox",
   "every-code",
   "merge-train",
+  "tenant-admission",
 ];
 
 export function EngineeringRouteFrame({

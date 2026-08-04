@@ -46,6 +46,8 @@ Use these docs as the source of truth for `launchplane`.
   and local contract.
 - [github-actions-security.md](github-actions-security.md) — GitHub Actions
   supply-chain pinning, source classification, provenance, and update policy.
+- [dependency-health-contract.md](dependency-health-contract.md) — causal
+  pull-request dependency comparisons and absolute health evidence.
 - [style/python.md](style/python.md) — Python conventions.
 - [style/testing.md](style/testing.md) — testing conventions.
 - [policies/coding-standards.md](policies/coding-standards.md) — naming and

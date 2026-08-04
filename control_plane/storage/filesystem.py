@@ -48,6 +48,7 @@ from control_plane.contracts.manager_preview_approval import (
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
     MergeTrainControllerLeaseLostError,
     MergeTrainControllerStateRecord,
@@ -108,6 +109,10 @@ from control_plane.contracts.private_health_endpoint_record import PrivateHealth
 from control_plane.contracts.repository_human_admission import (
     RepositoryHumanRolePolicyRecord,
     TenantTechnicalHumanWaiverEventRecord,
+)
+from control_plane.contracts.trusted_maintenance import (
+    TrustedMaintenanceEvidenceRecord,
+    TrustedMaintenancePolicyRecord,
 )
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
@@ -175,6 +180,11 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.repository_human_admission import (
     plan_repository_human_role_policy_append,
     plan_tenant_technical_human_waiver_event_append,
+)
+from control_plane.trusted_maintenance import (
+    plan_trusted_maintenance_evidence_append,
+    plan_trusted_maintenance_policy_apply,
+    plan_trusted_maintenance_policy_append,
 )
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
@@ -1227,12 +1237,26 @@ class FilesystemRecordStore:
         policy_sha256: str,
         lease_owner: str,
         lease_seconds: int,
+        initial_active_action: str,
+        initial_active_phase: str,
+        adoptable_active_actions: tuple[str, ...],
     ) -> MergeTrainControllerStateRecord:
         from control_plane.contracts.merge_train_controller_state import (
             build_merge_train_controller_key,
             build_merge_train_controller_state_record,
         )
 
+        normalized_initial_action = initial_active_action.strip()
+        normalized_initial_phase = initial_active_phase.strip()
+        normalized_adoptable_actions = tuple(
+            dict.fromkeys(action.strip() for action in adoptable_active_actions if action.strip())
+        )
+        if not normalized_initial_action or not normalized_initial_phase:
+            raise ValueError("merge train controller acquisition requires initial action and phase")
+        if normalized_initial_action not in normalized_adoptable_actions:
+            raise ValueError(
+                "initial controller action must be adoptable by the acquiring controller"
+            )
         record_type = "launchplane_merge_train_controller_states"
         controller_key = build_merge_train_controller_key(
             repository=repository,
@@ -1268,6 +1292,10 @@ class FilesystemRecordStore:
             adopting = current_record.status == "reconcile_required" or bool(
                 current_record.active_action and current_record.active_phase
             )
+            if adopting and current_record.active_action not in normalized_adoptable_actions:
+                raise MergeTrainControllerAdoptionRejectedError(
+                    "merge train controller state belongs to a different active action"
+                )
             leased_record = current_record.model_copy(
                 update={
                     "policy_key": policy_key,
@@ -1281,8 +1309,8 @@ class FilesystemRecordStore:
                         lease_seconds=lease_seconds,
                     ),
                     "heartbeat_at": observed_at,
-                    "active_action": current_record.active_action or "controller_run_once",
-                    "active_phase": current_record.active_phase or "select_next_action",
+                    "active_action": current_record.active_action or normalized_initial_action,
+                    "active_phase": current_record.active_phase or normalized_initial_phase,
                     "reconciliation_status": "adopted" if adopting else "clean",
                     "reconciliation_detail": (
                         build_merge_train_controller_resume_detail(current_record)
@@ -2395,6 +2423,262 @@ class FilesystemRecordStore:
             and (not status or record.status == status)
         ]
         records.sort(key=lambda record: (record.product, record.context, record.canary_key))
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_trusted_maintenance_policy_record(
+        self,
+        record: TrustedMaintenancePolicyRecord,
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_trusted_maintenance_policies"
+        with self._product_authority_bundle_lock():
+            records = self._list_models_locked(TrustedMaintenancePolicyRecord, record_type)
+            plan = plan_trusted_maintenance_policy_append(records=records, record=record)
+            if plan.status == "replayed":
+                return "replayed"
+            if plan.superseded_current_record is None:
+                self._write_model_locked(record_type, record.record_id, record)
+                return "written"
+            self._write_trusted_maintenance_policy_replacement_locked(
+                record_type=record_type,
+                superseded_current_record=plan.superseded_current_record,
+                active_record=record,
+            )
+            return "written"
+
+    def compare_and_write_trusted_maintenance_policy_record(
+        self,
+        record: TrustedMaintenancePolicyRecord,
+        *,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_trusted_maintenance_policies"
+        with self._product_authority_bundle_lock():
+            records = self._list_models_locked(TrustedMaintenancePolicyRecord, record_type)
+            plan = plan_trusted_maintenance_policy_apply(
+                records=records,
+                record=record,
+                expected_current_record_id=expected_current_record_id,
+                expected_current_policy_digest=expected_current_policy_digest,
+            )
+            if plan.status == "replayed":
+                return "replayed"
+            if plan.superseded_current_record is None:
+                self._write_model_locked(record_type, record.record_id, record)
+                return "written"
+            self._write_trusted_maintenance_policy_replacement_locked(
+                record_type=record_type,
+                superseded_current_record=plan.superseded_current_record,
+                active_record=record,
+            )
+            return "written"
+
+    def _write_trusted_maintenance_policy_replacement_locked(
+        self,
+        *,
+        record_type: str,
+        superseded_current_record: TrustedMaintenancePolicyRecord,
+        active_record: TrustedMaintenancePolicyRecord,
+    ) -> None:
+        stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
+        stage_dir = self._product_authority_bundle_stage_root() / stage_id
+        records_dir = stage_dir / "records"
+        records_dir.mkdir(parents=True, exist_ok=False)
+        entries: list[_AuthorityBundleStageEntry] = []
+        try:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type=record_type,
+                record_id=superseded_current_record.record_id,
+                model=superseded_current_record,
+                step_name="supersede_trusted_maintenance_policy",
+            )
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type=record_type,
+                record_id=active_record.record_id,
+                model=active_record,
+                step_name="write_trusted_maintenance_policy",
+            )
+            manifest = _AuthorityBundleStageManifest(
+                stage_id=stage_id,
+                state="ready",
+                entries=tuple(entries),
+            )
+            self._write_product_authority_bundle_stage_manifest(
+                stage_dir=stage_dir,
+                manifest=manifest,
+            )
+            self._after_product_authority_bundle_step(
+                "stage_trusted_maintenance_policy_replacement"
+            )
+            publishing_manifest = manifest.model_copy(update={"state": "publishing"})
+            self._write_product_authority_bundle_stage_manifest(
+                stage_dir=stage_dir,
+                manifest=publishing_manifest,
+            )
+            self._after_product_authority_bundle_step(
+                "publish_trusted_maintenance_policy_replacement"
+            )
+            self._publish_product_authority_bundle_stage(
+                manifest=publishing_manifest,
+                stage_dir=stage_dir,
+                recovering=False,
+            )
+        except Exception:
+            if not (stage_dir / "manifest.json").exists():
+                shutil.rmtree(stage_dir, ignore_errors=True)
+            raise
+
+    def read_trusted_maintenance_policy_record(
+        self,
+        record_id: str,
+    ) -> TrustedMaintenancePolicyRecord:
+        return self._read_model(
+            TrustedMaintenancePolicyRecord,
+            "launchplane_trusted_maintenance_policies",
+            record_id,
+        )
+
+    def list_trusted_maintenance_policy_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[TrustedMaintenancePolicyRecord, ...]:
+        normalized_repository = repository.strip().lower()
+        records = [
+            record
+            for record in self._list_models(
+                TrustedMaintenancePolicyRecord,
+                "launchplane_trusted_maintenance_policies",
+            )
+            if (not repository_id or record.repository_id == repository_id)
+            and (not repository_owner_id or record.repository_owner_id == repository_owner_id)
+            and (not normalized_repository or record.repository == normalized_repository)
+            and (not product or record.product == product)
+            and (not context or record.context == context)
+            and (not status or record.status == status)
+        ]
+        records.sort(
+            key=lambda record: (
+                record.policy_revision,
+                record.repository_id,
+                record.product,
+                record.context,
+                record.record_id,
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_trusted_maintenance_evidence_record(
+        self,
+        record: TrustedMaintenanceEvidenceRecord,
+    ) -> Literal["written", "replayed"]:
+        record_type = "launchplane_trusted_maintenance_evidence"
+        with self._product_authority_bundle_lock():
+            records = self._list_models_locked(
+                TrustedMaintenanceEvidenceRecord,
+                record_type,
+            )
+            plan = plan_trusted_maintenance_evidence_append(records=records, record=record)
+            if plan.status == "replayed":
+                return "replayed"
+            self._write_model_locked(record_type, record.evidence_id, record)
+            return "written"
+
+    def read_trusted_maintenance_evidence_record(
+        self,
+        evidence_id: str,
+    ) -> TrustedMaintenanceEvidenceRecord:
+        return self._read_model(
+            TrustedMaintenanceEvidenceRecord,
+            "launchplane_trusted_maintenance_evidence",
+            evidence_id,
+        )
+
+    def list_trusted_maintenance_evidence_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository_owner_id: str = "",
+        repository: str = "",
+        product: str = "",
+        context: str = "",
+        evidence_id: str = "",
+        binding_sha256: str = "",
+        pull_request_number: int | None = None,
+        head_sha: str = "",
+        classification_digest: str = "",
+        policy_record_id: str = "",
+        policy_digest: str = "",
+        matched_actor_rule_id: str = "",
+        pr_author_github_id: int | None = None,
+        sender_github_id: int | None = None,
+        event_name: str = "",
+        event_action: str = "",
+        delivery_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[TrustedMaintenanceEvidenceRecord, ...]:
+        normalized_repository = repository.strip().lower()
+        records = [
+            record
+            for record in self._list_models(
+                TrustedMaintenanceEvidenceRecord,
+                "launchplane_trusted_maintenance_evidence",
+            )
+            if (not repository_id or record.binding.repository_id == repository_id)
+            and (
+                not repository_owner_id or record.binding.repository_owner_id == repository_owner_id
+            )
+            and (not normalized_repository or record.binding.repository == normalized_repository)
+            and (not product or record.binding.product == product)
+            and (not context or record.binding.context == context)
+            and (not evidence_id or record.evidence_id == evidence_id)
+            and (not binding_sha256 or record.binding.binding_sha256 == binding_sha256)
+            and (
+                pull_request_number is None
+                or record.binding.pull_request_number == pull_request_number
+            )
+            and (not head_sha or record.binding.head_sha == head_sha)
+            and (
+                not classification_digest
+                or record.binding.classification_digest == classification_digest
+            )
+            and (not policy_record_id or record.binding.policy_record_id == policy_record_id)
+            and (not policy_digest or record.binding.policy_digest == policy_digest)
+            and (
+                not matched_actor_rule_id
+                or record.binding.matched_actor_rule_id == matched_actor_rule_id
+            )
+            and (
+                pr_author_github_id is None
+                or record.binding.pr_author_github_id == pr_author_github_id
+            )
+            and (sender_github_id is None or record.binding.sender_github_id == sender_github_id)
+            and (not event_name or record.binding.event_name == event_name)
+            and (not event_action or record.binding.event_action == event_action)
+            and (not delivery_id or record.binding.delivery_id == delivery_id)
+        ]
+        records.sort(
+            key=lambda record: (
+                record.occurred_at,
+                record.evidence_id,
+            ),
+            reverse=True,
+        )
         if limit is not None:
             records = records[:limit]
         return tuple(records)

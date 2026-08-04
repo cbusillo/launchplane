@@ -43,6 +43,8 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/products/{product}/environments/{environment}/config/apply",
             "/v1/products/{product}/environments/{environment}/promotion/dry-run",
             "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch",
+            "/v1/tenant-admission/technical-human-waivers/apply",
+            "/v1/tenant-admission/trusted-maintenance-policies/apply",
             "/v1/work-graph/rank",
         }
         browser_dependency_names = {
@@ -50,8 +52,12 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "read_browser_work_graph_rank_identity",
         }
         expected_bearer_only_routes = {
+            "/v1/authz-diagnostics/github-actions/evaluate",
             "/v1/secrets/reencrypt",
             "/v1/tenant-admission/repository-classifications/apply",
+            "/v1/tenant-admission/repository-human-role-policies/apply",
+            "/v1/tenant-admission/status/reconcile",
+            "/v1/work-graph/tenant-admission/controller/run-once",
         }
         actual_routes = {"/auth/logout"}
         actual_bearer_only_routes: set[str] = set()

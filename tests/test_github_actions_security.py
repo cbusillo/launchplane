@@ -1,4 +1,7 @@
+import json
+import os
 import re
+import subprocess
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -309,6 +312,67 @@ def _container_references() -> Iterator[ContainerReference]:
 
 
 class GitHubActionsSecurityTests(TestCase):
+    def test_product_repo_config_authority_uses_called_workflow_revision(self) -> None:
+        workflow = Path(".github/workflows/reusable-product-repo-config-authority.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("launchplane-revision:", workflow)
+        self.assertIn("launchplane-revision must be a 40-character commit SHA", workflow)
+        self.assertIn("JOB_CONTEXT_JSON: ${{ toJSON(job) }}", workflow)
+        self.assertIn(".workflow_sha", workflow)
+        self.assertIn("launchplane-revision must match the called workflow commit SHA", workflow)
+        self.assertIn("ref: ${{ inputs.launchplane-revision }}", workflow)
+        self.assertNotIn("ref: main", workflow)
+
+    def test_product_repo_config_authority_revision_validation_fails_closed(self) -> None:
+        workflow = load_workflow(".github/workflows/reusable-product-repo-config-authority.yml")
+        step = workflow.step_named(
+            "launchplane-config-authority",
+            "Validate Launchplane audit tool revision",
+        )
+        self.assertIsNotNone(step)
+        assert step is not None
+
+        revision = "a" * 40
+        cases: tuple[tuple[str, str, dict[str, object], int], ...] = (
+            ("valid", revision, {"workflow_sha": revision}, 0),
+            ("missing", revision, {}, 1),
+            ("non-string", revision, {"workflow_sha": 123}, 1),
+            ("malformed", revision, {"workflow_sha": "a" * 39}, 1),
+            ("uppercase", revision, {"workflow_sha": "A" * 40}, 1),
+            ("non-hex", revision, {"workflow_sha": "g" * 40}, 1),
+            ("trailing-newline", revision, {"workflow_sha": f"{revision}\n"}, 1),
+            ("mismatch", revision, {"workflow_sha": "b" * 40}, 1),
+        )
+        for case_name, input_revision, job_context, expected_exit_code in cases:
+            with self.subTest(case_name=case_name):
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "--noprofile",
+                        "--norc",
+                        "-e",
+                        "-o",
+                        "pipefail",
+                        "-c",
+                        step.run,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    env=os.environ
+                    | {
+                        "JOB_CONTEXT_JSON": json.dumps(job_context),
+                        "LAUNCHPLANE_REVISION": input_revision,
+                    },
+                    text=True,
+                )
+                self.assertEqual(
+                    result.returncode,
+                    expected_exit_code,
+                    f"stdout={result.stdout}\nstderr={result.stderr}",
+                )
+
     def test_action_reference_parser_covers_inline_step_syntax(self) -> None:
         match = USES_LINE_PATTERN.match(
             "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"

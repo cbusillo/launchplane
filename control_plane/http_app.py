@@ -26,6 +26,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from control_plane import authz_grant_service as control_plane_authz_grant_service
+from control_plane import authz_diagnostics as control_plane_authz_diagnostics
 from control_plane import ingress_route_scope as control_plane_ingress_route_scope
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
@@ -94,7 +95,12 @@ from control_plane.http_routes import (
     register_product_profile_read_routes,
     register_protected_artifact_read_routes,
     register_runner_host_hygiene_read_routes,
+    REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE,
+    TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE,
+    TENANT_ADMISSION_STATUS_RECONCILE_ROUTE,
+    TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE,
     TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE,
+    TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE,
     TenantAdmissionReadRouteDependencies,
     TenantAdmissionWriteRouteDependencies,
     register_tenant_admission_read_routes,
@@ -206,6 +212,7 @@ from control_plane.merge_train_batch_candidate import (
     require_merge_train_batch_candidate_record_store,
 )
 from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
     MergeTrainControllerLeaseLostError,
     MergeTrainControllerReconciliationRequiredError,
@@ -653,7 +660,10 @@ from control_plane.workflows.preview_pr_feedback import (
 )
 from control_plane.workflows.launchplane_self_deploy import execute_launchplane_self_deploy
 from control_plane.workflows.ship import utc_now_timestamp
-from control_plane.workflows.launchplane import resolve_launchplane_github_token
+from control_plane.workflows.launchplane import (
+    github_api_request,
+    resolve_launchplane_github_token,
+)
 from control_plane.work_graph_issue_inbox import (
     GitHubIssueInboxReconcileRequest,
 )
@@ -710,6 +720,11 @@ _PRODUCT_HEALTH_MONITORING_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_MAX_BODY_BYTES = 64 * 1024
 _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES = 64 * 1024
+_REPOSITORY_HUMAN_ROLE_POLICY_MAX_BODY_BYTES = 64 * 1024
+_TENANT_TECHNICAL_HUMAN_WAIVER_MAX_BODY_BYTES = 64 * 1024
+_TENANT_ADMISSION_CONTROLLER_RUN_ONCE_MAX_BODY_BYTES = 64 * 1024
+_TENANT_ADMISSION_STATUS_RECONCILE_MAX_BODY_BYTES = 64 * 1024
+_TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE = "/v1/product-profiles/prelaunch-rebuild/apply"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
@@ -765,6 +780,36 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
         True,
         True,
     ),
+    REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE: (
+        "Repository human role policy",
+        _REPOSITORY_HUMAN_ROLE_POLICY_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    TENANT_TECHNICAL_HUMAN_WAIVER_APPLY_ROUTE: (
+        "Tenant technical human waiver",
+        _TENANT_TECHNICAL_HUMAN_WAIVER_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE: (
+        "Tenant admission controller run",
+        _TENANT_ADMISSION_CONTROLLER_RUN_ONCE_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    TENANT_ADMISSION_STATUS_RECONCILE_ROUTE: (
+        "Tenant admission status reconciliation",
+        _TENANT_ADMISSION_STATUS_RECONCILE_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE: (
+        "Trusted-maintenance policy",
+        _TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
 }
 _DOKPLOY_TARGET_SETUP_ROUTE = "/v1/dokploy-targets/setup"
 _PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE = "/v1/products/public-ingress-monitor/run-once"
@@ -802,6 +847,7 @@ _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-conte
 _PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
 _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
+_AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE = "/v1/authz-diagnostics/github-actions/evaluate"
 _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE = "/v1/authz-policies/managed-rule-sets/reconcile"
 _AUTH_SESSION_ROUTE = "/v1/auth/session"
 _AUTH_GITHUB_LOGIN_ROUTE = "/auth/github/login"
@@ -3247,6 +3293,23 @@ class LaunchplaneAuthzPolicyRuntime:
     def revision(self) -> int:
         return self._revision
 
+    def allows(
+        self,
+        *,
+        identity: LaunchplaneIdentity,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None = None,
+    ) -> bool:
+        return self._policy.allows(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+            target=target,
+        )
+
     def policy_record(self, *, updated_at: str) -> LaunchplaneAuthzPolicyRecord:
         record_id = self._record_id or f"runtime-authz-policy-{self._policy_sha256[:12]}"
         return LaunchplaneAuthzPolicyRecord(
@@ -4078,27 +4141,11 @@ def create_launchplane_fastapi_app(
             raise _authentication_required_error("Mutation routes require GitHub Actions OIDC.")
         return oidc_identity
 
-    def read_route_authorization_allows(
-        *,
-        identity: LaunchplaneIdentity,
-        action: str,
-        product: str,
-        context: str,
-        target: AuthorizationTarget | None = None,
-    ) -> bool:
-        return resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=action,
-            product=product,
-            context=context,
-            target=target,
-        )
-
     read_route_dependencies = ReadRouteDependencies(
         read_identity=read_identity,
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
-        authorization_allows=read_route_authorization_allows,
+        authorization_allows=resolved_authz_policy_runtime.allows,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
     )
@@ -4106,7 +4153,7 @@ def create_launchplane_fastapi_app(
         read_write_identity=read_write_identity,
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
-        authorization_allows=read_route_authorization_allows,
+        authorization_allows=resolved_authz_policy_runtime.allows,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
         control_plane_root=resolved_control_plane_root,
@@ -4121,6 +4168,8 @@ def create_launchplane_fastapi_app(
                 context_name=context,
             )
         ),
+        control_plane_root=resolved_control_plane_root,
+        github_token=resolve_launchplane_github_token,
     )
     driver_read_route_dependencies = DriverReadRouteDependencies(
         common=read_route_dependencies,
@@ -5019,6 +5068,7 @@ def create_launchplane_fastapi_app(
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
             MergeTrainControllerReconciliationRequiredError,
+            MergeTrainControllerAdoptionRejectedError,
         ) as error:
             raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         except MergeTrainBatchCandidateRecordNotFoundError as error:
@@ -5184,6 +5234,7 @@ def create_launchplane_fastapi_app(
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
             MergeTrainControllerReconciliationRequiredError,
+            MergeTrainControllerAdoptionRejectedError,
         ) as error:
             raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         except (MergeTrainControllerRequestError, ValueError, click.ClickException) as error:
@@ -8786,6 +8837,7 @@ def create_launchplane_fastapi_app(
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
             MergeTrainControllerReconciliationRequiredError,
+            MergeTrainControllerAdoptionRejectedError,
         ) as error:
             raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         except MergeTrainStackCollapseBatchCandidateStoreMissingError as error:
@@ -8979,6 +9031,7 @@ def create_launchplane_fastapi_app(
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
             MergeTrainControllerReconciliationRequiredError,
+            MergeTrainControllerAdoptionRejectedError,
         ) as error:
             raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         except (
@@ -9169,6 +9222,7 @@ def create_launchplane_fastapi_app(
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
             MergeTrainControllerReconciliationRequiredError,
+            MergeTrainControllerAdoptionRejectedError,
         ) as error:
             raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
         if controller_state_store is None:
@@ -13409,6 +13463,38 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             policy=control_plane_authz_grant_service.summarize_active_authz_policy_record(
                 active_records[0]
+            ),
+        )
+
+    async def evaluate_github_actions_authz_diagnostic(
+        diagnostic_request: control_plane_authz_diagnostics.AuthzDiagnosticEvaluateEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
+    ) -> control_plane_authz_diagnostics.AuthzDiagnosticEvaluateResponse:
+        trace_id = next_trace_id()
+        if not isinstance(identity, GitHubActionsIdentity) or not (
+            resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="authz_diagnostic.evaluate",
+                product=diagnostic_request.product,
+                context=diagnostic_request.context,
+                target=diagnostic_request.target,
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot evaluate its Launchplane authorization.",
+            )
+        return control_plane_authz_diagnostics.AuthzDiagnosticEvaluateResponse(
+            trace_id=trace_id,
+            policy_record_id=resolved_authz_policy_runtime.record_id,
+            policy_revision=resolved_authz_policy_runtime.revision,
+            policy_sha256=resolved_authz_policy_runtime.policy_sha256,
+            evaluation=control_plane_authz_diagnostics.evaluate_github_actions_authz(
+                policy=resolved_authz_policy_runtime.policy,
+                identity=identity,
+                request=diagnostic_request,
             ),
         )
 
@@ -18112,7 +18198,7 @@ def create_launchplane_fastapi_app(
         read_browser_mutation_identity=read_browser_mutation_identity,
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
-        authorization_allows=resolved_authz_policy_runtime.policy.allows,
+        authorization_allows=resolved_authz_policy_runtime.allows,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
         control_plane_root=resolved_control_plane_root,
@@ -19558,7 +19644,11 @@ def create_launchplane_fastapi_app(
     )
     register_tenant_admission_read_routes(
         app,
-        dependencies=TenantAdmissionReadRouteDependencies(common=read_route_dependencies),
+        dependencies=TenantAdmissionReadRouteDependencies(
+            common=read_route_dependencies,
+            control_plane_root=resolved_control_plane_root,
+            github_token=resolve_launchplane_github_token,
+        ),
     )
 
     app.add_api_route(
@@ -20285,6 +20375,12 @@ def create_launchplane_fastapi_app(
         409: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
     }
+    authz_diagnostic_route_responses: dict[int | str, dict[str, Any]] = {
+        400: {"model": LaunchplaneErrorResponse},
+        401: {"model": LaunchplaneErrorResponse},
+        403: {"model": LaunchplaneErrorResponse},
+        503: {"model": LaunchplaneErrorResponse},
+    }
 
     app.add_api_route(
         _AUTHZ_POLICY_ACTIVE_ROUTE,
@@ -20324,6 +20420,17 @@ def create_launchplane_fastapi_app(
         operation_id="reconcile_managed_authz_policy",
         summary="Reconcile managed authz policy rules",
         responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
+        _AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE,
+        evaluate_github_actions_authz_diagnostic,
+        methods=["POST"],
+        response_model=control_plane_authz_diagnostics.AuthzDiagnosticEvaluateResponse,
+        response_model_exclude_none=True,
+        operation_id="evaluate_github_actions_authz_diagnostic",
+        summary="Evaluate the calling GitHub Actions identity against active authorization",
+        responses=authz_diagnostic_route_responses,
     )
 
     app.add_api_route(
@@ -20477,11 +20584,15 @@ def create_launchplane_fastapi_app(
 
     tenant_admission_write_route_dependencies = TenantAdmissionWriteRouteDependencies(
         read_write_identity=read_bearer_identity,
+        read_browser_mutation_identity=read_browser_mutation_identity,
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
-        authorization_allows=read_route_authorization_allows,
+        authorization_allows=resolved_authz_policy_runtime.allows,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
+        control_plane_root=resolved_control_plane_root,
+        github_token=resolve_launchplane_github_token,
+        github_api=github_api_request,
     )
     register_tenant_admission_write_routes(
         app,
@@ -20669,14 +20780,17 @@ def merge_train_controller_fence_http_error(
         MergeTrainControllerLeaseHeldError
         | MergeTrainControllerLeaseLostError
         | MergeTrainControllerReconciliationRequiredError
+        | MergeTrainControllerAdoptionRejectedError
     ),
 ) -> HTTPException:
     if isinstance(error, MergeTrainControllerLeaseHeldError):
         code = "merge_train_controller_lease_held"
     elif isinstance(error, MergeTrainControllerLeaseLostError):
         code = "merge_train_controller_lease_lost"
-    else:
+    elif isinstance(error, MergeTrainControllerReconciliationRequiredError):
         code = "merge_train_controller_reconciliation_required"
+    else:
+        code = "merge_train_controller_foreign_action"
     return _launchplane_http_error(
         status_code=409,
         trace_id=trace_id,

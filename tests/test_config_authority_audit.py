@@ -621,6 +621,348 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         coverage = cast("dict[str, object]", payload["coverage"])
         self.assertEqual(coverage["source_file_count"], 2)
 
+    def test_dependency_health_action_inputs_are_thin_connector_mechanics(self) -> None:
+        action_sha = "a" * 40
+        workflow_template = (
+            "name: Dependency health\n"
+            '"on": pull_request\n'
+            "jobs:\n"
+            "  compare:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    env:\n"
+            "      TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.70.0@sha256:" + "b" * 64 + "\n"
+            "    steps:\n"
+            "      - id: compare\n"
+            "        uses: >-\n"
+            "          cbusillo/launchplane/.github/actions/dependency-health-trivy@{action_ref}\n"
+            "        with:\n"
+            "          baseline-report: ${{{{ steps.prepare.outputs.root }}}}/reports/baseline.json\n"
+            "          candidate-report: ${{{{ steps.prepare.outputs.root }}}}/reports/candidate.json\n"
+            "          repository: ${{{{ github.repository }}}}\n"
+            "          baseline-commit: ${{{{ env.BASELINE_COMMIT }}}}\n"
+            "          candidate-commit: ${{{{ env.CANDIDATE_COMMIT }}}}\n"
+            '          producer-version: "0.70.0"\n'
+            "          advisory-revision: ${{{{ steps.scan.outputs.advisory-revision }}}}\n"
+            "          scan-scope: npm-production-lockfile\n"
+            "          scan-configuration-sha256: "
+            "${{{{ steps.prepare.outputs.configuration-sha256 }}}}\n"
+            "          target-advisory-text: >-\n"
+            "            ${{{{ github.event_name == 'pull_request' && "
+            "github.event.pull_request.user.login == 'dependabot[bot]' && "
+            "steps.dependabot.outputs.dependency-type != 'direct:development' && "
+            "github.event.pull_request.body || '' }}}}\n"
+            "          output-directory: ${{{{ steps.prepare.outputs.root }}}}/evaluation\n"
+        )
+
+        for action_ref, expected_status in ((action_sha, "pass"), ("main", "fail")):
+            with self.subTest(action_ref=action_ref):
+                with TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    _init_repo(root)
+                    workflow = root / ".github" / "workflows" / "ci.yml"
+                    workflow.parent.mkdir(parents=True)
+                    workflow.write_text(
+                        workflow_template.format(action_ref=action_ref),
+                        encoding="utf-8",
+                    )
+                    _commit_all(root)
+
+                    payload = build_config_authority_audit(control_plane_root=root)
+                    gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+                self.assertEqual(gate["status"], expected_status)
+                findings = [
+                    finding
+                    for finding in _findings(payload)
+                    if finding["path"] == ".github/workflows/ci.yml"
+                ]
+                if expected_status == "pass":
+                    self.assertTrue(findings)
+                    self.assertTrue(
+                        all(
+                            finding["allow_reason"] == "thin_connector_input"
+                            for finding in findings
+                        )
+                    )
+                else:
+                    self.assertTrue(
+                        any(
+                            finding["key"] == "uses"
+                            and finding["classification"] == "needs_classification"
+                            for finding in findings
+                        )
+                    )
+                    self.assertTrue(
+                        any(
+                            finding["classification"] == "needs_classification"
+                            for finding in findings
+                        )
+                    )
+
+    def test_inline_mutable_dependency_health_action_is_rejected(self) -> None:
+        for uses_step in (
+            "      - uses: cbusillo/launchplane/.github/actions/dependency-health-trivy@main\n",
+            "      - uses: >-\n"
+            "          cbusillo/launchplane/.github/actions/"
+            "dependency-health-trivy@main\n",
+        ):
+            with self.subTest(uses_step=uses_step):
+                with TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    _init_repo(root)
+                    workflow = root / ".github" / "workflows" / "ci.yml"
+                    workflow.parent.mkdir(parents=True)
+                    workflow.write_text(
+                        "name: Dependency health\n"
+                        '"on": pull_request\n'
+                        "jobs:\n"
+                        "  compare:\n"
+                        "    runs-on: ubuntu-latest\n"
+                        "    steps:\n" + uses_step,
+                        encoding="utf-8",
+                    )
+                    _commit_all(root)
+
+                    payload = build_config_authority_audit(control_plane_root=root)
+                    gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+                self.assertEqual(gate["status"], "fail")
+                uses_finding = next(
+                    finding
+                    for finding in _findings(payload)
+                    if finding["path"] == ".github/workflows/ci.yml" and finding["key"] == "uses"
+                )
+                self.assertEqual(uses_finding["classification"], "needs_classification")
+
+    def test_dependency_health_action_inputs_are_scoped_to_the_action(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "ci.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Dependency health\n"
+                '"on": pull_request\n'
+                "jobs:\n"
+                "  compare:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - id: compare\n"
+                "        uses: cbusillo/launchplane/.github/actions/"
+                "dependency-health-trivy@" + "a" * 40 + "\n"
+                "        with:\n"
+                "          repository: ${{ github.repository }}\n"
+                "      - name: Unrelated action\n"
+                "        uses: example/action@" + "b" * 40 + "\n"
+                "        with:\n"
+                "          repository: ${{ github.repository }}\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+            gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+        self.assertEqual(gate["status"], "fail")
+        repository_findings = [
+            finding
+            for finding in _findings(payload)
+            if finding["path"] == ".github/workflows/ci.yml"
+            and str(finding["key"]).endswith("repository")
+        ]
+        self.assertEqual(
+            [finding["classification"] for finding in repository_findings],
+            ["allowed", "needs_classification"],
+        )
+
+    def test_list_block_scalar_dependency_health_inputs_are_scoped(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "ci.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Dependency health\n"
+                '"on": pull_request\n'
+                "jobs:\n"
+                "  compare:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: >-\n"
+                "          cbusillo/launchplane/.github/actions/"
+                "dependency-health-trivy@" + "a" * 40 + "\n"
+                "        with:\n"
+                "          repository: cbusillo/checked-in-product\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+            gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+        self.assertEqual(gate["status"], "fail")
+        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        self.assertEqual(findings_by_key["uses"]["classification"], "allowed")
+        self.assertEqual(
+            findings_by_key["dependency-health.with[1].repository"]["classification"],
+            "needs_classification",
+        )
+
+    def test_dependency_health_target_text_requires_exact_dependabot_guard(self) -> None:
+        safe_expression = (
+            "${{ github.event_name == 'pull_request' && "
+            "github.event.pull_request.user.login == 'dependabot[bot]' && "
+            "steps.dependabot.outputs.dependency-type != 'direct:development' && "
+            "github.event.pull_request.body || '' }}"
+        )
+        unsafe_expression = (
+            "${{ github.event.pull_request.user.login != 'dependabot[bot]' && "
+            "github.event.pull_request.body || 'dependabot' }}"
+        )
+        job_output_expression = "${{ needs.scan.outputs.target-advisory-text }}"
+
+        for expression, expected_status in (
+            (safe_expression, "pass"),
+            (unsafe_expression, "fail"),
+            (job_output_expression, "fail"),
+        ):
+            with self.subTest(expression=expression):
+                with TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    _init_repo(root)
+                    workflow = root / ".github" / "workflows" / "ci.yml"
+                    workflow.parent.mkdir(parents=True)
+                    workflow.write_text(
+                        "name: Dependency health\n"
+                        '"on": pull_request\n'
+                        "jobs:\n"
+                        "  compare:\n"
+                        "    runs-on: ubuntu-latest\n"
+                        "    steps:\n"
+                        "      - id: compare\n"
+                        "        uses: cbusillo/launchplane/.github/actions/"
+                        "dependency-health-trivy@" + "a" * 40 + "\n"
+                        "        with:\n"
+                        f"          target-advisory-text: {expression}\n",
+                        encoding="utf-8",
+                    )
+                    _commit_all(root)
+
+                    payload = build_config_authority_audit(control_plane_root=root)
+                    gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+                self.assertEqual(gate["status"], expected_status)
+
+    def test_dependency_health_action_inputs_reject_job_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "ci.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Dependency health\n"
+                '"on": pull_request\n'
+                "jobs:\n"
+                "  compare:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - id: compare\n"
+                "        uses: cbusillo/launchplane/.github/actions/"
+                "dependency-health-trivy@" + "a" * 40 + "\n"
+                "        with:\n"
+                "          baseline-report: "
+                "${{ needs.prepare.outputs.root }}/reports/baseline.json\n"
+                "          advisory-revision: "
+                "${{ needs.scan.outputs.advisory-revision }}\n"
+                "          output-directory: "
+                "${{ needs.prepare.outputs.root }}/evaluation\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+            gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+        self.assertEqual(gate["status"], "fail")
+        findings_by_input = {
+            str(finding["key"]).rsplit(".", maxsplit=1)[-1]: finding
+            for finding in _findings(payload)
+            if str(finding["key"]).startswith("dependency-health.with[")
+        }
+        for input_name in ("baseline-report", "advisory-revision", "output-directory"):
+            self.assertEqual(
+                findings_by_input[input_name]["classification"],
+                "needs_classification",
+            )
+
+    def test_trivy_image_must_be_digest_pinned(self) -> None:
+        pinned_image = "ghcr.io/aquasecurity/trivy:0.70.0@sha256:" + "b" * 64
+
+        for image, expected_status in (
+            (pinned_image, "pass"),
+            ("ghcr.io/aquasecurity/trivy:latest", "fail"),
+            ("trivy:latest", "fail"),
+        ):
+            with self.subTest(image=image):
+                with TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    _init_repo(root)
+                    workflow = root / ".github" / "workflows" / "ci.yml"
+                    workflow.parent.mkdir(parents=True)
+                    workflow.write_text(
+                        "name: Dependency health\n"
+                        '"on": pull_request\n'
+                        "jobs:\n"
+                        "  compare:\n"
+                        "    runs-on: ubuntu-latest\n"
+                        "    env:\n"
+                        f"      TRIVY_IMAGE: {image}\n",
+                        encoding="utf-8",
+                    )
+                    _commit_all(root)
+
+                    payload = build_config_authority_audit(control_plane_root=root)
+                    gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+                self.assertEqual(gate["status"], expected_status)
+
+    def test_dynamic_default_branch_guard_is_workflow_mechanic(self) -> None:
+        workflow_template = (
+            "name: Publish\n"
+            '"on": workflow_dispatch\n'
+            "jobs:\n"
+            "  publish:\n"
+            "    if: {guard}\n"
+            "    runs-on: ubuntu-latest\n"
+        )
+
+        for guard, expected_status in (
+            (
+                ">-\n"
+                "      ${{ github.ref == format('refs/heads/{0}', "
+                "github.event.repository.default_branch) }}",
+                "pass",
+            ),
+            ("${{ github.ref == 'refs/heads/main' }}", "fail"),
+            ("${{ github.ref_name == 'main' }}", "fail"),
+        ):
+            with self.subTest(guard=guard):
+                with TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    _init_repo(root)
+                    workflow = root / ".github" / "workflows" / "publish.yml"
+                    workflow.parent.mkdir(parents=True)
+                    workflow.write_text(
+                        workflow_template.format(guard=guard),
+                        encoding="utf-8",
+                    )
+                    _commit_all(root)
+
+                    payload = build_config_authority_audit(control_plane_root=root)
+                    gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+                self.assertEqual(gate["status"], expected_status)
+
     def test_click_option_metadata_is_reported_as_operator_input(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -778,8 +1120,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "  product-path:\n"
                 "    default: products/concrete-product.yml\n"
                 "runs:\n"
-                "  using: node24\n"
-                "  main: dist/index.js\n",
+                "  using: composite\n"
+                "  steps:\n"
+                "    - shell: bash\n"
+                "      env:\n"
+                "        INPUT_REPOSITORY: ${{ inputs.repository }}\n"
+                "        INPUT_TARGET_ADVISORY_IDS: ${{ inputs.target-advisory-ids }}\n"
+                "        INPUT_EVENT_REPOSITORY: ${{ github.event.inputs.repository }}\n"
+                "      run: echo setup\n",
                 encoding="utf-8",
             )
             _commit_all(root)
@@ -794,8 +1142,19 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
         self.assertEqual(output_default["classification"], "allowed")
         self.assertEqual(output_default["allow_reason"], "thin_connector_input")
-        self.assertEqual(findings_by_key["main"]["classification"], "allowed")
-        self.assertEqual(findings_by_key["main"]["allow_reason"], "thin_connector_input")
+        self.assertEqual(findings_by_key["INPUT_REPOSITORY"]["classification"], "allowed")
+        self.assertEqual(
+            findings_by_key["INPUT_REPOSITORY"]["allow_reason"], "thin_connector_input"
+        )
+        self.assertEqual(findings_by_key["INPUT_TARGET_ADVISORY_IDS"]["classification"], "allowed")
+        self.assertEqual(
+            findings_by_key["INPUT_TARGET_ADVISORY_IDS"]["allow_reason"],
+            "thin_connector_input",
+        )
+        self.assertEqual(
+            findings_by_key["INPUT_EVENT_REPOSITORY"]["classification"],
+            "needs_classification",
+        )
         self.assertEqual(product_path_default["classification"], "needs_classification")
         self.assertEqual(product_path_default["allow_reason"], "")
 
@@ -2159,14 +2518,16 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             (
                 ".github/workflows/launchplane-config-authority.yml",
-                "checkout.repository[1]",
-                "${{ github.repository_owner }}/launchplane",
-                {"launchplane_tool_checkout_pinned_blocks": {"1"}},
+                "uses",
+                "cbusillo/launchplane/.github/workflows/"
+                "reusable-product-repo-config-authority.yml@" + "a" * 40,
+                {"launchplane_config_authority_revision": "a" * 40},
             ),
             (
                 ".github/workflows/launchplane-config-authority.yml",
-                "uses",
-                "cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@main",
+                "launchplane-config-authority.with[1].launchplane-revision",
+                "a" * 40,
+                {"launchplane_config_authority_revision": "a" * 40},
             ),
             (
                 ".github/workflows/launchplane-deploy.yml",
@@ -4226,7 +4587,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         rejected = cast("list[dict[str, object]]", gate["rejected_findings"])
         self.assertEqual(rejected[0]["rule_id"], "changed_files_gate_base_unavailable")
 
-    def test_cli_product_repo_gate_allows_launchplane_tool_checkout(self) -> None:
+    def test_cli_product_repo_gate_rejects_launchplane_tool_checkout_without_binding(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_repo(root)
@@ -4280,15 +4641,21 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ],
             )
 
-        self.assertEqual(result.exit_code, 0, result.output)
-        payload = json.loads(result.output)
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output.split("Error:", 1)[0])
         gate = cast("dict[str, object]", payload["gate"])
-        self.assertEqual(gate["status"], "pass")
+        self.assertEqual(gate["status"], "fail")
+        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        self.assertEqual(
+            findings_by_key["launchplane-config-authority-binding"]["allow_reason"],
+            "",
+        )
 
     def test_cli_product_repo_gate_allows_reusable_launchplane_gate_workflow(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_repo(root)
+            revision = "a" * 40
             workflow = root / ".github" / "workflows" / "launchplane-config-authority.yml"
             workflow.parent.mkdir(parents=True)
             workflow.write_text("name: Launchplane Config Authority\n", encoding="utf-8")
@@ -4305,7 +4672,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "  contents: read\n\n"
                 "jobs:\n"
                 "  launchplane-config-authority:\n"
-                "    uses: cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@main\n",
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                f"reusable-product-repo-config-authority.yml@{revision}\n"
+                "    with:\n"
+                f"      launchplane-revision: {revision}\n",
                 encoding="utf-8",
             )
             _commit_all(root)
@@ -4331,9 +4701,159 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         gate = cast("dict[str, object]", payload["gate"])
         self.assertEqual(gate["status"], "pass")
         findings = _findings(payload)
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0]["key"], "uses")
-        self.assertEqual(findings[0]["allow_reason"], "thin_connector_input")
+        self.assertEqual(
+            {finding["key"] for finding in findings},
+            {"uses", "launchplane-config-authority.with[1].launchplane-revision"},
+        )
+        self.assertTrue(
+            all(finding["allow_reason"] == "thin_connector_input" for finding in findings)
+        )
+
+    def test_cli_product_repo_gate_rejects_mismatched_launchplane_gate_revision(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-config-authority.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Launchplane Config Authority\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/config-authority-gate")
+            workflow.write_text(
+                "---\n"
+                "name: Launchplane Config Authority\n\n"
+                '"on": pull_request\n\n'
+                "jobs:\n"
+                "  launchplane-config-authority:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                "reusable-product-repo-config-authority.yml@" + "a" * 40 + "\n"
+                "    with:\n"
+                "      launchplane-revision: " + "b" * 40 + "\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output.split("Error:", 1)[0])
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "fail")
+        revision_finding = next(
+            finding
+            for finding in _findings(payload)
+            if finding["key"] == "launchplane-config-authority.with[1].launchplane-revision"
+        )
+        self.assertEqual(revision_finding["classification"], "needs_classification")
+
+    def test_cli_product_repo_gate_rejects_unbound_launchplane_gate_revisions(self) -> None:
+        cases = {
+            "empty": "",
+            "missing-input": (
+                "  launchplane-config-authority:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                "reusable-product-repo-config-authority.yml@" + "a" * 40 + "\n"
+            ),
+            "unrelated-input": (
+                "  launchplane-config-authority:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                "reusable-product-repo-config-authority.yml@" + "a" * 40 + "\n"
+                "  unrelated:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    env:\n"
+                "      launchplane-revision: " + "a" * 40 + "\n"
+            ),
+            "unrelated-with-input": (
+                "  launchplane-config-authority:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                "reusable-product-repo-config-authority.yml@" + "a" * 40 + "\n"
+                "  unrelated:\n"
+                "    with:\n"
+                "      launchplane-revision: " + "a" * 40 + "\n"
+            ),
+            "wrong-workflow": (
+                "  launchplane-config-authority:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                "reusable-generic-web-preview-lifecycle.yml@" + "a" * 40 + "\n"
+            ),
+            "extra-workflow": (
+                "  launchplane-config-authority:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                "reusable-product-repo-config-authority.yml@" + "a" * 40 + "\n"
+                "    with:\n"
+                "      launchplane-revision: " + "a" * 40 + "\n"
+                "  extra:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                "reusable-generic-web-preview-lifecycle.yml@" + "b" * 40 + "\n"
+            ),
+            "swapped-pairs": (
+                "  first:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                "reusable-product-repo-config-authority.yml@" + "a" * 40 + "\n"
+                "    with:\n"
+                "      launchplane-revision: " + "b" * 40 + "\n"
+                "  second:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                "reusable-product-repo-config-authority.yml@" + "b" * 40 + "\n"
+                "    with:\n"
+                "      launchplane-revision: " + "a" * 40 + "\n"
+            ),
+        }
+
+        for case_name, jobs in cases.items():
+            with self.subTest(case_name=case_name):
+                with TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    _init_repo(root)
+                    workflow = root / ".github" / "workflows" / "launchplane-config-authority.yml"
+                    workflow.parent.mkdir(parents=True)
+                    workflow.write_text("name: Launchplane Config Authority\n", encoding="utf-8")
+                    _commit_all(root)
+                    _git(root, "branch", "-M", "main")
+                    _checkout_branch(root, "feature/config-authority-gate")
+                    workflow.write_text(
+                        "---\n"
+                        "name: Launchplane Config Authority\n\n"
+                        '"on": pull_request\n\n'
+                        "jobs:\n" + jobs,
+                        encoding="utf-8",
+                    )
+                    _commit_all(root)
+
+                    runner = CliRunner()
+                    result = runner.invoke(
+                        CLI_MAIN,
+                        [
+                            "service",
+                            "audit-config-authority",
+                            "--control-plane-root",
+                            str(root),
+                            "--mode",
+                            "changed-files-gate",
+                            "--fail-on-findings",
+                            "--gate-profile",
+                            "product-repo",
+                        ],
+                    )
+
+                self.assertNotEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output.split("Error:", 1)[0])
+                gate = cast("dict[str, object]", payload["gate"])
+                self.assertEqual(gate["status"], "fail")
 
     def test_cli_product_repo_gate_rejects_reusable_launchplane_gate_branch(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -4381,9 +4901,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         gate = cast("dict[str, object]", payload["gate"])
         self.assertEqual(gate["status"], "fail")
         findings = _findings(payload)
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0]["key"], "uses")
-        self.assertEqual(findings[0]["allow_reason"], "")
+        findings_by_key = {finding["key"]: finding for finding in findings}
+        self.assertEqual(findings_by_key["uses"]["allow_reason"], "")
+        self.assertEqual(
+            findings_by_key["launchplane-config-authority-binding"]["allow_reason"],
+            "",
+        )
 
     def test_cli_product_repo_gate_allows_image_artifact_deploy_workflow(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -4713,7 +5236,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotIn("preview_url", thin_connector_keys)
         self.assertNotIn("idempotency-key", thin_connector_keys)
 
-    def test_cli_product_repo_gate_allows_compact_launchplane_tool_checkout(self) -> None:
+    def test_cli_product_repo_gate_rejects_compact_tool_checkout_without_binding(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_repo(root)
@@ -4753,10 +5276,15 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ],
             )
 
-        self.assertEqual(result.exit_code, 0, result.output)
-        payload = json.loads(result.output)
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output.split("Error:", 1)[0])
         gate = cast("dict[str, object]", payload["gate"])
-        self.assertEqual(gate["status"], "pass")
+        self.assertEqual(gate["status"], "fail")
+        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        self.assertEqual(
+            findings_by_key["launchplane-config-authority-binding"]["allow_reason"],
+            "",
+        )
 
     def test_cli_product_repo_gate_rejects_hardcoded_launchplane_tool_checkout(self) -> None:
         with TemporaryDirectory() as temp_dir:

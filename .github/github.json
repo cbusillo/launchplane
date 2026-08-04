@@ -26,6 +26,7 @@
     "records": "docs/records.md",
     "secrets": "docs/secrets.md",
     "githubActionsSecurity": "docs/github-actions-security.md",
+    "dependencyHealthContract": "docs/dependency-health-contract.md",
     "publicReadiness": "docs/public-readiness.md",
     "style": ["docs/style/python.md", "docs/style/testing.md"],
     "policies": ["docs/policies/coding-standards.md"]
@@ -119,6 +120,7 @@
     "Reusable Generic Web Prod Promotion",
     "Reusable Generic Web Prod Rollback",
     "Reusable Generic Web Stable Verification",
+    "Reusable Generic Web Preview",
     "Reusable Generic Web Preview Lifecycle",
     "Reusable Generic Web Preview Verification",
     "Reusable Product Driver Stable Environment",

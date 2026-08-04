@@ -826,9 +826,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 }
                 role_indexes = {
                     index["name"]: index
-                    for index in inspector.get_indexes(
-                        "launchplane_repository_human_role_policies"
-                    )
+                    for index in inspector.get_indexes("launchplane_repository_human_role_policies")
                 }
                 waiver_indexes = {
                     index["name"]: index
@@ -906,15 +904,11 @@ class SchemaMigrationTests(unittest.TestCase):
             ["repository_id", "product", "context"],
         )
         self.assertEqual(
-            waiver_indexes["launchplane_tenant_human_waiver_exact_head_idx"][
-                "column_names"
-            ],
+            waiver_indexes["launchplane_tenant_human_waiver_exact_head_idx"]["column_names"],
             ["repository_id", "pull_request_number", "head_sha", "occurred_at", "event_id"],
         )
         self.assertEqual(
-            waiver_indexes["launchplane_tenant_human_waiver_binding_idx"][
-                "column_names"
-            ],
+            waiver_indexes["launchplane_tenant_human_waiver_binding_idx"]["column_names"],
             ["binding_sha256", "occurred_at", "event_id"],
         )
         self.assertNotIn(
@@ -937,21 +931,17 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "a0d2f4b6c8e1")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "b1c2d3e4f5a6")
         self.assertEqual(
             column_types[("launchplane_repository_human_role_policies", "payload")],
             ("jsonb",),
         )
         self.assertEqual(
-            column_types[
-                ("launchplane_repository_human_role_policies", "role_policy_revision")
-            ],
+            column_types[("launchplane_repository_human_role_policies", "role_policy_revision")],
             ("bigint", "int8"),
         )
         self.assertEqual(
-            column_types[
-                ("launchplane_tenant_technical_human_waiver_events", "payload")
-            ],
+            column_types[("launchplane_tenant_technical_human_waiver_events", "payload")],
             ("jsonb",),
         )
         self.assertEqual(

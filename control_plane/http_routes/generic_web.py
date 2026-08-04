@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -144,6 +145,7 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewProfileStore,
     discover_generic_web_preview_desired_state,
     preview_pr_number_from_slug,
+    resolve_generic_web_preview_slug,
 )
 from control_plane.workflows.odoo_generic_web_post_deploy import (
     generic_web_post_deploy_executor_for_driver_id,
@@ -473,6 +475,26 @@ class GenericWebWriteRouteHandlers:
     apply_generic_web_preview_verification: Callable[..., Any]
     write_generic_web_rollback_plan: Callable[..., Any]
     write_generic_web_rollback: Callable[..., Any]
+
+
+def _generic_web_preview_refresh_lock(
+    *,
+    request: Request,
+    profile: LaunchplaneProductProfileRecord,
+    refresh_request: GenericWebPreviewRefreshEnvelope,
+) -> tuple[str, asyncio.Lock]:
+    preview_slug = resolve_generic_web_preview_slug(
+        profile=profile,
+        preview_slug=refresh_request.refresh.preview_slug,
+        anchor_pr_number=refresh_request.refresh.anchor_pr_number,
+        label="Generic web preview refresh",
+    )
+    lock_key = f"{profile.product}:{profile.preview.context}:{preview_slug}"
+    locks = getattr(request.app.state, "generic_web_preview_refresh_locks", None)
+    if locks is None:
+        locks = {}
+        request.app.state.generic_web_preview_refresh_locks = locks
+    return lock_key, locks.setdefault(lock_key, asyncio.Lock())
 
 
 def build_generic_web_write_route_handlers(
@@ -1185,11 +1207,10 @@ def build_generic_web_write_route_handlers(
         if replayed_response is not None:
             return replayed_response
         try:
-            records, result = apply_generic_web_preview_refresh_result(
-                control_plane_root=dependencies.control_plane_root,
-                record_store=record_store,
-                request=refresh_request,
+            lock_key, refresh_lock = _generic_web_preview_refresh_lock(
+                request=request,
                 profile=profile,
+                refresh_request=refresh_request,
             )
         except (ValueError, click.ClickException) as error:
             raise dependencies.http_error(
@@ -1198,34 +1219,82 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        pr_number = manager_preview_pr_number(
-            profile=profile,
-            anchor_pr_number=refresh_request.refresh.anchor_pr_number,
-            preview_slug=refresh_request.refresh.preview_slug,
-        )
-        if pr_number is not None:
-            reconcile_manager_preview_approval_for_pr_best_effort(
-                repository=profile.repository,
-                pr_number=pr_number,
-                record_store=record_store,
-                control_plane_root=dependencies.control_plane_root,
-            )
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records=records,
-            result=result,
-        )
-        if should_store_generic_web_preview_idempotency(result):
-            dependencies.store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
-                route_path=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
-                idempotency_key=normalized_key,
-                request_fingerprint_value=payload_fingerprint,
+        if refresh_lock.locked():
+            raise dependencies.http_error(
+                status_code=409,
                 trace_id=trace_id,
-                response=response,
+                code="mutation_in_progress",
+                message=(
+                    "A generic web preview refresh is already running for the requested preview. "
+                    "Retry after it completes."
+                ),
+        )
+        await refresh_lock.acquire()
+        try:
+            cancellation: asyncio.CancelledError | None = None
+            try:
+                refresh_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        apply_generic_web_preview_refresh_result,
+                        control_plane_root=dependencies.control_plane_root,
+                        record_store=record_store,
+                        request=refresh_request,
+                        profile=profile,
+                    ),
+                    name=f"generic-web-preview-refresh:{trace_id}",
+                )
+                try:
+                    records, result = await asyncio.shield(refresh_task)
+                except asyncio.CancelledError as error:
+                    cancellation = error
+                    while not refresh_task.done():
+                        try:
+                            await asyncio.shield(refresh_task)
+                        except asyncio.CancelledError:
+                            continue
+                    records, result = refresh_task.result()
+            except (ValueError, click.ClickException) as error:
+                raise dependencies.http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_request",
+                    message="Request could not be completed.",
+                ) from error
+            pr_number = manager_preview_pr_number(
+                profile=profile,
+                anchor_pr_number=refresh_request.refresh.anchor_pr_number,
+                preview_slug=refresh_request.refresh.preview_slug,
             )
-        return response
+            if pr_number is not None:
+                reconcile_manager_preview_approval_for_pr_best_effort(
+                    repository=profile.repository,
+                    pr_number=pr_number,
+                    record_store=record_store,
+                    control_plane_root=dependencies.control_plane_root,
+                )
+            response = accepted_evidence_response(
+                trace_id=trace_id,
+                records=records,
+                result=result,
+            )
+            if should_store_generic_web_preview_idempotency(result):
+                dependencies.store_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+                    idempotency_key=normalized_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=response,
+                )
+            if cancellation is not None:
+                raise cancellation
+            return response
+        finally:
+            refresh_lock.release()
+            locks = request.app.state.generic_web_preview_refresh_locks
+            if locks.get(lock_key) is refresh_lock:
+                locks.pop(lock_key, None)
 
     async def apply_generic_web_preview_destroy(
         request: Request,

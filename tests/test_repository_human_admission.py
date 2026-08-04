@@ -1,5 +1,7 @@
 import unittest
-from typing import cast
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Literal, cast
 
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -20,9 +22,17 @@ from control_plane.contracts.tenant_merge_eligibility import (
 )
 from control_plane.repository_human_admission import (
     RepositoryHumanRolePolicyConflictError,
+    RepositoryHumanRolePolicySequenceError,
+    TenantTechnicalHumanWaiverApplyEnvelope,
     TenantTechnicalHumanWaiverAuthorizationError,
+    TenantTechnicalHumanWaiverExpectedAuthority,
+    TenantTechnicalHumanWaiverStaleAuthorityError,
+    apply_tenant_technical_human_waiver,
+    apply_repository_human_role_policy,
     capture_tenant_technical_human_waiver_event,
+    get_repository_human_role_policy_read_model,
     manager_role_policy_provenance,
+    plan_repository_human_role_policy_apply,
     plan_repository_human_role_policy_append,
     technical_human_waiver_path_result,
 )
@@ -32,6 +42,7 @@ from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
     TerminalAgentIdentity,
 )
+from control_plane.storage.filesystem import FilesystemRecordStore
 
 
 PRODUCT = "launchplane"
@@ -113,6 +124,151 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
             plan_repository_human_role_policy_append(
                 records=(revision_1,),
                 record=revision_1.model_copy(update={"status": "superseded"}),
+            )
+
+    def test_role_policy_current_read_model_is_scope_bound_and_ambiguous_safe(
+        self,
+    ) -> None:
+        class AmbiguousReadStore:
+            def list_repository_human_role_policy_records(
+                self,
+                *,
+                repository_id: str = "",
+                repository_owner_id: str = "",
+                repository: str = "",
+                product: str = "",
+                context: str = "",
+                status: str = "",
+                limit: int | None = None,
+            ) -> tuple[RepositoryHumanRolePolicyRecord, ...]:
+                del repository_id, repository_owner_id, repository, product, context, status, limit
+                revision_1 = _role_policy(repository_owner_ids=(301,))
+                revision_2 = _role_policy(
+                    repository_owner_ids=(302,),
+                    revision=2,
+                    supersedes_record_id=revision_1.record_id,
+                )
+                return (revision_1, revision_2)
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(Path(temporary_directory_name))
+            missing = get_repository_human_role_policy_read_model(
+                repository_id=REPOSITORY_ID,
+                product=PRODUCT,
+                context=CONTEXT,
+                store=store,
+            )
+            revision_1 = _role_policy(repository_owner_ids=(301,))
+            revision_2 = _role_policy(
+                repository_owner_ids=(302,),
+                revision=2,
+                supersedes_record_id=revision_1.record_id,
+            )
+            store.write_repository_human_role_policy_record(revision_1)
+            store.write_repository_human_role_policy_record(revision_2)
+            available = get_repository_human_role_policy_read_model(
+                repository_id=REPOSITORY_ID,
+                product=PRODUCT,
+                context=CONTEXT,
+                store=store,
+            )
+
+        ambiguous = get_repository_human_role_policy_read_model(
+            repository_id=REPOSITORY_ID,
+            product=PRODUCT,
+            context=CONTEXT,
+            store=AmbiguousReadStore(),
+        )
+
+        self.assertEqual(missing.status, "missing")
+        self.assertIsNone(missing.current_record)
+        self.assertEqual(available.status, "available")
+        self.assertEqual(available.current_record, revision_2)
+        self.assertEqual(available.history_count, 2)
+        self.assertEqual(ambiguous.status, "ambiguous")
+        self.assertIsNone(ambiguous.current_record)
+
+    def test_role_policy_apply_requires_explicit_expected_tip_id_and_digest(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(Path(temporary_directory_name))
+            revision_1 = _role_policy(repository_owner_ids=(301,))
+            revision_2 = _role_policy(
+                repository_owner_ids=(302,),
+                revision=2,
+                supersedes_record_id=revision_1.record_id,
+            )
+
+            applied_1 = apply_repository_human_role_policy(
+                store=store,
+                record=revision_1,
+                mode="apply",
+            )
+
+            with self.assertRaisesRegex(ValueError, "expected current record ID and digest"):
+                apply_repository_human_role_policy(
+                    store=store,
+                    record=revision_2,
+                    expected_current_record_id=revision_1.record_id,
+                    mode="apply",
+                )
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                apply_repository_human_role_policy(
+                    store=store,
+                    record=revision_2,
+                    expected_current_record_id="wrong-record-id",
+                    expected_current_role_policy_digest=revision_1.role_policy_digest,
+                    mode="apply",
+                )
+            with self.assertRaises(RepositoryHumanRolePolicyConflictError):
+                apply_repository_human_role_policy(
+                    store=store,
+                    record=revision_2,
+                    expected_current_record_id=revision_1.record_id,
+                    expected_current_role_policy_digest="f" * 64,
+                    mode="apply",
+                )
+
+            applied_2 = apply_repository_human_role_policy(
+                store=store,
+                record=revision_2,
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
+                mode="apply",
+            )
+            replay_2 = apply_repository_human_role_policy(
+                store=store,
+                record=revision_2,
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
+                mode="apply",
+            )
+
+        self.assertEqual(applied_1.status, "applied")
+        self.assertEqual(applied_2.status, "applied")
+        self.assertEqual(replay_2.status, "replayed")
+
+    def test_role_policy_apply_rejects_inactive_candidate_and_sequence_gaps(
+        self,
+    ) -> None:
+        revision_1 = _role_policy(repository_owner_ids=(301,))
+        revision_2 = _role_policy(
+            repository_owner_ids=(302,),
+            revision=2,
+            supersedes_record_id=revision_1.record_id,
+        )
+        with self.assertRaisesRegex(ValueError, "active candidate"):
+            plan_repository_human_role_policy_apply(
+                records=(),
+                record=revision_1.model_copy(update={"status": "superseded"}),
+                expected_current_record_id="",
+                expected_current_role_policy_digest="",
+            )
+        with self.assertRaises(RepositoryHumanRolePolicySequenceError):
+            plan_repository_human_role_policy_apply(
+                records=(revision_1,),
+                record=revision_2.model_copy(update={"role_policy_revision": 3}),
+                expected_current_record_id=revision_1.record_id,
+                expected_current_role_policy_digest=revision_1.role_policy_digest,
             )
 
     def test_owner_waiver_captures_exact_managed_authz_and_satisfies_path(self) -> None:
@@ -206,6 +362,206 @@ class RepositoryHumanAdmissionTests(unittest.TestCase):
                 reason="No authz rule.",
                 recorded_at=OCCURRED_AT,
             )
+
+    def test_waiver_requires_numeric_managed_rule_not_login_only(self) -> None:
+        role_policy = _role_policy(repository_owner_ids=(301,))
+        login_only_policy = _authz_policy_record(
+            github_ids=(),
+            extra_rule={
+                "managed_set_id": "tenant-human.login-only",
+                "managed_rule_id": "technical-waiver-login-only",
+                "logins": ["human-301"],
+                "roles": ["read_only"],
+                "products": [PRODUCT],
+                "contexts": [CONTEXT],
+                "actions": [TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION],
+            },
+        )
+
+        with self.assertRaisesRegex(
+            TenantTechnicalHumanWaiverAuthorizationError,
+            "caller GitHub ID",
+        ):
+            capture_tenant_technical_human_waiver_event(
+                identity=_human(github_id=301),
+                candidate=_candidate(),
+                classification=_classification(),
+                role_policy_record=role_policy,
+                authz_policy_record=login_only_policy,
+                action="created",
+                occurred_at=OCCURRED_AT,
+                source_event_kind="github_issue_comment",
+                source_event_id="comment-login-only",
+                reason="Login-only managed rule must fail closed.",
+                recorded_at=OCCURRED_AT,
+            )
+
+    def test_waiver_numeric_rule_ignores_mutable_login_metadata(self) -> None:
+        role_policy = _role_policy(repository_owner_ids=(301,))
+        renamed_human = _human(
+            github_id=301,
+            login="new-human-301",
+            organizations=frozenset({"new-org"}),
+            teams=frozenset({"new-org/new-team"}),
+            role="admin",
+        )
+
+        event = capture_tenant_technical_human_waiver_event(
+            identity=renamed_human,
+            candidate=_candidate(),
+            classification=_classification(),
+            role_policy_record=role_policy,
+            authz_policy_record=_authz_policy_record(
+                github_ids=(),
+                extra_rule={
+                    "managed_set_id": "tenant-human.numeric-only",
+                    "managed_rule_id": "technical-waiver-stale-login",
+                    "github_ids": [301],
+                    "logins": ["old-human-301"],
+                    "organizations": ["new-org"],
+                    "teams": ["new-org/new-team"],
+                    "roles": ["admin"],
+                    "products": [PRODUCT],
+                    "contexts": [CONTEXT],
+                    "actions": [TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION],
+                },
+            ),
+            action="created",
+            occurred_at=OCCURRED_AT,
+            source_event_kind="github_issue_comment",
+            source_event_id="comment-renamed-human",
+            reason="Numeric GitHub ID remains the waiver authority.",
+            recorded_at=OCCURRED_AT,
+        ).record
+
+        self.assertEqual(event.authorization.author_github_id, 301)
+        self.assertEqual(event.authorization.author_login, "new-human-301")
+
+    def test_waiver_requires_exactly_one_numeric_managed_rule(self) -> None:
+        role_policy = _role_policy(repository_owner_ids=(301,))
+        duplicate_policy = _authz_policy_record(
+            github_ids=(301,),
+            extra_rule={
+                "managed_set_id": "tenant-human.example",
+                "managed_rule_id": "technical-waiver-duplicate",
+                "github_ids": [301],
+                "roles": ["read_only"],
+                "products": [PRODUCT],
+                "contexts": [CONTEXT],
+                "actions": [TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION],
+            },
+        )
+
+        with self.assertRaisesRegex(
+            TenantTechnicalHumanWaiverAuthorizationError,
+            "exactly one managed authz policy rule",
+        ):
+            capture_tenant_technical_human_waiver_event(
+                identity=_human(github_id=301),
+                candidate=_candidate(),
+                classification=_classification(),
+                role_policy_record=role_policy,
+                authz_policy_record=duplicate_policy,
+                action="created",
+                occurred_at=OCCURRED_AT,
+                source_event_kind="github_issue_comment",
+                source_event_id="comment-duplicate-rule",
+                reason="Duplicate managed rules must fail closed.",
+                recorded_at=OCCURRED_AT,
+            )
+
+    def test_apply_envelope_does_not_accept_occurred_at(self) -> None:
+        with self.assertRaises(ValueError):
+            TenantTechnicalHumanWaiverApplyEnvelope.model_validate(
+                _waiver_apply_payload(action="created") | {"occurred_at": "2001-01-01T00:00:00Z"}
+            )
+
+    def test_waiver_apply_plans_create_and_revoke_lifecycle(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(Path(temporary_directory_name))
+            classification = _classification()
+            role_policy = _role_policy(repository_owner_ids=(301,))
+            authz_policy = _authz_policy_record(github_ids=(301,))
+            store.write_tenant_repository_classification_record(classification)
+            store.write_repository_human_role_policy_record(role_policy)
+            _write_authz_policy_record(store, authz_policy)
+
+            create_result = apply_tenant_technical_human_waiver(
+                store=store,
+                identity=_human(github_id=301),
+                envelope=TenantTechnicalHumanWaiverApplyEnvelope.model_validate(
+                    _waiver_apply_payload(action="created")
+                ),
+                observed_at=OCCURRED_AT,
+            )
+            created_event = capture_tenant_technical_human_waiver_event(
+                identity=_human(github_id=301),
+                candidate=_candidate(),
+                classification=classification,
+                role_policy_record=role_policy,
+                authz_policy_record=authz_policy,
+                action="created",
+                occurred_at=OCCURRED_AT,
+                source_event_kind="github_issue_comment",
+                source_event_id="comment-created",
+                reason="Owner reviewed exact technical waiver.",
+                recorded_at=OCCURRED_AT,
+            ).record
+            store.write_tenant_technical_human_waiver_event_record(created_event)
+            revoke_result = apply_tenant_technical_human_waiver(
+                store=store,
+                identity=_human(github_id=301),
+                envelope=TenantTechnicalHumanWaiverApplyEnvelope.model_validate(
+                    _waiver_apply_payload(
+                        action="revoked",
+                        source_event_id="comment-revoked",
+                        expected_current={
+                            "waiver_id": created_event.waiver_id,
+                            "event_digest": created_event.event_digest,
+                        },
+                    )
+                ),
+                observed_at="2026-07-31T12:10:00Z",
+            )
+
+        self.assertEqual(create_result.status, "would_apply")
+        self.assertEqual(create_result.path_result.state, "satisfied")
+        self.assertTrue(create_result.dry_run)
+        self.assertEqual(revoke_result.status, "would_apply")
+        self.assertEqual(revoke_result.path_result.state, "denied")
+        self.assertTrue(revoke_result.dry_run)
+
+    def test_waiver_apply_rejects_superseded_repository_classification(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(Path(temporary_directory_name))
+            classification = _classification()
+            replacement_classification = _classification(
+                product="replacement-product",
+                context="replacement-context",
+                classification_kind="engineering",
+                classification_revision=2,
+                classified_at="2026-07-31T11:05:00Z",
+                supersedes_record_id=classification.record_id,
+            )
+            role_policy = _role_policy(repository_owner_ids=(301,))
+            authz_policy = _authz_policy_record(github_ids=(301,))
+            store.write_tenant_repository_classification_record(classification)
+            store.write_tenant_repository_classification_record(replacement_classification)
+            store.write_repository_human_role_policy_record(role_policy)
+            _write_authz_policy_record(store, authz_policy)
+
+            with self.assertRaisesRegex(
+                TenantTechnicalHumanWaiverStaleAuthorityError,
+                "classification does not match candidate",
+            ):
+                apply_tenant_technical_human_waiver(
+                    store=store,
+                    identity=_human(github_id=301),
+                    envelope=TenantTechnicalHumanWaiverApplyEnvelope.model_validate(
+                        _waiver_apply_payload(action="created")
+                    ),
+                    observed_at="2026-07-31T12:00:00Z",
+                )
 
     def test_waiver_path_is_exact_head_policy_bound_expiring_and_revocable(self) -> None:
         role_policy = _role_policy(repository_owner_ids=(301,))
@@ -546,10 +902,14 @@ def _role_policy(
     )
 
 
-def _authz_policy_record(*, github_ids: tuple[int, ...]) -> LaunchplaneAuthzPolicyRecord:
-    policy = LaunchplaneAuthzPolicy(
-        schema_version=2,
-        github_humans=(
+def _authz_policy_record(
+    *,
+    github_ids: tuple[int, ...],
+    extra_rule: dict[str, object] | None = None,
+) -> LaunchplaneAuthzPolicyRecord:
+    rules: list[GitHubHumanPolicyRule] = []
+    if github_ids:
+        rules.append(
             GitHubHumanPolicyRule(
                 managed_set_id="tenant-human.example",
                 managed_rule_id="technical-waiver",
@@ -558,9 +918,11 @@ def _authz_policy_record(*, github_ids: tuple[int, ...]) -> LaunchplaneAuthzPoli
                 products=(PRODUCT,),
                 contexts=(CONTEXT,),
                 actions=(TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION,),
-            ),
-        ),
-    )
+            )
+        )
+    if extra_rule is not None:
+        rules.append(GitHubHumanPolicyRule.model_validate(extra_rule))
+    policy = LaunchplaneAuthzPolicy(schema_version=2, github_humans=tuple(rules))
     digest = authz_policy_sha256(policy)
     return LaunchplaneAuthzPolicyRecord(
         record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
@@ -573,15 +935,62 @@ def _authz_policy_record(*, github_ids: tuple[int, ...]) -> LaunchplaneAuthzPoli
     )
 
 
-def _human(*, github_id: int) -> GitHubHumanIdentity:
+def _write_authz_policy_record(
+    store: FilesystemRecordStore,
+    record: LaunchplaneAuthzPolicyRecord,
+) -> None:
+    record_path = store.state_dir / "launchplane_authz_policies" / f"{record.record_id}.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+
+
+def _waiver_apply_payload(
+    *,
+    action: str,
+    source_event_id: str | None = None,
+    expected_current: dict[str, object] | None = None,
+) -> dict[str, object]:
+    classification = _classification()
+    role_policy = _role_policy(repository_owner_ids=(301,))
+    authz_policy = _authz_policy_record(github_ids=(301,))
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "mode": "dry_run",
+        "action": action,
+        "candidate": _candidate().model_dump(mode="json"),
+        "expected_authority": TenantTechnicalHumanWaiverExpectedAuthority(
+            classification_record_id=classification.record_id,
+            classification_digest=classification.classification_digest,
+            role_policy_record_id=role_policy.record_id,
+            role_policy_digest=role_policy.role_policy_digest,
+            authz_policy_record_id=authz_policy.record_id,
+            authz_policy_digest=authz_policy.policy_sha256,
+        ).model_dump(mode="json"),
+        "source_event_kind": "github_issue_comment",
+        "source_event_id": source_event_id or f"comment-{action}",
+        "reason": "Owner reviewed exact technical waiver.",
+    }
+    if expected_current is not None:
+        payload["expected_current"] = expected_current
+    return payload
+
+
+def _human(
+    *,
+    github_id: int,
+    login: str = "",
+    organizations: frozenset[str] = frozenset(),
+    teams: frozenset[str] = frozenset(),
+    role: Literal["read_only", "admin"] = "read_only",
+) -> GitHubHumanIdentity:
     return GitHubHumanIdentity(
-        login=f"human-{github_id}",
+        login=login or f"human-{github_id}",
         github_id=github_id,
         name="Human Example",
         email="human@example.com",
-        organizations=frozenset(),
-        teams=frozenset(),
-        role="read_only",
+        organizations=organizations,
+        teams=teams,
+        role=role,
     )
 
 

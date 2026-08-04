@@ -82,6 +82,7 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "odoo_instance_overrides_payload_present",
         "website_bootstrap_domain_set",
         "website_bootstrap_domain_matches_canonical",
+        "website_bootstrap_web_base_url_matches",
         "website_bootstrap_homepage_url_set",
         "website_bootstrap_homepage_url_matches",
         "website_bootstrap_homepage_page_found",
@@ -99,6 +100,11 @@ ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
     "odoo_module_update_completed",
     "odoo_module_update_image_match",
     "odoo_module_update_modules_configured",
+)
+ODOO_WEBSITE_BOOTSTRAP_REQUIRED_READBACK_MARKERS = (
+    "website_bootstrap_applied",
+    "website_bootstrap_domain_matches_canonical",
+    "website_bootstrap_web_base_url_matches",
 )
 ODOO_BACKUP_GATE_RESULT_MARKER = "LAUNCHPLANE_ODOO_BACKUP_GATE_RESULT_B64"
 ODOO_BACKUP_GATE_RESULT_FIELDS = frozenset(
@@ -2020,6 +2026,23 @@ def require_odoo_module_update_readback_evidence(evidence: Mapping[str, str]) ->
     if missing_markers:
         raise click.ClickException(
             "Odoo module install/update evidence did not prove the current runtime update: "
+            + ", ".join(missing_markers)
+        )
+
+
+def require_odoo_website_bootstrap_readback_evidence(evidence: Mapping[str, str]) -> None:
+    if evidence.get("log_available") != "true":
+        raise click.ClickException(
+            "Odoo website bootstrap evidence is unavailable from the provider schedule logs."
+        )
+    missing_markers = tuple(
+        marker
+        for marker in ODOO_WEBSITE_BOOTSTRAP_REQUIRED_READBACK_MARKERS
+        if evidence.get(marker) != "true"
+    )
+    if missing_markers:
+        raise click.ClickException(
+            "Odoo website bootstrap evidence did not prove the current preview bootstrap: "
             + ", ".join(missing_markers)
         )
 

@@ -506,20 +506,20 @@ def _ensure_application(
         raise click.ClickException(
             "Generic web preview template application is missing environmentId."
         )
-    if not server_id:
-        raise click.ClickException("Generic web preview template application is missing serverId.")
+    application_payload: JsonObject = {
+        "name": application_name,
+        "appName": app_name,
+        "description": description,
+        "environmentId": environment_id,
+    }
+    if server_id:
+        application_payload["serverId"] = server_id
     created = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/application.create",
         method="POST",
-        payload={
-            "name": application_name,
-            "appName": app_name,
-            "description": description,
-            "environmentId": environment_id,
-            "serverId": server_id,
-        },
+        payload=application_payload,
     )
     created_application = dokploy_api.as_json_object(created)
     created_application_id = str((created_application or {}).get("applicationId") or "").strip()

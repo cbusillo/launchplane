@@ -9,6 +9,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+REPOSITORY_HUMAN_ROLE_POLICY_READ_ACTION = "repository_human_role_policy.read"
+REPOSITORY_HUMAN_ROLE_POLICY_WRITE_ACTION = "repository_human_role_policy.write"
 TENANT_TECHNICAL_HUMAN_WAIVER_WRITE_ACTION = "tenant_technical_human_waiver.write"
 
 RepositoryHumanRolePolicyStatus = Literal["active", "superseded"]
@@ -310,6 +312,7 @@ class TenantTechnicalHumanWaiverEventRecord(BaseModel):
     binding: TenantTechnicalHumanWaiverBinding
     action: TenantTechnicalHumanWaiverAction
     occurred_at: str
+    recorded_at: str = ""
     source_event_kind: str
     source_event_id: str
     reason: str
@@ -322,6 +325,13 @@ class TenantTechnicalHumanWaiverEventRecord(BaseModel):
         if self.schema_version != 1:
             raise ValueError("Unsupported tenant technical human waiver event schema version.")
         self.occurred_at = _normalize_utc_timestamp(self.occurred_at, "occurred_at")
+        self.recorded_at = (
+            _normalize_utc_timestamp(self.recorded_at, "recorded_at")
+            if self.recorded_at
+            else self.occurred_at
+        )
+        if self.recorded_at != self.occurred_at:
+            raise ValueError("tenant technical human waiver recorded_at must equal occurred_at")
         self.source_event_kind = _required_token(self.source_event_kind, "source_event_kind")
         self.source_event_id = _required_token(self.source_event_id, "source_event_id")
         self.reason = _required_token(self.reason, "reason")
@@ -429,7 +439,7 @@ def tenant_technical_human_waiver_binding_sha256(
 def tenant_technical_human_waiver_event_digest(
     event: TenantTechnicalHumanWaiverEventRecord,
 ) -> str:
-    return _model_sha256(event, exclude={"event_digest"})
+    return _model_sha256(event, exclude={"event_digest", "recorded_at"})
 
 
 def build_tenant_technical_human_waiver_id(*, binding_sha256: str) -> str:

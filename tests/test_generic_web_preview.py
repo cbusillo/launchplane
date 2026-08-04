@@ -42,6 +42,7 @@ from control_plane.workflows.generic_web_preview import (
     resolve_generic_web_preview_profile,
     resolve_generic_web_preview_slug,
     resolve_generic_web_preview_url,
+    _ensure_application,
     _wait_for_preview_health,
 )
 from control_plane.workflows.preview_desired_state import render_preview_slug
@@ -1314,6 +1315,19 @@ class GenericWebPreviewTests(unittest.TestCase):
                 "/api/domain.create",
             ],
         )
+        create_application = [
+            request for request in requests if request["path"] == "/api/application.create"
+        ][0]
+        self.assertEqual(
+            create_application["payload"],
+            {
+                "name": "syo-preview-preview-42-site",
+                "appName": "sellyouroutboard-preview-42-site",
+                "description": "Preview environment for sellyouroutboard preview-42-site",
+                "environmentId": "env-1",
+                "serverId": "server-1",
+            },
+        )
         update_application = [
             request for request in requests if request["path"] == "/api/application.update"
         ][0]
@@ -1340,6 +1354,71 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertNotIn("SMTP_HOST=", env_text)
         trigger_deployment.assert_called_once()
         wait_health.assert_called_once()
+
+    def test_ensure_application_uses_default_server_when_template_omits_server_id(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def _create_application(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            return {"applicationId": "app-preview"}
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview._find_application_by_name",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
+                side_effect=_create_application,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview._fetch_application",
+                return_value={"applicationId": "app-preview"},
+            ),
+        ):
+            application, created = _ensure_application(
+                host="https://dokploy.example",
+                token="token",
+                application_name="preview-42-site",
+                app_name="preview-42-site",
+                description="Launchplane preview",
+                template_application={"environmentId": "env-1"},
+            )
+
+        self.assertTrue(created)
+        self.assertEqual(application, {"applicationId": "app-preview"})
+        self.assertEqual(requests[0]["path"], "/api/application.create")
+        self.assertEqual(
+            requests[0]["payload"],
+            {
+                "name": "preview-42-site",
+                "appName": "preview-42-site",
+                "description": "Launchplane preview",
+                "environmentId": "env-1",
+            },
+        )
+
+    def test_ensure_application_rejects_template_without_environment_id(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview._find_application_by_name",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
+            ) as dokploy_request,
+        ):
+            with self.assertRaisesRegex(click.ClickException, "missing environmentId"):
+                _ensure_application(
+                    host="https://dokploy.example",
+                    token="token",
+                    application_name="preview-42-site",
+                    app_name="preview-42-site",
+                    description="Launchplane preview",
+                    template_application={"serverId": "server-1"},
+                )
+
+        dokploy_request.assert_not_called()
 
     def test_execute_generic_web_preview_refresh_blocks_unsafe_copied_secret_key(self) -> None:
         profile = _profile().model_copy(

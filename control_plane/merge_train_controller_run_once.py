@@ -68,6 +68,19 @@ from control_plane.workflows.merge_train_controller import (
 
 _LOGGER = logging.getLogger(__name__)
 DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS = 300
+MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION = "merge_train_controller_run_once"
+MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS = (
+    "admit_collapsed_root",
+    "build_candidate",
+    "execute_stack_collapse",
+    "land_batch",
+    MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+    "observe_candidate",
+    "plan_candidate",
+    "plan_landing",
+    "plan_stack_collapse",
+    "reflow_candidate",
+)
 
 
 class MergeTrainControllerRunOnceEnvelope(BaseModel):
@@ -116,6 +129,9 @@ class MergeTrainControllerStateRecordStore(Protocol):
         policy_sha256: str,
         lease_owner: str,
         lease_seconds: int,
+        initial_active_action: str,
+        initial_active_phase: str,
+        adoptable_active_actions: tuple[str, ...],
     ) -> MergeTrainControllerStateRecord: ...
 
     def compare_and_set_merge_train_controller_state_record(
@@ -204,6 +220,9 @@ def merge_train_controller_mutation_fence(
         policy_sha256=policy_sha256,
         lease_owner=lease_owner,
         lease_seconds=DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS,
+        initial_active_action=active_action,
+        initial_active_phase=active_phase,
+        adoptable_active_actions=(active_action,),
     )
     lease = MergeTrainControllerLeaseContext(
         record=controller_state,
@@ -280,6 +299,9 @@ def execute_merge_train_controller_run_once(
             policy_sha256=policy_sha256,
             lease_owner=lease_owner,
             lease_seconds=DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS,
+            initial_active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+            initial_active_phase="select_next_action",
+            adoptable_active_actions=MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS,
         )
         lease = MergeTrainControllerLeaseContext(
             record=controller_state,
