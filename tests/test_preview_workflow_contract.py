@@ -288,6 +288,9 @@ class PreviewWorkflowContractTests(unittest.TestCase):
 
         self.assertIn("route-path: /v1/drivers/generic-web/preview-refresh", workflow)
         self.assertIn("route-path: /v1/drivers/generic-web/preview-destroy", workflow)
+        self.assertIn("route-path: /v1/authz-diagnostics/github-actions/evaluate", workflow)
+        self.assertIn('"action": "preview_refresh.execute"', workflow)
+        self.assertIn("expected-status: 200,403", workflow)
         self.assertIn(
             "refresh.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}", workflow
         )

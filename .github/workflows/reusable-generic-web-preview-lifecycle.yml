@@ -241,6 +241,7 @@ jobs:
           idempotency-key: >-
             ${{ needs.resolve.outputs.idempotency_key }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
+          expected-status: 200,403
           fail-result-paths: result.refresh_status,result.readiness.health_status
           output-paths: >-
             trace_id=trace_id,
@@ -248,6 +249,36 @@ jobs:
             preview_url=result.preview_url,
             refresh_status=result.refresh_status,
             error_message=result.error_message
+
+      - name: Diagnose preview refresh authorization
+        if: ${{ steps.lp.outputs.status-code == '403' }}
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: /v1/authz-diagnostics/github-actions/evaluate
+          payload: |-
+            {
+              "schema_version": 1,
+              "action": "preview_refresh.execute",
+              "target": {
+                "scope": "preview"
+              }
+            }
+          payload-fields: |-
+            product=${{ needs.resolve.outputs.product }}
+            context=${{ inputs.context || format('{0}-preview', needs.resolve.outputs.product) }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          expected-status: 200,403
+
+      - name: Fail denied preview refresh
+        if: ${{ steps.lp.outputs.status-code == '403' }}
+        env:
+          RESPONSE_BODY: ${{ steps.lp.outputs.response-body }}
+        run: |
+          echo "$RESPONSE_BODY" >&2
+          exit 1
 
       - name: Report refresh result
         run: |
