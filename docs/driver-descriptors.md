@@ -295,7 +295,10 @@ non-default server; otherwise Dokploy selects its default server. Inventory
 scans Dokploy applications by the product profile's preview application-name
 prefix; destroy deletes matching stateless preview applications. Readiness
 validates the DB-backed preview template lane and provider/runtime inputs before
-refresh. Verification records common post-refresh smoke evidence
+refresh. Provider refresh work runs outside Launchplane's ASGI event loop, so
+health and other control-plane routes remain available while Dokploy deploys the
+preview; Launchplane serializes concurrent refreshes for the same preview.
+Verification records common post-refresh smoke evidence
 against the latest Launchplane preview generation and is available to any
 product profile that uses the generic-web base driver. These descriptor actions
 remain discoverable, but native FastAPI owns execution for refresh, inventory,

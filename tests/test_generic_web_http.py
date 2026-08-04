@@ -1,8 +1,11 @@
+import asyncio
 import json
+import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
+from typing import Any, Literal
 from unittest.mock import patch
 
 from click import ClickException
@@ -62,6 +65,7 @@ from tests.test_service import (
     _fastapi_browser_mutation_headers,
     _fastapi_human_session_manager,
     _fastapi_signed_in_cookie,
+    _http_request_for_service_test,
     _invoke_app,
     _product_profile_lanes,
     create_launchplane_fastapi_test_app,
@@ -3378,8 +3382,8 @@ class GenericWebHttpTests(unittest.TestCase):
                     "refresh_finished_at": "2026-05-03T15:05:00Z",
                     "product": "sellyouroutboard",
                     "context": "sellyouroutboard-testing",
-                    "preview_slug": "pr-42",
-                    "application_name": "sellyouroutboard-pr-42",
+                    "preview_slug": "preview-42",
+                    "application_name": "sellyouroutboard-preview-42",
                     "application_id": "app-preview",
                     "preview_url": "https://pr-42.example.test",
                 },
@@ -3421,6 +3425,148 @@ class GenericWebHttpTests(unittest.TestCase):
                 _, kwargs = refresh.call_args
                 self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
                 self.assertEqual(kwargs["request"].preview_url, "https://pr-42.example.test")
+
+    def test_generic_web_preview_refresh_keeps_health_responsive_during_provider_wait(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile = LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            profile = profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"slug_template": "preview-{number}"})}
+            )
+            store.write_product_profile_record(
+                profile
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            provider_wait_started = threading.Event()
+            release_provider_wait = threading.Event()
+            provider_wait_started_at: list[float] = []
+            provider_refresh_calls: list[None] = []
+
+            def _slow_refresh(**_kwargs: object) -> dict[str, object]:
+                provider_refresh_calls.append(None)
+                provider_wait_started_at.append(time.monotonic())
+                provider_wait_started.set()
+                release_provider_wait.wait(timeout=0.75)
+                return {
+                    "refresh_status": "pass",
+                    "refresh_started_at": "2026-05-03T15:00:00Z",
+                    "refresh_finished_at": "2026-05-03T15:05:00Z",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard-testing",
+                    "preview_slug": "preview-42",
+                    "application_name": "sellyouroutboard-preview-42",
+                    "application_id": "app-preview",
+                    "preview_url": "https://pr-42.example.test",
+                }
+
+            async def _exercise_refresh_and_health() -> tuple[Any, Any, Any, float]:
+                refresh_task = asyncio.create_task(
+                    _http_request_for_service_test(
+                        app,
+                        method="POST",
+                        path="/v1/drivers/generic-web/preview-refresh",
+                        payload={
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "refresh": {
+                                "schema_version": 1,
+                                "product": "sellyouroutboard",
+                                "anchor_pr_number": 42,
+                                "preview_url": "https://pr-42.example.test",
+                                "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                            },
+                        },
+                        authorization="Bearer valid-token",
+                        headers={"Idempotency-Key": "generic-web-preview-refresh:syo:pr-42"},
+                    )
+                )
+                await asyncio.wait_for(
+                    asyncio.to_thread(provider_wait_started.wait, 1), timeout=1.25
+                )
+                competing_response = await asyncio.wait_for(
+                    _http_request_for_service_test(
+                        app,
+                        method="POST",
+                        path="/v1/drivers/generic-web/preview-refresh",
+                        payload={
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "refresh": {
+                                "schema_version": 1,
+                                "product": "sellyouroutboard",
+                                "preview_slug": "preview-42",
+                                "preview_url": "https://pr-42.example.test",
+                                "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                            },
+                        },
+                        authorization="Bearer valid-token",
+                        headers={"Idempotency-Key": "generic-web-preview-refresh:syo:pr-42-competing"},
+                    ),
+                    timeout=0.5,
+                )
+                health_response = await asyncio.wait_for(
+                    _http_request_for_service_test(
+                        app,
+                        method="GET",
+                        path="/v1/health",
+                    ),
+                    timeout=0.5,
+                )
+                health_elapsed_seconds = time.monotonic() - provider_wait_started_at[0]
+                release_provider_wait.set()
+                refresh_response = await asyncio.wait_for(refresh_task, timeout=1)
+                return refresh_response, competing_response, health_response, health_elapsed_seconds
+
+            with patch(
+                "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
+                side_effect=_slow_refresh,
+            ):
+                (
+                    refresh_response,
+                    competing_response,
+                    health_response,
+                    health_elapsed_seconds,
+                ) = asyncio.run(_exercise_refresh_and_health())
+
+        self.assertEqual(refresh_response.status_code, 202)
+        self.assertEqual(competing_response.status_code, 409)
+        self.assertEqual(competing_response.json()["error"]["code"], "mutation_in_progress")
+        self.assertEqual(health_response.status_code, 200)
+        self.assertLess(health_elapsed_seconds, 0.5)
+        self.assertEqual(len(provider_refresh_calls), 1)
 
     def test_generic_web_preview_refresh_mutation_builder_records_smoke_failure(
         self,
