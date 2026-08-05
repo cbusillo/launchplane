@@ -580,6 +580,7 @@ export type LaunchplanePreviewSummary = {
 };
 
 export type LaunchplaneProductProfileRecord = {
+    default_branch: string;
     display_name: string;
     driver_id: string;
     expected_config: ProductExpectedConfigProfile;
@@ -591,6 +592,8 @@ export type LaunchplaneProductProfileRecord = {
     product: string;
     promotion_workflow: ProductPromotionWorkflowProfile;
     repository: string;
+    repository_id: string;
+    repository_owner_id: string;
     runtime_port: number;
     schema_version: number;
     source: string;

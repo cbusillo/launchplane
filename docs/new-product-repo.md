@@ -46,102 +46,32 @@ as Discord Blue's Every Code bridge port `8787`.
 
 ## Launchplane Records
 
-Before wiring workflows, seed or verify these records in Launchplane with an
-operator-owned onboarding manifest through the Product Onboarding workflow or
-`POST /v1/product-onboarding/apply`. Direct local DB apply from a checkout is a
-break-glass local/bootstrap repair path and requires an explicit acknowledgement:
+For a conventional generic-web product, dispatch `Product Onboarding` with
+typed product, repository, image, port, health, and optional Dokploy naming
+inputs. The workflow resolves immutable GitHub repository identity, plans one
+new non-production Dokploy application, plans the product record bundle, and
+plans six exact preview authz rules. `mode=apply` then pauses at the protected
+`launchplane-authz-admin` review before applying the three reviewed contracts.
 
-```sh
-uv run launchplane product-onboarding apply \
-  --database-url "$LAUNCHPLANE_DATABASE_URL" \
-  --manifest-file state/product-onboarding/<product>.json \
-  --allow-direct-db-mutation
-```
+The normal path accepts no base64 manifest, copied provider id, authz JSON, or
+database credential. Stable idempotency keys make a same-plan retry replay the
+created target rather than create a duplicate. If records apply but authz apply
+fails, the product remains safely unauthorized; rerun the same reviewed flow
+instead of deleting records or creating another target.
 
-The manifest is applied idempotently and writes Launchplane-owned records for:
+The reviewed flow writes the generic-web product profile, immutable repository
+identity, one `testing` lane, provider target records, preview policy, and the
+complete `operator.generic-web-preview` desired set. The authz planner retains
+all existing managed rules and sends the resulting desired set through the
+existing digest-bound reconcile route. Product onboarding never writes authz
+policy directly.
 
-- product profile with product key, owning repo, driver id, image repository,
-  runtime port, health path, and preview policy
-- lane profiles for stable instances such as `testing` and `prod`
-- provider target records and target-id records
-- runtime-environment records for non-secret settings
-- disabled managed secret binding placeholders for required secret keys
-
-Each onboarding target entry must include the live provider `target_id`.
-Manifests must use the neutral `provider_targets` input name. Launchplane
-rejects obsolete `dokploy_targets` input with a validation error and fails
-closed instead of seeding a target record that a later deploy cannot resolve.
-Product onboarding and context cutover evidence uses provider-neutral response
-keys (`provider_targets` and `provider_target_ids`) even when Dokploy remains
-the runtime execution provider.
-
-When the Dokploy application or compose target already exists, adopt it into
-Launchplane before or after onboarding instead of hand-editing target ids into
-repo-local files:
-
-```sh
-uv run launchplane dokploy-targets adopt \
-  --database-url "$LAUNCHPLANE_DATABASE_URL" \
-  --context <product-context> \
-  --instance prod \
-  --target-type application \
-  --target-id <dokploy-application-id>
-```
-
-The command is a dry run unless `--apply` is supplied. It fetches the live
-Dokploy target, stores only Launchplane-owned target metadata and the target-id
-record, and intentionally does not copy provider env text or secret-shaped
-values. Local apply also requires `--allow-direct-db-mutation` and is explicit
-local/bootstrap repair only; routine shared/live target setup should use the
-manual `Dokploy Target Setup` workflow. Use `--project-name`, `--target-name`,
-`--domain`, and `--healthcheck-path` when the provider payload does not expose
-enough redacted metadata for the record.
-
-For shared or production live mutations, use the manual `Dokploy Target Setup`
-workflow instead of local CLI commands. The workflow calls the deployed
-Launchplane service route `POST /v1/dokploy-targets/setup` with GitHub OIDC,
-supports dry-run and apply modes, and writes the Dokploy target, target-id, and
-provider-target records through Launchplane storage. `create-compose` is the
-stable Odoo setup path when no Dokploy compose target exists yet; provide the
-Dokploy project/environment or project name, server id, target name, optional
-domain hosts, runtime port, and an operator reason before applying. Runtime port
-is used only for `create-compose` domain reconciliation and requires at least
-one domain. If a provider create succeeds but the follow-up Launchplane record
-write fails, note the created Dokploy compose/application id from the workflow
-logs and re-run the workflow with `operation=adopt` for the same
-context/instance instead of creating another target.
-When repairing an accidental target-authority collision, pass
-`expected_current_provider_target_json` from provider-target audit evidence so
-Launchplane replaces the existing provider-target row only if the live DB-backed
-authority still matches the reviewed old target. Without that expectation,
-target setup continues to fail closed instead of replacing explicit provider
-authority.
-
-When the Dokploy application does not exist yet, let Launchplane plan and apply
-the provider mutation so the app id is captured in records immediately:
-
-```sh
-uv run launchplane dokploy-targets create-application \
-  --database-url "$LAUNCHPLANE_DATABASE_URL" \
-  --context <product-context> \
-  --instance prod \
-  --target-name <dokploy-application-name> \
-  --project-name <dokploy-project-name>
-```
-
-This command is also dry-run by default. With local
-`--apply --allow-direct-db-mutation`, it can create a Dokploy project,
-environment, and application, then write the matching tracked target and
-target-id records. Use `--project-id` or `--environment-id` to reuse existing
-provider containers, and `--server-id` when the app belongs on a remote Dokploy
-server. Routine shared/live creation should use the manual workflow above. It
-still does not configure secrets or copy provider env text;
-runtime and secret records remain separate Launchplane-owned setup steps.
-
-Then import or update DB-backed authz policy records for the product's GitHub
-Actions workflows. Authz policy merging remains a separate operator step so a
-new product onboarding manifest cannot accidentally replace unrelated product
-access rules.
+Existing targets, production targets, compose targets, Odoo products, and
+non-generic drivers remain explicit advanced operations. Use `Dokploy Target
+Setup` for those cases. Use `Product Onboarding Manifest (Advanced)` only for
+an operator-owned manifest that cannot use the conventional path. Direct local
+CLI mutation remains break-glass bootstrap or repair behavior and requires
+`--allow-direct-db-mutation`; it is not an onboarding alternative.
 
 Do not store these as product-repo Launchplane manifests. The repo may document
 the expected app runtime contract, but Launchplane records are the live source

@@ -46,6 +46,16 @@ title: Secrets
   only in the executor step. The token is revoked at job completion and is not
   persisted in artifacts, audit records, logs, or Launchplane managed secrets.
   Do not retain a PAT fallback.
+- Conventional product onboarding uses a dedicated read-only GitHub App to
+  resolve immutable repository and owner ids before protected review. Store its
+  client id in `LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID` and its private key
+  in `LAUNCHPLANE_ONBOARDING_GITHUB_APP_PRIVATE_KEY`. Install it only on product
+  repositories that operators may onboard and grant only the GitHub App's
+  mandatory metadata read access.
+  The workflow passes the key only to the commit-pinned official token action,
+  uses the short-lived token only for repository metadata lookup, and does not
+  persist the token or private key in plan/apply artifacts. Do not use a PAT or
+  the Launchplane service GitHub App as a fallback.
 
 ## DB-Backed Secret Resolution
 
