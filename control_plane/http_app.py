@@ -70,6 +70,10 @@ from control_plane.http_routes import (
     EVIDENCE_INGRESS_ROUTES as _EVIDENCE_INGRESS_ROUTES,
     EvidenceWriteRouteDependencies,
     GenericWebWriteRouteDependencies,
+    PRODUCT_OWNER_POLICY_APPLY_ROUTE,
+    PRODUCT_OWNER_REQUIREMENT_APPLY_ROUTE,
+    PRODUCT_OWNER_ROUTING_APPLY_ROUTE,
+    ProductOwnerWriteRouteDependencies,
     ProductReadRouteDependencies,
     PromotionEvidenceRequest as PromotionEvidenceRequest,
     ReadRouteDependencies,
@@ -99,6 +103,8 @@ from control_plane.http_routes import (
     register_preview_notification_attempt_read_routes,
     register_preview_readiness_read_routes,
     register_preview_record_read_routes,
+    register_product_owner_read_routes,
+    register_product_owner_write_routes,
     register_product_config_status_read_routes,
     register_product_context_audit_read_routes,
     register_product_environment_read_routes,
@@ -736,6 +742,7 @@ _TENANT_TECHNICAL_HUMAN_WAIVER_MAX_BODY_BYTES = 64 * 1024
 _TENANT_ADMISSION_CONTROLLER_RUN_ONCE_MAX_BODY_BYTES = 64 * 1024
 _TENANT_ADMISSION_STATUS_RECONCILE_MAX_BODY_BYTES = 64 * 1024
 _TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES = 64 * 1024
+_PRODUCT_OWNER_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE = "/v1/product-profiles/prelaunch-rebuild/apply"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
@@ -818,6 +825,24 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE: (
         "Trusted-maintenance policy",
         _TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    PRODUCT_OWNER_POLICY_APPLY_ROUTE: (
+        "Product Owner policy",
+        _PRODUCT_OWNER_POLICY_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    PRODUCT_OWNER_REQUIREMENT_APPLY_ROUTE: (
+        "Product Owner requirement",
+        _PRODUCT_OWNER_POLICY_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    PRODUCT_OWNER_ROUTING_APPLY_ROUTE: (
+        "Product Owner routing",
+        _PRODUCT_OWNER_POLICY_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -4183,6 +4208,14 @@ def create_launchplane_fastapi_app(
 
     read_route_dependencies = ReadRouteDependencies(
         read_identity=read_identity,
+        get_record_store=get_record_store,
+        next_trace_id=next_trace_id,
+        authorization_allows=resolved_authz_policy_runtime.allows,
+        http_error=_launchplane_http_error,
+        error_response_model=LaunchplaneErrorResponse,
+    )
+    product_owner_write_route_dependencies = ProductOwnerWriteRouteDependencies(
+        read_write_identity=read_write_identity,
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
         authorization_allows=resolved_authz_policy_runtime.allows,
@@ -19826,6 +19859,8 @@ def create_launchplane_fastapi_app(
         },
     )
 
+    register_product_owner_read_routes(app, dependencies=read_route_dependencies)
+
     register_preview_readiness_read_routes(
         app,
         dependencies=read_route_dependencies,
@@ -20830,6 +20865,10 @@ def create_launchplane_fastapi_app(
     register_tenant_admission_write_routes(
         app,
         dependencies=tenant_admission_write_route_dependencies,
+    )
+    register_product_owner_write_routes(
+        app,
+        dependencies=product_owner_write_route_dependencies,
     )
 
     def read_operator_ui(path: str = "") -> Response:

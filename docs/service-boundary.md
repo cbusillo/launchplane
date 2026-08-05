@@ -3483,6 +3483,22 @@ The first explicit drivers should be:
 
 Repo-specific variation should stay thin and declarative where possible.
 
+## Product Owner Shadow API
+
+The product Owner API is an additive policy-administration and read-model
+surface. Policy, requirement, and preferred-routing revisions are written
+through separate endpoints and separate authz actions. Their write actions are
+classified as `policy_admin`; an invocation grant authorizes the API call but
+never satisfies an Owner requirement.
+
+Shadow evaluation derives human identity only from immutable provider subject
+identity. It does not consume global-admin, bootstrap-admin, manager,
+delegation, repository-permission, or routing state as Owner authority. Every
+response declares `authoritative=false` and `enforcement_effect=none`, so no
+existing service route may use it as an authorization verdict in this slice.
+
+See `docs/product-owner-policy.md` for routes and persisted record contracts.
+
 ## Out Of Scope For This First Slice
 
 - full human/operator auth design

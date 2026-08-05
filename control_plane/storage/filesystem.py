@@ -10,7 +10,7 @@ from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Any, Literal, TypeVar, cast
 
 from pydantic import BaseModel
 
@@ -84,6 +84,11 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
+from control_plane.contracts.product_owner import (
+    ProductOwnerPolicyRecord,
+    ProductOwnerRequirementRecord,
+    ProductOwnerRoutingRecord,
+)
 from control_plane.odoo_stable_lane import (
     ODOO_STABLE_LANE_BLOCKING_STATUSES,
     OdooStableLaneOperationConflictError,
@@ -180,6 +185,14 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.repository_human_admission import (
     plan_repository_human_role_policy_append,
     plan_tenant_technical_human_waiver_event_append,
+)
+from control_plane.product_owner_service import (
+    ProductOwnerPolicyConflictError,
+    ProductOwnerPolicySequenceError,
+    ProductOwnerRequirementConflictError,
+    ProductOwnerRequirementSequenceError,
+    ProductOwnerRoutingConflictError,
+    ProductOwnerRoutingSequenceError,
 )
 from control_plane.trusted_maintenance import (
     plan_trusted_maintenance_evidence_append,
@@ -998,6 +1011,375 @@ class FilesystemRecordStore:
                 record.product,
                 record.context,
                 record.record_id,
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def compare_and_write_product_owner_policy_record(
+        self,
+        record: ProductOwnerPolicyRecord,
+        *,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+    ) -> Literal["written", "replayed"]:
+        return self._compare_and_write_product_owner_revision_record(
+            model_type=ProductOwnerPolicyRecord,
+            record_type="launchplane_product_owner_policies",
+            record=record,
+            revision_field="policy_revision",
+            digest_field="policy_digest",
+            expected_current_record_id=expected_current_record_id,
+            expected_current_digest=expected_current_policy_digest,
+            sequence_error=ProductOwnerPolicySequenceError,
+            conflict_error=ProductOwnerPolicyConflictError,
+            step_label="product_owner_policy",
+        )
+
+    def write_product_owner_policy_record(
+        self,
+        record: ProductOwnerPolicyRecord,
+    ) -> Literal["written", "replayed"]:
+        records = self.list_product_owner_policy_records(
+            product=record.product,
+            system=record.system,
+            status="active",
+            limit=1,
+        )
+        current = records[0] if records else None
+        return self.compare_and_write_product_owner_policy_record(
+            record,
+            expected_current_record_id=current.record_id if current is not None else "",
+            expected_current_policy_digest=current.policy_digest if current is not None else "",
+        )
+
+    def read_product_owner_policy_record(self, record_id: str) -> ProductOwnerPolicyRecord:
+        return self._read_model(
+            ProductOwnerPolicyRecord,
+            "launchplane_product_owner_policies",
+            record_id,
+        )
+
+    def list_product_owner_policy_records(
+        self,
+        *,
+        product: str = "",
+        system: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[ProductOwnerPolicyRecord, ...]:
+        records = self._list_product_owner_revision_records(
+            model_type=ProductOwnerPolicyRecord,
+            record_type="launchplane_product_owner_policies",
+            product=product,
+            system=system,
+            status=status,
+            revision_field="policy_revision",
+            limit=limit,
+        )
+        return tuple(cast(ProductOwnerPolicyRecord, record) for record in records)
+
+    def compare_and_write_product_owner_requirement_record(
+        self,
+        record: ProductOwnerRequirementRecord,
+        *,
+        expected_current_record_id: str,
+        expected_current_requirement_digest: str,
+    ) -> Literal["written", "replayed"]:
+        return self._compare_and_write_product_owner_revision_record(
+            model_type=ProductOwnerRequirementRecord,
+            record_type="launchplane_product_owner_requirements",
+            record=record,
+            revision_field="requirement_revision",
+            digest_field="requirement_digest",
+            expected_current_record_id=expected_current_record_id,
+            expected_current_digest=expected_current_requirement_digest,
+            sequence_error=ProductOwnerRequirementSequenceError,
+            conflict_error=ProductOwnerRequirementConflictError,
+            step_label="product_owner_requirement",
+        )
+
+    def write_product_owner_requirement_record(
+        self,
+        record: ProductOwnerRequirementRecord,
+    ) -> Literal["written", "replayed"]:
+        records = self.list_product_owner_requirement_records(
+            product=record.product,
+            system=record.system,
+            status="active",
+            limit=1,
+        )
+        current = records[0] if records else None
+        return self.compare_and_write_product_owner_requirement_record(
+            record,
+            expected_current_record_id=current.record_id if current is not None else "",
+            expected_current_requirement_digest=(
+                current.requirement_digest if current is not None else ""
+            ),
+        )
+
+    def read_product_owner_requirement_record(
+        self,
+        record_id: str,
+    ) -> ProductOwnerRequirementRecord:
+        return self._read_model(
+            ProductOwnerRequirementRecord,
+            "launchplane_product_owner_requirements",
+            record_id,
+        )
+
+    def list_product_owner_requirement_records(
+        self,
+        *,
+        product: str = "",
+        system: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[ProductOwnerRequirementRecord, ...]:
+        records = self._list_product_owner_revision_records(
+            model_type=ProductOwnerRequirementRecord,
+            record_type="launchplane_product_owner_requirements",
+            product=product,
+            system=system,
+            status=status,
+            revision_field="requirement_revision",
+            limit=limit,
+        )
+        return tuple(cast(ProductOwnerRequirementRecord, record) for record in records)
+
+    def compare_and_write_product_owner_routing_record(
+        self,
+        record: ProductOwnerRoutingRecord,
+        *,
+        expected_current_record_id: str,
+        expected_current_routing_digest: str,
+    ) -> Literal["written", "replayed"]:
+        return self._compare_and_write_product_owner_revision_record(
+            model_type=ProductOwnerRoutingRecord,
+            record_type="launchplane_product_owner_routing",
+            record=record,
+            revision_field="routing_revision",
+            digest_field="routing_digest",
+            expected_current_record_id=expected_current_record_id,
+            expected_current_digest=expected_current_routing_digest,
+            sequence_error=ProductOwnerRoutingSequenceError,
+            conflict_error=ProductOwnerRoutingConflictError,
+            step_label="product_owner_routing",
+        )
+
+    def write_product_owner_routing_record(
+        self,
+        record: ProductOwnerRoutingRecord,
+    ) -> Literal["written", "replayed"]:
+        records = self.list_product_owner_routing_records(
+            product=record.product,
+            system=record.system,
+            status="active",
+            limit=1,
+        )
+        current = records[0] if records else None
+        return self.compare_and_write_product_owner_routing_record(
+            record,
+            expected_current_record_id=current.record_id if current is not None else "",
+            expected_current_routing_digest=current.routing_digest if current is not None else "",
+        )
+
+    def read_product_owner_routing_record(self, record_id: str) -> ProductOwnerRoutingRecord:
+        return self._read_model(
+            ProductOwnerRoutingRecord,
+            "launchplane_product_owner_routing",
+            record_id,
+        )
+
+    def list_product_owner_routing_records(
+        self,
+        *,
+        product: str = "",
+        system: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[ProductOwnerRoutingRecord, ...]:
+        records = self._list_product_owner_revision_records(
+            model_type=ProductOwnerRoutingRecord,
+            record_type="launchplane_product_owner_routing",
+            product=product,
+            system=system,
+            status=status,
+            revision_field="routing_revision",
+            limit=limit,
+        )
+        return tuple(cast(ProductOwnerRoutingRecord, record) for record in records)
+
+    def _compare_and_write_product_owner_revision_record(
+        self,
+        *,
+        model_type: type[Any],
+        record_type: str,
+        record: Any,
+        revision_field: str,
+        digest_field: str,
+        expected_current_record_id: str,
+        expected_current_digest: str,
+        sequence_error: type[ValueError],
+        conflict_error: type[ValueError],
+        step_label: str,
+    ) -> Literal["written", "replayed"]:
+        with self._product_authority_bundle_lock():
+            try:
+                model_type.model_validate(record.model_dump(mode="python"))
+            except ValueError as error:
+                raise conflict_error(
+                    f"Incoming {step_label.replace('_', ' ')} payload does not match its "
+                    "derived identifiers."
+                ) from error
+            if record.status != "active":
+                raise sequence_error(
+                    f"Incoming {step_label.replace('_', ' ')} revision must have active status."
+                )
+            if record.effective_at > _utc_now_timestamp():
+                raise sequence_error(
+                    f"Incoming active {step_label.replace('_', ' ')} revision cannot take effect "
+                    "in the future."
+                )
+            records = self._list_models_locked(model_type, record_type)
+            same_id = tuple(
+                existing for existing in records if existing.record_id == record.record_id
+            )
+            if same_id:
+                if len(same_id) != 1 or getattr(same_id[0], digest_field) != getattr(
+                    record,
+                    digest_field,
+                ):
+                    raise conflict_error(
+                        f"{step_label.replace('_', ' ')} record id conflicts with history."
+                    )
+                return "replayed"
+            current_records = tuple(existing for existing in records if existing.status == "active")
+            if len(current_records) > 1:
+                raise sequence_error(
+                    f"{step_label.replace('_', ' ')} history has multiple active revisions."
+                )
+            current = current_records[0] if current_records else None
+            revision = int(getattr(record, revision_field))
+            if current is None:
+                if revision != 1:
+                    raise sequence_error(
+                        f"Initial {step_label.replace('_', ' ')} revision must be 1."
+                    )
+                if expected_current_record_id.strip() or expected_current_digest.strip():
+                    raise conflict_error(
+                        f"Initial {step_label.replace('_', ' ')} expected tip must be absent."
+                    )
+                self._write_model_locked(record_type, record.record_id, record)
+                return "written"
+            if (
+                expected_current_record_id.strip() != current.record_id
+                or expected_current_digest.strip().lower() != getattr(current, digest_field)
+            ):
+                raise conflict_error(
+                    f"Expected current {step_label.replace('_', ' ')} tip is stale."
+                )
+            if revision != int(getattr(current, revision_field)) + 1:
+                raise sequence_error(f"Next {step_label.replace('_', ' ')} revision is not linear.")
+            if record.supersedes_record_id != current.record_id:
+                raise sequence_error(
+                    f"Next {step_label.replace('_', ' ')} must supersede the current record."
+                )
+            if record.effective_at < current.effective_at:
+                raise sequence_error(
+                    f"Next {step_label.replace('_', ' ')} effective_at cannot precede the current "
+                    "revision."
+                )
+            superseded = current.model_copy(update={"status": "superseded"})
+            self._write_product_owner_revision_replacement_locked(
+                record_type=record_type,
+                superseded_current_record=superseded,
+                active_record=record,
+                step_label=step_label,
+            )
+            return "written"
+
+    def _write_product_owner_revision_replacement_locked(
+        self,
+        *,
+        record_type: str,
+        superseded_current_record: Any,
+        active_record: Any,
+        step_label: str,
+    ) -> None:
+        stage_id = f"{_utc_now_timestamp().replace(':', '').replace('-', '')}-{time.time_ns()}"
+        stage_dir = self._product_authority_bundle_stage_root() / stage_id
+        (stage_dir / "records").mkdir(parents=True, exist_ok=False)
+        entries: list[_AuthorityBundleStageEntry] = []
+        try:
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type=record_type,
+                record_id=str(superseded_current_record.record_id),
+                model=superseded_current_record,
+                step_name=f"supersede_{step_label}",
+            )
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type=record_type,
+                record_id=str(active_record.record_id),
+                model=active_record,
+                step_name=f"write_{step_label}",
+            )
+            manifest = _AuthorityBundleStageManifest(
+                stage_id=stage_id,
+                state="ready",
+                entries=tuple(entries),
+            )
+            self._write_product_authority_bundle_stage_manifest(
+                stage_dir=stage_dir,
+                manifest=manifest,
+            )
+            self._after_product_authority_bundle_step(f"stage_{step_label}_replacement")
+            publishing_manifest = manifest.model_copy(update={"state": "publishing"})
+            self._write_product_authority_bundle_stage_manifest(
+                stage_dir=stage_dir,
+                manifest=publishing_manifest,
+            )
+            self._after_product_authority_bundle_step(f"publish_{step_label}_replacement")
+            self._publish_product_authority_bundle_stage(
+                manifest=publishing_manifest,
+                stage_dir=stage_dir,
+                recovering=False,
+            )
+        except Exception:
+            if not (stage_dir / "manifest.json").exists():
+                shutil.rmtree(stage_dir, ignore_errors=True)
+            raise
+
+    def _list_product_owner_revision_records(
+        self,
+        *,
+        model_type: type[Any],
+        record_type: str,
+        product: str,
+        system: str,
+        status: str,
+        revision_field: str,
+        limit: int | None,
+    ) -> tuple[Any, ...]:
+        records = [
+            record
+            for record in self._list_models(model_type, record_type)
+            if (not product or record.product == product)
+            and (not system or record.system == system)
+            and (not status or record.status == status)
+        ]
+        records.sort(
+            key=lambda record: (
+                int(getattr(record, revision_field)),
+                str(record.product),
+                str(record.system),
+                str(record.record_id),
             ),
             reverse=True,
         )

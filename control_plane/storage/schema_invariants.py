@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "b1c2d3e4f5a6"
+EXPECTED_ALEMBIC_HEAD_REVISION = "c1d2e3f4a5b6"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -274,6 +274,41 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_trusted_maintenance_evidence",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_product_owner_policies",
+        "policy_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_product_owner_policies",
+        "quorum",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_product_owner_policies",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_product_owner_requirements",
+        "requirement_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_product_owner_requirements",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_product_owner_routing",
+        "routing_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_product_owner_routing",
         "payload",
         ("jsonb",),
     ),
@@ -575,6 +610,60 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
             "occurred_at",
         ),
     ),
+    CriticalIndex(
+        "launchplane_product_owner_policies",
+        "launchplane_product_owner_policy_revision_uidx",
+        ("product", "system", "policy_revision"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_product_owner_policies",
+        "launchplane_product_owner_policy_active_uidx",
+        ("product", "system"),
+        unique=True,
+        predicate_expression="status='active'",
+    ),
+    CriticalIndex(
+        "launchplane_product_owner_policies",
+        "launchplane_product_owner_policy_current_idx",
+        ("product", "system", "status", "policy_revision"),
+    ),
+    CriticalIndex(
+        "launchplane_product_owner_requirements",
+        "launchplane_product_owner_requirement_revision_uidx",
+        ("product", "system", "requirement_revision"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_product_owner_requirements",
+        "launchplane_product_owner_requirement_active_uidx",
+        ("product", "system"),
+        unique=True,
+        predicate_expression="status='active'",
+    ),
+    CriticalIndex(
+        "launchplane_product_owner_requirements",
+        "launchplane_product_owner_requirement_current_idx",
+        ("product", "system", "status", "requirement_revision"),
+    ),
+    CriticalIndex(
+        "launchplane_product_owner_routing",
+        "launchplane_product_owner_routing_revision_uidx",
+        ("product", "system", "routing_revision"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_product_owner_routing",
+        "launchplane_product_owner_routing_active_uidx",
+        ("product", "system"),
+        unique=True,
+        predicate_expression="status='active'",
+    ),
+    CriticalIndex(
+        "launchplane_product_owner_routing",
+        "launchplane_product_owner_routing_current_idx",
+        ("product", "system", "status", "routing_revision"),
+    ),
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
@@ -605,6 +694,18 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_trusted_maintenance_evidence",
         ("evidence_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_product_owner_policies",
+        ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_product_owner_requirements",
+        ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_product_owner_routing",
+        ("record_id",),
     ),
 )
 

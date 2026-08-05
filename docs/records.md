@@ -226,6 +226,32 @@ operation or reconciliation key before invoking the provider, and complete only
 after durable local evidence is ready. A crash or timeout after key binding is
 an unknown outcome, not permission to retry the provider mutation.
 
+## Product Owner Policy Records
+
+Product/system Owner state is split across three independently revisioned
+records:
+
+- `ProductOwnerPolicyRecord` stores one or more human Owner grants. Each grant
+  binds an immutable provider subject identity to explicit repository and
+  environment sets. The only Owner class is `owner`, and quorum is one.
+- `ProductOwnerRequirementRecord` stores explicit action, repository, and
+  environment requirements. An Owner grant never implies that an action is
+  required.
+- `ProductOwnerRoutingRecord` stores preferred immutable identity IDs. The
+  record carries `authoritative=false`; preferred routing cannot grant or deny
+  Owner authority.
+
+All three streams use deterministic record IDs, canonical SHA-256 payload
+digests, active/superseded history, exact-next revision sequencing, predecessor
+links, and compare-and-swap expected-tip writes. Shadow evaluation reports the
+current policy, requirement, and routing provenance and always returns
+`authoritative=false` with `enforcement_effect=none`.
+
+The PostgreSQL tables are `launchplane_product_owner_policies`,
+`launchplane_product_owner_requirements`, and
+`launchplane_product_owner_routing`. Migration `c1d2e3f4a5b6` creates these
+tables without inserting or inferring any owner data.
+
 ## Transactional Outbox
 
 External deliveries that are not safe to perform inside the request transaction
