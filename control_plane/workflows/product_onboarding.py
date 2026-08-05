@@ -48,6 +48,14 @@ class ProductOnboardingRecordStore(ProductAuthorityBundleStore, Protocol):
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None: ...
 
+    def list_runtime_environment_records(
+        self,
+        *,
+        scope: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
+
     def list_secret_bindings(
         self,
         *,
@@ -271,19 +279,32 @@ def build_physical_provider_target_records(
 
 
 def build_runtime_environment_records(
-    *, manifest: ProductOnboardingManifest, updated_at: str
+    *,
+    manifest: ProductOnboardingManifest,
+    updated_at: str,
+    existing_records: tuple[RuntimeEnvironmentRecord, ...] = (),
 ) -> tuple[RuntimeEnvironmentRecord, ...]:
-    return tuple(
-        RuntimeEnvironmentRecord(
-            scope=record.scope,
-            context=record.context,
-            instance=record.instance,
-            env=dict(record.env),
-            updated_at=updated_at,
-            source_label=manifest.source_label,
+    existing_records_by_route = {
+        (record.scope, record.context, record.instance): record for record in existing_records
+    }
+    runtime_environment_records: list[RuntimeEnvironmentRecord] = []
+    for record in manifest.runtime_environments:
+        existing_record = existing_records_by_route.get(
+            (record.scope, record.context, record.instance)
         )
-        for record in manifest.runtime_environments
-    )
+        merged_env = dict(existing_record.env) if existing_record is not None else {}
+        merged_env.update(record.env)
+        runtime_environment_records.append(
+            RuntimeEnvironmentRecord(
+                scope=record.scope,
+                context=record.context,
+                instance=record.instance,
+                env=merged_env,
+                updated_at=updated_at,
+                source_label=manifest.source_label,
+            )
+        )
+    return tuple(runtime_environment_records)
 
 
 def build_secret_bindings(
@@ -406,7 +427,9 @@ def plan_product_onboarding_authority_bundle(
         for record in record_store.list_physical_provider_target_records()
     }
     runtime_environments = build_runtime_environment_records(
-        manifest=manifest, updated_at=recorded_at
+        manifest=manifest,
+        updated_at=recorded_at,
+        existing_records=record_store.list_runtime_environment_records(),
     )
     secret_binding_plan = build_secret_bindings(
         manifest=manifest,

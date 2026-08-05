@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from ipaddress import ip_address
 import time
 from pathlib import Path
 from typing import Iterator, Literal, Protocol, runtime_checkable
@@ -23,6 +24,7 @@ from control_plane.contracts.runtime_identity import (
     health_payload_runtime_identity_status,
     runtime_identity_env,
 )
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeKeySafetyTarget,
@@ -52,6 +54,14 @@ _PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
 
 class GenericWebPreviewProfileStore(Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
+    def list_runtime_environment_records(
+        self,
+        *,
+        scope: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
 
 
 @runtime_checkable
@@ -229,7 +239,11 @@ class GenericWebPreviewRefreshResult(BaseModel):
     error_message: str = ""
 
 
-class MissingPreviewBaseUrlError(click.ClickException):
+class PreviewBaseUrlConfigurationError(click.ClickException):
+    pass
+
+
+class MissingPreviewBaseUrlError(PreviewBaseUrlConfigurationError):
     pass
 
 
@@ -805,25 +819,107 @@ def _preview_host(preview_url: str) -> str:
     parsed = urlparse(preview_url.strip())
     if not parsed.hostname:
         raise click.ClickException("Generic web preview URL is missing a hostname.")
-    if parsed.port:
-        return f"{parsed.hostname}:{parsed.port}"
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise click.ClickException("Generic web preview URL has an invalid port.") from error
+    if port:
+        return f"{parsed.hostname}:{port}"
     return parsed.hostname
 
 
 def _preview_url_from_base_url(*, preview_slug: str, preview_base_url: str) -> str:
-    parsed = urlparse(preview_base_url.strip())
+    normalized_preview_base_url = preview_base_url.strip()
+    if any(character.isspace() for character in normalized_preview_base_url):
+        raise PreviewBaseUrlConfigurationError(
+            f"{_PREVIEW_BASE_URL_ENV_KEY} cannot contain whitespace."
+        )
+    parsed = urlparse(normalized_preview_base_url)
     if parsed.scheme not in {"http", "https"}:
-        raise click.ClickException(f"{_PREVIEW_BASE_URL_ENV_KEY} must use http or https.")
+        raise PreviewBaseUrlConfigurationError(
+            f"{_PREVIEW_BASE_URL_ENV_KEY} must use http or https."
+        )
     if not parsed.hostname:
-        raise click.ClickException(f"{_PREVIEW_BASE_URL_ENV_KEY} requires a hostname.")
+        raise PreviewBaseUrlConfigurationError(f"{_PREVIEW_BASE_URL_ENV_KEY} requires a hostname.")
+    if parsed.username or parsed.password:
+        raise PreviewBaseUrlConfigurationError(
+            f"{_PREVIEW_BASE_URL_ENV_KEY} cannot contain credentials."
+        )
+    if parsed.hostname.startswith("*."):
+        raise PreviewBaseUrlConfigurationError(
+            f"{_PREVIEW_BASE_URL_ENV_KEY} must name the preview base host, not a wildcard."
+        )
+    try:
+        ip_address(parsed.hostname)
+    except ValueError:
+        pass
+    else:
+        raise PreviewBaseUrlConfigurationError(
+            f"{_PREVIEW_BASE_URL_ENV_KEY} must use a DNS hostname, not an IP address."
+        )
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-        raise click.ClickException(
+        raise PreviewBaseUrlConfigurationError(
             f"{_PREVIEW_BASE_URL_ENV_KEY} must be a root URL without path, query, or fragment."
         )
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise PreviewBaseUrlConfigurationError(
+            f"{_PREVIEW_BASE_URL_ENV_KEY} has an invalid port."
+        ) from error
     host = f"{preview_slug.strip()}.{parsed.hostname}"
-    if parsed.port:
-        host = f"{host}:{parsed.port}"
+    if port:
+        host = f"{host}:{port}"
     return f"{parsed.scheme}://{host}"
+
+
+def _resolve_generic_web_preview_base_url(
+    *,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    record_store: GenericWebPreviewProfileStore | None = None,
+    database_url: str | None = None,
+) -> str:
+    if record_store is None:
+        try:
+            context_values = control_plane_runtime_environments.resolve_runtime_context_values(
+                control_plane_root=control_plane_root,
+                context_name=profile.preview.context,
+                database_url=database_url,
+            )
+        except control_plane_runtime_environments.MissingRuntimeContextDefinitionError as error:
+            raise MissingPreviewBaseUrlError(
+                f"Missing {_PREVIEW_BASE_URL_ENV_KEY} in Launchplane runtime-environment records for {profile.preview.context}."
+            ) from error
+    else:
+        runtime_environment_records = (
+            *record_store.list_runtime_environment_records(scope="global"),
+            *record_store.list_runtime_environment_records(context_name=profile.preview.context),
+        )
+        definition = (
+            control_plane_runtime_environments.build_runtime_environment_definition_from_records(
+                runtime_environment_records
+            )
+        )
+        context_definition = definition.contexts.get(profile.preview.context)
+        if context_definition is None:
+            raise MissingPreviewBaseUrlError(
+                f"Missing {_PREVIEW_BASE_URL_ENV_KEY} in Launchplane runtime-environment records for {profile.preview.context}."
+            )
+        context_values = {
+            key: str(value)
+            for key, value in {
+                **definition.shared_env,
+                **context_definition.shared_env,
+            }.items()
+        }
+    preview_base_url = str(context_values.get(_PREVIEW_BASE_URL_ENV_KEY) or "").strip()
+    if not preview_base_url:
+        raise MissingPreviewBaseUrlError(
+            f"Missing {_PREVIEW_BASE_URL_ENV_KEY} in Launchplane runtime-environment records for {profile.preview.context}."
+        )
+    _preview_url_from_base_url(preview_slug="readiness", preview_base_url=preview_base_url)
+    return preview_base_url
 
 
 def resolve_generic_web_preview_url(
@@ -831,21 +927,18 @@ def resolve_generic_web_preview_url(
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     request: GenericWebPreviewRefreshRequest,
+    record_store: GenericWebPreviewProfileStore | None = None,
     database_url: str | None = None,
 ) -> str:
     explicit_preview_url = request.preview_url.strip()
     if explicit_preview_url:
         return explicit_preview_url
-    context_values = control_plane_runtime_environments.resolve_runtime_context_values(
+    preview_base_url = _resolve_generic_web_preview_base_url(
         control_plane_root=control_plane_root,
-        context_name=profile.preview.context,
+        profile=profile,
+        record_store=record_store,
         database_url=database_url,
     )
-    preview_base_url = str(context_values.get(_PREVIEW_BASE_URL_ENV_KEY) or "").strip()
-    if not preview_base_url:
-        raise MissingPreviewBaseUrlError(
-            f"Missing {_PREVIEW_BASE_URL_ENV_KEY} in Launchplane runtime-environment records for {profile.preview.context}."
-        )
     return _preview_url_from_base_url(
         preview_slug=resolve_generic_web_preview_slug(
             profile=profile,
@@ -1071,6 +1164,7 @@ def evaluate_generic_web_preview_readiness(
     request: GenericWebPreviewReadinessRequest,
     checked_at: str,
     profile: LaunchplaneProductProfileRecord | None = None,
+    preview_url_override: str = "",
 ) -> GenericWebPreviewReadinessResult:
     resolved_profile = profile
     if resolved_profile is None:
@@ -1079,6 +1173,30 @@ def evaluate_generic_web_preview_readiness(
             product=request.product,
         )
     checks: list[GenericWebPreviewReadinessCheck] = []
+    preview_base_url_error = ""
+    if not preview_url_override.strip():
+        try:
+            _resolve_generic_web_preview_base_url(
+                control_plane_root=control_plane_root,
+                profile=resolved_profile,
+                record_store=record_store,
+            )
+        except PreviewBaseUrlConfigurationError as error:
+            preview_base_url_error = str(error)
+    checks.append(
+        GenericWebPreviewReadinessCheck(
+            check_id="preview_base_url",
+            status="blocked" if preview_base_url_error else "pass",
+            message=(
+                preview_base_url_error
+                or (
+                    "Preview URL is supplied explicitly for this refresh."
+                    if preview_url_override.strip()
+                    else "Preview base URL is configured in Launchplane runtime-environment records."
+                )
+            ),
+        )
+    )
     template_lane = _template_lane(profile=resolved_profile)
     if template_lane is None:
         checks.append(
@@ -1206,7 +1324,9 @@ def evaluate_generic_web_preview_readiness(
         )
     )
     status: Literal["pass", "blocked"] = (
-        "blocked" if missing_env_keys or missing_provider_fields else "pass"
+        "blocked"
+        if preview_base_url_error or missing_env_keys or missing_provider_fields
+        else "pass"
     )
     return GenericWebPreviewReadinessResult(
         readiness_status=status,
@@ -1254,8 +1374,9 @@ def execute_generic_web_preview_refresh(
             control_plane_root=control_plane_root,
             profile=resolved_profile,
             request=request,
+            record_store=record_store,
         )
-    except MissingPreviewBaseUrlError as exc:
+    except PreviewBaseUrlConfigurationError as exc:
         finished_at = utc_now_timestamp()
         return GenericWebPreviewRefreshResult(
             refresh_status="blocked",
@@ -1274,6 +1395,7 @@ def execute_generic_web_preview_refresh(
         request=GenericWebPreviewReadinessRequest(product=request.product, source=request.source),
         checked_at=started_at,
         profile=resolved_profile,
+        preview_url_override=request.preview_url,
     )
     if readiness.readiness_status != "pass":
         finished_at = utc_now_timestamp()

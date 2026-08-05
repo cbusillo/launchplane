@@ -47,6 +47,10 @@ name: Product Onboarding
         required: false
         default: ""
         type: string
+      preview_base_url:
+        description: Root URL whose subdomains host previews, for example https://product-preview.example.com.
+        required: true
+        type: string
       preview_label:
         description: Label that enables preview automation.
         required: false
@@ -128,6 +132,7 @@ jobs:
       HEALTH_PATH: ${{ inputs.health_path }}
       TESTING_CONTEXT: ${{ inputs.testing_context }}
       PREVIEW_CONTEXT: ${{ inputs.preview_context }}
+      PREVIEW_BASE_URL: ${{ inputs.preview_base_url }}
       PREVIEW_LABEL: ${{ inputs.preview_label }}
       TARGET_NAME: ${{ inputs.target_name }}
       PROJECT_NAME: ${{ inputs.project_name }}
@@ -146,6 +151,8 @@ jobs:
           python3 - <<'PY'
           import os
           import re
+          from ipaddress import ip_address
+          from urllib.parse import urlparse
 
           def required(name: str, maximum: int = 300) -> str:
               value = os.environ[name].strip()
@@ -181,6 +188,34 @@ jobs:
           health_path = required("HEALTH_PATH")
           if not health_path.startswith("/"):
               raise SystemExit("health_path must start with '/'.")
+          preview_base_url = required("PREVIEW_BASE_URL")
+          parsed_preview_base_url = urlparse(preview_base_url)
+          if parsed_preview_base_url.scheme not in {"http", "https"}:
+              raise SystemExit("preview_base_url must use http or https.")
+          if not parsed_preview_base_url.hostname:
+              raise SystemExit("preview_base_url requires a hostname.")
+          if parsed_preview_base_url.username or parsed_preview_base_url.password:
+              raise SystemExit("preview_base_url cannot contain credentials.")
+          if parsed_preview_base_url.hostname.startswith("*."):
+              raise SystemExit("preview_base_url must name the base host, not a wildcard.")
+          try:
+              ip_address(parsed_preview_base_url.hostname)
+          except ValueError:
+              pass
+          else:
+              raise SystemExit("preview_base_url must use a DNS hostname, not an IP address.")
+          if (
+              parsed_preview_base_url.path not in {"", "/"}
+              or parsed_preview_base_url.query
+              or parsed_preview_base_url.fragment
+          ):
+              raise SystemExit(
+                  "preview_base_url must be a root URL without path, query, or fragment."
+              )
+          try:
+              parsed_preview_base_url.port
+          except ValueError as error:
+              raise SystemExit("preview_base_url has an invalid port.") from error
           required("DISPLAY_NAME")
           required("IMAGE_REPOSITORY")
           required("PREVIEW_LABEL")
@@ -266,6 +301,7 @@ jobs:
             --arg project_name "$NORMALIZED_PROJECT_NAME" \
             --arg server_id "$SERVER_ID" \
             --arg preview_context "$NORMALIZED_PREVIEW_CONTEXT" \
+            --arg preview_base_url "$PREVIEW_BASE_URL" \
             --arg preview_label "$PREVIEW_LABEL" \
             --arg domain_certificate_type "$DOMAIN_CERTIFICATE_TYPE" \
             --argjson runtime_port "$RUNTIME_PORT" \
@@ -276,7 +312,8 @@ jobs:
               health_path:$health_path, testing_context:$testing_context,
               target_name:$target_name, project_name:$project_name,
               server_id:$server_id,
-              preview_context:$preview_context, preview_label:$preview_label,
+              preview_context:$preview_context, preview_base_url:$preview_base_url,
+              preview_label:$preview_label,
               domain_certificate_type:$domain_certificate_type}' \
             > generic-web-intent.json
           jq -n \
@@ -383,6 +420,7 @@ jobs:
             echo "- Repository: $REPOSITORY"
             echo "- Testing context: $NORMALIZED_TESTING_CONTEXT"
             echo "- Preview context: $NORMALIZED_PREVIEW_CONTEXT"
+            echo "- Preview base URL: $PREVIEW_BASE_URL"
             echo "- Provider operation: create-application"
             echo "- Launchplane worker SHA: \`$GITHUB_SHA\`"
             echo "- Provider plan: \`$target_plan_sha256\`"

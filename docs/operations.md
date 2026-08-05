@@ -1366,11 +1366,15 @@ Use the manual `Product Onboarding` workflow for a new generic-web product.
 Start with `mode=dry_run` when operator review of the exact plan is useful, or
 use `mode=apply` for one dispatch that pauses at the protected
 `launchplane-authz-admin` environment before any writes. Provide product,
-repository, image repository, runtime port, health path, and a reason/issue
-reference; optional names derive from the product key.
+repository, image repository, runtime port, health path, preview base URL, and a
+reason/issue reference; optional names derive from the product key. The preview
+base URL must be a root URL. Its wildcard DNS and ingress namespace must already
+route to the selected Dokploy server because onboarding owns Launchplane and
+Dokploy records, not public ingress provisioning.
 
 The workflow resolves immutable GitHub identity, plans one non-production
-Dokploy application, plans Launchplane records, and plans the complete
+Dokploy application, plans Launchplane records including the context-scoped
+`LAUNCHPLANE_PREVIEW_BASE_URL`, and plans the complete
 `operator.generic-web-preview` managed authz set. The apply job reuses the
 reviewed plan artifact and digests. Do not copy target ids, manifests, authz
 JSON, or database credentials into the conventional workflow.
@@ -1401,6 +1405,14 @@ rerun; the product remains unauthorized until the existing managed authz
 reconcile succeeds. Use `Product Onboarding Manifest (Advanced)` only when the
 typed generic-web contract does not fit, and use `Dokploy Target Setup` for
 adoption, production, compose, or repair operations.
+
+To change the preview base URL later, rerun `Product Onboarding` with the new
+root URL. Onboarding updates its owned key while preserving unrelated values in
+the same preview-context runtime-environment record.
+
+Products onboarded before this input existed must rerun `Product Onboarding`
+once to record the preview base URL. Until then, preview readiness and refresh
+return a typed blocked result rather than guessing a domain.
 
 - Promotions and deploys reference explicit artifact identifiers.
 - Missing control-plane config is a hard error, not a silent fallback.

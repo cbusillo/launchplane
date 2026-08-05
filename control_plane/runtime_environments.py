@@ -18,6 +18,10 @@ ScalarValue = str | int | float | bool
 ScalarMap = dict[str, ScalarValue]
 
 
+class MissingRuntimeContextDefinitionError(click.ClickException):
+    pass
+
+
 class RuntimeEnvironmentRecordStore(Protocol):
     def list_runtime_environment_records(
         self, *, context_name: str = "", instance_name: str = ""
@@ -100,7 +104,7 @@ def resolve_values_from_definition(
     merged_values: dict[str, str] = _normalize_scalar_map(definition.shared_env)
     context_definition = definition.contexts.get(context_name)
     if context_definition is None:
-        raise click.ClickException(
+        raise MissingRuntimeContextDefinitionError(
             f"Runtime environments file has no context definition for {context_name!r}."
         )
     merged_values.update(_normalize_scalar_map(context_definition.shared_env))
@@ -144,7 +148,7 @@ def resolve_runtime_context_values(
     merged_values: dict[str, str] = _normalize_scalar_map(definition.shared_env)
     context_definition = definition.contexts.get(context_name)
     if context_definition is None:
-        raise click.ClickException(
+        raise MissingRuntimeContextDefinitionError(
             f"Runtime environments file has no context definition for {context_name!r}."
         )
     merged_values.update(_normalize_scalar_map(context_definition.shared_env))

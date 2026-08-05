@@ -1982,6 +1982,12 @@ dry-run digest, and requires that exact digest plus the provider-resolved target
 id for apply. The resulting bundle includes the product profile, one testing
 lane, Dokploy-backed target records, target-id records, preview policy, and any
 declared runtime-environment or disabled managed-secret binding placeholders.
+The conventional generic-web contract requires an operator-supplied root
+preview base URL and writes it as the context-scoped
+`LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record. The reviewed digest
+binds that mutable runtime value; no real domain becomes checked-in authority.
+Repeated onboarding merges that owned key into the existing preview-context
+record instead of replacing unrelated runtime values.
 Generic-web dry-run requires `generic_web_onboarding.plan`; apply and advanced
 manifest writes require `product_onboarding.apply`, all for product/context
 `launchplane`. The route requires DB-backed storage and returns only sanitized

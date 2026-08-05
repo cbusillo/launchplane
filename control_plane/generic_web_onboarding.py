@@ -1,26 +1,72 @@
 from __future__ import annotations
 
 import hashlib
+from ipaddress import ip_address
 import json
 import re
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.product_onboarding_manifest import (
+    ProductOnboardingExpectedConfigManifest,
     ProductOnboardingLaneManifest,
     ProductOnboardingManifest,
     ProductOnboardingPreviewManifest,
+    ProductOnboardingRuntimeEnvironmentManifest,
     ProductOnboardingTargetManifest,
 )
 from control_plane.contracts.product_profile_record import (
     PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL,
+    ProductRuntimeConfigRequirement,
 )
 
 
 _PRODUCT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _GIT_REF_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
+_PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
+
+
+def _normalize_preview_base_url(value: str) -> str:
+    normalized_value = value.strip()
+    if not normalized_value:
+        raise ValueError("generic-web onboarding requires preview_base_url")
+    if any(character.isspace() for character in normalized_value):
+        raise ValueError("generic-web onboarding preview_base_url cannot contain whitespace")
+    parsed = urlparse(normalized_value)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("generic-web onboarding preview_base_url must use http or https")
+    if not parsed.hostname:
+        raise ValueError("generic-web onboarding preview_base_url requires a hostname")
+    if parsed.username or parsed.password:
+        raise ValueError("generic-web onboarding preview_base_url cannot contain credentials")
+    if parsed.hostname.startswith("*."):
+        raise ValueError(
+            "generic-web onboarding preview_base_url must name the preview base host, not a wildcard"
+        )
+    try:
+        ip_address(parsed.hostname)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(
+            "generic-web onboarding preview_base_url must use a DNS hostname, not an IP address"
+        )
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError(
+            "generic-web onboarding preview_base_url must be a root URL without path, query, or fragment"
+        )
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("generic-web onboarding preview_base_url has an invalid port") from error
+    hostname = parsed.hostname.lower()
+    normalized_host = f"[{hostname}]" if ":" in hostname else hostname
+    if port:
+        normalized_host = f"{normalized_host}:{port}"
+    return f"{parsed.scheme.lower()}://{normalized_host}"
 
 
 class GenericWebOnboardingIntent(BaseModel):
@@ -36,6 +82,7 @@ class GenericWebOnboardingIntent(BaseModel):
     image_repository: str
     runtime_port: int = Field(ge=1, le=65535)
     health_path: str
+    preview_base_url: str
     testing_context: str = ""
     target_name: str = ""
     project_name: str = ""
@@ -55,6 +102,7 @@ class GenericWebOnboardingIntent(BaseModel):
         self.default_branch = self.default_branch.strip()
         self.image_repository = self.image_repository.strip()
         self.health_path = self.health_path.strip()
+        self.preview_base_url = _normalize_preview_base_url(self.preview_base_url)
         self.testing_context = self.testing_context.strip() or f"{self.product}-testing"
         self.target_name = self.target_name.strip() or f"{self.product}-testing"
         self.project_name = self.project_name.strip() or self.product
@@ -155,6 +203,21 @@ def build_generic_web_onboarding_manifest(
                 target_name=intent.target_name,
                 source_git_ref=f"origin/{intent.default_branch}",
                 healthcheck_path=intent.health_path,
+            ),
+        ),
+        runtime_environments=(
+            ProductOnboardingRuntimeEnvironmentManifest(
+                scope="context",
+                context=intent.preview_context,
+                env={_PREVIEW_BASE_URL_ENV_KEY: intent.preview_base_url},
+            ),
+        ),
+        expected_config=ProductOnboardingExpectedConfigManifest(
+            runtime_environment_keys=(
+                ProductRuntimeConfigRequirement(
+                    key=_PREVIEW_BASE_URL_ENV_KEY,
+                    context=intent.preview_context,
+                ),
             ),
         ),
         source_label="service:generic-web-onboarding",

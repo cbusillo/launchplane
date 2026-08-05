@@ -32,6 +32,7 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewInventoryRequest,
     GenericWebPreviewReadinessRequest,
     GenericWebPreviewRefreshRequest,
+    MissingPreviewBaseUrlError,
     discover_generic_web_preview_desired_state,
     evaluate_generic_web_preview_readiness,
     execute_generic_web_preview_destroy,
@@ -54,10 +55,12 @@ class _GenericWebPreviewStore:
         profile: LaunchplaneProductProfileRecord,
         *,
         runtime_key_safety_policies: tuple[RuntimeKeySafetyPolicyRecord, ...] = (),
+        runtime_environment_records: tuple[RuntimeEnvironmentRecord, ...] | None = None,
         secret_bindings: tuple[SecretBinding, ...] = (),
     ) -> None:
         self.profile = profile
         self.runtime_key_safety_policies = runtime_key_safety_policies
+        self.runtime_environment_records = runtime_environment_records
         self.secret_bindings = secret_bindings
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
@@ -100,21 +103,28 @@ class _GenericWebPreviewStore:
         return bindings
 
     def list_runtime_environment_records(
-        self, *, context_name: str = "", instance_name: str = ""
+        self,
+        *,
+        scope: str = "",
+        context_name: str = "",
+        instance_name: str = "",
     ) -> tuple[RuntimeEnvironmentRecord, ...]:
-        records = (
-            RuntimeEnvironmentRecord(
-                scope="context",
-                context=self.profile.preview.context,
-                env={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://syo-preview.example.test"},
-                updated_at="2026-05-10T05:30:00Z",
-                source_label="test",
-            ),
-        )
+        records = self.runtime_environment_records
+        if records is None:
+            records = (
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context=self.profile.preview.context,
+                    env={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://syo-preview.example.test"},
+                    updated_at="2026-05-10T05:30:00Z",
+                    source_label="test",
+                ),
+            )
         return tuple(
             record
             for record in records
-            if (not context_name or record.context == context_name)
+            if (not scope or record.scope == scope)
+            and (not context_name or record.context == context_name)
             and (not instance_name or record.instance == instance_name)
         )
 
@@ -588,7 +598,12 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(result.missing_provider_fields, ("dockerImage", "username"))
         self.assertEqual(
             [check.check_id for check in result.checks],
-            ["template_env", "template_provider_fields", "transport_policy"],
+            [
+                "preview_base_url",
+                "template_env",
+                "template_provider_fields",
+                "transport_policy",
+            ],
         )
 
     def test_evaluate_generic_web_preview_readiness_keeps_template_lane_when_target_id_missing(
@@ -631,8 +646,11 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(result.template_context, "sellyouroutboard-testing")
         self.assertEqual(result.template_instance, "testing")
         self.assertEqual(result.template_target_id, "")
-        self.assertEqual([check.check_id for check in result.checks], ["template_target"])
-        self.assertIn("template lane to have a Dokploy target_id", result.checks[0].message)
+        self.assertEqual(
+            [check.check_id for check in result.checks],
+            ["preview_base_url", "template_target"],
+        )
+        self.assertIn("template lane to have a Dokploy target_id", result.checks[1].message)
         source_of_truth.assert_called_once_with(
             control_plane_root=Path("."),
             allow_incomplete_target_ids=True,
@@ -687,7 +705,7 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(result.template_target_type, "compose")
         self.assertEqual(result.template_target_id, "compose-cm-testing")
         self.assertEqual(
-            result.checks[0].message,
+            result.checks[1].message,
             "Generic web preview readiness requires the template lane to be a Dokploy application.",
         )
         read_dokploy_config.assert_not_called()
@@ -738,7 +756,7 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(result.readiness_status, "blocked")
         self.assertEqual(result.template_target_type, "compose")
         self.assertEqual(
-            result.checks[0].message,
+            result.checks[1].message,
             "Generic web preview readiness requires the template lane to be a Dokploy application.",
         )
         read_dokploy_config.assert_not_called()
@@ -856,7 +874,7 @@ class GenericWebPreviewTests(unittest.TestCase):
                 "preview": _profile().preview.model_copy(update={"slug_template": "pr-{number}"})
             }
         )
-        store = _GenericWebPreviewStore(profile)
+        store = _GenericWebPreviewStore(profile, runtime_environment_records=())
         with (
             patch(
                 "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.load_runtime_environment_definition",
@@ -897,46 +915,152 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertIn("Missing LAUNCHPLANE_PREVIEW_BASE_URL", result.error_message)
         dokploy_request.assert_not_called()
 
+    def test_missing_preview_context_is_typed_blocked_configuration(self) -> None:
+        profile = _profile().model_copy(
+            update={
+                "preview": _profile().preview.model_copy(
+                    update={
+                        "context": "sellyouroutboard-preview",
+                        "slug_template": "pr-{number}",
+                    }
+                )
+            }
+        )
+        store = _GenericWebPreviewStore(profile, runtime_environment_records=())
+        runtime_definition = (
+            control_plane_runtime_environments.build_runtime_environment_definition_from_records(
+                (
+                    RuntimeEnvironmentRecord(
+                        scope="context",
+                        context="sellyouroutboard-testing",
+                        env={"OTHER_KEY": "value"},
+                        updated_at="2026-05-10T05:30:00Z",
+                        source_label="test",
+                    ),
+                )
+            )
+        )
+        source = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    target_type="application",
+                    target_id="app-testing",
+                ),
+            ),
+        )
+        request = GenericWebPreviewRefreshRequest(
+            product="sellyouroutboard",
+            preview_slug="pr-42",
+            image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
+            anchor_head_sha="abc123",
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.load_runtime_environment_definition",
+                return_value=runtime_definition,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "SMTP_HOST=smtp.example\nSMTP_FROM=hello@example.com\n",
+                    "dockerImage": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                    "username": "github-actions",
+                },
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
+            ) as dokploy_request,
+            patch(
+                "control_plane.workflows.generic_web_preview.utc_now_timestamp",
+                side_effect=["2026-05-10T05:30:00Z", "2026-05-10T05:30:01Z"],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                MissingPreviewBaseUrlError,
+                "Missing LAUNCHPLANE_PREVIEW_BASE_URL",
+            ):
+                resolve_generic_web_preview_url(
+                    control_plane_root=Path("."),
+                    profile=profile,
+                    request=request,
+                )
+            readiness = evaluate_generic_web_preview_readiness(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewReadinessRequest(product="sellyouroutboard"),
+                checked_at="2026-05-10T05:30:00Z",
+                profile=profile,
+            )
+            result = execute_generic_web_preview_refresh(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=request,
+                profile=profile,
+            )
+
+        self.assertEqual(readiness.readiness_status, "blocked")
+        self.assertEqual(readiness.checks[0].check_id, "preview_base_url")
+        self.assertEqual(readiness.checks[0].status, "blocked")
+        self.assertEqual(result.refresh_status, "blocked")
+        self.assertIn("Missing LAUNCHPLANE_PREVIEW_BASE_URL", result.error_message)
+        dokploy_request.assert_not_called()
+
     def test_execute_generic_web_preview_refresh_rejects_malformed_base_url(self) -> None:
         profile = _profile().model_copy(
             update={
                 "preview": _profile().preview.model_copy(update={"slug_template": "pr-{number}"})
             }
         )
-        store = _GenericWebPreviewStore(profile)
-        with (
-            patch(
-                "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.load_runtime_environment_definition",
-                return_value=control_plane_runtime_environments.build_runtime_environment_definition_from_records(
-                    (
+        for preview_base_url, expected_error in (
+            ("https://preview.example/path", "root URL"),
+            ("https://preview.example:99999", "invalid port"),
+            ("https://user:password@preview.example", "credentials"),
+            ("https://*.preview.example", "not a wildcard"),
+            ("https://192.0.2.10", "not an IP address"),
+        ):
+            with self.subTest(preview_base_url=preview_base_url):
+                store = _GenericWebPreviewStore(
+                    profile,
+                    runtime_environment_records=(
                         RuntimeEnvironmentRecord(
                             scope="context",
                             context="sellyouroutboard-testing",
-                            env={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://preview.example/path"},
+                            env={"LAUNCHPLANE_PREVIEW_BASE_URL": preview_base_url},
                             updated_at="2026-05-10T05:30:00Z",
                             source_label="test",
                         ),
-                    )
-                ),
-            ),
-            patch(
-                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
-            ) as dokploy_request,
-        ):
-            with self.assertRaisesRegex(click.ClickException, "root URL"):
-                execute_generic_web_preview_refresh(
-                    control_plane_root=Path("."),
-                    record_store=store,
-                    request=GenericWebPreviewRefreshRequest(
-                        product="sellyouroutboard",
-                        preview_slug="pr-42",
-                        preview_url="",
-                        image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
-                        anchor_head_sha="abc123",
                     ),
                 )
+                with patch(
+                    "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
+                ) as dokploy_request:
+                    result = execute_generic_web_preview_refresh(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=GenericWebPreviewRefreshRequest(
+                            product="sellyouroutboard",
+                            preview_slug="pr-42",
+                            preview_url="",
+                            image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
+                            anchor_head_sha="abc123",
+                        ),
+                    )
 
-        dokploy_request.assert_not_called()
+                self.assertEqual(result.refresh_status, "blocked")
+                self.assertIn(expected_error, result.error_message)
+                dokploy_request.assert_not_called()
 
     def test_resolve_preview_url_rejects_non_root_base_url(self) -> None:
         profile = _profile().model_copy(
@@ -1202,7 +1326,7 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(sleeps, [])
 
     def test_execute_generic_web_preview_refresh_creates_application_from_template(self) -> None:
-        store = _GenericWebPreviewStore(_profile())
+        store = _GenericWebPreviewStore(_profile(), runtime_environment_records=())
         source = DokploySourceOfTruth(
             schema_version=1,
             targets=(

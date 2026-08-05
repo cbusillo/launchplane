@@ -47,11 +47,15 @@ as Discord Blue's Every Code bridge port `8787`.
 ## Launchplane Records
 
 For a conventional generic-web product, dispatch `Product Onboarding` with
-typed product, repository, image, port, health, and optional Dokploy naming
-inputs. The workflow resolves immutable GitHub repository identity, plans one
-new non-production Dokploy application, plans the product record bundle, and
-plans six exact preview authz rules. `mode=apply` then pauses at the protected
-`launchplane-authz-admin` review before applying the three reviewed contracts.
+typed product, repository, image, port, health, preview base URL, and optional
+Dokploy naming inputs. The preview base URL is the root URL whose subdomains
+host previews, such as `https://product-preview.example.com`; wildcard DNS and
+ingress for `*.product-preview.example.com` must already route to the selected
+Dokploy server. The workflow resolves immutable GitHub repository identity,
+plans one new non-production Dokploy application, plans the product record
+bundle, and plans six exact preview authz rules. `mode=apply` then pauses at the
+protected `launchplane-authz-admin` review before applying the three reviewed
+contracts.
 
 The normal path accepts no base64 manifest, copied provider id, authz JSON, or
 database credential. Stable idempotency keys make a same-plan retry replay the
@@ -60,11 +64,12 @@ fails, the product remains safely unauthorized; rerun the same reviewed flow
 instead of deleting records or creating another target.
 
 The reviewed flow writes the generic-web product profile, immutable repository
-identity, one `testing` lane, provider target records, preview policy, and the
-complete `operator.generic-web-preview` desired set. The authz planner retains
-all existing managed rules and sends the resulting desired set through the
-existing digest-bound reconcile route. Product onboarding never writes authz
-policy directly.
+identity, one `testing` lane, provider target records, preview policy, the
+context-scoped `LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record, and
+the complete `operator.generic-web-preview` desired set. The authz planner
+retains all existing managed rules and sends the resulting desired set through
+the existing digest-bound reconcile route. Product onboarding never writes
+authz policy directly.
 
 Existing targets, production targets, compose targets, Odoo products, and
 non-generic drivers remain explicit advanced operations. Use `Dokploy Target

@@ -48488,6 +48488,10 @@
                         "title": "Preview App Name Prefix",
                         "type": "string"
                       },
+                      "preview_base_url": {
+                        "title": "Preview Base Url",
+                        "type": "string"
+                      },
                       "preview_context": {
                         "default": "",
                         "title": "Preview Context",
@@ -48555,7 +48559,8 @@
                       "repository_owner_id",
                       "image_repository",
                       "runtime_port",
-                      "health_path"
+                      "health_path",
+                      "preview_base_url"
                     ],
                     "title": "GenericWebOnboardingIntent",
                     "type": "object"

@@ -2319,6 +2319,10 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("actions/create-github-app-token@", workflow_text)
         self.assertIn("LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID", workflow_text)
         self.assertIn("permission-contents: read", workflow_text)
+        self.assertIn("preview_base_url:", workflow_text)
+        self.assertIn("PREVIEW_BASE_URL: ${{ inputs.preview_base_url }}", workflow_text)
+        self.assertIn("preview_base_url:$preview_base_url", workflow_text)
+        self.assertIn("Preview base URL", workflow_text)
         self.assertIn('gh api "repos/${REPOSITORY}"', workflow_text)
         self.assertIn(
             "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
@@ -2627,6 +2631,17 @@ class ProductOnboardingTests(unittest.TestCase):
                 record_store=store,
                 manifest=manifest,
             )
+            existing_runtime_record = store.list_runtime_environment_records()[0]
+            store.write_runtime_environment_record(
+                existing_runtime_record.model_copy(
+                    update={
+                        "env": {
+                            **existing_runtime_record.env,
+                            "UNRELATED_PREVIEW_SETTING": "preserve-me",
+                        }
+                    }
+                )
+            )
             second_result = apply_product_onboarding_manifest(
                 record_store=store,
                 manifest=manifest,
@@ -2691,6 +2706,10 @@ class ProductOnboardingTests(unittest.TestCase):
             ],
         )
         self.assertEqual(len(runtime_records), 1)
+        self.assertEqual(
+            runtime_records[0].env["UNRELATED_PREVIEW_SETTING"],
+            "preserve-me",
+        )
         self.assertEqual(len(secret_bindings), 1)
         self.assertEqual(secret_bindings[0].binding_key, "SMTP_PASSWORD")
         self.assertEqual(secret_bindings[0].status, "disabled")
