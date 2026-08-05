@@ -278,7 +278,7 @@ jobs:
       anchor_pr_url: ${{ needs.resolve.outputs.anchor_pr_url }}
       anchor_head_sha: ${{ needs.resolve.outputs.head_sha }}
       image_reference: ${{ needs.build.outputs.image_reference }}
-      timeout-seconds: ${{ inputs['timeout-seconds'] }}
+      timeout-seconds: ${{ inputs['timeout-seconds'] || '300' }}
       timeout-ms: ${{ inputs['timeout-ms'] }}
       launchplane_url: ${{ inputs.launchplane_url }}
       launchplane_audience: ${{ inputs.launchplane_audience }}
@@ -357,6 +357,7 @@ jobs:
       verification_status: pass
       verified_at: ${{ needs.verify.outputs.verified_at }}
       checked_urls: ${{ needs.verify.outputs.checked_urls }}
+      timeout-seconds: ${{ inputs['timeout-seconds'] || '300' }}
       timeout-ms: ${{ inputs['timeout-ms'] }}
       launchplane_url: ${{ inputs.launchplane_url }}
       launchplane_audience: ${{ inputs.launchplane_audience }}
@@ -376,6 +377,7 @@ jobs:
       verification_status: fail
       verified_at: ${{ needs.verify.outputs.verified_at }}
       checked_urls: ${{ needs.verify.outputs.checked_urls }}
+      timeout-seconds: ${{ inputs['timeout-seconds'] }}
       failure_summary: ${{ needs.verify.outputs.failure_summary }}
       timeout-ms: ${{ inputs['timeout-ms'] }}
       launchplane_url: ${{ inputs.launchplane_url }}

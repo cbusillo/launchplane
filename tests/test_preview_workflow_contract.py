@@ -290,7 +290,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertIn("route-path: /v1/drivers/generic-web/preview-destroy", workflow)
         self.assertIn("route-path: /v1/authz-diagnostics/github-actions/evaluate", workflow)
         self.assertIn('"action": "preview_refresh.execute"', workflow)
-        self.assertIn("expected-status: 200,403", workflow)
+        self.assertIn("expected-status: 200,202,403", workflow)
         self.assertIn(
             "refresh.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}", workflow
         )
@@ -424,6 +424,10 @@ class PreviewWorkflowContractTests(unittest.TestCase):
                 workflow.job_uses(job_id),
                 "./.github/workflows/reusable-generic-web-preview-verification.yml",
             )
+        self.assertEqual(
+            workflow_text.count("timeout-seconds: ${{ inputs['timeout-seconds'] || '300' }}"),
+            2,
+        )
         self.assertEqual(
             workflow.job_uses("feedback-refresh"),
             "./.github/workflows/reusable-preview-feedback-status.yml",
