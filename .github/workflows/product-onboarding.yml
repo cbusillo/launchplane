@@ -401,7 +401,7 @@ jobs:
   apply:
     if: ${{ inputs.mode == 'apply' }}
     needs: plan
-    uses: ./.github/workflows/reusable-generic-web-onboarding-apply.yml
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml@d21d609514404d3420fceb7fe53857ae407d3ff8
     with:
       product: ${{ needs.plan.outputs.product }}
       testing_context: ${{ needs.plan.outputs.testing_context }}

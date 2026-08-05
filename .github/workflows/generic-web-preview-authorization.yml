@@ -232,7 +232,7 @@ jobs:
   apply:
     if: ${{ inputs.mode == 'apply' }}
     needs: plan
-    uses: ./.github/workflows/reusable-generic-web-preview-authz-apply.yml
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml@d21d609514404d3420fceb7fe53857ae407d3ff8
     with:
       product: ${{ needs.plan.outputs.product }}
       plan_sha256: ${{ needs.plan.outputs.plan_sha256 }}

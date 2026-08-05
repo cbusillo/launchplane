@@ -2333,7 +2333,9 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         self.assertEqual(
             workflow.job_uses("apply"),
-            "./.github/workflows/reusable-generic-web-onboarding-apply.yml",
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-generic-web-onboarding-apply.yml@"
+            "d21d609514404d3420fceb7fe53857ae407d3ff8",
         )
         self.assertIn("/v1/authz-policies/managed-rule-sets/reconcile", apply_workflow_text)
         self.assertIn("environment: launchplane-authz-admin", apply_workflow_text)
@@ -2378,7 +2380,9 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         self.assertEqual(
             workflow.job_uses("apply"),
-            "./.github/workflows/reusable-generic-web-preview-authz-apply.yml",
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-generic-web-preview-authz-apply.yml@"
+            "d21d609514404d3420fceb7fe53857ae407d3ff8",
         )
         self.assertIn("environment: launchplane-authz-admin", apply_workflow_text)
         self.assertIn("/v1/authz-policies/managed-rule-sets/reconcile", apply_workflow_text)

@@ -1374,7 +1374,9 @@ Planning authority is read-only and distinct: the plan job uses
 `dokploy_target.plan`, `generic_web_onboarding.plan`, and
 `generic_web_preview_authz.plan`. Only the protected apply worker receives
 `dokploy_target.setup`, `product_onboarding.apply`, and
-`authz_policy_grant.write`.
+`authz_policy_grant.write`. Both protected workers are called by immutable
+full-SHA reusable-workflow refs so policy-admin grants never depend on a mutable
+branch identity.
 
 Use `Generic Web Preview Authorization` for reviewed `expand`, `contract`, and
 `retire` operations after onboarding. It derives the same conventional caller
