@@ -33,6 +33,17 @@ name: Generic Web Preview Authorization
         required: false
         default: ""
         type: string
+      launchplane_sha:
+        description: >-
+          Reviewed Launchplane reusable-workflow SHA; defaults to this workflow revision.
+        required: false
+        default: ""
+        type: string
+      include_ingress_operator:
+        description: Temporarily include scoped preview-ingress plan/apply rules.
+        required: false
+        default: false
+        type: boolean
       confirmation:
         description: Type APPLY GENERIC WEB PREVIEW AUTHORIZATION when mode=apply.
         required: false
@@ -68,6 +79,8 @@ jobs:
       PRODUCT: ${{ inputs.product }}
       REPOSITORY: ${{ inputs.repository }}
       PREVIEW_CONTEXT: ${{ inputs.preview_context }}
+      LAUNCHPLANE_SHA: ${{ inputs.launchplane_sha }}
+      INCLUDE_INGRESS_OPERATOR: ${{ inputs.include_ingress_operator }}
       CONFIRMATION: ${{ inputs.confirmation }}
       REASON: ${{ inputs.reason }}
       RELATED_ISSUE: ${{ inputs.related_issue }}
@@ -113,6 +126,12 @@ jobs:
           if repository_match is None:
               raise SystemExit("repository must use owner/name form.")
           preview_context = optional("PREVIEW_CONTEXT") or f"{product}-preview"
+          launchplane_sha = (optional("LAUNCHPLANE_SHA", 40) or os.environ["GITHUB_SHA"]).lower()
+          if re.fullmatch(r"[0-9a-f]{40}", launchplane_sha) is None:
+              raise SystemExit("launchplane_sha must be a full commit SHA when provided.")
+          include_ingress_operator = required("INCLUDE_INGRESS_OPERATOR", 5).lower()
+          if include_ingress_operator not in {"true", "false"}:
+              raise SystemExit("include_ingress_operator must be true or false.")
           required("REASON")
           required("RELATED_ISSUE")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
@@ -120,6 +139,7 @@ jobs:
               handle.write(f"repository_owner={repository_match.group(1)}\n")
               handle.write(f"repository_name={repository_match.group(2)}\n")
               handle.write(f"preview_context={preview_context}\n")
+              handle.write(f"launchplane_sha={launchplane_sha}\n")
           PY
 
       - name: Mint repository metadata token
@@ -163,6 +183,7 @@ jobs:
           DEFAULT_BRANCH: ${{ steps.repository.outputs.default_branch }}
           NORMALIZED_PRODUCT: ${{ steps.inputs.outputs.product }}
           NORMALIZED_PREVIEW_CONTEXT: ${{ steps.inputs.outputs.preview_context }}
+          NORMALIZED_LAUNCHPLANE_SHA: ${{ steps.inputs.outputs.launchplane_sha }}
           REPOSITORY_ID: ${{ steps.repository.outputs.repository_id }}
           REPOSITORY_OWNER_ID: ${{ steps.repository.outputs.repository_owner_id }}
         run: |
@@ -175,14 +196,16 @@ jobs:
             --arg repository_owner_id "$REPOSITORY_OWNER_ID" \
             --arg default_branch "$DEFAULT_BRANCH" \
             --arg preview_context "$NORMALIZED_PREVIEW_CONTEXT" \
-            --arg launchplane_sha "$GITHUB_SHA" \
+            --arg launchplane_sha "$NORMALIZED_LAUNCHPLANE_SHA" \
+            --argjson include_ingress_operator "$INCLUDE_INGRESS_OPERATOR" \
             --arg reason "$REASON" \
             --arg related_issue "$RELATED_ISSUE" \
             '{schema_version:1, product:"launchplane", operation:$operation,
               target_product:$target_product, repository:$repository,
               repository_id:$repository_id, repository_owner_id:$repository_owner_id,
               default_branch:$default_branch, preview_context:$preview_context,
-              launchplane_sha:$launchplane_sha, reason:$reason,
+              launchplane_sha:$launchplane_sha,
+              include_ingress_operator:$include_ingress_operator, reason:$reason,
               related_issue:$related_issue}' \
             > authz-plan-request.json
 
@@ -202,6 +225,7 @@ jobs:
         shell: bash
         env:
           NORMALIZED_PRODUCT: ${{ steps.inputs.outputs.product }}
+          NORMALIZED_LAUNCHPLANE_SHA: ${{ steps.inputs.outputs.launchplane_sha }}
         run: |
           set -euo pipefail
           plan_sha256="$(jq -r '.result.plan_sha256 // empty' authz-plan.json)"
@@ -216,7 +240,8 @@ jobs:
             echo
             echo "- Product: $NORMALIZED_PRODUCT"
             echo "- Operation: $OPERATION"
-            echo "- Launchplane worker SHA: \`$GITHUB_SHA\`"
+            echo "- Launchplane worker SHA: \`$NORMALIZED_LAUNCHPLANE_SHA\`"
+            echo "- Include ingress operator: $INCLUDE_INGRESS_OPERATOR"
             echo "- Plan: \`$plan_sha256\`"
             echo "- Rules added: $(jq -r '.result.diff.added_rule_count' authz-plan.json)"
             echo "- Rules removed: $(jq -r '.result.diff.removed_rule_count' authz-plan.json)"

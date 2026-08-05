@@ -78,6 +78,16 @@ an operator-owned manifest that cannot use the conventional path. Direct local
 CLI mutation remains break-glass bootstrap or repair behavior and requires
 `--allow-direct-db-mutation`; it is not an onboarding alternative.
 
+If live proof finds that an existing preview wildcard ingress route needs a
+Launchplane-managed repair, `Generic Web Preview Authorization` can temporarily
+include the scoped `Ingress Route Dry Run` and `Ingress Route Apply` workflow
+rules. Expand with `include_ingress_operator=true` and the exact reviewed
+reusable-workflow SHA, perform the route dry-run/apply, then contract with the
+same SHA and `include_ingress_operator=false`. The planner copies the pinned
+ingress workflow identity from the active policy and fails closed when no single
+template exists; operators do not hand-author authz JSON or edit a per-product
+policy secret.
+
 The conventional product-repo caller files are
 `.github/workflows/launchplane-preview.yml` for pull-request refresh,
 verification, and feedback, and
