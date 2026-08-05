@@ -118,6 +118,11 @@ class NpmplusProxyHost(NpmplusProxyHostPayload):
     id: int = Field(ge=1)
     locations: tuple[NpmplusLocation, ...] = ()
 
+    @field_validator("locations", mode="before")
+    @classmethod
+    def _normalize_null_locations(cls, value: object) -> object:
+        return () if value is None else value
+
 
 @dataclass(frozen=True)
 class NpmplusCredentials:
