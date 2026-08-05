@@ -2335,7 +2335,7 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow.job_uses("apply"),
             "cbusillo/launchplane/.github/workflows/"
             "reusable-generic-web-onboarding-apply.yml@"
-            "d21d609514404d3420fceb7fe53857ae407d3ff8",
+            "ddc0533476246a9c4c52094ab1c945e294adb3c9",
         )
         self.assertIn("/v1/authz-policies/managed-rule-sets/reconcile", apply_workflow_text)
         self.assertIn("environment: launchplane-authz-admin", apply_workflow_text)
