@@ -241,7 +241,7 @@ jobs:
           idempotency-key: >-
             ${{ needs.resolve.outputs.idempotency_key }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
-          expected-status: 200,403
+          expected-status: 200,202,403
           fail-result-paths: result.refresh_status,result.readiness.health_status
           output-paths: >-
             trace_id=trace_id,
