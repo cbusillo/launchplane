@@ -50,8 +50,11 @@ title: Secrets
   resolve immutable repository and owner ids before protected review. Store its
   client id in `LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID` and its private key
   in `LAUNCHPLANE_ONBOARDING_GITHUB_APP_PRIVATE_KEY`. Install it only on product
-  repositories that operators may onboard and grant only the GitHub App's
-  mandatory metadata read access.
+  repositories that operators may onboard and grant only repository Contents
+  read plus the GitHub App's mandatory metadata read access. Contents read is
+  the minimum permission that lets an installation be scoped to selected
+  private repositories; the workflow requests that exact permission when it
+  mints each repository-scoped token.
   The workflow passes the key only to the commit-pinned official token action,
   uses the short-lived token only for repository metadata lookup, and does not
   persist the token or private key in plan/apply artifacts. Do not use a PAT or

@@ -212,6 +212,7 @@ jobs:
           private-key: ${{ secrets.LAUNCHPLANE_ONBOARDING_GITHUB_APP_PRIVATE_KEY }}
           owner: ${{ steps.inputs.outputs.repository_owner }}
           repositories: ${{ steps.inputs.outputs.repository_name }}
+          permission-contents: read
 
       - name: Resolve immutable repository identity
         id: repository
