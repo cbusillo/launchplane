@@ -13,6 +13,7 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview,
+    apply_launchplane_destroy_preview_if_present,
     apply_launchplane_generation_evidence,
     upsert_launchplane_preview_from_request,
 )
@@ -337,6 +338,20 @@ class LaunchplaneMutationTests(unittest.TestCase):
                     destroy_reason="closed",
                 ),
             )
+
+    def test_destroy_preview_if_present_reports_missing_preview(self) -> None:
+        result = apply_launchplane_destroy_preview_if_present(
+            record_store=_FakePreviewMutationStore(),
+            request=PreviewDestroyMutationRequest(
+                context="site-testing",
+                anchor_repo="cbusillo/site",
+                anchor_pr_number=42,
+                destroyed_at="2026-05-03T00:05:00Z",
+                destroy_reason="closed",
+            ),
+        )
+
+        self.assertEqual(result, {"transition": "destroyed_missing_preview"})
 
     def test_destroy_preview_records_destroyed_state(self) -> None:
         store = _FakePreviewMutationStore()

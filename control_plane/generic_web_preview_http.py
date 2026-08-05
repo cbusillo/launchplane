@@ -17,8 +17,11 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
     _GENERIC_WEB_PREVIEW_READINESS_ROUTE,
     _GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+    _apply_generic_web_preview_destroy_records,
     _apply_generic_web_preview_refresh_records,
     _generic_web_preview_anchor_pr_number,
+    _generic_web_preview_anchor_repo,
+    _generic_web_preview_destroy_anchor_pr_number,
     _write_preview_inventory_scan_if_supported,
 )
 from control_plane.drivers.generic_web_preview_extensions import (
@@ -222,6 +225,11 @@ def apply_generic_web_preview_destroy_result(
     if driver_extension_result is not None:
         return driver_extension_result
 
+    anchor_pr_number = _generic_web_preview_destroy_anchor_pr_number(
+        request=request.destroy,
+        profile=profile,
+    )
+    anchor_repo = _generic_web_preview_anchor_repo(profile)
     driver_result = execute_generic_web_preview_destroy(
         control_plane_root=control_plane_root,
         record_store=cast(GenericWebPreviewProfileStore, record_store),
@@ -229,7 +237,15 @@ def apply_generic_web_preview_destroy_result(
         profile=profile,
     )
     driver_result = GenericWebPreviewDestroyResult.model_validate(driver_result)
-    return {}, driver_result.model_dump(mode="json")
+    records = _apply_generic_web_preview_destroy_records(
+        record_store=record_store,
+        request=request.destroy,
+        driver_result=driver_result,
+        context=profile.preview.context,
+        anchor_repo=anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+    )
+    return records, driver_result.model_dump(mode="json")
 
 
 def should_store_generic_web_preview_idempotency(result: dict[str, object]) -> bool:

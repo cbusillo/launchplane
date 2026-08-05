@@ -301,6 +301,22 @@ def apply_launchplane_destroy_preview(
     record_store: LaunchplaneDestroyPreviewStore,
     request: PreviewDestroyMutationRequest,
 ) -> dict[str, object]:
+    result = apply_launchplane_destroy_preview_if_present(
+        record_store=record_store,
+        request=request,
+    )
+    if result["transition"] == "destroyed_missing_preview":
+        raise click.ClickException(
+            f"No Launchplane preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
+        )
+    return result
+
+
+def apply_launchplane_destroy_preview_if_present(
+    *,
+    record_store: LaunchplaneDestroyPreviewStore,
+    request: PreviewDestroyMutationRequest,
+) -> dict[str, object]:
     preview_record = find_preview_record(
         record_store=record_store,
         context_name=request.context,
@@ -308,9 +324,7 @@ def apply_launchplane_destroy_preview(
         anchor_pr_number=request.anchor_pr_number,
     )
     if preview_record is None:
-        raise click.ClickException(
-            f"No Launchplane preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
-        )
+        return {"transition": "destroyed_missing_preview"}
     transitioned_preview = apply_preview_destroyed_transition(
         preview=preview_record,
         destroyed_at=request.destroyed_at,

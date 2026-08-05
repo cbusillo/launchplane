@@ -5015,6 +5015,24 @@ class GenericWebHttpTests(unittest.TestCase):
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
             )
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-sellyouroutboard-testing-sellyouroutboard-pr-42",
+                    context="sellyouroutboard-testing",
+                    anchor_repo="sellyouroutboard",
+                    anchor_pr_number=42,
+                    anchor_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/42",
+                    preview_label="preview",
+                    canonical_url="https://pr-42.sellyouroutboard.example.test",
+                    state="active",
+                    created_at="2026-05-03T15:55:00Z",
+                    updated_at="2026-05-03T15:56:00Z",
+                    eligible_at="2026-05-03T15:55:00Z",
+                    active_generation_id="generation-1",
+                    serving_generation_id="generation-1",
+                    latest_generation_id="generation-1",
+                )
+            )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -5075,10 +5093,19 @@ class GenericWebHttpTests(unittest.TestCase):
                     },
                     headers={"Idempotency-Key": "generic-web-preview-destroy:syo:pr-42"},
                 )
+                preview = store.read_preview_record(
+                    "preview-sellyouroutboard-testing-sellyouroutboard-pr-42"
+                )
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["destroy_status"], "pass")
         self.assertEqual(payload["result"]["application_id"], "app-preview")
+        self.assertEqual(payload["records"]["transition"], "destroyed")
+        self.assertEqual(preview.state, "destroyed")
+        self.assertEqual(preview.destroyed_at, "2026-05-03T16:00:02Z")
+        self.assertEqual(preview.destroy_reason, "external_preview_pull_request_closed")
+        self.assertEqual(preview.active_generation_id, "")
+        self.assertEqual(preview.serving_generation_id, "")
         destroy.assert_called_once()
         _, kwargs = destroy.call_args
         self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
@@ -5168,6 +5195,7 @@ class GenericWebHttpTests(unittest.TestCase):
         self.assertEqual(second_status_code, 202)
         self.assertEqual(first_payload["result"], second_payload["result"])
         self.assertTrue(second_payload["replayed"])
+        self.assertEqual(first_payload["records"]["transition"], "destroyed_missing_preview")
         destroy.assert_called_once()
 
     def test_generic_web_stable_verification_route_accepts_odoo_base_driver_profile(
