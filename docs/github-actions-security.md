@@ -68,7 +68,8 @@ written to the workflow log by the upstream implementation.
   repository-qualified reference, except narrowly approved privileged workers
   whose full-SHA `job_workflow_ref` is itself part of the active policy trust
   boundary. The approved set is limited to managed authz administration,
-  route-binding reconciliation, exact-instance product health-policy mutation,
+  generic-web onboarding/preview-authz protected apply, route-binding
+  reconciliation, exact-instance product health-policy mutation,
   exact-instance immutable Odoo artifact publication, and exact-instance Odoo
   target-replacement plan/apply workers whose actions are separately authorized.
   It also includes exact-instance redacted target-log diagnostics and Odoo

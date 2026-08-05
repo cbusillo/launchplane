@@ -59,7 +59,6 @@ class GenericWebOnboardingIntent(BaseModel):
         self.testing_context = self.testing_context.strip() or f"{self.product}-testing"
         self.target_name = self.target_name.strip() or f"{self.product}-testing"
         self.project_name = self.project_name.strip() or self.product
-        self.environment_name = self.environment_name.strip() or "testing"
         self.server_id = self.server_id.strip()
         self.preview_context = self.preview_context.strip() or f"{self.product}-preview"
         self.preview_label = self.preview_label.strip() or PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL

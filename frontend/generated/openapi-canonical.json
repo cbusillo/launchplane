@@ -48476,6 +48476,7 @@
                         "type": "string"
                       },
                       "environment_name": {
+                        "const": "testing",
                         "default": "testing",
                         "title": "Environment Name",
                         "type": "string"
