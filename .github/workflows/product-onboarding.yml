@@ -352,6 +352,10 @@ jobs:
       - name: Finalize onboarding plan
         id: plan
         shell: bash
+        env:
+          NORMALIZED_PREVIEW_CONTEXT: ${{ steps.inputs.outputs.preview_context }}
+          NORMALIZED_PRODUCT: ${{ steps.inputs.outputs.product }}
+          NORMALIZED_TESTING_CONTEXT: ${{ steps.inputs.outputs.testing_context }}
         run: |
           set -euo pipefail
           onboarding_plan_sha256="$(jq -r '.result.plan_sha256 // empty' onboarding-plan.json)"
@@ -374,10 +378,10 @@ jobs:
           {
             echo "## Generic-web onboarding plan"
             echo
-            echo "- Product: ${{ steps.inputs.outputs.product }}"
+            echo "- Product: $NORMALIZED_PRODUCT"
             echo "- Repository: $REPOSITORY"
-            echo "- Testing context: ${{ steps.inputs.outputs.testing_context }}"
-            echo "- Preview context: ${{ steps.inputs.outputs.preview_context }}"
+            echo "- Testing context: $NORMALIZED_TESTING_CONTEXT"
+            echo "- Preview context: $NORMALIZED_PREVIEW_CONTEXT"
             echo "- Provider operation: create-application"
             echo "- Launchplane worker SHA: \`$GITHUB_SHA\`"
             echo "- Provider plan: \`$target_plan_sha256\`"

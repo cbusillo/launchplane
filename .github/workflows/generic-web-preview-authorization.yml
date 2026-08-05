@@ -199,6 +199,8 @@ jobs:
       - name: Finalize authorization plan
         id: plan
         shell: bash
+        env:
+          NORMALIZED_PRODUCT: ${{ steps.inputs.outputs.product }}
         run: |
           set -euo pipefail
           plan_sha256="$(jq -r '.result.plan_sha256 // empty' authz-plan.json)"
@@ -211,7 +213,7 @@ jobs:
           {
             echo "## Generic-web preview authorization plan"
             echo
-            echo "- Product: ${{ steps.inputs.outputs.product }}"
+            echo "- Product: $NORMALIZED_PRODUCT"
             echo "- Operation: $OPERATION"
             echo "- Launchplane worker SHA: \`$GITHUB_SHA\`"
             echo "- Plan: \`$plan_sha256\`"
