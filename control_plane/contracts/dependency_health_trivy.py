@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
 import re
+from urllib.parse import unquote
 
 from control_plane.contracts.artifact_dependency_provenance import (
     normalize_artifact_relative_path,
@@ -165,7 +166,16 @@ def dependency_health_snapshot_from_trivy_report(
                 "InstalledVersion",
                 label="Trivy vulnerability installed version",
             )
-            if (package_name, installed_version) not in package_inventory:
+            has_package_inventory_evidence = (
+                package_name,
+                installed_version,
+            ) in package_inventory
+            has_embedded_package_evidence = _trivy_vulnerability_has_embedded_package_evidence(
+                vulnerability,
+                result_class=result_class,
+                installed_version=installed_version,
+            )
+            if not has_package_inventory_evidence and not has_embedded_package_evidence:
                 raise ValueError(
                     "Trivy vulnerability package/version is absent from Packages evidence"
                 )
@@ -203,6 +213,30 @@ def dependency_health_snapshot_from_trivy_report(
         provenance=provenance,
         findings=tuple(accumulator.build() for accumulator in accumulators.values()),
     )
+
+
+def _trivy_vulnerability_has_embedded_package_evidence(
+    vulnerability: Mapping[str, object],
+    *,
+    result_class: str,
+    installed_version: str,
+) -> bool:
+    if result_class != "lang-pkgs":
+        return False
+    package_identifier = vulnerability.get("PkgIdentifier")
+    if not isinstance(package_identifier, Mapping):
+        return False
+    purl = package_identifier.get("PURL")
+    uid = package_identifier.get("UID")
+    if not isinstance(purl, str) or not purl.strip():
+        return False
+    if not isinstance(uid, str) or not uid.strip():
+        return False
+    purl_without_fragment = purl.split("#", 1)[0]
+    purl_without_qualifiers = purl_without_fragment.split("?", 1)[0]
+    if "@" not in purl_without_qualifiers:
+        return False
+    return unquote(purl_without_qualifiers.rsplit("@", 1)[1]) == installed_version
 
 
 def _trivy_advisory_aliases(

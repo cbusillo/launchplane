@@ -306,6 +306,78 @@ class DependencyHealthTrivyAdapterTests(unittest.TestCase):
                 provenance=_provenance(),
             )
 
+    def test_adapter_accepts_identified_bundled_language_package(self) -> None:
+        vulnerability = _vulnerability(
+            "CVE-2026-14257",
+            package="brace-expansion",
+            version="5.0.7",
+        )
+        vulnerability["PkgIdentifier"] = {
+            "PURL": "pkg:npm/brace-expansion@5.0.7",
+            "UID": "identified-bundled-package",
+        }
+        report = _report([vulnerability])
+        result = report["Results"]
+        assert isinstance(result, list)
+        result_payload = result[0]
+        assert isinstance(result_payload, dict)
+        result_payload["Packages"] = [{"Name": "npm", "Version": "11.18.0"}]
+
+        snapshot = dependency_health_snapshot_from_trivy_report(
+            report=report,
+            provenance=_provenance(),
+        )
+
+        self.assertEqual(snapshot.findings[0].package, "brace-expansion")
+        self.assertEqual(snapshot.findings[0].versions, ("5.0.7",))
+
+    def test_adapter_rejects_bundled_package_with_mismatched_identifier(self) -> None:
+        vulnerability = _vulnerability(
+            "CVE-2026-14257",
+            package="brace-expansion",
+            version="5.0.7",
+        )
+        vulnerability["PkgIdentifier"] = {
+            "PURL": "pkg:npm/brace-expansion@5.0.9",
+            "UID": "mismatched-bundled-package",
+        }
+        report = _report([vulnerability])
+        result = report["Results"]
+        assert isinstance(result, list)
+        result_payload = result[0]
+        assert isinstance(result_payload, dict)
+        result_payload["Packages"] = [{"Name": "npm", "Version": "11.18.0"}]
+
+        with self.assertRaisesRegex(ValueError, "absent from Packages evidence"):
+            dependency_health_snapshot_from_trivy_report(
+                report=report,
+                provenance=_provenance(),
+            )
+
+    def test_adapter_rejects_os_package_missing_from_inventory(self) -> None:
+        vulnerability = _vulnerability(
+            "CVE-2026-14257",
+            package="libexample",
+            version="1.0.0",
+        )
+        vulnerability["PkgIdentifier"] = {
+            "PURL": "pkg:deb/debian/libexample@1.0.0",
+            "UID": "identified-os-package",
+        }
+        report = _report([vulnerability], ecosystem="debian")
+        result = report["Results"]
+        assert isinstance(result, list)
+        result_payload = result[0]
+        assert isinstance(result_payload, dict)
+        result_payload["Class"] = "os-pkgs"
+        result_payload["Packages"] = [{"Name": "other-package", "Version": "1.0.0"}]
+
+        with self.assertRaisesRegex(ValueError, "absent from Packages evidence"):
+            dependency_health_snapshot_from_trivy_report(
+                report=report,
+                provenance=_provenance(),
+            )
+
     def test_adapter_rejects_modified_findings(self) -> None:
         report = _report([])
         result = report["Results"]
