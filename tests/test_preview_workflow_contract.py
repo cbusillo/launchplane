@@ -310,6 +310,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         resolver = workflow.step_named("resolve", "Resolve Launchplane preview request")
         self.assertIsNotNone(resolver)
         assert resolver is not None
+        self.assertIn('TIMEOUT_SECONDS="300"', resolver.run)
         self.assertIn('echo "timeout_seconds=$TIMEOUT_SECONDS"', resolver.run)
         for job_id, field_name in (
             ("refresh", "refresh.timeout_seconds"),
