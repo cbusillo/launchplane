@@ -28,6 +28,7 @@ concurrency:
 jobs:
   apply:
     runs-on: ubuntu-latest
+    environment: launchplane-authz-admin
     env:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       MANIFEST_BASE64: ${{ inputs.manifest_base64 }}

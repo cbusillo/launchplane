@@ -48475,12 +48475,6 @@
                         "title": "Domain Certificate Type",
                         "type": "string"
                       },
-                      "environment_name": {
-                        "const": "testing",
-                        "default": "testing",
-                        "title": "Environment Name",
-                        "type": "string"
-                      },
                       "health_path": {
                         "title": "Health Path",
                         "type": "string"

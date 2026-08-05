@@ -2345,8 +2345,10 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("resolved_target_id:$target_id", apply_workflow_text)
         self.assertIn("Reviewed onboarding plan digest does not match", apply_workflow_text)
         self.assertIn("Reviewed authz configuration does not match", apply_workflow_text)
+        self.assertIn("Reviewed provider plan digest does not match", apply_workflow_text)
         self.assertIn("authz-managed:operator.generic-web-preview", apply_workflow_text)
         self.assertIn("retention-days: 14", workflow_text)
+        self.assertIn("Launchplane worker SHA", workflow_text)
         self.assertIn("product: ${{ needs.plan.outputs.product }}", workflow_text)
         self.assertIn('fail-result-paths: ""', apply_workflow_text)
         self.assertNotIn("manifest_base64", workflow_text)
@@ -2399,6 +2401,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("Product Onboarding Manifest (Advanced)", workflow_text)
         self.assertIn("manifest_base64", workflow_text)
         self.assertIn("APPLY PRODUCT ONBOARDING", workflow_text)
+        self.assertIn("environment: launchplane-authz-admin", workflow_text)
         self.assertIn("/v1/product-onboarding/apply", workflow_text)
         self.assertNotIn("/v1/authz-policies/managed-rule-sets/reconcile", workflow_text)
 

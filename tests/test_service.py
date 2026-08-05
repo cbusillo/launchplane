@@ -2810,6 +2810,80 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(profile.default_branch, "main")
         self.assertEqual(profile.preview.context, "demo-web-preview")
 
+    def test_generic_web_onboarding_planner_cannot_apply_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["generic_web_onboarding.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3"),
+            )
+            generic_web = {
+                "product": "demo-web",
+                "display_name": "Demo Web",
+                "repository": "example/demo-web",
+                "repository_id": "123",
+                "repository_owner_id": "456",
+                "default_branch": "main",
+                "image_repository": "ghcr.io/example/demo-web",
+                "runtime_port": 3000,
+                "health_path": "/healthz",
+            }
+            dry_run_status, dry_run_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "generic_web": generic_web,
+                },
+            )
+            apply_status, apply_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reviewed_plan_sha256": dry_run_payload["result"]["plan_sha256"],
+                    "resolved_target_id": "app-demo-web",
+                    "generic_web": generic_web,
+                },
+                headers={"Idempotency-Key": "planner-cannot-apply-records"},
+            )
+
+        self.assertEqual(dry_run_status, 202)
+        self.assertEqual(apply_status, 403)
+        self.assertEqual(apply_payload["error"]["code"], "authorization_denied")
+
     def test_product_onboarding_endpoint_rejects_provider_target_conflict(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

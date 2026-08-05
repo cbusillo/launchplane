@@ -1383,6 +1383,12 @@ Use `Generic Web Preview Authorization` for reviewed `expand`, `contract`, and
 paths and immutable repository identity, submits no hand-authored policy JSON,
 and applies only through the protected managed reconcile contract.
 
+For products previously owned by the retired per-product generic-preview
+secret, run `expand` at the new Launchplane SHA, repin the product callers, then
+run `contract` at that same SHA. This reviewed overlap removes legacy managed
+rule identities without an authorization gap. Use `retire` when offboarding the
+product entirely.
+
 If provider creation succeeds and a later step fails, rerun the exact same
 workflow inputs, including the reason. Stable idempotency keys replay the provider result and prevent duplicate
 creation. If records succeed but authz fails, leave the records in place and

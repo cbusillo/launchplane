@@ -77,7 +77,7 @@ The conventional product-repo caller files are
 `.github/workflows/launchplane-preview.yml` for pull-request refresh,
 verification, and feedback, and
 `.github/workflows/launchplane-preview-notice.yml` for trusted cleanup and
-fork/Dependabot notice handling. The generated caller contract and onboarding
+fork/Dependabot notice handling. The conventional caller contract and onboarding
 authz planner use these exact paths; custom filenames require an advanced
 contract rather than an implicit fallback.
 

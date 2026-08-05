@@ -213,6 +213,7 @@ jobs:
             echo
             echo "- Product: ${{ steps.inputs.outputs.product }}"
             echo "- Operation: $OPERATION"
+            echo "- Launchplane worker SHA: \`$GITHUB_SHA\`"
             echo "- Plan: \`$plan_sha256\`"
             echo "- Rules added: $(jq -r '.result.diff.added_rule_count' authz-plan.json)"
             echo "- Rules removed: $(jq -r '.result.diff.removed_rule_count' authz-plan.json)"

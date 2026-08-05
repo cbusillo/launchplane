@@ -116,6 +116,7 @@ jobs:
       repository_id: ${{ steps.repository.outputs.repository_id }}
       repository_owner_id: ${{ steps.repository.outputs.repository_owner_id }}
       testing_context: ${{ steps.inputs.outputs.testing_context }}
+      target_plan_sha256: ${{ steps.plan.outputs.target_plan_sha256 }}
     env:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       MODE: ${{ inputs.mode }}
@@ -262,7 +263,6 @@ jobs:
             --arg testing_context "$NORMALIZED_TESTING_CONTEXT" \
             --arg target_name "$NORMALIZED_TARGET_NAME" \
             --arg project_name "$NORMALIZED_PROJECT_NAME" \
-            --arg environment_name "$ENVIRONMENT_NAME" \
             --arg server_id "$SERVER_ID" \
             --arg preview_context "$NORMALIZED_PREVIEW_CONTEXT" \
             --arg preview_label "$PREVIEW_LABEL" \
@@ -274,7 +274,7 @@ jobs:
               image_repository:$image_repository, runtime_port:$runtime_port,
               health_path:$health_path, testing_context:$testing_context,
               target_name:$target_name, project_name:$project_name,
-              environment_name:$environment_name, server_id:$server_id,
+              server_id:$server_id,
               preview_context:$preview_context, preview_label:$preview_label,
               domain_certificate_type:$domain_certificate_type}' \
             > generic-web-intent.json
@@ -356,6 +356,7 @@ jobs:
           set -euo pipefail
           onboarding_plan_sha256="$(jq -r '.result.plan_sha256 // empty' onboarding-plan.json)"
           authz_plan_sha256="$(jq -r '.result.plan_sha256 // empty' authz-plan.json)"
+          target_plan_sha256="$(sha256sum target-plan-request.json | awk '{print $1}')"
           if ! [[ "$onboarding_plan_sha256" =~ ^[0-9a-f]{64}$ ]]; then
             echo "Product onboarding plan did not return a valid digest." >&2
             exit 1
@@ -368,6 +369,7 @@ jobs:
           {
             echo "onboarding_plan_sha256=$onboarding_plan_sha256"
             echo "authz_plan_sha256=$authz_plan_sha256"
+            echo "target_plan_sha256=$target_plan_sha256"
           } >> "$GITHUB_OUTPUT"
           {
             echo "## Generic-web onboarding plan"
@@ -377,6 +379,8 @@ jobs:
             echo "- Testing context: ${{ steps.inputs.outputs.testing_context }}"
             echo "- Preview context: ${{ steps.inputs.outputs.preview_context }}"
             echo "- Provider operation: create-application"
+            echo "- Launchplane worker SHA: \`$GITHUB_SHA\`"
+            echo "- Provider plan: \`$target_plan_sha256\`"
             echo "- Product plan: \`$onboarding_plan_sha256\`"
             echo "- Authz plan: \`$authz_plan_sha256\`"
             echo "- Authz rules added: $(jq -r '.result.diff.added_rule_count' authz-plan.json)"
@@ -407,5 +411,6 @@ jobs:
       testing_context: ${{ needs.plan.outputs.testing_context }}
       onboarding_plan_sha256: ${{ needs.plan.outputs.onboarding_plan_sha256 }}
       authz_plan_sha256: ${{ needs.plan.outputs.authz_plan_sha256 }}
+      target_plan_sha256: ${{ needs.plan.outputs.target_plan_sha256 }}
       reason: ${{ inputs.reason }}
     secrets: inherit

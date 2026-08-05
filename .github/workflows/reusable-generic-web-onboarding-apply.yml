@@ -20,6 +20,10 @@ name: Reusable Generic Web Onboarding Apply
         description: Managed-authz plan digest from the planning job.
         required: true
         type: string
+      target_plan_sha256:
+        description: Provider-target request digest from the planning job.
+        required: true
+        type: string
       reason:
         description: Operator reason from the reviewed dispatch.
         required: true
@@ -39,6 +43,7 @@ jobs:
       REASON: ${{ inputs.reason }}
       ONBOARDING_PLAN_SHA256: ${{ inputs.onboarding_plan_sha256 }}
       AUTHZ_PLAN_SHA256: ${{ inputs.authz_plan_sha256 }}
+      TARGET_PLAN_SHA256: ${{ inputs.target_plan_sha256 }}
       TESTING_CONTEXT: ${{ inputs.testing_context }}
     steps:
       - name: Download reviewed onboarding plan
@@ -53,12 +58,17 @@ jobs:
           set -euo pipefail
           artifact_onboarding_plan_sha256="$(jq -r '.result.plan_sha256 // empty' onboarding-plan.json)"
           artifact_authz_plan_sha256="$(jq -r '.result.plan_sha256 // empty' authz-plan.json)"
+          artifact_target_plan_sha256="$(sha256sum target-plan-request.json | awk '{print $1}')"
           if [ "$artifact_onboarding_plan_sha256" != "$ONBOARDING_PLAN_SHA256" ]; then
             echo "Reviewed onboarding plan digest does not match its artifact." >&2
             exit 1
           fi
           if [ "$artifact_authz_plan_sha256" != "$AUTHZ_PLAN_SHA256" ]; then
             echo "Reviewed authz plan digest does not match its artifact." >&2
+            exit 1
+          fi
+          if [ "$artifact_target_plan_sha256" != "$TARGET_PLAN_SHA256" ]; then
+            echo "Reviewed provider plan digest does not match its artifact." >&2
             exit 1
           fi
           if ! diff -u \
@@ -151,6 +161,7 @@ jobs:
             echo "- Testing context: $TESTING_CONTEXT"
             echo "- Product plan: \`$ONBOARDING_PLAN_SHA256\`"
             echo "- Authz plan: \`$AUTHZ_PLAN_SHA256\`"
+            echo "- Provider plan: \`$TARGET_PLAN_SHA256\`"
             if [ -f target-apply.json ]; then
               echo "- Provider target: $(jq -r '.result.setup.target_record.target_name // ""' target-apply.json)"
             fi
