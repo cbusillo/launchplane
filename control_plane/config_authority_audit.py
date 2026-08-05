@@ -2778,14 +2778,14 @@ def _allow_reason(
     allow_context = allow_context or {}
     normalized = path.replace("\\", "/")
     key_text = _semantic_full_key_text(key)
+    if _is_codeowners_path(normalized):
+        return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if normalized.startswith("docs/") or normalized in {"README.md", "AGENTS.md", "handoff.md"}:
         return ALLOW_REASON_DOCS_EXAMPLE
     if normalized.startswith("tests/") or "/test" in normalized:
         return ALLOW_REASON_TEST_FIXTURE
     if normalized.startswith("addons/") or "/addons/" in normalized:
         return ALLOW_REASON_PRODUCT_OWNED_ADDON
-    if _is_codeowners_path(normalized):
-        return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if normalized == ".github/github.json" and _is_repo_metadata_ergonomics_key(key):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if normalized.endswith(".py") and (
@@ -3701,10 +3701,15 @@ def _is_codeowners_path(path: str) -> bool:
 
 
 def _owner_repo_reference_matches(value: str) -> Iterable[re.Match[str]]:
-    for match in OWNER_REPO_PATTERN.finditer(value):
-        if match.start() > 0 and value[match.start() - 1] in "./\\":
+    offset = 0
+    while match := OWNER_REPO_PATTERN.search(value, offset):
+        preceded_by_path_separator = match.start() > 0 and value[match.start() - 1] in "./\\"
+        github_api_repository = value[: match.start()].endswith("/repos/")
+        if preceded_by_path_separator and not github_api_repository:
+            offset = match.start() + 1
             continue
         yield match
+        offset = match.end()
 
 
 def _contains_owner_repo_reference(value: str) -> bool:

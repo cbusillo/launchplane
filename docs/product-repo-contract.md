@@ -139,7 +139,8 @@ runtime authority. Shell-local filesystem paths such as
 `/var/run/docker.sock` and `/dev/null` are not interpreted as GitHub
 owner/repository identities, while package scripts using explicit local paths
 such as `./node_modules/.bin/...` are not treated as repository authority.
-Real owner/repository literals remain audited.
+Real owner/repository literals and GitHub API paths such as
+`/repos/owner/repository` remain audited.
 The `product-repo` profile keeps ordinary
 product-owned test fixtures allowed, but also rejects test fixtures that carry
 Launchplane lifecycle authority such as authz policy, provider target,

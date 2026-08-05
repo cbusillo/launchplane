@@ -1107,7 +1107,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             script.write_text(
                 "#!/usr/bin/env bash\n"
                 "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock tool "
-                "--ignorefile /dev/null\n",
+                "--ignorefile /dev/null\n"
+                "gh api /repos/example/production/actions/runs\n",
                 encoding="utf-8",
             )
             _commit_all(root)
@@ -1129,9 +1130,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(len(package_findings), 1)
         self.assertEqual(package_findings[0]["key"], "scripts.deploy")
         self.assertEqual(package_findings[0]["classification"], "needs_classification")
-        self.assertFalse(
-            any(finding["path"] == "scripts/scan-runtime-image.sh" for finding in findings)
-        )
+        script_findings = [
+            finding for finding in findings if finding["path"] == "scripts/scan-runtime-image.sh"
+        ]
+        self.assertEqual(len(script_findings), 1)
+        self.assertEqual(script_findings[0]["key"], "repository")
+        self.assertEqual(script_findings[0]["classification"], "needs_classification")
 
     def test_hashes_are_stable_for_same_inputs_and_findings(self) -> None:
         with TemporaryDirectory() as temp_dir:
