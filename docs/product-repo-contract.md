@@ -133,6 +133,14 @@ resolve `origin/main` or `main`; when no merge base or dirty local comparison is
 available, the gate fails closed rather than silently passing. Docs, tests,
 schema fixtures, bootstrap wiring, and explicitly allowed thin connector
 mechanics are reported with allow reasons instead of blocking the default gate.
+Repository review metadata such as CODEOWNERS and `.github/github.json`
+`reviewPolicy` fields is classified as repository ergonomics rather than
+runtime authority. Shell-local filesystem paths such as
+`/var/run/docker.sock` and `/dev/null` are not interpreted as GitHub
+owner/repository identities, while package scripts using explicit local paths
+such as `./node_modules/.bin/...` are not treated as repository authority.
+Real owner/repository literals and GitHub API paths such as
+`/repos/owner/repository` remain audited.
 The `product-repo` profile keeps ordinary
 product-owned test fixtures allowed, but also rejects test fixtures that carry
 Launchplane lifecycle authority such as authz policy, provider target,
