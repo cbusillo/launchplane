@@ -66,6 +66,8 @@ jobs:
       should_cleanup: ${{ steps.notice.outputs.should_cleanup }}
       should_record: ${{ steps.notice.outputs.should_record }}
       status: ${{ steps.notice.outputs.status }}
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - name: Resolve preview request notice

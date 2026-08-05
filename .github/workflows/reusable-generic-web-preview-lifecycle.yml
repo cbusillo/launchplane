@@ -111,6 +111,7 @@ jobs:
       operation: ${{ steps.request.outputs.operation }}
       product: ${{ steps.request.outputs.product }}
       run_url: ${{ steps.request.outputs.run_url }}
+      timeout_seconds: ${{ steps.request.outputs.timeout_seconds }}
     runs-on: ubuntu-latest
     steps:
       - name: Resolve Launchplane preview request
@@ -202,6 +203,7 @@ jobs:
             echo "operation=$OPERATION"
             echo "product=$PRODUCT"
             echo "run_url=$run_url"
+            echo "timeout_seconds=$TIMEOUT_SECONDS"
           } >>"$GITHUB_OUTPUT"
 
   refresh:
@@ -237,7 +239,7 @@ jobs:
             refresh.anchor_head_sha=${{ inputs.anchor_head_sha }}
             refresh.image_reference=${{ inputs.image_reference }}
             refresh.source=${{ needs.resolve.outputs.run_url }}
-            refresh.timeout_seconds=${{ inputs['timeout-seconds'] }}
+            refresh.timeout_seconds=${{ needs.resolve.outputs.timeout_seconds }}
           idempotency-key: >-
             ${{ needs.resolve.outputs.idempotency_key }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
@@ -315,7 +317,7 @@ jobs:
             destroy.product=${{ needs.resolve.outputs.product }}
             destroy.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}
             destroy.destroy_reason=${{ needs.resolve.outputs.destroy_reason }}
-            destroy.timeout_seconds=${{ inputs['timeout-seconds'] }}
+            destroy.timeout_seconds=${{ needs.resolve.outputs.timeout_seconds }}
           idempotency-key: >-
             ${{ needs.resolve.outputs.idempotency_key }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
