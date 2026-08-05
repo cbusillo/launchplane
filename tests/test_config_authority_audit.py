@@ -1006,6 +1006,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         "docs": {"operations": "docs/operations.md"},
                         "importantWorkflows": ["CI"],
                         "pullRequests": {"preferredMergeMethod": "merge"},
+                        "reviewPolicy": {"codeOwners": ".github/CODEOWNERS"},
                         "qualityGate": {
                             "security": {"secretScan": "docker run ghcr.io/example/gitleaks:latest"}
                         },
@@ -1053,6 +1054,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "repo_metadata_ergonomics",
         )
         self.assertEqual(
+            by_key["reviewPolicy.codeOwners"]["allow_reason"],
+            "repo_metadata_ergonomics",
+        )
+        self.assertEqual(
             by_key["qualityGate.security.secretScan"]["allow_reason"],
             "repo_metadata_ergonomics",
         )
@@ -1070,6 +1075,63 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(by_key["product.owner"]["evidence"], "<redacted-runtime-identity>")
         self.assertEqual(by_key["launchplane.lanes.testing.url"]["allow_reason"], "")
         self.assertEqual(by_key["launchplane.lanes.testing.deployRoute"]["allow_reason"], "")
+
+    def test_codeowners_and_local_filesystem_paths_are_repo_mechanics(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            codeowners = root / ".github" / "CODEOWNERS"
+            codeowners.parent.mkdir()
+            codeowners.write_text(
+                "src/domains/billing/ @example-owner @example-reviewer\n"
+                "/.github/CODEOWNERS @example-owner @example-reviewer\n",
+                encoding="utf-8",
+            )
+            package_json = root / "package.json"
+            package_json.write_text(
+                json.dumps(
+                    {
+                        "scripts": {
+                            "docker:migrate": (
+                                "docker compose run --rm app "
+                                "./node_modules/.bin/prisma migrate deploy"
+                            ),
+                            "deploy": "./scripts/deploy.sh --repo example/production",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            script = root / "scripts" / "scan-runtime-image.sh"
+            script.parent.mkdir()
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock tool "
+                "--ignorefile /dev/null\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        findings = _findings(payload)
+        codeowner_findings = [
+            finding for finding in findings if finding["path"] == ".github/CODEOWNERS"
+        ]
+        self.assertTrue(codeowner_findings)
+        self.assertTrue(
+            all(
+                finding["allow_reason"] == "repo_metadata_ergonomics"
+                for finding in codeowner_findings
+            )
+        )
+        package_findings = [finding for finding in findings if finding["path"] == "package.json"]
+        self.assertEqual(len(package_findings), 1)
+        self.assertEqual(package_findings[0]["key"], "scripts.deploy")
+        self.assertEqual(package_findings[0]["classification"], "needs_classification")
+        self.assertFalse(
+            any(finding["path"] == "scripts/scan-runtime-image.sh" for finding in findings)
+        )
 
     def test_hashes_are_stable_for_same_inputs_and_findings(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -2554,8 +2554,8 @@ def _script_line_candidates(text: str) -> list[tuple[int, str, object]]:
         )
         for url in URL_PATTERN.findall(line):
             candidates.append((index, "url", url))
-        for repo in OWNER_REPO_PATTERN.findall(line):
-            candidates.append((index, "repository", repo))
+        for match in _owner_repo_reference_matches(line):
+            candidates.append((index, "repository", match.group(0)))
     return candidates
 
 
@@ -2655,9 +2655,14 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
         return True
     if any(part in key_text.split("_") for part in SECRET_SHAPED_KEY_PARTS):
         return True
+    repository_reference = (
+        _contains_owner_repo_reference(value_text)
+        if normalized == "package.json" and key.startswith("scripts.")
+        else OWNER_REPO_PATTERN.search(value_text) is not None
+    )
     return bool(
         URL_PATTERN.search(value_text)
-        or OWNER_REPO_PATTERN.search(value_text)
+        or repository_reference
         or PROVIDER_TARGET_PATTERN.search(value_text)
     )
 
@@ -2779,6 +2784,8 @@ def _allow_reason(
         return ALLOW_REASON_TEST_FIXTURE
     if normalized.startswith("addons/") or "/addons/" in normalized:
         return ALLOW_REASON_PRODUCT_OWNED_ADDON
+    if _is_codeowners_path(normalized):
+        return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if normalized == ".github/github.json" and _is_repo_metadata_ergonomics_key(key):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if normalized.endswith(".py") and (
@@ -3684,8 +3691,24 @@ def _is_repo_metadata_ergonomics_key(key: str) -> bool:
             "qaLabels",
             "qualityGate.",
             "relatedRepos[",
+            "reviewPolicy.",
         )
     )
+
+
+def _is_codeowners_path(path: str) -> bool:
+    return path in {".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"}
+
+
+def _owner_repo_reference_matches(value: str) -> Iterable[re.Match[str]]:
+    for match in OWNER_REPO_PATTERN.finditer(value):
+        if match.start() > 0 and value[match.start() - 1] in "./\\":
+            continue
+        yield match
+
+
+def _contains_owner_repo_reference(value: str) -> bool:
+    return next(iter(_owner_repo_reference_matches(value)), None) is not None
 
 
 def _repo_metadata(root: Path) -> dict[str, object]:
