@@ -2318,7 +2318,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("APPLY GENERIC WEB ONBOARDING", workflow_text)
         self.assertIn("actions/create-github-app-token@", workflow_text)
         self.assertIn("LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID", workflow_text)
-        self.assertNotIn("permission-contents", workflow_text)
+        self.assertIn("permission-contents: read", workflow_text)
         self.assertIn('gh api "repos/${REPOSITORY}"', workflow_text)
         self.assertIn(
             "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
@@ -2376,6 +2376,7 @@ class ProductOnboardingTests(unittest.TestCase):
             self.assertIn(f"- {operation}", workflow_text)
         self.assertNotIn("- onboard", workflow_text)
         self.assertIn("actions/create-github-app-token@", workflow_text)
+        self.assertIn("permission-contents: read", workflow_text)
         self.assertIn(
             "/v1/authz-policies/managed-rule-sets/generic-web-preview/plan",
             workflow_text,
