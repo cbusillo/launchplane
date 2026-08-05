@@ -316,6 +316,7 @@ class DependencyHealthTrivyAdapterTests(unittest.TestCase):
             "PURL": "pkg:npm/brace-expansion@5.0.7",
             "UID": "identified-bundled-package",
         }
+        vulnerability["PkgID"] = "brace-expansion@5.0.7"
         report = _report([vulnerability])
         result = report["Results"]
         assert isinstance(result, list)
@@ -331,16 +332,17 @@ class DependencyHealthTrivyAdapterTests(unittest.TestCase):
         self.assertEqual(snapshot.findings[0].package, "brace-expansion")
         self.assertEqual(snapshot.findings[0].versions, ("5.0.7",))
 
-    def test_adapter_rejects_bundled_package_with_mismatched_identifier(self) -> None:
+    def test_adapter_rejects_bundled_package_with_mismatched_package_id(self) -> None:
         vulnerability = _vulnerability(
             "CVE-2026-14257",
             package="brace-expansion",
             version="5.0.7",
         )
         vulnerability["PkgIdentifier"] = {
-            "PURL": "pkg:npm/brace-expansion@5.0.9",
+            "PURL": "pkg:npm/brace-expansion@5.0.7",
             "UID": "mismatched-bundled-package",
         }
+        vulnerability["PkgID"] = "brace-expansion@5.0.9"
         report = _report([vulnerability])
         result = report["Results"]
         assert isinstance(result, list)
@@ -354,7 +356,7 @@ class DependencyHealthTrivyAdapterTests(unittest.TestCase):
                 provenance=_provenance(),
             )
 
-    def test_adapter_rejects_os_package_missing_from_inventory(self) -> None:
+    def test_adapter_accepts_identified_os_package_missing_from_inventory(self) -> None:
         vulnerability = _vulnerability(
             "CVE-2026-14257",
             package="libexample",
@@ -364,6 +366,7 @@ class DependencyHealthTrivyAdapterTests(unittest.TestCase):
             "PURL": "pkg:deb/debian/libexample@1.0.0",
             "UID": "identified-os-package",
         }
+        vulnerability["PkgID"] = "libexample@1.0.0"
         report = _report([vulnerability], ecosystem="debian")
         result = report["Results"]
         assert isinstance(result, list)
@@ -372,11 +375,13 @@ class DependencyHealthTrivyAdapterTests(unittest.TestCase):
         result_payload["Class"] = "os-pkgs"
         result_payload["Packages"] = [{"Name": "other-package", "Version": "1.0.0"}]
 
-        with self.assertRaisesRegex(ValueError, "absent from Packages evidence"):
-            dependency_health_snapshot_from_trivy_report(
-                report=report,
-                provenance=_provenance(),
-            )
+        snapshot = dependency_health_snapshot_from_trivy_report(
+            report=report,
+            provenance=_provenance(),
+        )
+
+        self.assertEqual(snapshot.findings[0].package, "libexample")
+        self.assertEqual(snapshot.findings[0].versions, ("1.0.0",))
 
     def test_adapter_rejects_modified_findings(self) -> None:
         report = _report([])

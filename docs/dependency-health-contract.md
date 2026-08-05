@@ -142,10 +142,10 @@ and rejects Trivy modified/ignored findings. Reports must contain only
 `lang-pkgs` and `os-pkgs` vulnerability results; mixed scanner output is
 rejected rather than partially normalized. Trivy can report a bundled language
 package vulnerability without repeating that package in the result's
-`Packages` inventory. The adapter accepts that narrow case only when the
-vulnerability carries a non-empty `PkgIdentifier` UID and a PURL whose version
-matches `InstalledVersion`; operating-system findings and unidentified or
-mismatched language packages remain fail-closed.
+`Packages` inventory. The adapter accepts that narrow case for language and
+operating-system packages only when `PkgID` exactly matches
+`PkgName@InstalledVersion` and `PkgIdentifier` carries both a non-empty UID and
+a package URL. Unidentified or mismatched findings remain fail-closed.
 
 Assess one snapshot absolutely:
 
