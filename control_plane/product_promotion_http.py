@@ -24,6 +24,7 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
+from control_plane.contracts.deploy_reference import validate_provider_deploy_reference
 from control_plane.drivers.generic_web_dispatch import (
     GenericWebProdPromotionEnvelope,
     GenericWebPromotionWorkflowEnvelope,
@@ -89,6 +90,7 @@ class ProductPromotionEvidence(BaseModel):
 
     environment: str
     artifact_id: str = ""
+    deploy_reference: str = ""
     source_git_ref: str = ""
     deployment_record_id: str = ""
     inventory_updated_at: str = ""
@@ -475,6 +477,7 @@ def product_promotion_direct_request(
         promotion=GenericWebProdPromotionRequest(
             product=profile.product,
             artifact_id=status.source.artifact_id,
+            deploy_reference=status.source.deploy_reference,
             source_git_ref=status.source.source_git_ref,
             from_instance=status.source_environment,
             to_instance=status.destination_environment,
@@ -497,6 +500,7 @@ def product_promotion_workflow_request(
             dry_run=request.dry_run,
             bump=request.bump,
             artifact_id=status.source.artifact_id,
+            deploy_reference=status.source.deploy_reference,
             source_git_ref=status.source.source_git_ref,
             evidence_fingerprint=status.evidence_fingerprint,
         ),
@@ -555,9 +559,12 @@ def product_promotion_intent_matches(
         inputs.get(workflow.promotion_intent_input.strip()) == intent_id
         and inputs.get(workflow.dry_run_input.strip()) == "false"
         and inputs.get(workflow.artifact_id_input.strip()) == status.source.artifact_id
+        and inputs.get(workflow.deploy_reference_input.strip(), "")
+        == status.source.deploy_reference
         and inputs.get(workflow.source_git_ref_input.strip()) == status.source.source_git_ref
         and request.product == profile.product
         and request.artifact_id == status.source.artifact_id
+        and request.deploy_reference == status.source.deploy_reference
         and request.source_git_ref == status.source.source_git_ref
         and request.from_instance == status.source_environment
         and request.to_instance == status.destination_environment
@@ -664,6 +671,10 @@ def _promotion_evidence(
         return ProductPromotionEvidence(environment=lane.instance)
     runtime_identity = inventory.runtime_identity
     artifact_id = _runtime_artifact_id(profile, inventory)
+    deploy_reference = _runtime_deploy_reference(
+        inventory=inventory,
+        artifact_id=artifact_id,
+    )
     source_git_ref = runtime_identity.source_git_ref.strip() if runtime_identity is not None else ""
     try:
         inventory_updated_at = _parse_timestamp(inventory.updated_at)
@@ -674,6 +685,7 @@ def _promotion_evidence(
         return ProductPromotionEvidence(
             environment=lane.instance,
             artifact_id=artifact_id,
+            deploy_reference=deploy_reference,
             source_git_ref=source_git_ref,
             deployment_record_id=(
                 runtime_identity.deployment_record_id if runtime_identity is not None else ""
@@ -698,6 +710,7 @@ def _promotion_evidence(
     return ProductPromotionEvidence(
         environment=lane.instance,
         artifact_id=artifact_id,
+        deploy_reference=deploy_reference,
         source_git_ref=source_git_ref,
         deployment_record_id=(
             runtime_identity.deployment_record_id if runtime_identity is not None else ""
@@ -727,6 +740,22 @@ def _runtime_artifact_id(
             return ""
         return artifact_id
     except (ValueError, click.ClickException):
+        return ""
+
+
+def _runtime_deploy_reference(*, inventory: EnvironmentInventory, artifact_id: str) -> str:
+    if inventory.runtime_identity is None:
+        return ""
+    image_reference = inventory.runtime_identity.image_reference.strip()
+    if not image_reference or image_reference == inventory.runtime_identity.artifact_id.strip():
+        return ""
+    try:
+        return validate_provider_deploy_reference(
+            artifact_id=artifact_id,
+            deploy_reference=image_reference,
+            label="Product promotion source evidence",
+        )
+    except ValueError:
         return ""
 
 

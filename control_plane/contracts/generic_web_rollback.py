@@ -16,6 +16,7 @@ from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
 )
 from control_plane.drivers.registry import read_driver_descriptor
+from control_plane.contracts.deploy_reference import is_non_floating_tag_reference
 from control_plane.workflows.ship import utc_now_timestamp
 
 GenericWebRollbackPlanStatus = Literal["ready", "blocked"]
@@ -25,6 +26,7 @@ GenericWebRollbackBlockerCode = Literal[
     "backup_gate_scope_mismatch",
     "deployment_scope_mismatch",
     "health_evidence_failed",
+    "missing_deploy_reference",
     "missing_rollback_target",
     "mutable_artifact_reference",
     "target_deploy_not_passed",
@@ -97,6 +99,7 @@ class GenericWebRollbackDeployPlan(BaseModel):
     product: str
     instance: str
     artifact_id: str
+    deploy_reference: str = ""
     source_git_ref: str
     timeout_seconds: int | None = Field(default=None, ge=1)
     no_cache: bool = False
@@ -106,6 +109,7 @@ class GenericWebRollbackDeployPlan(BaseModel):
         self.product = self.product.strip()
         self.instance = self.instance.strip()
         self.artifact_id = self.artifact_id.strip()
+        self.deploy_reference = self.deploy_reference.strip()
         self.source_git_ref = self.source_git_ref.strip()
         if not self.product:
             raise ValueError("generic web rollback deploy plan requires product")
@@ -223,6 +227,7 @@ def build_generic_web_rollback_plan(
                 product=profile.product,
                 instance=lane.instance,
                 artifact_id=artifact_identity.artifact_id,
+                deploy_reference=_deploy_reference(deployment_record),
                 source_git_ref=source_git_ref,
                 timeout_seconds=request.timeout_seconds,
                 no_cache=request.no_cache,
@@ -374,11 +379,24 @@ def _validate_rollback_target(
             )
         )
         return
-    if not _immutable_artifact_id(profile=profile, deployment_record=deployment_record):
+    immutable_artifact_id = _immutable_artifact_id(
+        profile=profile,
+        deployment_record=deployment_record,
+    )
+    if not immutable_artifact_id:
         blockers.append(
             _blocker(
                 "mutable_artifact_reference",
                 "generic web rollback target must use an immutable image digest",
+            )
+        )
+    elif _deployment_target_is_application(deployment_record) and not _deploy_reference(
+        deployment_record
+    ):
+        blockers.append(
+            _blocker(
+                "missing_deploy_reference",
+                "generic web application rollback target has no immutable provider deploy reference",
             )
         )
 
@@ -425,6 +443,29 @@ def _immutable_artifact_id(
     if artifact_id.startswith(f"{image_repository}@sha256:"):
         return artifact_id
     return ""
+
+
+def _deploy_reference(deployment_record: DeploymentRecord) -> str:
+    if deployment_record.runtime_identity is None:
+        return ""
+    image_reference = deployment_record.runtime_identity.image_reference.strip()
+    if not is_non_floating_tag_reference(image_reference):
+        return ""
+    return image_reference
+
+
+def _deployment_target_is_application(deployment_record: DeploymentRecord) -> bool:
+    if deployment_record.resolved_target is not None:
+        return deployment_record.resolved_target.target_type == "application"
+    if deployment_record.deployed_target is not None:
+        return (
+            deployment_record.deployed_target.target_category == "application"
+            or deployment_record.deployed_target.provider_target_type == "application"
+        )
+    return (
+        deployment_record.deploy.target_category == "application"
+        or deployment_record.deploy.provider_target_type == "application"
+    )
 
 
 def _generic_web_rollback_plan_id(*, context: str, instance: str, deployment_record_id: str) -> str:

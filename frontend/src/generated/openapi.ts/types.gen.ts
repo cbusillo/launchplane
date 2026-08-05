@@ -1743,6 +1743,7 @@ export type ProductPromotionDryRunResult = {
     backup_status: 'pending' | 'pass' | 'fail' | 'skipped';
     bump: 'patch' | 'minor' | 'major';
     context: string;
+    deploy_reference: string;
     deployment_record_id: string;
     deployment_status: 'pending' | 'pass' | 'fail' | 'skipped';
     destination_health_status: 'pending' | 'pass' | 'fail' | 'skipped';
@@ -1769,6 +1770,7 @@ export type ProductPromotionDryRunResult = {
 
 export type ProductPromotionEvidence = {
     artifact_id: string;
+    deploy_reference: string;
     deployment_record_id: string;
     deployment_status: 'pending' | 'pass' | 'fail' | 'skipped';
     environment: string;
@@ -1893,6 +1895,7 @@ export type ProductPromotionWorkflowProfile = {
     artifact_id_input: string;
     bump_input: string;
     default_bump: string;
+    deploy_reference_input: string;
     dry_run_input: string;
     promotion_intent_input: string;
     ref: string;

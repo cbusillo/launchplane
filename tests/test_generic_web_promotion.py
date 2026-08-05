@@ -146,17 +146,23 @@ def _request(**overrides: object) -> GenericWebProdPromotionRequest:
     return GenericWebProdPromotionRequest.model_validate(payload)
 
 
-def _deployment_record() -> DeploymentRecord:
+def _deployment_record(
+    *,
+    artifact_id: str = "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+    deploy_reference: str = "",
+) -> DeploymentRecord:
     runtime_identity = RuntimeIdentity(
         product="sellyouroutboard",
         context="sellyouroutboard-testing",
         instance="prod",
         deployment_record_id="deployment-syo-prod",
-        artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+        artifact_id=artifact_id,
+        image_reference=deploy_reference or artifact_id,
         source_git_ref="abc123",
     )
     ship_request = ShipRequest(
-        artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+        artifact_id=artifact_id,
+        deploy_reference=deploy_reference,
         context="sellyouroutboard-testing",
         instance="prod",
         source_git_ref="abc123",
@@ -581,6 +587,101 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         )
         self.assertEqual(result.source_git_ref, "abc123")
         self.assertEqual(result.promotion_status, "pending")
+
+    def test_dry_run_prefers_explicit_deploy_reference_over_inventory_fallback(self) -> None:
+        store = _GenericWebPromotionStore(_profile())
+        artifact_id = f"ghcr.io/cbusillo/sellyouroutboard@sha256:{'a' * 64}"
+        inventory_reference = "ghcr.io/cbusillo/sellyouroutboard:sha-inventory"
+        request_reference = "ghcr.io/cbusillo/sellyouroutboard:sha-request"
+        store.write_environment_inventory(
+            _testing_inventory(
+                artifact_identity=ArtifactIdentityReference(artifact_id=artifact_id),
+                runtime_identity=RuntimeIdentity(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    deployment_record_id="deployment-syo-testing",
+                    artifact_id=artifact_id,
+                    image_reference=inventory_reference,
+                    source_git_ref="abc123",
+                ),
+            )
+        )
+
+        result = execute_generic_web_prod_promotion(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request(
+                artifact_id=artifact_id,
+                deploy_reference=request_reference,
+                dry_run=True,
+            ),
+        )
+
+        self.assertEqual(result.deploy_reference, request_reference)
+
+    def test_execute_passes_deploy_reference_to_deploy(self) -> None:
+        store = _GenericWebPromotionStore(_profile())
+        artifact_id = f"ghcr.io/cbusillo/sellyouroutboard@sha256:{'a' * 64}"
+        deploy_reference = "ghcr.io/cbusillo/sellyouroutboard:sha-request"
+        store.write_environment_inventory(
+            _testing_inventory(
+                artifact_identity=ArtifactIdentityReference(artifact_id=artifact_id),
+                runtime_identity=RuntimeIdentity(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    deployment_record_id="deployment-syo-testing",
+                    artifact_id=artifact_id,
+                    image_reference=deploy_reference,
+                    source_git_ref="abc123",
+                ),
+            )
+        )
+
+        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+            request = cast(GenericWebDeployRequest, kwargs["request"])
+            self.assertEqual(request.deploy_reference, deploy_reference)
+            store.write_deployment_record(
+                _deployment_record(
+                    artifact_id=artifact_id,
+                    deploy_reference=deploy_reference,
+                )
+            )
+            return _deploy_result()
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion.execute_generic_web_deploy",
+                side_effect=fake_deploy,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
+                return_value=HealthcheckPass(
+                    payload={
+                        "runtime_identity": _runtime_identity_payload(
+                            artifact_id=artifact_id,
+                            image_reference=deploy_reference,
+                        )
+                    }
+                ),
+            ),
+        ):
+            result = execute_generic_web_prod_promotion(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(
+                    artifact_id=artifact_id,
+                    deploy_reference=deploy_reference,
+                ),
+            )
+
+        self.assertEqual(result.promotion_status, "pass")
+        self.assertEqual(result.deploy_reference, deploy_reference)
 
     def test_dry_run_rejects_release_tag_mismatch_before_mutation(self) -> None:
         store = _GenericWebPromotionStore(_profile())

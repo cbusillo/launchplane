@@ -6,6 +6,10 @@ from urllib.parse import urlsplit
 import click
 
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.deploy_reference import (
+    is_digest_pinned_image_reference,
+    provider_image_reference,
+)
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import api as dokploy_api
@@ -29,6 +33,13 @@ def update_dokploy_target_artifact(
         target_id=target_id,
     )
     if target_type == "application":
+        if is_digest_pinned_image_reference(artifact_id):
+            raise click.ClickException(
+                "Dokploy application deploy requires deploy_reference when artifact_id is "
+                "digest-pinned. Use an immutable provider tag such as repo:sha-<commit>; "
+                "Dokploy cannot save repo@sha256:<digest> on application targets with a "
+                "saved Registry Swarm."
+            )
         _prepare_saved_registry_login(
             host=host,
             token=token,
@@ -198,12 +209,18 @@ def execute_dokploy_artifact_deploy(
         target_type=resolved_target.target_type,
         target_id=resolved_target.target_id,
     )
+    deploy_reference = ship_request.artifact_id
+    if resolved_target.target_type == "application":
+        deploy_reference = provider_image_reference(
+            artifact_id=ship_request.artifact_id,
+            deploy_reference=ship_request.deploy_reference,
+        )
     update_dokploy_target_artifact(
         host=host,
         token=token,
         target_type=resolved_target.target_type,
         target_id=resolved_target.target_id,
-        artifact_id=ship_request.artifact_id,
+        artifact_id=deploy_reference,
         runtime_identity=runtime_identity,
         before_provider_mutation=before_provider_mutation,
         effect_started=effect_started,

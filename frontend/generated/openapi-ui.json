@@ -13547,6 +13547,11 @@
             "title": "Context",
             "type": "string"
           },
+          "deploy_reference": {
+            "default": "",
+            "title": "Deploy Reference",
+            "type": "string"
+          },
           "deployment_record_id": {
             "default": "",
             "title": "Deployment Record Id",
@@ -13700,6 +13705,7 @@
           "backup_status",
           "bump",
           "context",
+          "deploy_reference",
           "deployment_record_id",
           "deployment_status",
           "destination_health_status",
@@ -13732,6 +13738,11 @@
           "artifact_id": {
             "default": "",
             "title": "Artifact Id",
+            "type": "string"
+          },
+          "deploy_reference": {
+            "default": "",
+            "title": "Deploy Reference",
             "type": "string"
           },
           "deployment_record_id": {
@@ -13813,6 +13824,7 @@
         },
         "required": [
           "artifact_id",
+          "deploy_reference",
           "deployment_record_id",
           "deployment_status",
           "environment",
@@ -14447,6 +14459,11 @@
             "title": "Default Bump",
             "type": "string"
           },
+          "deploy_reference_input": {
+            "default": "deploy_reference",
+            "title": "Deploy Reference Input",
+            "type": "string"
+          },
           "dry_run_input": {
             "default": "dry_run",
             "title": "Dry Run Input",
@@ -14479,6 +14496,7 @@
           "artifact_id_input",
           "bump_input",
           "default_bump",
+          "deploy_reference_input",
           "dry_run_input",
           "promotion_intent_input",
           "ref",

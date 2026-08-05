@@ -113,7 +113,7 @@ The product repo submits immutable image identity plus the tested source SHA;
 Launchplane resolves lane, provider target, runtime environment, managed
 secrets, and deployment records from DB-backed authority.
 
-Publish images to the profile's `image.repository` and prefer digest deployment:
+Publish images to the profile's `image.repository` and preserve digest identity:
 
 ```text
 ghcr.io/cbusillo/discord-blue@sha256:<digest>
@@ -125,12 +125,17 @@ emits a human-readable tag, the Launchplane trigger should still send the exact
 digest image reference or an artifact id that Launchplane can resolve to that
 digest.
 
-For the current generic-web application deploy path, the submitted
-`artifact_id` is the deployable immutable image reference used to update the
-Dokploy application's Docker image. Do not submit a mutable tag for service
-deploys. If a later slice adds generic artifact-manifest resolution for this
-path, the manifest must still resolve to the same `repository@sha256:digest`
-identity before Dokploy is mutated.
+For generic-web and VeriReel application targets, `artifact_id` remains the
+canonical artifact identity and should be the digest-pinned
+`repository@sha256:digest` reference. Dokploy applications with a saved Registry
+Swarm cannot save that digest reference as the Docker image because Dokploy
+re-tags application images internally. Product workflows that publish a stable
+SHA tag, such as `repository:sha-<commit>`, should pass that tag as
+`deploy_reference`. Launchplane validates that `deploy_reference` is a
+non-floating tag in the same repository, uses it only for the provider-facing
+Docker image, and records runtime identity with `artifact_id` as the digest and
+`image_reference` as the provider tag. Compose targets remain backward
+compatible with digest image references in `artifact_id`.
 
 RepairShopr Sync is the first live canary for this stable shape. The
 `cbusillo/repairshopr_api` product workflow built an immutable GHCR image,

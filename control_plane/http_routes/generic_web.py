@@ -198,6 +198,7 @@ class _GenericWebDeployProviderMutationAdapter:
                     profile=self._profile,
                     artifact_id=deploy.artifact_id,
                 ),
+                request_deploy_reference=deploy.deploy_reference,
                 fallback_target_name=f"{self._profile.product}-{self._lane.instance}",
             )
         return self._resolved_deploy_target
@@ -226,6 +227,7 @@ class _GenericWebDeployProviderMutationAdapter:
                     profile=self._profile,
                     artifact_id=deploy.artifact_id,
                 ),
+                request_deploy_reference=deploy.deploy_reference,
                 lane=self._lane,
             )
             self._resolved_deploy_target = resolved_target
@@ -367,6 +369,7 @@ class _GenericWebProdPromotionProviderMutationAdapter:
                     artifact_id=promotion.artifact_id,
                 ),
                 fallback_target_name=f"{self._profile.product}-{self._lane.instance}",
+                request_deploy_reference=promotion.deploy_reference,
             )
         return self._resolved_deploy_target
 
@@ -1228,7 +1231,7 @@ def build_generic_web_write_route_handlers(
                     "A generic web preview refresh is already running for the requested preview. "
                     "Retry after it completes."
                 ),
-        )
+            )
         await refresh_lock.acquire()
         try:
             cancellation: asyncio.CancelledError | None = None

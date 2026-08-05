@@ -11,6 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deploy_target import DeployTargetCategory
+from control_plane.contracts.deploy_reference import (
+    is_non_floating_tag_reference,
+    validate_provider_deploy_reference,
+)
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -75,6 +79,7 @@ class GenericWebProdPromotionRequest(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     product: str
     artifact_id: str = ""
+    deploy_reference: str = ""
     source_git_ref: str = ""
     from_instance: str = "testing"
     to_instance: str = "prod"
@@ -93,6 +98,7 @@ class GenericWebProdPromotionRequest(BaseModel):
     def _validate_request(self) -> "GenericWebProdPromotionRequest":
         self.product = self.product.strip()
         self.artifact_id = self.artifact_id.strip()
+        self.deploy_reference = self.deploy_reference.strip()
         self.source_git_ref = self.source_git_ref.strip()
         self.from_instance = self.from_instance.strip().lower()
         self.to_instance = self.to_instance.strip().lower()
@@ -122,6 +128,7 @@ class GenericWebProdPromotionResult(BaseModel):
     from_instance: str
     to_instance: str
     artifact_id: str
+    deploy_reference: str = ""
     source_git_ref: str = ""
     backup_record_id: str = ""
     promotion_record_id: str
@@ -270,6 +277,7 @@ def execute_generic_web_prod_promotion(
             from_instance=source_lane.instance,
             to_instance=destination_lane.instance,
             artifact_id=request.artifact_id,
+            deploy_reference=request.deploy_reference,
             source_git_ref=request.source_git_ref,
             backup_record_id=request.backup_record_id,
             promotion_record_id=promotion_record_id,
@@ -316,6 +324,7 @@ def execute_generic_web_prod_promotion(
             product=request.product,
             instance=destination_lane.instance,
             artifact_id=request.artifact_id,
+            deploy_reference=request.deploy_reference,
             source_git_ref=request.source_git_ref,
             timeout_seconds=request.timeout_seconds,
             no_cache=request.no_cache,
@@ -540,12 +549,28 @@ def _resolve_source_inventory_inputs(
             f"request artifact={requested_artifact_id or '<default>'} "
             f"source_ref={request.source_git_ref or '<default>'}."
         )
+    deploy_reference = request.deploy_reference or _inventory_deploy_reference(source_inventory)
+    deploy_reference = validate_provider_deploy_reference(
+        artifact_id=normalized_inventory_artifact_id,
+        deploy_reference=deploy_reference,
+        label="Generic web prod promotion",
+    )
     return request.model_copy(
         update={
             "artifact_id": normalized_inventory_artifact_id,
+            "deploy_reference": deploy_reference,
             "source_git_ref": inventory_source_git_ref,
         }
     )
+
+
+def _inventory_deploy_reference(source_inventory: EnvironmentInventory) -> str:
+    if source_inventory.runtime_identity is None:
+        return ""
+    image_reference = source_inventory.runtime_identity.image_reference.strip()
+    if is_non_floating_tag_reference(image_reference):
+        return image_reference
+    return ""
 
 
 def _health_url_for_lane(*, lane: ProductLaneProfile, health_path: str) -> str:
@@ -1060,6 +1085,7 @@ def _result_from_record(
         from_instance=record.from_instance,
         to_instance=record.to_instance,
         artifact_id=record.artifact_identity.artifact_id,
+        deploy_reference=request.deploy_reference,
         source_git_ref=request.source_git_ref,
         backup_record_id=record.backup_record_id,
         promotion_record_id=record.record_id,

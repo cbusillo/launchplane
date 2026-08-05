@@ -55,6 +55,7 @@ class VeriReelProdPromotionRequest(BaseModel):
     from_instance: str = "testing"
     to_instance: str = "prod"
     artifact_id: str
+    deploy_reference: str = ""
     source_git_ref: str
     backup_record_id: str
     promotion_record_id: str
@@ -80,6 +81,7 @@ class VeriReelProdPromotionRequest(BaseModel):
             raise ValueError("VeriReel prod promotion requires to_instance 'prod'.")
         if not self.artifact_id.strip():
             raise ValueError("VeriReel prod promotion requires artifact_id.")
+        self.deploy_reference = self.deploy_reference.strip()
         if not self.source_git_ref.strip():
             raise ValueError("VeriReel prod promotion requires source_git_ref.")
         if not self.backup_record_id.strip():
@@ -800,6 +802,7 @@ def execute_verireel_prod_promotion(
             context=request.context,
             instance="prod",
             artifact_id=request.artifact_id,
+            deploy_reference=request.deploy_reference,
             source_git_ref=request.source_git_ref,
             expected_build_revision=request.expected_build_revision,
             expected_build_tag=request.expected_build_tag,

@@ -94,6 +94,7 @@ def execute_generic_web_rollback(
             product=planned_deploy.product,
             instance=planned_deploy.instance,
             artifact_id=planned_deploy.artifact_id,
+            deploy_reference=planned_deploy.deploy_reference,
             source_git_ref=planned_deploy.source_git_ref,
             timeout_seconds=planned_deploy.timeout_seconds,
             no_cache=planned_deploy.no_cache,

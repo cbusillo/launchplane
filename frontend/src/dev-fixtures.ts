@@ -839,6 +839,7 @@ export function promotionStatusForFixture(
     source: {
       environment: "testing",
       artifact_id: sourceArtifact,
+      deploy_reference: `ghcr.io/example/atlas-commerce:sha-${sourceGitRef}`,
       source_git_ref: sourceGitRef,
       deployment_record_id: missingEvidence ? "" : "deployment-fixture-testing",
       inventory_updated_at: missingEvidence ? "" : OBSERVED_AT,
@@ -856,6 +857,9 @@ export function promotionStatusForFixture(
       artifact_id: missingEvidence
         ? ""
         : `ghcr.io/example/atlas-commerce@sha256:${"b".repeat(64)}`,
+      deploy_reference: missingEvidence
+        ? ""
+        : `ghcr.io/example/atlas-commerce:sha-${"2".repeat(40)}`,
       source_git_ref: missingEvidence ? "" : "2".repeat(40),
       deployment_record_id: missingEvidence ? "" : "deployment-fixture-prod",
       inventory_updated_at: missingEvidence ? "" : OBSERVED_AT,
@@ -933,6 +937,7 @@ export async function dryRunProductPromotionForFixture(
       from_instance: status.source_environment,
       to_instance: status.destination_environment,
       artifact_id: status.source.artifact_id,
+      deploy_reference: status.source.deploy_reference,
       source_git_ref: status.source.source_git_ref,
       backup_record_id: "",
       promotion_record_id: "promotion-fixture-dry-run",

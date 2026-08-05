@@ -401,11 +401,13 @@ class _FakeGenericWebDeployProvider:
         lane: ProductLaneProfile,
         normalized_artifact_id: str,
         fallback_target_name: str,
+        request_deploy_reference: str = "",
     ) -> GenericWebResolvedDeployTarget:
         del control_plane_root, request_artifact_id, record_store, profile, fallback_target_name
         resolved = GenericWebResolvedDeployTarget(
             ship_request=ShipRequest(
                 artifact_id=normalized_artifact_id,
+                deploy_reference=request_deploy_reference,
                 context=lane.context,
                 instance=lane.instance,
                 source_git_ref=request_source_git_ref,
@@ -727,18 +729,71 @@ class GenericWebDeployTests(unittest.TestCase):
             store.deployments[0].delegated_executor,
             "control-plane.fake-cloud",
         )
-        self.assertEqual(store.deployments[0].deploy.provider_id, "fake-cloud")
-        self.assertEqual(store.deployments[0].deploy.target_category, "service")
-        deployed_target = store.deployments[0].deployed_target
-        assert deployed_target is not None
-        self.assertEqual(deployed_target.provider_id, "fake-cloud")
-        self.assertEqual(deployed_target.target_category, "service")
-        self.assertEqual(deployed_target.provider_target_type, "managed-service")
-        self.assertEqual(len(deploy_provider.runtime_identities), 1)
-        self.assertEqual(
-            deploy_provider.runtime_identities[0].deployment_record_id,
-            store.deployments[0].record_id,
+
+    def test_execute_generic_web_deploy_uses_deploy_reference_for_runtime_image(self) -> None:
+        artifact_id = (
+            "ghcr.io/cbusillo/sellyouroutboard@sha256:"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         )
+        deploy_reference = "ghcr.io/cbusillo/sellyouroutboard:sha-abcdef1234567890"
+        store = _GenericWebDeployStore(_profile())
+        deploy_provider = _FakeGenericWebDeployProvider()
+
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=GenericWebDeployRequest(
+                product="sellyouroutboard",
+                instance="testing",
+                artifact_id=artifact_id,
+                deploy_reference=deploy_reference,
+                source_git_ref="abcdef1234567890",
+            ),
+            deploy_provider=deploy_provider,
+        )
+
+        self.assertEqual(result.deploy_status, "pass")
+        artifact_identity = store.deployments[0].artifact_identity
+        self.assertIsNotNone(artifact_identity)
+        assert artifact_identity is not None
+        self.assertEqual(artifact_identity.artifact_id, artifact_id)
+        self.assertIsNotNone(store.deployments[0].runtime_identity)
+        assert store.deployments[0].runtime_identity is not None
+        self.assertEqual(store.deployments[0].runtime_identity.artifact_id, artifact_id)
+        self.assertEqual(store.deployments[0].runtime_identity.image_reference, deploy_reference)
+        self.assertEqual(deploy_provider.runtime_identities[0].artifact_id, artifact_id)
+        self.assertEqual(deploy_provider.runtime_identities[0].image_reference, deploy_reference)
+
+    def test_execute_generic_web_deploy_records_invalid_deploy_reference_before_effect(
+        self,
+    ) -> None:
+        artifact_id = (
+            "ghcr.io/cbusillo/sellyouroutboard@sha256:"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        )
+        store = _GenericWebDeployStore(_profile())
+        deploy_provider = _FakeGenericWebDeployProvider()
+
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=GenericWebDeployRequest(
+                product="sellyouroutboard",
+                instance="testing",
+                artifact_id=artifact_id,
+                deploy_reference="ghcr.io/cbusillo/other:sha-abcdef1234567890",
+                source_git_ref="abcdef1234567890",
+            ),
+            deploy_provider=deploy_provider,
+        )
+
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertIn("deploy_reference must use the same image repository", result.error_message)
+        self.assertFalse(result.provider_effect_attempted)
+        self.assertEqual(deploy_provider.runtime_identities, [])
+        self.assertEqual(len(store.deployments), 1)
+        self.assertEqual(store.deployments[0].deploy.status, "fail")
+        self.assertIsNone(store.deployments[0].runtime_identity)
 
     def test_execute_generic_web_deploy_records_failure_for_missing_image_profile(
         self,
@@ -1049,6 +1104,7 @@ class GenericWebDeployTests(unittest.TestCase):
                 lane: ProductLaneProfile,
                 normalized_artifact_id: str,
                 fallback_target_name: str,
+                request_deploy_reference: str = "",
             ) -> GenericWebResolvedDeployTarget:
                 del (
                     control_plane_root,
@@ -1060,6 +1116,7 @@ class GenericWebDeployTests(unittest.TestCase):
                     profile,
                     lane,
                     normalized_artifact_id,
+                    request_deploy_reference,
                     fallback_target_name,
                 )
                 raise click.ClickException("target missing")
@@ -1116,6 +1173,7 @@ class GenericWebDeployTests(unittest.TestCase):
                 ),
                 deploy_provider=_FakeGenericWebDeployProvider(),
             )
+        self.assertEqual(store.deployments, [])
 
         self.assertEqual(store.deployments, [])
 

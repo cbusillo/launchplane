@@ -888,6 +888,15 @@ class GenericWebHttpTests(unittest.TestCase):
                     target_id="app-prod",
                     target_name="syo-prod-app",
                 ),
+                runtime_identity=RuntimeIdentity(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    instance="prod",
+                    deployment_record_id="deployment-syo-prod-previous",
+                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                    source_git_ref="abc123",
+                    image_reference="ghcr.io/cbusillo/sellyouroutboard:sha-abc123",
+                ),
                 deploy=DeploymentEvidence(
                     target_name="syo-prod-app",
                     target_type="application",
@@ -1078,6 +1087,15 @@ class GenericWebHttpTests(unittest.TestCase):
                         target_type="application",
                         target_id="app-prod",
                         target_name="syo-prod-app",
+                    ),
+                    runtime_identity=RuntimeIdentity(
+                        product="sellyouroutboard",
+                        context="sellyouroutboard-testing",
+                        instance="prod",
+                        deployment_record_id="deployment-syo-prod-previous",
+                        artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                        source_git_ref="abc123",
+                        image_reference="ghcr.io/cbusillo/sellyouroutboard:sha-abc123",
                     ),
                     deploy=DeploymentEvidence(
                         target_name="syo-prod-app",
@@ -3435,11 +3453,13 @@ class GenericWebHttpTests(unittest.TestCase):
             store = FilesystemRecordStore(state_dir=state_dir)
             profile = LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
             profile = profile.model_copy(
-                update={"preview": profile.preview.model_copy(update={"slug_template": "preview-{number}"})}
+                update={
+                    "preview": profile.preview.model_copy(
+                        update={"slug_template": "preview-{number}"}
+                    )
+                }
             )
-            store.write_product_profile_record(
-                profile
-            )
+            store.write_product_profile_record(profile)
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -3533,7 +3553,9 @@ class GenericWebHttpTests(unittest.TestCase):
                             },
                         },
                         authorization="Bearer valid-token",
-                        headers={"Idempotency-Key": "generic-web-preview-refresh:syo:pr-42-competing"},
+                        headers={
+                            "Idempotency-Key": "generic-web-preview-refresh:syo:pr-42-competing"
+                        },
                     ),
                     timeout=0.5,
                 )
