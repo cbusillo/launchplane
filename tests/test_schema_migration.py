@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
@@ -840,6 +841,31 @@ class SchemaMigrationTests(unittest.TestCase):
                 waiver_primary_key = inspector.get_pk_constraint(
                     "launchplane_tenant_technical_human_waiver_events"
                 )
+                owner_table_names = (
+                    "launchplane_product_owner_policies",
+                    "launchplane_product_owner_requirements",
+                    "launchplane_product_owner_routing",
+                )
+                owner_columns: dict[str, set[str]] = {
+                    table_name: {
+                        str(column["name"]) for column in inspector.get_columns(table_name)
+                    }
+                    for table_name in owner_table_names
+                }
+                owner_indexes: dict[str, dict[str, Mapping[str, object]]] = {
+                    table_name: {
+                        str(index["name"]): index for index in inspector.get_indexes(table_name)
+                    }
+                    for table_name in owner_table_names
+                }
+                owner_primary_keys: dict[str, Mapping[str, object]] = {
+                    table_name: inspector.get_pk_constraint(table_name)
+                    for table_name in (
+                        "launchplane_product_owner_policies",
+                        "launchplane_product_owner_requirements",
+                        "launchplane_product_owner_routing",
+                    )
+                }
             finally:
                 engine.dispose()
 
@@ -852,6 +878,7 @@ class SchemaMigrationTests(unittest.TestCase):
 
         self.assertIn("launchplane_repository_human_role_policies", table_names)
         self.assertIn("launchplane_tenant_technical_human_waiver_events", table_names)
+        self.assertGreaterEqual(table_names, set(owner_table_names))
         self.assertGreaterEqual(
             role_columns,
             {
@@ -911,6 +938,50 @@ class SchemaMigrationTests(unittest.TestCase):
             waiver_indexes["launchplane_tenant_human_waiver_binding_idx"]["column_names"],
             ["binding_sha256", "occurred_at", "event_id"],
         )
+        for table_name, revision_column, digest_column, active_index in (
+            (
+                "launchplane_product_owner_policies",
+                "policy_revision",
+                "policy_digest",
+                "launchplane_product_owner_policy_active_uidx",
+            ),
+            (
+                "launchplane_product_owner_requirements",
+                "requirement_revision",
+                "requirement_digest",
+                "launchplane_product_owner_requirement_active_uidx",
+            ),
+            (
+                "launchplane_product_owner_routing",
+                "routing_revision",
+                "routing_digest",
+                "launchplane_product_owner_routing_active_uidx",
+            ),
+        ):
+            self.assertGreaterEqual(
+                owner_columns[table_name],
+                {
+                    "record_id",
+                    "product",
+                    "system",
+                    "status",
+                    revision_column,
+                    "effective_at",
+                    "source",
+                    "supersedes_record_id",
+                    digest_column,
+                    "payload",
+                },
+            )
+            self.assertEqual(
+                owner_primary_keys[table_name]["constrained_columns"],
+                ["record_id"],
+            )
+            self.assertTrue(owner_indexes[table_name][active_index]["unique"])
+            self.assertEqual(
+                owner_indexes[table_name][active_index]["column_names"],
+                ["product", "system"],
+            )
         self.assertNotIn(
             "launchplane_repository_human_role_policies",
             downgraded_table_names,
@@ -919,6 +990,8 @@ class SchemaMigrationTests(unittest.TestCase):
             "launchplane_tenant_technical_human_waiver_events",
             downgraded_table_names,
         )
+        for table_name in owner_table_names:
+            self.assertNotIn(table_name, downgraded_table_names)
 
     def test_repository_human_admission_schema_invariants_are_expected(self) -> None:
         column_types = {
@@ -931,7 +1004,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "b1c2d3e4f5a6")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "c1d2e3f4a5b6")
         self.assertEqual(
             column_types[("launchplane_repository_human_role_policies", "payload")],
             ("jsonb",),

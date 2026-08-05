@@ -9,6 +9,7 @@ from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast, overload
 from pydantic import BaseModel
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     JSON,
     Index,
@@ -124,6 +125,11 @@ from control_plane.odoo_stable_lane import (
     odoo_stable_lane_operation_priority,
 )
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
+from control_plane.contracts.product_owner import (
+    ProductOwnerPolicyRecord,
+    ProductOwnerRequirementRecord,
+    ProductOwnerRoutingRecord,
+)
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -235,6 +241,14 @@ from control_plane.trusted_maintenance import (
     plan_trusted_maintenance_policy_apply,
     plan_trusted_maintenance_policy_append,
     trusted_maintenance_current_authority,
+)
+from control_plane.product_owner_service import (
+    ProductOwnerPolicyConflictError,
+    ProductOwnerPolicySequenceError,
+    ProductOwnerRequirementConflictError,
+    ProductOwnerRequirementSequenceError,
+    ProductOwnerRoutingConflictError,
+    ProductOwnerRoutingSequenceError,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -1050,6 +1064,177 @@ class LaunchplaneTrustedMaintenancePolicyRow(Base):
     source: Mapped[str] = mapped_column(String, nullable=False)
     supersedes_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
     policy_digest: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneProductOwnerPolicyRow(Base):
+    __tablename__ = "launchplane_product_owner_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'superseded')",
+            name="launchplane_product_owner_policy_status_ck",
+        ),
+        CheckConstraint(
+            "policy_revision >= 1",
+            name="launchplane_product_owner_policy_revision_ck",
+        ),
+        CheckConstraint(
+            "quorum = 1",
+            name="launchplane_product_owner_policy_quorum_ck",
+        ),
+        CheckConstraint(
+            "(policy_revision = 1 AND supersedes_record_id IS NULL) OR "
+            "(policy_revision > 1 AND supersedes_record_id IS NOT NULL)",
+            name="launchplane_product_owner_policy_supersedes_ck",
+        ),
+        Index(
+            "launchplane_product_owner_policy_revision_uidx",
+            "product",
+            "system",
+            "policy_revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_product_owner_policy_active_uidx",
+            "product",
+            "system",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "launchplane_product_owner_policy_current_idx",
+            "product",
+            "system",
+            "status",
+            desc("policy_revision"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    system: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    policy_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    quorum: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    effective_at: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    supersedes_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    policy_digest: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneProductOwnerRequirementRow(Base):
+    __tablename__ = "launchplane_product_owner_requirements"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'superseded')",
+            name="launchplane_product_owner_requirement_status_ck",
+        ),
+        CheckConstraint(
+            "requirement_revision >= 1",
+            name="launchplane_product_owner_requirement_revision_ck",
+        ),
+        CheckConstraint(
+            "enforcement_mode = 'shadow'",
+            name="launchplane_product_owner_requirement_shadow_ck",
+        ),
+        CheckConstraint(
+            "(requirement_revision = 1 AND supersedes_record_id IS NULL) OR "
+            "(requirement_revision > 1 AND supersedes_record_id IS NOT NULL)",
+            name="launchplane_product_owner_requirement_supersedes_ck",
+        ),
+        Index(
+            "launchplane_product_owner_requirement_revision_uidx",
+            "product",
+            "system",
+            "requirement_revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_product_owner_requirement_active_uidx",
+            "product",
+            "system",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "launchplane_product_owner_requirement_current_idx",
+            "product",
+            "system",
+            "status",
+            desc("requirement_revision"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    system: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    requirement_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    enforcement_mode: Mapped[str] = mapped_column(String, nullable=False)
+    effective_at: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    supersedes_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    requirement_digest: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneProductOwnerRoutingRow(Base):
+    __tablename__ = "launchplane_product_owner_routing"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'superseded')",
+            name="launchplane_product_owner_routing_status_ck",
+        ),
+        CheckConstraint(
+            "routing_revision >= 1",
+            name="launchplane_product_owner_routing_revision_ck",
+        ),
+        CheckConstraint(
+            "authoritative = false",
+            name="launchplane_product_owner_routing_non_authoritative_ck",
+        ),
+        CheckConstraint(
+            "(routing_revision = 1 AND supersedes_record_id IS NULL) OR "
+            "(routing_revision > 1 AND supersedes_record_id IS NOT NULL)",
+            name="launchplane_product_owner_routing_supersedes_ck",
+        ),
+        Index(
+            "launchplane_product_owner_routing_revision_uidx",
+            "product",
+            "system",
+            "routing_revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_product_owner_routing_active_uidx",
+            "product",
+            "system",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "launchplane_product_owner_routing_current_idx",
+            "product",
+            "system",
+            "status",
+            desc("routing_revision"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    system: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    routing_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    authoritative: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    effective_at: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    supersedes_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    routing_digest: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -13634,6 +13819,374 @@ class PostgresRecordStore(HumanSessionStore):
             ),
         )
 
+    def compare_and_write_product_owner_policy_record(
+        self,
+        record: ProductOwnerPolicyRecord,
+        *,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+    ) -> Literal["written", "replayed"]:
+        return self._compare_and_write_product_owner_revision_record(
+            model_type=ProductOwnerPolicyRecord,
+            row_type=LaunchplaneProductOwnerPolicyRow,
+            row_factory=self._product_owner_policy_row,
+            record=record,
+            revision_field="policy_revision",
+            digest_field="policy_digest",
+            expected_current_record_id=expected_current_record_id,
+            expected_current_digest=expected_current_policy_digest,
+            sequence_error=ProductOwnerPolicySequenceError,
+            conflict_error=ProductOwnerPolicyConflictError,
+            label="product Owner policy",
+        )
+
+    def write_product_owner_policy_record(
+        self,
+        record: ProductOwnerPolicyRecord,
+    ) -> Literal["written", "replayed"]:
+        current = self.list_product_owner_policy_records(
+            product=record.product,
+            system=record.system,
+            status="active",
+            limit=1,
+        )
+        return self.compare_and_write_product_owner_policy_record(
+            record,
+            expected_current_record_id=current[0].record_id if current else "",
+            expected_current_policy_digest=current[0].policy_digest if current else "",
+        )
+
+    def read_product_owner_policy_record(self, record_id: str) -> ProductOwnerPolicyRecord:
+        return self._read_model(
+            model_type=ProductOwnerPolicyRecord,
+            orm_model=LaunchplaneProductOwnerPolicyRow,
+            filters=(LaunchplaneProductOwnerPolicyRow.record_id == record_id,),
+        )
+
+    def list_product_owner_policy_records(
+        self,
+        *,
+        product: str = "",
+        system: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[ProductOwnerPolicyRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneProductOwnerPolicyRow.product == product)
+        if system:
+            filters.append(LaunchplaneProductOwnerPolicyRow.system == system)
+        if status:
+            filters.append(LaunchplaneProductOwnerPolicyRow.status == status)
+        return self._list_models(
+            model_type=ProductOwnerPolicyRecord,
+            orm_model=LaunchplaneProductOwnerPolicyRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneProductOwnerPolicyRow.policy_revision.desc(),
+                LaunchplaneProductOwnerPolicyRow.product.desc(),
+                LaunchplaneProductOwnerPolicyRow.system.desc(),
+                LaunchplaneProductOwnerPolicyRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def compare_and_write_product_owner_requirement_record(
+        self,
+        record: ProductOwnerRequirementRecord,
+        *,
+        expected_current_record_id: str,
+        expected_current_requirement_digest: str,
+    ) -> Literal["written", "replayed"]:
+        return self._compare_and_write_product_owner_revision_record(
+            model_type=ProductOwnerRequirementRecord,
+            row_type=LaunchplaneProductOwnerRequirementRow,
+            row_factory=self._product_owner_requirement_row,
+            record=record,
+            revision_field="requirement_revision",
+            digest_field="requirement_digest",
+            expected_current_record_id=expected_current_record_id,
+            expected_current_digest=expected_current_requirement_digest,
+            sequence_error=ProductOwnerRequirementSequenceError,
+            conflict_error=ProductOwnerRequirementConflictError,
+            label="product Owner requirement",
+        )
+
+    def write_product_owner_requirement_record(
+        self,
+        record: ProductOwnerRequirementRecord,
+    ) -> Literal["written", "replayed"]:
+        current = self.list_product_owner_requirement_records(
+            product=record.product,
+            system=record.system,
+            status="active",
+            limit=1,
+        )
+        return self.compare_and_write_product_owner_requirement_record(
+            record,
+            expected_current_record_id=current[0].record_id if current else "",
+            expected_current_requirement_digest=(current[0].requirement_digest if current else ""),
+        )
+
+    def read_product_owner_requirement_record(
+        self,
+        record_id: str,
+    ) -> ProductOwnerRequirementRecord:
+        return self._read_model(
+            model_type=ProductOwnerRequirementRecord,
+            orm_model=LaunchplaneProductOwnerRequirementRow,
+            filters=(LaunchplaneProductOwnerRequirementRow.record_id == record_id,),
+        )
+
+    def list_product_owner_requirement_records(
+        self,
+        *,
+        product: str = "",
+        system: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[ProductOwnerRequirementRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneProductOwnerRequirementRow.product == product)
+        if system:
+            filters.append(LaunchplaneProductOwnerRequirementRow.system == system)
+        if status:
+            filters.append(LaunchplaneProductOwnerRequirementRow.status == status)
+        return self._list_models(
+            model_type=ProductOwnerRequirementRecord,
+            orm_model=LaunchplaneProductOwnerRequirementRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneProductOwnerRequirementRow.requirement_revision.desc(),
+                LaunchplaneProductOwnerRequirementRow.product.desc(),
+                LaunchplaneProductOwnerRequirementRow.system.desc(),
+                LaunchplaneProductOwnerRequirementRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def compare_and_write_product_owner_routing_record(
+        self,
+        record: ProductOwnerRoutingRecord,
+        *,
+        expected_current_record_id: str,
+        expected_current_routing_digest: str,
+    ) -> Literal["written", "replayed"]:
+        return self._compare_and_write_product_owner_revision_record(
+            model_type=ProductOwnerRoutingRecord,
+            row_type=LaunchplaneProductOwnerRoutingRow,
+            row_factory=self._product_owner_routing_row,
+            record=record,
+            revision_field="routing_revision",
+            digest_field="routing_digest",
+            expected_current_record_id=expected_current_record_id,
+            expected_current_digest=expected_current_routing_digest,
+            sequence_error=ProductOwnerRoutingSequenceError,
+            conflict_error=ProductOwnerRoutingConflictError,
+            label="product Owner routing",
+        )
+
+    def write_product_owner_routing_record(
+        self,
+        record: ProductOwnerRoutingRecord,
+    ) -> Literal["written", "replayed"]:
+        current = self.list_product_owner_routing_records(
+            product=record.product,
+            system=record.system,
+            status="active",
+            limit=1,
+        )
+        return self.compare_and_write_product_owner_routing_record(
+            record,
+            expected_current_record_id=current[0].record_id if current else "",
+            expected_current_routing_digest=current[0].routing_digest if current else "",
+        )
+
+    def read_product_owner_routing_record(self, record_id: str) -> ProductOwnerRoutingRecord:
+        return self._read_model(
+            model_type=ProductOwnerRoutingRecord,
+            orm_model=LaunchplaneProductOwnerRoutingRow,
+            filters=(LaunchplaneProductOwnerRoutingRow.record_id == record_id,),
+        )
+
+    def list_product_owner_routing_records(
+        self,
+        *,
+        product: str = "",
+        system: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[ProductOwnerRoutingRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneProductOwnerRoutingRow.product == product)
+        if system:
+            filters.append(LaunchplaneProductOwnerRoutingRow.system == system)
+        if status:
+            filters.append(LaunchplaneProductOwnerRoutingRow.status == status)
+        return self._list_models(
+            model_type=ProductOwnerRoutingRecord,
+            orm_model=LaunchplaneProductOwnerRoutingRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneProductOwnerRoutingRow.routing_revision.desc(),
+                LaunchplaneProductOwnerRoutingRow.product.desc(),
+                LaunchplaneProductOwnerRoutingRow.system.desc(),
+                LaunchplaneProductOwnerRoutingRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def _product_owner_policy_row(
+        self,
+        record: ProductOwnerPolicyRecord,
+    ) -> LaunchplaneProductOwnerPolicyRow:
+        return LaunchplaneProductOwnerPolicyRow(
+            record_id=record.record_id,
+            product=record.product,
+            system=record.system,
+            status=record.status,
+            policy_revision=record.policy_revision,
+            quorum=record.quorum,
+            effective_at=record.effective_at,
+            source=record.source,
+            supersedes_record_id=record.supersedes_record_id,
+            policy_digest=record.policy_digest,
+            payload=self._payload_dict(record),
+        )
+
+    def _product_owner_requirement_row(
+        self,
+        record: ProductOwnerRequirementRecord,
+    ) -> LaunchplaneProductOwnerRequirementRow:
+        return LaunchplaneProductOwnerRequirementRow(
+            record_id=record.record_id,
+            product=record.product,
+            system=record.system,
+            status=record.status,
+            requirement_revision=record.requirement_revision,
+            enforcement_mode=record.enforcement_mode,
+            effective_at=record.effective_at,
+            source=record.source,
+            supersedes_record_id=record.supersedes_record_id,
+            requirement_digest=record.requirement_digest,
+            payload=self._payload_dict(record),
+        )
+
+    def _product_owner_routing_row(
+        self,
+        record: ProductOwnerRoutingRecord,
+    ) -> LaunchplaneProductOwnerRoutingRow:
+        return LaunchplaneProductOwnerRoutingRow(
+            record_id=record.record_id,
+            product=record.product,
+            system=record.system,
+            status=record.status,
+            routing_revision=record.routing_revision,
+            authoritative=record.authoritative,
+            effective_at=record.effective_at,
+            source=record.source,
+            supersedes_record_id=record.supersedes_record_id,
+            routing_digest=record.routing_digest,
+            payload=self._payload_dict(record),
+        )
+
+    def _compare_and_write_product_owner_revision_record(
+        self,
+        *,
+        model_type: type[Any],
+        row_type: type[Any],
+        row_factory: Callable[[Any], Any],
+        record: Any,
+        revision_field: str,
+        digest_field: str,
+        expected_current_record_id: str,
+        expected_current_digest: str,
+        sequence_error: type[ValueError],
+        conflict_error: type[ValueError],
+        label: str,
+    ) -> Literal["written", "replayed"]:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            try:
+                model_type.model_validate(record.model_dump(mode="python"))
+            except ValueError as error:
+                raise conflict_error(
+                    f"Incoming {label} payload does not match its derived identifiers."
+                ) from error
+            if record.status != "active":
+                raise sequence_error(f"Incoming {label} revision must have active status.")
+            if record.effective_at > _utc_now_timestamp():
+                raise sequence_error(
+                    f"Incoming active {label} revision cannot take effect in the future."
+                )
+            if self.database_dialect_name == "postgresql":
+                session.execute(
+                    text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                    {
+                        "lock_name": (
+                            f"product-owner:{row_type.__tablename__}:"
+                            f"{record.product}:{record.system}"
+                        )
+                    },
+                )
+            statement = (
+                select(row_type)
+                .where(row_type.product == record.product, row_type.system == record.system)
+                .order_by(getattr(row_type, revision_field).desc())
+            )
+            if self.database_dialect_name == "postgresql":
+                statement = statement.with_for_update()
+            rows = tuple(session.scalars(statement).all())
+            records = tuple(
+                self._read_payload(model_type=model_type, payload=row.payload) for row in rows
+            )
+            same_id = tuple(
+                existing for existing in records if existing.record_id == record.record_id
+            )
+            if same_id:
+                if len(same_id) != 1 or getattr(same_id[0], digest_field) != getattr(
+                    record,
+                    digest_field,
+                ):
+                    raise conflict_error(f"{label} record id conflicts with history.")
+                session.commit()
+                return "replayed"
+            current_records = tuple(existing for existing in records if existing.status == "active")
+            if len(current_records) > 1:
+                raise sequence_error(f"{label} history has multiple active revisions.")
+            current = current_records[0] if current_records else None
+            revision = int(getattr(record, revision_field))
+            if current is None:
+                if revision != 1:
+                    raise sequence_error(f"Initial {label} revision must be 1.")
+                if expected_current_record_id.strip() or expected_current_digest.strip():
+                    raise conflict_error(f"Initial {label} expected tip must be absent.")
+            else:
+                if (
+                    expected_current_record_id.strip() != current.record_id
+                    or expected_current_digest.strip().lower() != getattr(current, digest_field)
+                ):
+                    raise conflict_error(f"Expected current {label} tip is stale.")
+                if revision != int(getattr(current, revision_field)) + 1:
+                    raise sequence_error(f"Next {label} revision is not linear.")
+                if record.supersedes_record_id != current.record_id:
+                    raise sequence_error(f"Next {label} must supersede the current record.")
+                if record.effective_at < current.effective_at:
+                    raise sequence_error(
+                        f"Next {label} effective_at cannot precede the current revision."
+                    )
+                current_row = next(row for row in rows if row.record_id == current.record_id)
+                superseded = current.model_copy(update={"status": "superseded"})
+                current_row.status = "superseded"
+                current_row.payload = self._payload_dict(superseded)
+                session.flush()
+            session.add(row_factory(record))
+            session.flush()
+            session.commit()
+            return "written"
+
     def import_core_records_from_filesystem(
         self, filesystem_store: FilesystemRecordStore
     ) -> dict[str, int]:
@@ -13646,6 +14199,9 @@ class PostgresRecordStore(HumanSessionStore):
             "inventory": 0,
             "odoo_instance_overrides": 0,
             "product_profiles": 0,
+            "product_owner_policies": 0,
+            "product_owner_requirements": 0,
+            "product_owner_routing": 0,
             "preview_records": 0,
             "preview_enablement": 0,
             "preview_generations": 0,
@@ -13692,6 +14248,34 @@ class PostgresRecordStore(HumanSessionStore):
             for classification_record in classification_records:
                 self.write_tenant_repository_classification_record(classification_record)
                 counts["tenant_repository_classifications"] += 1
+        for owner_policy in sorted(
+            filesystem_store.list_product_owner_policy_records(),
+            key=lambda record: (record.product, record.system, record.policy_revision),
+        ):
+            self.write_product_owner_policy_record(
+                owner_policy.model_copy(update={"status": "active"})
+            )
+            counts["product_owner_policies"] += 1
+        for owner_requirement in sorted(
+            filesystem_store.list_product_owner_requirement_records(),
+            key=lambda record: (
+                record.product,
+                record.system,
+                record.requirement_revision,
+            ),
+        ):
+            self.write_product_owner_requirement_record(
+                owner_requirement.model_copy(update={"status": "active"})
+            )
+            counts["product_owner_requirements"] += 1
+        for owner_routing in sorted(
+            filesystem_store.list_product_owner_routing_records(),
+            key=lambda record: (record.product, record.system, record.routing_revision),
+        ):
+            self.write_product_owner_routing_record(
+                owner_routing.model_copy(update={"status": "active"})
+            )
+            counts["product_owner_routing"] += 1
         for backup_gate_record in filesystem_store.list_backup_gate_records():
             self.write_backup_gate_record(backup_gate_record)
             counts["backup_gates"] += 1

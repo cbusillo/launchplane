@@ -15340,6 +15340,1007 @@
         "title": "ProductOverviewResponse",
         "type": "object"
       },
+      "ProductOwnerActionContext": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "system": {
+            "title": "System",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "system",
+          "repository_id",
+          "environment",
+          "action"
+        ],
+        "title": "ProductOwnerActionContext",
+        "type": "object"
+      },
+      "ProductOwnerGrant": {
+        "additionalProperties": false,
+        "properties": {
+          "environments": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Environments",
+            "type": "array"
+          },
+          "grant_id": {
+            "default": "",
+            "title": "Grant Id",
+            "type": "string"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/ProductOwnerIdentity"
+          },
+          "repository_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Repository Ids",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "identity",
+          "repository_ids",
+          "environments"
+        ],
+        "title": "ProductOwnerGrant",
+        "type": "object"
+      },
+      "ProductOwnerIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "identity_id": {
+            "default": "",
+            "title": "Identity Id",
+            "type": "string"
+          },
+          "identity_kind": {
+            "const": "human",
+            "default": "human",
+            "title": "Identity Kind",
+            "type": "string"
+          },
+          "owner_class": {
+            "const": "owner",
+            "default": "owner",
+            "title": "Owner Class",
+            "type": "string"
+          },
+          "provider": {
+            "const": "github",
+            "title": "Provider",
+            "type": "string"
+          },
+          "provider_subject_id": {
+            "title": "Provider Subject Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "provider",
+          "provider_subject_id"
+        ],
+        "title": "ProductOwnerIdentity",
+        "type": "object"
+      },
+      "ProductOwnerPolicyApplyEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_current_policy_digest": {
+            "default": "",
+            "title": "Expected Current Policy Digest",
+            "type": "string"
+          },
+          "expected_current_record_id": {
+            "default": "",
+            "title": "Expected Current Record Id",
+            "type": "string"
+          },
+          "mode": {
+            "default": "apply",
+            "enum": [
+              "dry_run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "record": {
+            "$ref": "#/components/schemas/ProductOwnerPolicyRecord"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "record"
+        ],
+        "title": "ProductOwnerPolicyApplyEnvelope",
+        "type": "object"
+      },
+      "ProductOwnerPolicyApplyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/ProductOwnerPolicyApplyResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "ProductOwnerPolicyApplyResponse",
+        "type": "object"
+      },
+      "ProductOwnerPolicyApplyResult": {
+        "additionalProperties": false,
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/ProductOwnerPolicyRecord"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "would_apply",
+              "would_replay",
+              "applied",
+              "replayed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "record"
+        ],
+        "title": "ProductOwnerPolicyApplyResult",
+        "type": "object"
+      },
+      "ProductOwnerPolicyRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "effective_at": {
+            "title": "Effective At",
+            "type": "string"
+          },
+          "owners": {
+            "items": {
+              "$ref": "#/components/schemas/ProductOwnerGrant"
+            },
+            "title": "Owners",
+            "type": "array"
+          },
+          "policy_digest": {
+            "default": "",
+            "title": "Policy Digest",
+            "type": "string"
+          },
+          "policy_revision": {
+            "minimum": 1.0,
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "quorum": {
+            "const": 1,
+            "default": 1,
+            "title": "Quorum",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "supersedes_record_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Record Id"
+          },
+          "system": {
+            "title": "System",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "system",
+          "policy_revision",
+          "owners",
+          "effective_at",
+          "source",
+          "reason"
+        ],
+        "title": "ProductOwnerPolicyRecord",
+        "type": "object"
+      },
+      "ProductOwnerReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "authoritative": {
+            "const": false,
+            "default": false,
+            "title": "Authoritative",
+            "type": "boolean"
+          },
+          "current_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductOwnerPolicyRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_requirement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductOwnerRequirementRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_routing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductOwnerRoutingRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enforcement_effect": {
+            "const": "none",
+            "default": "none",
+            "title": "Enforcement Effect",
+            "type": "string"
+          },
+          "mode": {
+            "const": "shadow",
+            "default": "shadow",
+            "title": "Mode",
+            "type": "string"
+          },
+          "policy_history_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Policy History Count",
+            "type": "integer"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "requirement_history_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Requirement History Count",
+            "type": "integer"
+          },
+          "routing_history_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Routing History Count",
+            "type": "integer"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "system": {
+            "title": "System",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "system"
+        ],
+        "title": "ProductOwnerReadModel",
+        "type": "object"
+      },
+      "ProductOwnerReadResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "read_model": {
+            "$ref": "#/components/schemas/ProductOwnerReadModel"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "read_model"
+        ],
+        "title": "ProductOwnerReadResponse",
+        "type": "object"
+      },
+      "ProductOwnerRequirement": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "environments": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Environments",
+            "type": "array"
+          },
+          "quorum": {
+            "const": 1,
+            "default": 1,
+            "title": "Quorum",
+            "type": "integer"
+          },
+          "repository_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Repository Ids",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "action",
+          "repository_ids",
+          "environments"
+        ],
+        "title": "ProductOwnerRequirement",
+        "type": "object"
+      },
+      "ProductOwnerRequirementApplyEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_current_record_id": {
+            "default": "",
+            "title": "Expected Current Record Id",
+            "type": "string"
+          },
+          "expected_current_requirement_digest": {
+            "default": "",
+            "title": "Expected Current Requirement Digest",
+            "type": "string"
+          },
+          "mode": {
+            "default": "apply",
+            "enum": [
+              "dry_run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "record": {
+            "$ref": "#/components/schemas/ProductOwnerRequirementRecord"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "record"
+        ],
+        "title": "ProductOwnerRequirementApplyEnvelope",
+        "type": "object"
+      },
+      "ProductOwnerRequirementApplyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/ProductOwnerRequirementApplyResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "ProductOwnerRequirementApplyResponse",
+        "type": "object"
+      },
+      "ProductOwnerRequirementApplyResult": {
+        "additionalProperties": false,
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/ProductOwnerRequirementRecord"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "would_apply",
+              "would_replay",
+              "applied",
+              "replayed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "record"
+        ],
+        "title": "ProductOwnerRequirementApplyResult",
+        "type": "object"
+      },
+      "ProductOwnerRequirementRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "effective_at": {
+            "title": "Effective At",
+            "type": "string"
+          },
+          "enforcement_mode": {
+            "const": "shadow",
+            "default": "shadow",
+            "title": "Enforcement Mode",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "requirement_digest": {
+            "default": "",
+            "title": "Requirement Digest",
+            "type": "string"
+          },
+          "requirement_revision": {
+            "minimum": 1.0,
+            "title": "Requirement Revision",
+            "type": "integer"
+          },
+          "requirements": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductOwnerRequirement"
+            },
+            "title": "Requirements",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "supersedes_record_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Record Id"
+          },
+          "system": {
+            "title": "System",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "system",
+          "requirement_revision",
+          "effective_at",
+          "source",
+          "reason"
+        ],
+        "title": "ProductOwnerRequirementRecord",
+        "type": "object"
+      },
+      "ProductOwnerRoutingApplyEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_current_record_id": {
+            "default": "",
+            "title": "Expected Current Record Id",
+            "type": "string"
+          },
+          "expected_current_routing_digest": {
+            "default": "",
+            "title": "Expected Current Routing Digest",
+            "type": "string"
+          },
+          "mode": {
+            "default": "apply",
+            "enum": [
+              "dry_run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "record": {
+            "$ref": "#/components/schemas/ProductOwnerRoutingRecord"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "record"
+        ],
+        "title": "ProductOwnerRoutingApplyEnvelope",
+        "type": "object"
+      },
+      "ProductOwnerRoutingApplyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/ProductOwnerRoutingApplyResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "ProductOwnerRoutingApplyResponse",
+        "type": "object"
+      },
+      "ProductOwnerRoutingApplyResult": {
+        "additionalProperties": false,
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/ProductOwnerRoutingRecord"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "would_apply",
+              "would_replay",
+              "applied",
+              "replayed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "record"
+        ],
+        "title": "ProductOwnerRoutingApplyResult",
+        "type": "object"
+      },
+      "ProductOwnerRoutingRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "authoritative": {
+            "const": false,
+            "default": false,
+            "title": "Authoritative",
+            "type": "boolean"
+          },
+          "effective_at": {
+            "title": "Effective At",
+            "type": "string"
+          },
+          "preferred_owner_identity_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Preferred Owner Identity Ids",
+            "type": "array"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "routing_digest": {
+            "default": "",
+            "title": "Routing Digest",
+            "type": "string"
+          },
+          "routing_revision": {
+            "minimum": 1.0,
+            "title": "Routing Revision",
+            "type": "integer"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "supersedes_record_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Record Id"
+          },
+          "system": {
+            "title": "System",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "system",
+          "routing_revision",
+          "effective_at",
+          "source",
+          "reason"
+        ],
+        "title": "ProductOwnerRoutingRecord",
+        "type": "object"
+      },
+      "ProductOwnerShadowEvaluation": {
+        "additionalProperties": false,
+        "properties": {
+          "actor_identity_id": {
+            "title": "Actor Identity Id",
+            "type": "string"
+          },
+          "actor_is_preferred": {
+            "default": false,
+            "title": "Actor Is Preferred",
+            "type": "boolean"
+          },
+          "authoritative": {
+            "const": false,
+            "default": false,
+            "title": "Authoritative",
+            "type": "boolean"
+          },
+          "context": {
+            "$ref": "#/components/schemas/ProductOwnerActionContext"
+          },
+          "decision": {
+            "enum": [
+              "authorized",
+              "denied",
+              "not_required",
+              "unavailable"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "enforcement_effect": {
+            "const": "none",
+            "default": "none",
+            "title": "Enforcement Effect",
+            "type": "string"
+          },
+          "mode": {
+            "const": "shadow",
+            "default": "shadow",
+            "title": "Mode",
+            "type": "string"
+          },
+          "notify_owner_identity_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Notify Owner Identity Ids",
+            "type": "array"
+          },
+          "policy_digest": {
+            "default": "",
+            "title": "Policy Digest",
+            "type": "string"
+          },
+          "policy_record_id": {
+            "default": "",
+            "title": "Policy Record Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Revision"
+          },
+          "quorum": {
+            "const": 1,
+            "default": 1,
+            "title": "Quorum",
+            "type": "integer"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "requirement_digest": {
+            "default": "",
+            "title": "Requirement Digest",
+            "type": "string"
+          },
+          "requirement_record_id": {
+            "default": "",
+            "title": "Requirement Record Id",
+            "type": "string"
+          },
+          "requirement_revision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requirement Revision"
+          },
+          "routing_digest": {
+            "default": "",
+            "title": "Routing Digest",
+            "type": "string"
+          },
+          "routing_record_id": {
+            "default": "",
+            "title": "Routing Record Id",
+            "type": "string"
+          },
+          "routing_revision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Routing Revision"
+          },
+          "satisfying_owner_identity_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Satisfying Owner Identity Ids",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "decision",
+          "reason_code",
+          "context",
+          "actor_identity_id"
+        ],
+        "title": "ProductOwnerShadowEvaluation",
+        "type": "object"
+      },
+      "ProductOwnerShadowEvaluationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "evaluation": {
+            "$ref": "#/components/schemas/ProductOwnerShadowEvaluation"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "evaluation"
+        ],
+        "title": "ProductOwnerShadowEvaluationResponse",
+        "type": "object"
+      },
       "ProductPreviewProfile": {
         "additionalProperties": false,
         "properties": {
@@ -49669,6 +50670,789 @@
           }
         },
         "summary": "Apply product onboarding records"
+      }
+    },
+    "/v1/product-owner/policies/apply": {
+      "post": {
+        "operationId": "apply_product_owner_policy",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductOwnerPolicyApplyEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductOwnerPolicyApplyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Apply or dry-run a product Owner policy revision"
+      }
+    },
+    "/v1/product-owner/policy": {
+      "get": {
+        "operationId": "read_product_owner_policy",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "system",
+            "required": true,
+            "schema": {
+              "title": "System",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductOwnerReadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read the shadow product Owner policy bundle"
+      }
+    },
+    "/v1/product-owner/requirement": {
+      "get": {
+        "operationId": "read_product_owner_requirement",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "system",
+            "required": true,
+            "schema": {
+              "title": "System",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductOwnerReadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read the shadow product Owner requirement bundle"
+      }
+    },
+    "/v1/product-owner/requirements/apply": {
+      "post": {
+        "operationId": "apply_product_owner_requirement",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductOwnerRequirementApplyEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductOwnerRequirementApplyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Apply or dry-run a product Owner requirement revision"
+      }
+    },
+    "/v1/product-owner/routing": {
+      "get": {
+        "operationId": "read_product_owner_routing",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "system",
+            "required": true,
+            "schema": {
+              "title": "System",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductOwnerReadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read non-authoritative product Owner routing"
+      }
+    },
+    "/v1/product-owner/routing/apply": {
+      "post": {
+        "operationId": "apply_product_owner_routing",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductOwnerRoutingApplyEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductOwnerRoutingApplyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Apply or dry-run non-authoritative product Owner routing"
+      }
+    },
+    "/v1/product-owner/shadow-evaluation": {
+      "get": {
+        "operationId": "read_product_owner_shadow_evaluation",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "system",
+            "required": true,
+            "schema": {
+              "title": "System",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repository_id",
+            "required": true,
+            "schema": {
+              "title": "Repository Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "required": true,
+            "schema": {
+              "title": "Action",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "claimed_policy_revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Claimed Policy Revision"
+            }
+          },
+          {
+            "in": "query",
+            "name": "claimed_policy_digest",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Claimed Policy Digest",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "claimed_requirement_revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Claimed Requirement Revision"
+            }
+          },
+          {
+            "in": "query",
+            "name": "claimed_requirement_digest",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Claimed Requirement Digest",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductOwnerShadowEvaluationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Evaluate product Owner authority without changing enforcement"
       }
     },
     "/v1/product-profiles": {

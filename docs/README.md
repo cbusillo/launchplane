@@ -38,6 +38,8 @@ Use these docs as the source of truth for `launchplane`.
   host hygiene evidence, budgets, and future apply boundary.
 - [agent-context-boundary.md](agent-context-boundary.md) — public-safe agent
   context, caller profiles, scoped intent, redaction, and provenance boundary.
+- [product-owner-policy.md](product-owner-policy.md) — additive shadow-mode
+  product/system Owner membership, requirement, routing, and evaluation contract.
 - [operations.md](operations.md) — operator workflows and runtime boundary rules.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — current blockers and exit criteria

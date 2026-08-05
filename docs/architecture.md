@@ -44,6 +44,12 @@ Product, tenant, and local-DX repos own:
 GitHub owns the engineering workflow around this system: issues, branches,
 pull requests, labels, checks, PR comments, releases, and CI execution.
 
+Product/system human ownership is represented by additive Launchplane records.
+Owner membership, Owner requirements, and preferred routing are separate
+revision streams. Their current implementation is shadow-only and cannot alter
+legacy repository-human admission or any production authorization result; see
+`docs/product-owner-policy.md`.
+
 This repository is the product boundary today. Keep reusable nouns in
 Launchplane core, product-specific runtime behavior in Launchplane drivers, and
 repo-specific variation in thin request/config surfaces.

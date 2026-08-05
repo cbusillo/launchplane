@@ -47,6 +47,18 @@ from control_plane.http_routes.preview import (
     register_preview_readiness_read_routes,
     register_preview_record_read_routes,
 )
+from control_plane.http_routes.product_owner import (
+    PRODUCT_OWNER_POLICY_APPLY_ROUTE,
+    PRODUCT_OWNER_POLICY_READ_ROUTE,
+    PRODUCT_OWNER_REQUIREMENT_APPLY_ROUTE,
+    PRODUCT_OWNER_REQUIREMENT_READ_ROUTE,
+    PRODUCT_OWNER_ROUTING_APPLY_ROUTE,
+    PRODUCT_OWNER_ROUTING_READ_ROUTE,
+    PRODUCT_OWNER_SHADOW_EVALUATION_ROUTE,
+    ProductOwnerWriteRouteDependencies,
+    register_product_owner_read_routes,
+    register_product_owner_write_routes,
+)
 from control_plane.http_routes.runner_host_hygiene import (
     register_runner_host_hygiene_read_routes,
 )
@@ -92,7 +104,15 @@ __all__ = (
     "GenericWebWriteRouteDependencies",
     "GenericWebWriteRouteHandlers",
     "ProductReadRouteDependencies",
+    "ProductOwnerWriteRouteDependencies",
     "PromotionEvidenceRequest",
+    "PRODUCT_OWNER_POLICY_APPLY_ROUTE",
+    "PRODUCT_OWNER_POLICY_READ_ROUTE",
+    "PRODUCT_OWNER_REQUIREMENT_APPLY_ROUTE",
+    "PRODUCT_OWNER_REQUIREMENT_READ_ROUTE",
+    "PRODUCT_OWNER_ROUTING_APPLY_ROUTE",
+    "PRODUCT_OWNER_ROUTING_READ_ROUTE",
+    "PRODUCT_OWNER_SHADOW_EVALUATION_ROUTE",
     "REPOSITORY_HUMAN_ROLE_POLICY_APPLY_ROUTE",
     "TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ROUTE",
     "TENANT_ADMISSION_STATUS_RECONCILE_ROUTE",
@@ -126,6 +146,8 @@ __all__ = (
     "register_operation_status_read_routes",
     "register_preview_notification_attempt_read_routes",
     "register_preview_readiness_read_routes",
+    "register_product_owner_read_routes",
+    "register_product_owner_write_routes",
     "register_preview_record_read_routes",
     "register_product_config_status_read_routes",
     "register_product_context_audit_read_routes",
