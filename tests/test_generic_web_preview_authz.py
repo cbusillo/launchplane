@@ -28,36 +28,37 @@ def _request(**overrides: object) -> GenericWebPreviewAuthzPlanRequest:
 
 
 def _ingress_templates() -> tuple[GitHubActionsPolicyRule, ...]:
-    common = {
-        "repository": "cbusillo/launchplane",
-        "repository_id": "999",
-        "repository_owner_id": "456",
-        "job_workflow_refs": (
-            "cbusillo/launchplane/.github/workflows/reusable-ingress-route-dry-run.yml@" + "b" * 40,
-        ),
-        "event_names": ("workflow_dispatch",),
-        "products": ("template",),
-        "contexts": ("template",),
-    }
     return (
         GitHubActionsPolicyRule(
-            **common,
+            repository="cbusillo/launchplane",
+            repository_id="999",
+            repository_owner_id="456",
             workflow_refs=(
                 "cbusillo/launchplane/.github/workflows/ingress-route-dry-run.yml@refs/heads/main",
             ),
+            job_workflow_refs=(
+                "cbusillo/launchplane/.github/workflows/reusable-ingress-route-dry-run.yml@"
+                + "b" * 40,
+            ),
+            event_names=("workflow_dispatch",),
+            products=("template",),
+            contexts=("template",),
             actions=("ingress_route.plan",),
         ),
         GitHubActionsPolicyRule(
-            **{
-                **common,
-                "job_workflow_refs": (
-                    "cbusillo/launchplane/.github/workflows/"
-                    "reusable-ingress-route-apply.yml@" + "c" * 40,
-                ),
-            },
+            repository="cbusillo/launchplane",
+            repository_id="999",
+            repository_owner_id="456",
             workflow_refs=(
                 "cbusillo/launchplane/.github/workflows/ingress-route-apply.yml@refs/heads/main",
             ),
+            job_workflow_refs=(
+                "cbusillo/launchplane/.github/workflows/reusable-ingress-route-apply.yml@"
+                + "c" * 40,
+            ),
+            event_names=("workflow_dispatch",),
+            products=("template",),
+            contexts=("template",),
             actions=("ingress_route.apply",),
         ),
     )
