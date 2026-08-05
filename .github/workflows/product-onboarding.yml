@@ -63,10 +63,12 @@ name: Product Onboarding
         default: ""
         type: string
       environment_name:
-        description: Dokploy environment name.
-        required: false
+        description: Non-production Dokploy environment.
+        required: true
         default: testing
-        type: string
+        type: choice
+        options:
+          - testing
       server_id:
         description: Optional Dokploy server id.
         required: false
@@ -109,6 +111,7 @@ jobs:
       authz_plan_sha256: ${{ steps.plan.outputs.authz_plan_sha256 }}
       default_branch: ${{ steps.repository.outputs.default_branch }}
       onboarding_plan_sha256: ${{ steps.plan.outputs.onboarding_plan_sha256 }}
+      product: ${{ steps.inputs.outputs.product }}
       preview_context: ${{ steps.inputs.outputs.preview_context }}
       repository_id: ${{ steps.repository.outputs.repository_id }}
       repository_owner_id: ${{ steps.repository.outputs.repository_owner_id }}
@@ -151,6 +154,12 @@ jobs:
                   raise SystemExit(f"{name.lower()} must be one printable line.")
               return value
 
+          def optional(name: str, maximum: int = 300) -> str:
+              value = os.environ[name].strip()
+              if len(value) > maximum or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                  raise SystemExit(f"{name.lower()} must be one printable line.")
+              return value
+
           mode = required("MODE")
           if mode not in {"dry_run", "apply"}:
               raise SystemExit("mode must be dry_run or apply.")
@@ -171,10 +180,18 @@ jobs:
           health_path = required("HEALTH_PATH")
           if not health_path.startswith("/"):
               raise SystemExit("health_path must start with '/'.")
-          testing_context = os.environ["TESTING_CONTEXT"].strip() or f"{product}-testing"
-          preview_context = os.environ["PREVIEW_CONTEXT"].strip() or f"{product}-preview"
-          target_name = os.environ["TARGET_NAME"].strip() or f"{product}-testing"
-          project_name = os.environ["PROJECT_NAME"].strip() or product
+          required("DISPLAY_NAME")
+          required("IMAGE_REPOSITORY")
+          required("PREVIEW_LABEL")
+          required("REASON")
+          required("RELATED_ISSUE")
+          if required("ENVIRONMENT_NAME") != "testing":
+              raise SystemExit("environment_name must be testing.")
+          testing_context = optional("TESTING_CONTEXT") or f"{product}-testing"
+          preview_context = optional("PREVIEW_CONTEXT") or f"{product}-preview"
+          target_name = optional("TARGET_NAME") or f"{product}-testing"
+          project_name = optional("PROJECT_NAME") or product
+          optional("SERVER_ID")
           output = os.environ["GITHUB_OUTPUT"]
           with open(output, "a", encoding="utf-8") as handle:
               handle.write(f"product={product}\n")
@@ -379,14 +396,14 @@ jobs:
             authz-plan.json
             authz-reconcile-request.json
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
 
   apply:
     if: ${{ inputs.mode == 'apply' }}
     needs: plan
     uses: ./.github/workflows/reusable-generic-web-onboarding-apply.yml
     with:
-      product: ${{ inputs.product }}
+      product: ${{ needs.plan.outputs.product }}
       testing_context: ${{ needs.plan.outputs.testing_context }}
       onboarding_plan_sha256: ${{ needs.plan.outputs.onboarding_plan_sha256 }}
       authz_plan_sha256: ${{ needs.plan.outputs.authz_plan_sha256 }}

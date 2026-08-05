@@ -13022,9 +13022,14 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
+        onboarding_action = (
+            "generic_web_onboarding.plan"
+            if onboarding_request.generic_web is not None and onboarding_request.mode == "dry_run"
+            else "product_onboarding.apply"
+        )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action="product_onboarding.apply",
+            action=onboarding_action,
             product=onboarding_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ):
@@ -13032,7 +13037,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Workflow cannot apply Launchplane product onboarding manifests.",
+                message="Workflow cannot plan or apply Launchplane product onboarding.",
             )
         database_store = require_product_onboarding_database_store(
             record_store=record_store,
@@ -17841,17 +17846,27 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        can_setup_target = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="dokploy_target.setup",
             product=setup_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
+        )
+        can_plan_target = setup_request.mode == "dry-run" and (
+            can_setup_target
+            or resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="dokploy_target.plan",
+                product=setup_request.product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+        )
+        if not (can_setup_target if setup_request.mode == "apply" else can_plan_target):
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Workflow cannot run Launchplane Dokploy target setup.",
+                message="Workflow cannot plan or apply Launchplane Dokploy target setup.",
             )
         if setup_request.mode == "apply":
             if setup_request.confirmation != "APPLY DOKPLOY TARGET SETUP":

@@ -2698,7 +2698,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["product_onboarding.apply"],
+                            "actions": [
+                                "generic_web_onboarding.plan",
+                                "product_onboarding.apply",
+                            ],
                         }
                     ]
                 }
@@ -3263,12 +3266,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         {
                             "repository": "cbusillo/launchplane",
                             "workflow_refs": [
-                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                                "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
                             ],
                             "event_names": ["workflow_dispatch"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["dokploy_target.setup"],
+                            "actions": ["dokploy_target.plan"],
                         }
                     ]
                 }
@@ -3279,7 +3282,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     _identity(
                         repository="cbusillo/launchplane",
                         workflow_ref=(
-                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
                         ),
                         event_name="workflow_dispatch",
                     )
@@ -3312,6 +3315,29 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "deploy_timeout_seconds": 900,
                     },
                 )
+            apply_status, apply_payload = _invoke_dokploy_target_setup_app(
+                app,
+                method="POST",
+                path="/v1/dokploy-targets/setup",
+                payload={
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "operation": "create-compose",
+                    "product": "launchplane",
+                    "context": "cm_website",
+                    "instance": "testing",
+                    "target_name": "cm-website-testing",
+                    "project_name": "Odoo",
+                    "environment_name": "testing",
+                    "server_id": "server-123",
+                    "domains": ["cm-website-testing.shinycomputers.com"],
+                    "runtime_port": 8069,
+                    "deploy_timeout_seconds": 900,
+                    "confirmation": "APPLY DOKPLOY TARGET SETUP",
+                    "reason": "Planner must not apply.",
+                },
+                headers={"Idempotency-Key": "planner-cannot-apply-target"},
+            )
             store = PostgresRecordStore(database_url=database_url)
             try:
                 target_records = store.list_dokploy_target_records()
@@ -3326,6 +3352,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "planned-compose-id",
         )
         self.assertEqual(target_records, ())
+        self.assertEqual(apply_status, 403)
+        self.assertEqual(apply_payload["error"]["code"], "authorization_denied")
 
     def test_dokploy_target_setup_endpoint_maps_click_exception_to_bad_request(
         self,

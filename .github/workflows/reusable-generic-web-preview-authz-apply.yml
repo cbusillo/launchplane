@@ -1,0 +1,91 @@
+---
+name: Reusable Generic Web Preview Authorization Apply
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Product key from the reviewed plan.
+        required: true
+        type: string
+      plan_sha256:
+        description: Managed-authz plan digest from the planning job.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: launchplane-authz-admin
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      PRODUCT: ${{ inputs.product }}
+      PLAN_SHA256: ${{ inputs.plan_sha256 }}
+    steps:
+      - name: Download reviewed authorization plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v8.0.0
+        with:
+          name: generic-web-preview-authz-plan
+          path: .
+
+      - name: Render authorization apply request
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_plan_sha256="$(jq -r '.result.plan_sha256 // empty' authz-plan.json)"
+          if [ "$artifact_plan_sha256" != "$PLAN_SHA256" ]; then
+            echo "Reviewed authz plan digest does not match its artifact." >&2
+            exit 1
+          fi
+          if ! diff -u \
+            <(jq -S '.result.configuration' authz-plan.json) \
+            <(jq -S . authz-reconcile-request.json); then
+            echo "Reviewed authz configuration does not match its plan artifact." >&2
+            exit 1
+          fi
+          jq \
+            --arg reviewed "$artifact_plan_sha256" \
+            '.mode="apply" | .reviewed_plan_sha256=$reviewed' \
+            authz-reconcile-request.json > authz-apply-request.json
+
+      - name: Apply preview authorization
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/authz-policies/managed-rule-sets/reconcile
+          payload-file: authz-apply-request.json
+          idempotency-key: >-
+            ${{ format('authz-managed:operator.generic-web-preview:{0}',
+              inputs.plan_sha256) }}
+          expected-status: "202"
+          fail-result-paths: ""
+          response-output-file: authz-apply.json
+
+      - name: Summarize applied authorization
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Generic-web preview authorization apply"
+            echo
+            echo "- Product: $PRODUCT"
+            echo "- Plan: \`$PLAN_SHA256\`"
+            if [ -f authz-apply.json ]; then
+              echo "- Changed: $(jq -r '.result.changed // false' authz-apply.json)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload authorization apply evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: generic-web-preview-authz-apply
+          path: authz-apply.json
+          if-no-files-found: warn
+          retention-days: 14

@@ -1370,8 +1370,19 @@ Dokploy application, plans Launchplane records, and plans the complete
 reviewed plan artifact and digests. Do not copy target ids, manifests, authz
 JSON, or database credentials into the conventional workflow.
 
-If provider creation succeeds and a later step fails, rerun the same workflow
-inputs. Stable idempotency keys replay the provider result and prevent duplicate
+Planning authority is read-only and distinct: the plan job uses
+`dokploy_target.plan`, `generic_web_onboarding.plan`, and
+`generic_web_preview_authz.plan`. Only the protected apply worker receives
+`dokploy_target.setup`, `product_onboarding.apply`, and
+`authz_policy_grant.write`.
+
+Use `Generic Web Preview Authorization` for reviewed `expand`, `contract`, and
+`retire` operations after onboarding. It derives the same conventional caller
+paths and immutable repository identity, submits no hand-authored policy JSON,
+and applies only through the protected managed reconcile contract.
+
+If provider creation succeeds and a later step fails, rerun the exact same
+workflow inputs, including the reason. Stable idempotency keys replay the provider result and prevent duplicate
 creation. If records succeed but authz fails, leave the records in place and
 rerun; the product remains unauthorized until the existing managed authz
 reconcile succeeds. Use `Product Onboarding Manifest (Advanced)` only when the

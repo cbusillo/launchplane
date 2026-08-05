@@ -73,6 +73,14 @@ an operator-owned manifest that cannot use the conventional path. Direct local
 CLI mutation remains break-glass bootstrap or repair behavior and requires
 `--allow-direct-db-mutation`; it is not an onboarding alternative.
 
+The conventional product-repo caller files are
+`.github/workflows/launchplane-preview.yml` for pull-request refresh,
+verification, and feedback, and
+`.github/workflows/launchplane-preview-notice.yml` for trusted cleanup and
+fork/Dependabot notice handling. The generated caller contract and onboarding
+authz planner use these exact paths; custom filenames require an advanced
+contract rather than an implicit fallback.
+
 Do not store these as product-repo Launchplane manifests. The repo may document
 the expected app runtime contract, but Launchplane records are the live source
 of lifecycle truth. Store operator manifests under Launchplane state or another

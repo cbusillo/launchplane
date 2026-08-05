@@ -10,6 +10,8 @@ from control_plane.service_auth import GitHubActionsPolicyRule, LaunchplaneAuthz
 
 
 GENERIC_WEB_PREVIEW_MANAGED_SET_ID = "operator.generic-web-preview"
+GENERIC_WEB_PREVIEW_CALLER_WORKFLOW_PATH = ".github/workflows/launchplane-preview.yml"
+GENERIC_WEB_PREVIEW_NOTICE_WORKFLOW_PATH = ".github/workflows/launchplane-preview-notice.yml"
 _PRODUCT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -116,10 +118,12 @@ def build_generic_web_preview_authz_reconcile_request(
         rule for rule in retained_github_rules if request.target_product in rule.products
     )
     if request.operation == "onboard" and current_target_rules:
-        raise ValueError(
-            "generic-web preview authz onboarding requires the product to have no current "
-            "managed preview rules"
-        )
+        generated_rules = generic_web_preview_rules(request)
+        if _rules_by_managed_id(current_target_rules) != _rules_by_managed_id(generated_rules):
+            raise ValueError(
+                "generic-web preview authz onboarding found different current managed preview "
+                "rules; use expand and contract for a reviewed rotation"
+            )
     if request.operation in {"expand", "contract", "retire"} and not current_target_rules:
         raise ValueError(
             f"generic-web preview authz {request.operation} requires current product rules"
@@ -162,10 +166,10 @@ def generic_web_preview_rules(
 ) -> tuple[GitHubActionsPolicyRule, ...]:
     generation = request.launchplane_sha[:7]
     preview_workflow_ref = (
-        f"{request.repository}/.github/workflows/launchplane-preview.yml@refs/pull/*/merge"
+        f"{request.repository}/{GENERIC_WEB_PREVIEW_CALLER_WORKFLOW_PATH}@refs/pull/*/merge"
     )
     notice_workflow_ref = (
-        f"{request.repository}/.github/workflows/launchplane-preview-notice.yml@"
+        f"{request.repository}/{GENERIC_WEB_PREVIEW_NOTICE_WORKFLOW_PATH}@"
         f"refs/heads/{request.default_branch}"
     )
     launchplane_prefix = "cbusillo/launchplane/.github/workflows"
@@ -185,7 +189,7 @@ def generic_web_preview_rules(
         slot: str,
         action: str,
         workflow_ref: str,
-        job_workflow_ref: str,
+        job_workflow_refs: tuple[str, ...],
         event_name: Literal["pull_request", "pull_request_target"],
     ) -> GitHubActionsPolicyRule:
         return GitHubActionsPolicyRule(
@@ -195,7 +199,7 @@ def generic_web_preview_rules(
             repository_id=request.repository_id,
             repository_owner_id=request.repository_owner_id,
             workflow_refs=(workflow_ref,),
-            job_workflow_refs=(job_workflow_ref,),
+            job_workflow_refs=job_workflow_refs,
             event_names=(event_name,),
             products=(request.target_product,),
             contexts=(request.preview_context,),
@@ -207,42 +211,54 @@ def generic_web_preview_rules(
             slot="refresh",
             action="preview_refresh.execute",
             workflow_ref=preview_workflow_ref,
-            job_workflow_ref=lifecycle_ref,
+            job_workflow_refs=(lifecycle_ref,),
             event_name="pull_request",
         ),
         rule(
             slot="refresh-diagnostic",
             action="authz_diagnostic.evaluate",
             workflow_ref=preview_workflow_ref,
-            job_workflow_ref=lifecycle_ref,
+            job_workflow_refs=(lifecycle_ref,),
             event_name="pull_request",
         ),
         rule(
             slot="verification",
             action="preview_generation.write",
             workflow_ref=preview_workflow_ref,
-            job_workflow_ref=verification_ref,
+            job_workflow_refs=(verification_ref,),
             event_name="pull_request",
         ),
         rule(
             slot="feedback",
             action="preview_pr_feedback.write",
             workflow_ref=preview_workflow_ref,
-            job_workflow_ref=feedback_ref,
+            job_workflow_refs=(feedback_ref, lifecycle_ref),
             event_name="pull_request",
         ),
         rule(
             slot="destroy",
             action="preview_destroy.execute",
             workflow_ref=notice_workflow_ref,
-            job_workflow_ref=lifecycle_ref,
+            job_workflow_refs=(lifecycle_ref,),
             event_name="pull_request_target",
         ),
         rule(
             slot="notice-feedback",
             action="preview_pr_feedback.write",
             workflow_ref=notice_workflow_ref,
-            job_workflow_ref=feedback_ref,
+            job_workflow_refs=(feedback_ref, lifecycle_ref),
             event_name="pull_request_target",
         ),
     )
+
+
+def _rules_by_managed_id(
+    rules: tuple[GitHubActionsPolicyRule, ...],
+) -> dict[str, dict[str, object]]:
+    normalized: dict[str, dict[str, object]] = {}
+    for rule in rules:
+        managed_rule_id = rule.managed_rule_id or ""
+        if not managed_rule_id or managed_rule_id in normalized:
+            return {}
+        normalized[managed_rule_id] = rule.model_dump(mode="json")
+    return normalized

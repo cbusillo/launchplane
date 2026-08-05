@@ -52,8 +52,13 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             self.assertEqual(rule.products, ("demo-web",))
             self.assertEqual(rule.contexts, ("demo-web-preview",))
             self.assertEqual(len(rule.workflow_refs), 1)
-            self.assertEqual(len(rule.job_workflow_refs), 1)
-            self.assertTrue(rule.job_workflow_refs[0].endswith("@" + "a" * 40))
+            self.assertIn(len(rule.job_workflow_refs), {1, 2})
+            self.assertTrue(
+                all(
+                    job_workflow_ref.endswith("@" + "a" * 40)
+                    for job_workflow_ref in rule.job_workflow_refs
+                )
+            )
 
     def test_onboard_preserves_other_products_and_adds_target(self) -> None:
         other_request = _request(
@@ -78,17 +83,30 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             {"demo-web", "other-web"},
         )
 
-    def test_onboard_rejects_existing_product_rules(self) -> None:
+    def test_onboard_replays_identical_existing_product_rules(self) -> None:
         request = _request()
         current_policy = LaunchplaneAuthzPolicy(
             schema_version=2,
             github_actions=generic_web_preview_rules(request),
         )
 
-        with self.assertRaisesRegex(ValueError, "no current managed preview rules"):
+        reconcile = build_generic_web_preview_authz_reconcile_request(
+            current_policy=current_policy,
+            request=request,
+        )
+
+        self.assertEqual(len(reconcile.desired_policy.github_actions), 6)
+
+    def test_onboard_rejects_different_existing_product_rules(self) -> None:
+        current_policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=generic_web_preview_rules(_request()),
+        )
+
+        with self.assertRaisesRegex(ValueError, "use expand and contract"):
             build_generic_web_preview_authz_reconcile_request(
                 current_policy=current_policy,
-                request=request,
+                request=_request(launchplane_sha="b" * 40),
             )
 
     def test_expand_rejects_missing_product_rules(self) -> None:

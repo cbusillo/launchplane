@@ -39,7 +39,7 @@ class GenericWebOnboardingIntent(BaseModel):
     testing_context: str = ""
     target_name: str = ""
     project_name: str = ""
-    environment_name: str = "testing"
+    environment_name: Literal["testing"] = "testing"
     server_id: str = ""
     preview_context: str = ""
     preview_label: str = PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL

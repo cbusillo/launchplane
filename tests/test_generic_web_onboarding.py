@@ -97,6 +97,22 @@ class GenericWebOnboardingTests(unittest.TestCase):
                 health_path="/healthz",
             )
 
+    def test_environment_is_testing_only(self) -> None:
+        with self.assertRaisesRegex(ValueError, "testing"):
+            GenericWebOnboardingIntent.model_validate(
+                {
+                    "product": "demo-web",
+                    "display_name": "Demo Web",
+                    "repository": "example/demo-web",
+                    "repository_id": "123",
+                    "repository_owner_id": "456",
+                    "image_repository": "ghcr.io/example/demo-web",
+                    "runtime_port": 3000,
+                    "health_path": "/healthz",
+                    "environment_name": "production",
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

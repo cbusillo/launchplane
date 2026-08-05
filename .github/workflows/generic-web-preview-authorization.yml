@@ -1,0 +1,239 @@
+---
+name: Generic Web Preview Authorization
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Plan only or apply after protected review.
+        required: true
+        default: dry_run
+        type: choice
+        options:
+          - dry_run
+          - apply
+      operation:
+        description: Rotate or retire one product's managed preview rules.
+        required: true
+        type: choice
+        options:
+          - expand
+          - contract
+          - retire
+      product:
+        description: Stable lowercase product key.
+        required: true
+        type: string
+      repository:
+        description: Product repository in owner/name form.
+        required: true
+        type: string
+      preview_context:
+        description: Optional preview context; defaults to <product>-preview.
+        required: false
+        default: ""
+        type: string
+      confirmation:
+        description: Type APPLY GENERIC WEB PREVIEW AUTHORIZATION when mode=apply.
+        required: false
+        default: ""
+        type: string
+      reason:
+        description: Single-line operator reason.
+        required: true
+        type: string
+      related_issue:
+        description: Single-line issue or change reference.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: generic-web-preview-authorization-${{ inputs.product }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      plan_sha256: ${{ steps.plan.outputs.plan_sha256 }}
+      product: ${{ steps.inputs.outputs.product }}
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      MODE: ${{ inputs.mode }}
+      OPERATION: ${{ inputs.operation }}
+      PRODUCT: ${{ inputs.product }}
+      REPOSITORY: ${{ inputs.repository }}
+      PREVIEW_CONTEXT: ${{ inputs.preview_context }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      REASON: ${{ inputs.reason }}
+      RELATED_ISSUE: ${{ inputs.related_issue }}
+    steps:
+      - name: Validate and normalize authorization inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+
+          def required(name: str, maximum: int = 300) -> str:
+              value = os.environ[name].strip()
+              if not value:
+                  raise SystemExit(f"{name.lower()} is required.")
+              if len(value) > maximum or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                  raise SystemExit(f"{name.lower()} must be one printable line.")
+              return value
+
+          def optional(name: str, maximum: int = 300) -> str:
+              value = os.environ[name].strip()
+              if len(value) > maximum or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                  raise SystemExit(f"{name.lower()} must be one printable line.")
+              return value
+
+          mode = required("MODE")
+          if mode not in {"dry_run", "apply"}:
+              raise SystemExit("mode must be dry_run or apply.")
+          operation = required("OPERATION")
+          if operation not in {"expand", "contract", "retire"}:
+              raise SystemExit("operation must be expand, contract, or retire.")
+          if mode == "apply" and os.environ["CONFIRMATION"].strip() != "APPLY GENERIC WEB PREVIEW AUTHORIZATION":
+              raise SystemExit("apply requires exact confirmation text.")
+          if mode == "dry_run" and os.environ["CONFIRMATION"].strip():
+              raise SystemExit("dry_run rejects confirmation text.")
+          product = required("PRODUCT", 63).lower()
+          if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", product) is None:
+              raise SystemExit("product must use lowercase letters, numbers, and hyphens.")
+          repository = required("REPOSITORY")
+          repository_match = re.fullmatch(r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", repository)
+          if repository_match is None:
+              raise SystemExit("repository must use owner/name form.")
+          preview_context = optional("PREVIEW_CONTEXT") or f"{product}-preview"
+          required("REASON")
+          required("RELATED_ISSUE")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"product={product}\n")
+              handle.write(f"repository_owner={repository_match.group(1)}\n")
+              handle.write(f"repository_name={repository_match.group(2)}\n")
+              handle.write(f"preview_context={preview_context}\n")
+          PY
+
+      - name: Mint repository metadata token
+        id: repository-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ secrets.LAUNCHPLANE_ONBOARDING_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ steps.inputs.outputs.repository_owner }}
+          repositories: ${{ steps.inputs.outputs.repository_name }}
+
+      - name: Resolve immutable repository identity
+        id: repository
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.repository-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          repository_json="$(gh api "repos/${REPOSITORY}")"
+          repository_id="$(jq -r '.id | tostring' <<< "$repository_json")"
+          repository_owner_id="$(jq -r '.owner.id | tostring' <<< "$repository_json")"
+          default_branch="$(jq -r '.default_branch // empty' <<< "$repository_json")"
+          if ! [[ "$repository_id" =~ ^[0-9]+$ && "$repository_owner_id" =~ ^[0-9]+$ ]]; then
+            echo "GitHub repository identity is incomplete." >&2
+            exit 1
+          fi
+          if [ -z "$default_branch" ]; then
+            echo "GitHub repository default branch is unavailable." >&2
+            exit 1
+          fi
+          {
+            echo "repository_id=$repository_id"
+            echo "repository_owner_id=$repository_owner_id"
+            echo "default_branch=$default_branch"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Render authorization plan request
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ steps.repository.outputs.default_branch }}
+          NORMALIZED_PRODUCT: ${{ steps.inputs.outputs.product }}
+          NORMALIZED_PREVIEW_CONTEXT: ${{ steps.inputs.outputs.preview_context }}
+          REPOSITORY_ID: ${{ steps.repository.outputs.repository_id }}
+          REPOSITORY_OWNER_ID: ${{ steps.repository.outputs.repository_owner_id }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg operation "$OPERATION" \
+            --arg target_product "$NORMALIZED_PRODUCT" \
+            --arg repository "$REPOSITORY" \
+            --arg repository_id "$REPOSITORY_ID" \
+            --arg repository_owner_id "$REPOSITORY_OWNER_ID" \
+            --arg default_branch "$DEFAULT_BRANCH" \
+            --arg preview_context "$NORMALIZED_PREVIEW_CONTEXT" \
+            --arg launchplane_sha "$GITHUB_SHA" \
+            --arg reason "$REASON" \
+            --arg related_issue "$RELATED_ISSUE" \
+            '{schema_version:1, product:"launchplane", operation:$operation,
+              target_product:$target_product, repository:$repository,
+              repository_id:$repository_id, repository_owner_id:$repository_owner_id,
+              default_branch:$default_branch, preview_context:$preview_context,
+              launchplane_sha:$launchplane_sha, reason:$reason,
+              related_issue:$related_issue}' \
+            > authz-plan-request.json
+
+      - name: Plan preview authorization
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/authz-policies/managed-rule-sets/generic-web-preview/plan
+          payload-file: authz-plan-request.json
+          expected-status: "202"
+          fail-result-paths: ""
+          response-output-file: authz-plan.json
+
+      - name: Finalize authorization plan
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          plan_sha256="$(jq -r '.result.plan_sha256 // empty' authz-plan.json)"
+          if ! [[ "$plan_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Preview authz plan did not return a valid digest." >&2
+            exit 1
+          fi
+          jq '.result.configuration' authz-plan.json > authz-reconcile-request.json
+          echo "plan_sha256=$plan_sha256" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Generic-web preview authorization plan"
+            echo
+            echo "- Product: ${{ steps.inputs.outputs.product }}"
+            echo "- Operation: $OPERATION"
+            echo "- Plan: \`$plan_sha256\`"
+            echo "- Rules added: $(jq -r '.result.diff.added_rule_count' authz-plan.json)"
+            echo "- Rules removed: $(jq -r '.result.diff.removed_rule_count' authz-plan.json)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload authorization plan evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: generic-web-preview-authz-plan
+          path: |
+            authz-plan-request.json
+            authz-plan.json
+            authz-reconcile-request.json
+          if-no-files-found: error
+          retention-days: 14
+
+  apply:
+    if: ${{ inputs.mode == 'apply' }}
+    needs: plan
+    uses: ./.github/workflows/reusable-generic-web-preview-authz-apply.yml
+    with:
+      product: ${{ needs.plan.outputs.product }}
+      plan_sha256: ${{ needs.plan.outputs.plan_sha256 }}
+    secrets: inherit

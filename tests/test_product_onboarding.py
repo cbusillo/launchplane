@@ -2344,6 +2344,8 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("Reviewed onboarding plan digest does not match", apply_workflow_text)
         self.assertIn("Reviewed authz configuration does not match", apply_workflow_text)
         self.assertIn("authz-managed:operator.generic-web-preview", apply_workflow_text)
+        self.assertIn("retention-days: 14", workflow_text)
+        self.assertIn("product: ${{ needs.plan.outputs.product }}", workflow_text)
         self.assertIn('fail-result-paths: ""', apply_workflow_text)
         self.assertNotIn("manifest_base64", workflow_text)
         concurrency = workflow.data["concurrency"]
@@ -2356,6 +2358,34 @@ class ProductOnboardingTests(unittest.TestCase):
             self.assertNotIn("Authorization: Bearer", checked_workflow_text)
             self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", checked_workflow_text)
             self.assertNotIn("curl ", checked_workflow_text)
+
+    def test_generic_web_preview_authorization_workflow_owns_rotation_and_retirement(self) -> None:
+        workflow_path = Path(".github/workflows/generic-web-preview-authorization.yml")
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        workflow = load_workflow(workflow_path)
+        apply_workflow_text = Path(
+            ".github/workflows/reusable-generic-web-preview-authz-apply.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Generic Web Preview Authorization", workflow_text)
+        for operation in ("expand", "contract", "retire"):
+            self.assertIn(f"- {operation}", workflow_text)
+        self.assertNotIn("- onboard", workflow_text)
+        self.assertIn("actions/create-github-app-token@", workflow_text)
+        self.assertIn(
+            "/v1/authz-policies/managed-rule-sets/generic-web-preview/plan",
+            workflow_text,
+        )
+        self.assertEqual(
+            workflow.job_uses("apply"),
+            "./.github/workflows/reusable-generic-web-preview-authz-apply.yml",
+        )
+        self.assertIn("environment: launchplane-authz-admin", apply_workflow_text)
+        self.assertIn("/v1/authz-policies/managed-rule-sets/reconcile", apply_workflow_text)
+        self.assertIn("Reviewed authz configuration does not match", apply_workflow_text)
+        self.assertIn("retention-days: 14", workflow_text)
+        self.assertNotIn("managed_set_json", workflow_text)
+        self.assertNotIn("managed_set_json", apply_workflow_text)
 
     def test_advanced_product_onboarding_manifest_workflow_remains_available(self) -> None:
         workflow_text = Path(".github/workflows/product-onboarding-manifest.yml").read_text(
