@@ -1976,19 +1976,40 @@ lanes; policy apply merges those scopes additively without making checked-in
 files runtime authority.
 
 Product onboarding uses the native FastAPI
-`POST /v1/product-onboarding/apply` route. The route accepts the same
-operator-approved manifest as `launchplane product-onboarding apply` and writes
-the full Launchplane-owned bundle: product profile, existing Dokploy-backed
-target records, target-id records, runtime-environment records, and managed
-secret binding placeholders. The manual `Product Onboarding` workflow is the
-supported shared and production caller: operators pass the manifest as runtime
-workflow input, and product-specific onboarding JSON stays out of checked-in
-catalogs. Manifests must use neutral `provider_targets`; obsolete
-`dokploy_targets` input is rejected with a clear validation error. The route is
-restricted to `product_onboarding.apply` authority for product/context
-`launchplane`, requires DB-backed storage, and returns only sanitized
-`provider_target*` summaries. Product records are not loaded from checked-in
-catalogs or product repos.
+`POST /v1/product-onboarding/apply` route. Conventional generic-web onboarding
+accepts typed product and immutable repository identity, exposes a no-write
+dry-run digest, and requires that exact digest plus the provider-resolved target
+id for apply. The resulting bundle includes the product profile, one testing
+lane, Dokploy-backed target records, target-id records, preview policy, and any
+declared runtime-environment or disabled managed-secret binding placeholders.
+Generic-web dry-run requires `generic_web_onboarding.plan`; apply and advanced
+manifest writes require `product_onboarding.apply`, all for product/context
+`launchplane`. The route requires DB-backed storage and returns only sanitized
+`provider_target*` summaries.
+
+The manual `Product Onboarding` workflow is the supported conventional caller.
+It resolves numeric GitHub repository and owner ids with a narrowly scoped
+GitHub App token, plans `create-application` through
+`POST /v1/dokploy-targets/setup`, plans the product bundle, and requests a
+complete generic-web preview authz reconciliation plan from
+`POST /v1/authz-policies/managed-rule-sets/generic-web-preview/plan`. Apply is
+one protected review followed by provider setup, record apply, and the existing
+digest-bound managed authz reconcile endpoint. A target/record partial success
+is safe to replay with the same stable idempotency keys; a later authz failure
+leaves the product unauthorized rather than silently broadening access.
+
+The authz planning route requires `generic_web_preview_authz.plan`, reads the
+active DB-backed policy, retains unrelated managed rules, and returns a complete
+dry-run reconcile envelope. It never writes policy. The existing
+`POST /v1/authz-policies/managed-rule-sets/reconcile` route remains the sole
+writer and requires `authz_policy_grant.write` for apply. The advanced
+`Product Onboarding Manifest (Advanced)` workflow preserves operator-supplied
+manifest support for non-conventional products. Manifests must use neutral
+`provider_targets`; obsolete `dokploy_targets` input is rejected. Product
+records are never loaded from checked-in catalogs or product repos.
+The manual `Generic Web Preview Authorization` workflow is the operator surface
+for reviewed expand/contract rotations and product-rule retirement through this
+same planner and writer contract.
 
 Product context audit, cutover, and legacy cleanup routes expose copied or
 deleted runtime identity records under neutral `provider_targets` and
@@ -2022,9 +2043,11 @@ Dokploy target setup uses the native FastAPI
 `POST /v1/dokploy-targets/setup` route. The route is the service-owned path for
 adopting an existing Dokploy target or creating a new application/compose target
 while immediately writing the matching Dokploy target, target-id, and
-provider-target records. It supports dry-run and apply modes, requires
-`dokploy_target.setup` authz for product/context `launchplane`, and requires
-exact confirmation, an operator reason, and an idempotency key for apply. Apply
+provider-target records. Dry-run accepts the narrow `dokploy_target.plan`
+action or the backwards-compatible broader `dokploy_target.setup` action;
+apply always requires `dokploy_target.setup`, all for product/context
+`launchplane`. Apply requires exact confirmation, an operator reason, and an
+idempotency key. Apply
 requests keep the `Idempotency-Key` replay/conflict contract; dry-runs remain
 repeatable and are not stored as idempotency responses. The manual
 `Dokploy Target Setup` workflow is the supported shared and production caller;

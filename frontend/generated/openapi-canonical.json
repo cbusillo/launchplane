@@ -4495,6 +4495,83 @@
         "title": "GenericWebDeployRequest",
         "type": "object"
       },
+      "GenericWebPreviewAuthzPlanRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "default_branch": {
+            "default": "main",
+            "title": "Default Branch",
+            "type": "string"
+          },
+          "launchplane_sha": {
+            "title": "Launchplane Sha",
+            "type": "string"
+          },
+          "operation": {
+            "default": "onboard",
+            "enum": [
+              "onboard",
+              "expand",
+              "contract",
+              "retire"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "preview_context": {
+            "default": "",
+            "title": "Preview Context",
+            "type": "string"
+          },
+          "product": {
+            "const": "launchplane",
+            "default": "launchplane",
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "related_issue": {
+            "title": "Related Issue",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "title": "Repository Owner Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "target_product": {
+            "title": "Target Product",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_product",
+          "repository",
+          "repository_id",
+          "repository_owner_id",
+          "launchplane_sha",
+          "reason",
+          "related_issue"
+        ],
+        "title": "GenericWebPreviewAuthzPlanRequest",
+        "type": "object"
+      },
       "GenericWebPreviewDesiredStateEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -6998,6 +7075,11 @@
       "LaunchplaneProductProfileRecord": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "default": "main",
+            "title": "Default Branch",
+            "type": "string"
+          },
           "display_name": {
             "title": "Display Name",
             "type": "string"
@@ -7045,6 +7127,16 @@
           },
           "repository": {
             "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "default": "",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "default": "",
+            "title": "Repository Owner Id",
             "type": "string"
           },
           "runtime_port": {
@@ -27273,6 +27365,96 @@
           }
         },
         "summary": "Read redacted active authz policy administration state"
+      }
+    },
+    "/v1/authz-policies/managed-rule-sets/generic-web-preview/plan": {
+      "post": {
+        "operationId": "plan_generic_web_preview_authz",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWebPreviewAuthzPlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan a generic-web preview managed authz rule-set change"
       }
     },
     "/v1/authz-policies/managed-rule-sets/reconcile": {
@@ -48272,6 +48454,112 @@
             "application/json": {
               "schema": {
                 "$defs": {
+                  "GenericWebOnboardingIntent": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "default_branch": {
+                        "default": "main",
+                        "title": "Default Branch",
+                        "type": "string"
+                      },
+                      "display_name": {
+                        "title": "Display Name",
+                        "type": "string"
+                      },
+                      "domain_certificate_type": {
+                        "default": "none",
+                        "enum": [
+                          "none",
+                          "letsencrypt"
+                        ],
+                        "title": "Domain Certificate Type",
+                        "type": "string"
+                      },
+                      "health_path": {
+                        "title": "Health Path",
+                        "type": "string"
+                      },
+                      "image_repository": {
+                        "title": "Image Repository",
+                        "type": "string"
+                      },
+                      "preview_app_name_prefix": {
+                        "default": "",
+                        "title": "Preview App Name Prefix",
+                        "type": "string"
+                      },
+                      "preview_context": {
+                        "default": "",
+                        "title": "Preview Context",
+                        "type": "string"
+                      },
+                      "preview_label": {
+                        "default": "launchplane-preview",
+                        "title": "Preview Label",
+                        "type": "string"
+                      },
+                      "product": {
+                        "title": "Product",
+                        "type": "string"
+                      },
+                      "project_name": {
+                        "default": "",
+                        "title": "Project Name",
+                        "type": "string"
+                      },
+                      "repository": {
+                        "title": "Repository",
+                        "type": "string"
+                      },
+                      "repository_id": {
+                        "title": "Repository Id",
+                        "type": "string"
+                      },
+                      "repository_owner_id": {
+                        "title": "Repository Owner Id",
+                        "type": "string"
+                      },
+                      "runtime_port": {
+                        "maximum": 65535,
+                        "minimum": 1,
+                        "title": "Runtime Port",
+                        "type": "integer"
+                      },
+                      "schema_version": {
+                        "const": 1,
+                        "default": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "server_id": {
+                        "default": "",
+                        "title": "Server Id",
+                        "type": "string"
+                      },
+                      "target_name": {
+                        "default": "",
+                        "title": "Target Name",
+                        "type": "string"
+                      },
+                      "testing_context": {
+                        "default": "",
+                        "title": "Testing Context",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "product",
+                      "display_name",
+                      "repository",
+                      "repository_id",
+                      "repository_owner_id",
+                      "image_repository",
+                      "runtime_port",
+                      "health_path"
+                    ],
+                    "title": "GenericWebOnboardingIntent",
+                    "type": "object"
+                  },
                   "ProductLaneHealthCheck": {
                     "additionalProperties": false,
                     "properties": {
@@ -48575,6 +48863,11 @@
                   "ProductOnboardingManifest": {
                     "additionalProperties": false,
                     "properties": {
+                      "default_branch": {
+                        "default": "main",
+                        "title": "Default Branch",
+                        "type": "string"
+                      },
                       "display_name": {
                         "title": "Display Name",
                         "type": "string"
@@ -48632,6 +48925,16 @@
                       },
                       "repository": {
                         "title": "Repository",
+                        "type": "string"
+                      },
+                      "repository_id": {
+                        "default": "",
+                        "title": "Repository Id",
+                        "type": "string"
+                      },
+                      "repository_owner_id": {
+                        "default": "",
+                        "title": "Repository Owner Id",
                         "type": "string"
                       },
                       "runtime_environments": {
@@ -49153,11 +49456,47 @@
                 },
                 "additionalProperties": false,
                 "properties": {
+                  "generic_web": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/GenericWebOnboardingIntent"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "manifest": {
-                    "$ref": "#/$defs/ProductOnboardingManifest"
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/ProductOnboardingManifest"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "mode": {
+                    "default": "apply",
+                    "enum": [
+                      "dry_run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
                   },
                   "product": {
                     "title": "Product",
+                    "type": "string"
+                  },
+                  "resolved_target_id": {
+                    "default": "",
+                    "title": "Resolved Target Id",
+                    "type": "string"
+                  },
+                  "reviewed_plan_sha256": {
+                    "default": "",
+                    "title": "Reviewed Plan Sha256",
                     "type": "string"
                   },
                   "schema_version": {
@@ -49168,8 +49507,7 @@
                   }
                 },
                 "required": [
-                  "product",
-                  "manifest"
+                  "product"
                 ],
                 "title": "ProductOnboardingApplyEnvelope",
                 "type": "object"

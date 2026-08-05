@@ -35,6 +35,15 @@ SELF_REUSABLE_WORKFLOW_PREFIX = "cbusillo/launchplane/.github/workflows/"
 FIRST_PARTY_CROSS_REPOSITORY_ACTION_PREFIX = "cbusillo/launchplane/.github/actions/"
 MUTABLE_REFERENCE_ALLOWLIST: Mapping[Path, frozenset[str]] = {}
 PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
+    Path(".github/workflows/product-onboarding.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml"}
+    ),
+    Path(".github/workflows/generic-web-preview-authorization.yml"): frozenset(
+        {
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-generic-web-preview-authz-apply.yml"
+        }
+    ),
     Path(".github/workflows/authz-policy-reconcile.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml"}
     ),
@@ -154,6 +163,18 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     ),
     "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml": (
         ActionClassification("First-party same-repository", "authorization policy administration")
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "protected generic-web target, record, and authorization apply",
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "protected generic-web preview authorization rotation and retirement",
+        )
     ),
     "cbusillo/launchplane/.github/workflows/reusable-route-binding-reconcile.yml": (
         ActionClassification("First-party same-repository", "route authority reconciliation")

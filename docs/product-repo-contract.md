@@ -139,6 +139,11 @@ Launchplane lifecycle authority such as authz policy, provider target,
 runtime-environment, managed secret, route batch, topology, or target-id
 material.
 
+Conventional generic-web repositories use the exact caller paths
+`.github/workflows/launchplane-preview.yml` and
+`.github/workflows/launchplane-preview-notice.yml`. The generated product-repo
+integration and onboarding authz planner share this path contract.
+
 When a product repository runs the gate from GitHub Actions, use a dedicated
 `.github/workflows/launchplane-config-authority.yml` workflow that calls the
 Launchplane-owned reusable gate:

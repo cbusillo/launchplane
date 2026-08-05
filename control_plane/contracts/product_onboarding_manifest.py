@@ -155,6 +155,9 @@ class ProductOnboardingManifest(BaseModel):
     product: str
     display_name: str
     repository: str
+    repository_id: str = ""
+    repository_owner_id: str = ""
+    default_branch: str = "main"
     driver_id: str = "generic-web"
     image_repository: str = ""
     runtime_port: int = Field(default=0, ge=0, le=65535)
@@ -199,6 +202,22 @@ class ProductOnboardingManifest(BaseModel):
             raise ValueError("product onboarding manifest requires display_name")
         if not self.repository.strip():
             raise ValueError("product onboarding manifest requires repository")
+        self.repository_id = self.repository_id.strip()
+        self.repository_owner_id = self.repository_owner_id.strip()
+        self.default_branch = self.default_branch.strip() or "main"
+        if bool(self.repository_id) != bool(self.repository_owner_id):
+            raise ValueError(
+                "product onboarding repository identity requires both repository_id and "
+                "repository_owner_id"
+            )
+        for label, value in (
+            ("repository_id", self.repository_id),
+            ("repository_owner_id", self.repository_owner_id),
+        ):
+            if value and not value.isdecimal():
+                raise ValueError(f"product onboarding {label} must be a numeric GitHub ID")
+        if any(character.isspace() for character in self.default_branch):
+            raise ValueError("product onboarding default_branch cannot contain whitespace")
         if not self.driver_id.strip():
             raise ValueError("product onboarding manifest requires driver_id")
         self.driver_id = self.driver_id.strip()

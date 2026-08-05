@@ -6648,6 +6648,11 @@
       "LaunchplaneProductProfileRecord": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "default": "main",
+            "title": "Default Branch",
+            "type": "string"
+          },
           "display_name": {
             "title": "Display Name",
             "type": "string"
@@ -6697,6 +6702,16 @@
             "title": "Repository",
             "type": "string"
           },
+          "repository_id": {
+            "default": "",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "default": "",
+            "title": "Repository Owner Id",
+            "type": "string"
+          },
           "runtime_port": {
             "default": 0,
             "maximum": 65535,
@@ -6720,6 +6735,7 @@
           }
         },
         "required": [
+          "default_branch",
           "display_name",
           "driver_id",
           "expected_config",
@@ -6731,6 +6747,8 @@
           "product",
           "promotion_workflow",
           "repository",
+          "repository_id",
+          "repository_owner_id",
           "runtime_port",
           "schema_version",
           "source",

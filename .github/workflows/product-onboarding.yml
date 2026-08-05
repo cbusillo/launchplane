@@ -4,16 +4,95 @@ name: Product Onboarding
 "on":
   workflow_dispatch:
     inputs:
-      manifest_base64:
-        description: Base64-encoded product onboarding JSON manifest.
+      mode:
+        description: Plan only or apply after protected review.
+        required: true
+        default: dry_run
+        type: choice
+        options:
+          - dry_run
+          - apply
+      product:
+        description: Stable lowercase product key.
         required: true
         type: string
-      confirmation:
-        description: Type APPLY PRODUCT ONBOARDING to apply records.
+      display_name:
+        description: Human-readable product name.
         required: true
+        type: string
+      repository:
+        description: Product repository in owner/name form.
+        required: true
+        type: string
+      image_repository:
+        description: Immutable image repository, without a tag or digest.
+        required: true
+        type: string
+      runtime_port:
+        description: Application runtime port.
+        required: true
+        type: string
+      health_path:
+        description: Application health endpoint path.
+        required: true
+        default: /healthz
+        type: string
+      testing_context:
+        description: Optional testing context; defaults to <product>-testing.
+        required: false
+        default: ""
+        type: string
+      preview_context:
+        description: Optional preview context; defaults to <product>-preview.
+        required: false
+        default: ""
+        type: string
+      preview_label:
+        description: Label that enables preview automation.
+        required: false
+        default: launchplane-preview
+        type: string
+      target_name:
+        description: Optional Dokploy application name.
+        required: false
+        default: ""
+        type: string
+      project_name:
+        description: Optional Dokploy project name.
+        required: false
+        default: ""
+        type: string
+      environment_name:
+        description: Non-production Dokploy environment.
+        required: true
+        default: testing
+        type: choice
+        options:
+          - testing
+      server_id:
+        description: Optional Dokploy server id.
+        required: false
+        default: ""
+        type: string
+      domain_certificate_type:
+        description: Preview TLS owner.
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - letsencrypt
+      confirmation:
+        description: Type APPLY GENERIC WEB ONBOARDING when mode=apply.
+        required: false
+        default: ""
         type: string
       reason:
-        description: Operator reason for applying onboarding records.
+        description: Single-line operator reason.
+        required: true
+        type: string
+      related_issue:
+        description: Single-line issue or change reference.
         required: true
         type: string
 
@@ -26,116 +105,316 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  apply:
+  plan:
     runs-on: ubuntu-latest
+    outputs:
+      authz_plan_sha256: ${{ steps.plan.outputs.authz_plan_sha256 }}
+      default_branch: ${{ steps.repository.outputs.default_branch }}
+      onboarding_plan_sha256: ${{ steps.plan.outputs.onboarding_plan_sha256 }}
+      product: ${{ steps.inputs.outputs.product }}
+      preview_context: ${{ steps.inputs.outputs.preview_context }}
+      repository_id: ${{ steps.repository.outputs.repository_id }}
+      repository_owner_id: ${{ steps.repository.outputs.repository_owner_id }}
+      testing_context: ${{ steps.inputs.outputs.testing_context }}
+      target_plan_sha256: ${{ steps.plan.outputs.target_plan_sha256 }}
     env:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-      MANIFEST_BASE64: ${{ inputs.manifest_base64 }}
+      MODE: ${{ inputs.mode }}
+      PRODUCT: ${{ inputs.product }}
+      DISPLAY_NAME: ${{ inputs.display_name }}
+      REPOSITORY: ${{ inputs.repository }}
+      IMAGE_REPOSITORY: ${{ inputs.image_repository }}
+      RUNTIME_PORT: ${{ inputs.runtime_port }}
+      HEALTH_PATH: ${{ inputs.health_path }}
+      TESTING_CONTEXT: ${{ inputs.testing_context }}
+      PREVIEW_CONTEXT: ${{ inputs.preview_context }}
+      PREVIEW_LABEL: ${{ inputs.preview_label }}
+      TARGET_NAME: ${{ inputs.target_name }}
+      PROJECT_NAME: ${{ inputs.project_name }}
+      ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+      SERVER_ID: ${{ inputs.server_id }}
+      DOMAIN_CERTIFICATE_TYPE: ${{ inputs.domain_certificate_type }}
       CONFIRMATION: ${{ inputs.confirmation }}
       REASON: ${{ inputs.reason }}
+      RELATED_ISSUE: ${{ inputs.related_issue }}
     steps:
-      - name: Validate apply guard
+      - name: Validate and normalize typed inputs
+        id: inputs
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$CONFIRMATION" != "APPLY PRODUCT ONBOARDING" ]; then
-            echo "Exact confirmation text is required." >&2
-            exit 1
-          fi
-          if [ -z "$(printf '%s' "$REASON" | xargs)" ]; then
-            echo "reason is required." >&2
-            exit 1
-          fi
-
-      - name: Build onboarding request
-        id: onboarding
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${MANIFEST_BASE64:?Missing manifest_base64 input}"
-          manifest_file="${RUNNER_TEMP}/product-onboarding-manifest.json"
-          request_file="${RUNNER_TEMP}/product-onboarding-request.json"
-          python3 - <<'PY' > "$manifest_file"
-          import base64
-          import binascii
+          python3 - <<'PY'
           import os
-          import sys
+          import re
 
-          try:
-              sys.stdout.buffer.write(
-                  base64.b64decode(
-                      os.environ["MANIFEST_BASE64"].encode("ascii"), validate=True
-                  )
-              )
-          except (binascii.Error, UnicodeEncodeError) as error:
-              raise SystemExit(f"manifest_base64 must be valid base64: {error}")
+          def required(name: str, maximum: int = 300) -> str:
+              value = os.environ[name].strip()
+              if not value:
+                  raise SystemExit(f"{name.lower()} is required.")
+              if len(value) > maximum or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                  raise SystemExit(f"{name.lower()} must be one printable line.")
+              return value
+
+          def optional(name: str, maximum: int = 300) -> str:
+              value = os.environ[name].strip()
+              if len(value) > maximum or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                  raise SystemExit(f"{name.lower()} must be one printable line.")
+              return value
+
+          mode = required("MODE")
+          if mode not in {"dry_run", "apply"}:
+              raise SystemExit("mode must be dry_run or apply.")
+          if mode == "apply" and os.environ["CONFIRMATION"].strip() != "APPLY GENERIC WEB ONBOARDING":
+              raise SystemExit("apply requires exact confirmation text.")
+          if mode == "dry_run" and os.environ["CONFIRMATION"].strip():
+              raise SystemExit("dry_run rejects confirmation text.")
+          product = required("PRODUCT", 63).lower()
+          if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", product) is None:
+              raise SystemExit("product must use lowercase letters, numbers, and hyphens.")
+          repository = required("REPOSITORY")
+          repository_match = re.fullmatch(r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", repository)
+          if repository_match is None:
+              raise SystemExit("repository must use owner/name form.")
+          runtime_port = required("RUNTIME_PORT", 5)
+          if not runtime_port.isdecimal() or not 1 <= int(runtime_port) <= 65535:
+              raise SystemExit("runtime_port must be an integer from 1 through 65535.")
+          health_path = required("HEALTH_PATH")
+          if not health_path.startswith("/"):
+              raise SystemExit("health_path must start with '/'.")
+          required("DISPLAY_NAME")
+          required("IMAGE_REPOSITORY")
+          required("PREVIEW_LABEL")
+          required("REASON")
+          required("RELATED_ISSUE")
+          if required("ENVIRONMENT_NAME") != "testing":
+              raise SystemExit("environment_name must be testing.")
+          testing_context = optional("TESTING_CONTEXT") or f"{product}-testing"
+          preview_context = optional("PREVIEW_CONTEXT") or f"{product}-preview"
+          target_name = optional("TARGET_NAME") or f"{product}-testing"
+          project_name = optional("PROJECT_NAME") or product
+          optional("SERVER_ID")
+          output = os.environ["GITHUB_OUTPUT"]
+          with open(output, "a", encoding="utf-8") as handle:
+              handle.write(f"product={product}\n")
+              handle.write(f"repository_owner={repository_match.group(1)}\n")
+              handle.write(f"repository_name={repository_match.group(2)}\n")
+              handle.write(f"testing_context={testing_context}\n")
+              handle.write(f"preview_context={preview_context}\n")
+              handle.write(f"target_name={target_name}\n")
+              handle.write(f"project_name={project_name}\n")
           PY
-          jq -e 'type == "object"' "$manifest_file" >/dev/null
-          product="$(jq -r '.product // empty' "$manifest_file")"
-          if [ -z "$product" ]; then
-            echo "Product onboarding manifest requires product." >&2
+
+      - name: Mint repository metadata token
+        id: repository-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ secrets.LAUNCHPLANE_ONBOARDING_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ steps.inputs.outputs.repository_owner }}
+          repositories: ${{ steps.inputs.outputs.repository_name }}
+
+      - name: Resolve immutable repository identity
+        id: repository
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.repository-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          repository_json="$(gh api "repos/${REPOSITORY}")"
+          repository_id="$(jq -r '.id | tostring' <<< "$repository_json")"
+          repository_owner_id="$(jq -r '.owner.id | tostring' <<< "$repository_json")"
+          default_branch="$(jq -r '.default_branch // empty' <<< "$repository_json")"
+          if ! [[ "$repository_id" =~ ^[0-9]+$ && "$repository_owner_id" =~ ^[0-9]+$ ]]; then
+            echo "GitHub repository identity is incomplete." >&2
             exit 1
           fi
-          jq -n \
-            --slurpfile manifest "$manifest_file" \
-            '{schema_version: 1, product: "launchplane", manifest: $manifest[0]}' \
-            > "$request_file"
+          if [ -z "$default_branch" ]; then
+            echo "GitHub repository default branch is unavailable." >&2
+            exit 1
+          fi
           {
-            echo "request_file=$request_file"
-            echo "product=$product"
-            echo "idempotency_key=product-onboarding:${product}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+            echo "repository_id=$repository_id"
+            echo "repository_owner_id=$repository_owner_id"
+            echo "default_branch=$default_branch"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Request product onboarding apply
-        id: onboarding_request
+      - name: Render plan requests
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ steps.repository.outputs.default_branch }}
+          NORMALIZED_PRODUCT: ${{ steps.inputs.outputs.product }}
+          NORMALIZED_PREVIEW_CONTEXT: ${{ steps.inputs.outputs.preview_context }}
+          NORMALIZED_PROJECT_NAME: ${{ steps.inputs.outputs.project_name }}
+          NORMALIZED_TARGET_NAME: ${{ steps.inputs.outputs.target_name }}
+          NORMALIZED_TESTING_CONTEXT: ${{ steps.inputs.outputs.testing_context }}
+          REPOSITORY_ID: ${{ steps.repository.outputs.repository_id }}
+          REPOSITORY_OWNER_ID: ${{ steps.repository.outputs.repository_owner_id }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg product "$NORMALIZED_PRODUCT" \
+            --arg display_name "$DISPLAY_NAME" \
+            --arg repository "$REPOSITORY" \
+            --arg repository_id "$REPOSITORY_ID" \
+            --arg repository_owner_id "$REPOSITORY_OWNER_ID" \
+            --arg default_branch "$DEFAULT_BRANCH" \
+            --arg image_repository "$IMAGE_REPOSITORY" \
+            --arg health_path "$HEALTH_PATH" \
+            --arg testing_context "$NORMALIZED_TESTING_CONTEXT" \
+            --arg target_name "$NORMALIZED_TARGET_NAME" \
+            --arg project_name "$NORMALIZED_PROJECT_NAME" \
+            --arg server_id "$SERVER_ID" \
+            --arg preview_context "$NORMALIZED_PREVIEW_CONTEXT" \
+            --arg preview_label "$PREVIEW_LABEL" \
+            --arg domain_certificate_type "$DOMAIN_CERTIFICATE_TYPE" \
+            --argjson runtime_port "$RUNTIME_PORT" \
+            '{schema_version:1, product:$product, display_name:$display_name,
+              repository:$repository, repository_id:$repository_id,
+              repository_owner_id:$repository_owner_id, default_branch:$default_branch,
+              image_repository:$image_repository, runtime_port:$runtime_port,
+              health_path:$health_path, testing_context:$testing_context,
+              target_name:$target_name, project_name:$project_name,
+              server_id:$server_id,
+              preview_context:$preview_context, preview_label:$preview_label,
+              domain_certificate_type:$domain_certificate_type}' \
+            > generic-web-intent.json
+          jq -n \
+            --arg context "$NORMALIZED_TESTING_CONTEXT" \
+            --arg target_name "$NORMALIZED_TARGET_NAME" \
+            --arg project_name "$NORMALIZED_PROJECT_NAME" \
+            --arg environment_name "$ENVIRONMENT_NAME" \
+            --arg server_id "$SERVER_ID" \
+            --arg healthcheck_path "$HEALTH_PATH" \
+            '{schema_version:1, mode:"dry-run", operation:"create-application",
+              product:"launchplane", context:$context, instance:"testing",
+              target_name:$target_name, project_name:$project_name,
+              environment_name:$environment_name, server_id:$server_id,
+              healthcheck_path:$healthcheck_path}' \
+            > target-plan-request.json
+          jq -n --slurpfile intent generic-web-intent.json \
+            '{schema_version:1, product:"launchplane", mode:"dry_run",
+              generic_web:$intent[0]}' \
+            > onboarding-plan-request.json
+          jq -n \
+            --arg target_product "$NORMALIZED_PRODUCT" \
+            --arg repository "$REPOSITORY" \
+            --arg repository_id "$REPOSITORY_ID" \
+            --arg repository_owner_id "$REPOSITORY_OWNER_ID" \
+            --arg default_branch "$DEFAULT_BRANCH" \
+            --arg preview_context "$NORMALIZED_PREVIEW_CONTEXT" \
+            --arg launchplane_sha "$GITHUB_SHA" \
+            --arg reason "$REASON" \
+            --arg related_issue "$RELATED_ISSUE" \
+            '{schema_version:1, product:"launchplane", operation:"onboard",
+              target_product:$target_product, repository:$repository,
+              repository_id:$repository_id, repository_owner_id:$repository_owner_id,
+              default_branch:$default_branch, preview_context:$preview_context,
+              launchplane_sha:$launchplane_sha, reason:$reason,
+              related_issue:$related_issue}' \
+            > authz-plan-request.json
+
+      - name: Plan Dokploy application target
+        id: target-plan
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/dokploy-targets/setup
+          payload-file: target-plan-request.json
+          expected-status: "202"
+          fail-result-paths: ""
+          response-output-file: target-plan.json
+
+      - name: Plan product records
+        id: onboarding-plan
         uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
           route-path: /v1/product-onboarding/apply
-          payload-file: ${{ steps.onboarding.outputs.request_file }}
-          idempotency-key: ${{ steps.onboarding.outputs.idempotency_key }}
+          payload-file: onboarding-plan-request.json
+          expected-status: "202"
           fail-result-paths: ""
-          response-output-file: product-onboarding.json
+          response-output-file: onboarding-plan.json
 
-      - name: Check product onboarding response
+      - name: Plan preview authorization
+        id: authz-plan
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/authz-policies/managed-rule-sets/generic-web-preview/plan
+          payload-file: authz-plan-request.json
+          expected-status: "202"
+          fail-result-paths: ""
+          response-output-file: authz-plan.json
+
+      - name: Finalize onboarding plan
+        id: plan
         shell: bash
         env:
-          STATUS_CODE: ${{ steps.onboarding_request.outputs.status-code }}
+          NORMALIZED_PREVIEW_CONTEXT: ${{ steps.inputs.outputs.preview_context }}
+          NORMALIZED_PRODUCT: ${{ steps.inputs.outputs.product }}
+          NORMALIZED_TESTING_CONTEXT: ${{ steps.inputs.outputs.testing_context }}
         run: |
           set -euo pipefail
-          if [ "$STATUS_CODE" != "202" ]; then
-            cat product-onboarding.json >&2
-            echo "Product onboarding failed with HTTP ${STATUS_CODE}." >&2
+          onboarding_plan_sha256="$(jq -r '.result.plan_sha256 // empty' onboarding-plan.json)"
+          authz_plan_sha256="$(jq -r '.result.plan_sha256 // empty' authz-plan.json)"
+          target_plan_sha256="$(sha256sum target-plan-request.json | awk '{print $1}')"
+          if ! [[ "$onboarding_plan_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Product onboarding plan did not return a valid digest." >&2
             exit 1
           fi
-          jq . product-onboarding.json
+          if ! [[ "$authz_plan_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Preview authz plan did not return a valid digest." >&2
+            exit 1
+          fi
+          jq '.result.configuration' authz-plan.json > authz-reconcile-request.json
+          {
+            echo "onboarding_plan_sha256=$onboarding_plan_sha256"
+            echo "authz_plan_sha256=$authz_plan_sha256"
+            echo "target_plan_sha256=$target_plan_sha256"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Generic-web onboarding plan"
+            echo
+            echo "- Product: $NORMALIZED_PRODUCT"
+            echo "- Repository: $REPOSITORY"
+            echo "- Testing context: $NORMALIZED_TESTING_CONTEXT"
+            echo "- Preview context: $NORMALIZED_PREVIEW_CONTEXT"
+            echo "- Provider operation: create-application"
+            echo "- Launchplane worker SHA: \`$GITHUB_SHA\`"
+            echo "- Provider plan: \`$target_plan_sha256\`"
+            echo "- Product plan: \`$onboarding_plan_sha256\`"
+            echo "- Authz plan: \`$authz_plan_sha256\`"
+            echo "- Authz rules added: $(jq -r '.result.diff.added_rule_count' authz-plan.json)"
+            echo "- Authz rules removed: $(jq -r '.result.diff.removed_rule_count' authz-plan.json)"
+            echo "- Readiness blockers: $(jq -r '.result.diff.operational_readiness_blocked_rule_count' authz-plan.json)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload onboarding evidence
-        if: always()
+      - name: Upload onboarding plan evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: product-onboarding-result
-          path: product-onboarding.json
-          if-no-files-found: warn
+          name: generic-web-onboarding-plan
+          path: |
+            generic-web-intent.json
+            target-plan-request.json
+            target-plan.json
+            onboarding-plan.json
+            authz-plan.json
+            authz-reconcile-request.json
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Summarize onboarding
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            echo "## Product onboarding"
-            echo
-            echo "- Product: ${{ steps.onboarding.outputs.product }}"
-            echo "- Evidence artifact: product-onboarding-result"
-            if [ -f product-onboarding.json ]; then
-              echo "- Status: $(jq -r '.status // "unknown"' product-onboarding.json)"
-              echo "- Trace: $(jq -r '.trace_id // ""' product-onboarding.json)"
-              echo "- Product profile: $(jq -r '.records.product_profile // ""' product-onboarding.json)"
-              echo "- Provider targets: $(jq -r '.records.provider_target_count // "0"' product-onboarding.json)"
-              echo "- Provider target IDs: $(jq -r '.records.provider_target_id_count // "0"' product-onboarding.json)"
-              echo "- Runtime environments: $(jq -r '.records.runtime_environment_record_count // "0"' product-onboarding.json)"
-              echo "- Secret bindings: $(jq -r '.records.secret_binding_count // "0"' product-onboarding.json)"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+  apply:
+    if: ${{ inputs.mode == 'apply' }}
+    needs: plan
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml@ddc0533476246a9c4c52094ab1c945e294adb3c9 # main
+    with:
+      product: ${{ needs.plan.outputs.product }}
+      testing_context: ${{ needs.plan.outputs.testing_context }}
+      onboarding_plan_sha256: ${{ needs.plan.outputs.onboarding_plan_sha256 }}
+      authz_plan_sha256: ${{ needs.plan.outputs.authz_plan_sha256 }}
+      target_plan_sha256: ${{ needs.plan.outputs.target_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+    secrets: inherit

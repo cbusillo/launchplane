@@ -2302,41 +2302,108 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", rollback_request_block)
         self.assertNotIn("Authorization: Bearer", rollback_request_block)
 
-    def test_product_onboarding_workflow_calls_service_route_with_apply_guard(self) -> None:
-        workflow_text = Path(".github/workflows/product-onboarding.yml").read_text(encoding="utf-8")
+    def test_product_onboarding_workflow_coordinates_typed_reviewed_flow(self) -> None:
+        workflow_path = Path(".github/workflows/product-onboarding.yml")
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        workflow = load_workflow(workflow_path)
+        apply_workflow_text = Path(
+            ".github/workflows/reusable-generic-web-onboarding-apply.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn("mode:", workflow_text)
+        self.assertIn("repository:", workflow_text)
+        self.assertIn("image_repository:", workflow_text)
+        self.assertIn("runtime_port:", workflow_text)
+        self.assertIn("APPLY GENERIC WEB ONBOARDING", workflow_text)
+        self.assertIn("actions/create-github-app-token@", workflow_text)
+        self.assertIn("LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID", workflow_text)
+        self.assertNotIn("permission-contents", workflow_text)
+        self.assertIn('gh api "repos/${REPOSITORY}"', workflow_text)
         self.assertIn(
             "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
         self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
+        self.assertIn("/v1/dokploy-targets/setup", workflow_text)
         self.assertIn("/v1/product-onboarding/apply", workflow_text)
-        self.assertIn("payload-file: ${{ steps.onboarding.outputs.request_file }}", workflow_text)
         self.assertIn(
-            "idempotency-key: ${{ steps.onboarding.outputs.idempotency_key }}",
+            "/v1/authz-policies/managed-rule-sets/generic-web-preview/plan",
             workflow_text,
         )
-        self.assertIn('fail-result-paths: ""', workflow_text)
-        self.assertIn("response-output-file: product-onboarding.json", workflow_text)
-        self.assertIn(
-            "STATUS_CODE: ${{ steps.onboarding_request.outputs.status-code }}", workflow_text
+        self.assertEqual(
+            workflow.job_uses("apply"),
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-generic-web-onboarding-apply.yml@"
+            "ddc0533476246a9c4c52094ab1c945e294adb3c9",
         )
-        self.assertIn('if [ "$STATUS_CODE" != "202" ]; then', workflow_text)
-        self.assertIn("APPLY PRODUCT ONBOARDING", workflow_text)
+        self.assertIn("/v1/authz-policies/managed-rule-sets/reconcile", apply_workflow_text)
+        self.assertIn("environment: launchplane-authz-admin", apply_workflow_text)
+        self.assertIn("generic-web-onboarding-plan", workflow_text)
+        self.assertIn("generic-web-onboarding-apply", apply_workflow_text)
+        self.assertIn("reviewed_plan_sha256:$reviewed", apply_workflow_text)
+        self.assertIn("resolved_target_id:$target_id", apply_workflow_text)
+        self.assertIn("Reviewed onboarding plan digest does not match", apply_workflow_text)
+        self.assertIn("Reviewed authz configuration does not match", apply_workflow_text)
+        self.assertIn("Reviewed provider plan digest does not match", apply_workflow_text)
+        self.assertIn("authz-managed:operator.generic-web-preview", apply_workflow_text)
+        self.assertIn("retention-days: 14", workflow_text)
+        self.assertIn("Launchplane worker SHA", workflow_text)
+        self.assertIn("product: ${{ needs.plan.outputs.product }}", workflow_text)
+        self.assertIn('fail-result-paths: ""', apply_workflow_text)
+        self.assertNotIn("manifest_base64", workflow_text)
+        concurrency = workflow.data["concurrency"]
+        assert isinstance(concurrency, dict)
+        self.assertEqual(concurrency["group"], "product-onboarding")
+        for checked_workflow_text in (workflow_text, apply_workflow_text):
+            self.assertNotIn("actions/checkout", checked_workflow_text)
+            self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", checked_workflow_text)
+            self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", checked_workflow_text)
+            self.assertNotIn("Authorization: Bearer", checked_workflow_text)
+            self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", checked_workflow_text)
+            self.assertNotIn("curl ", checked_workflow_text)
+
+    def test_generic_web_preview_authorization_workflow_owns_rotation_and_retirement(self) -> None:
+        workflow_path = Path(".github/workflows/generic-web-preview-authorization.yml")
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        workflow = load_workflow(workflow_path)
+        apply_workflow_text = Path(
+            ".github/workflows/reusable-generic-web-preview-authz-apply.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Generic Web Preview Authorization", workflow_text)
+        for operation in ("expand", "contract", "retire"):
+            self.assertIn(f"- {operation}", workflow_text)
+        self.assertNotIn("- onboard", workflow_text)
+        self.assertIn("actions/create-github-app-token@", workflow_text)
+        self.assertIn(
+            "/v1/authz-policies/managed-rule-sets/generic-web-preview/plan",
+            workflow_text,
+        )
+        self.assertEqual(
+            workflow.job_uses("apply"),
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-generic-web-preview-authz-apply.yml@"
+            "d21d609514404d3420fceb7fe53857ae407d3ff8",
+        )
+        self.assertIn("environment: launchplane-authz-admin", apply_workflow_text)
+        self.assertIn("/v1/authz-policies/managed-rule-sets/reconcile", apply_workflow_text)
+        self.assertIn("Reviewed authz configuration does not match", apply_workflow_text)
+        self.assertIn("retention-days: 14", workflow_text)
+        self.assertNotIn("managed_set_json", workflow_text)
+        self.assertNotIn("managed_set_json", apply_workflow_text)
+
+    def test_advanced_product_onboarding_manifest_workflow_remains_available(self) -> None:
+        workflow_text = Path(".github/workflows/product-onboarding-manifest.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Product Onboarding Manifest (Advanced)", workflow_text)
         self.assertIn("manifest_base64", workflow_text)
-        self.assertIn(
-            "product-onboarding:${product}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}",
-            workflow_text,
-        )
-        self.assertIn("product-onboarding-result", workflow_text)
-        self.assertIn("if-no-files-found: warn", workflow_text)
-        self.assertNotIn("actions/checkout", workflow_text)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
-        self.assertNotIn("Authorization: Bearer", workflow_text)
-        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
-        self.assertNotIn("curl ", workflow_text)
+        self.assertIn("APPLY PRODUCT ONBOARDING", workflow_text)
+        self.assertIn("environment: launchplane-authz-admin", workflow_text)
+        self.assertIn("/v1/product-onboarding/apply", workflow_text)
+        self.assertNotIn("/v1/authz-policies/managed-rule-sets/reconcile", workflow_text)
 
     def test_work_graph_snapshot_validate_uses_shared_launchplane_request(self) -> None:
         workflow_text = Path(".github/workflows/work-graph-snapshot-validate.yml").read_text(

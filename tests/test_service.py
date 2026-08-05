@@ -2682,6 +2682,208 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertNotIn("DISCORD_TOKEN", json.dumps(payload, sort_keys=True))
         self.assertNotIn("test:discord-blue-onboarding", json.dumps(payload, sort_keys=True))
 
+    def test_generic_web_onboarding_dry_run_binds_apply_and_repository_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [
+                                "generic_web_onboarding.plan",
+                                "product_onboarding.apply",
+                            ],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            generic_web = {
+                "product": "demo-web",
+                "display_name": "Demo Web",
+                "repository": "example/demo-web",
+                "repository_id": "123",
+                "repository_owner_id": "456",
+                "default_branch": "main",
+                "image_repository": "ghcr.io/example/demo-web",
+                "runtime_port": 3000,
+                "health_path": "/healthz",
+            }
+            dry_run_status, dry_run_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "generic_web": generic_web,
+                },
+            )
+            plan_sha256 = dry_run_payload["result"]["plan_sha256"]
+            mismatch_status, mismatch_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reviewed_plan_sha256": "0" * 64,
+                    "resolved_target_id": "app-demo-web",
+                    "generic_web": generic_web,
+                },
+                headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
+            )
+            apply_status, apply_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reviewed_plan_sha256": plan_sha256,
+                    "resolved_target_id": "app-demo-web",
+                    "generic_web": generic_web,
+                },
+                headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
+            )
+            replay_status, replay_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reviewed_plan_sha256": plan_sha256,
+                    "resolved_target_id": "app-demo-web",
+                    "generic_web": generic_web,
+                },
+                headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                profiles = store.list_product_profile_records()
+                profile = store.read_product_profile_record("demo-web")
+            finally:
+                store.close()
+
+        self.assertEqual(dry_run_status, 202)
+        self.assertRegex(plan_sha256, r"^[0-9a-f]{64}$")
+        self.assertEqual(mismatch_status, 409)
+        self.assertEqual(mismatch_payload["error"]["code"], "product_onboarding_plan_mismatch")
+        self.assertEqual(apply_status, 202)
+        self.assertEqual(apply_payload["result"]["mode"], "apply")
+        self.assertEqual(apply_payload["result"]["plan_sha256"], plan_sha256)
+        self.assertEqual(replay_status, 202)
+        self.assertTrue(replay_payload["replayed"])
+        self.assertEqual(replay_payload["original_trace_id"], apply_payload["trace_id"])
+        self.assertEqual(replay_payload["records"], apply_payload["records"])
+        self.assertEqual(replay_payload["result"], apply_payload["result"])
+        self.assertEqual(len(profiles), 1)
+        self.assertEqual(profile.repository, "example/demo-web")
+        self.assertEqual(profile.repository_id, "123")
+        self.assertEqual(profile.repository_owner_id, "456")
+        self.assertEqual(profile.default_branch, "main")
+        self.assertEqual(profile.preview.context, "demo-web-preview")
+
+    def test_generic_web_onboarding_planner_cannot_apply_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["generic_web_onboarding.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3"),
+            )
+            generic_web = {
+                "product": "demo-web",
+                "display_name": "Demo Web",
+                "repository": "example/demo-web",
+                "repository_id": "123",
+                "repository_owner_id": "456",
+                "default_branch": "main",
+                "image_repository": "ghcr.io/example/demo-web",
+                "runtime_port": 3000,
+                "health_path": "/healthz",
+            }
+            dry_run_status, dry_run_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "generic_web": generic_web,
+                },
+            )
+            apply_status, apply_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reviewed_plan_sha256": dry_run_payload["result"]["plan_sha256"],
+                    "resolved_target_id": "app-demo-web",
+                    "generic_web": generic_web,
+                },
+                headers={"Idempotency-Key": "planner-cannot-apply-records"},
+            )
+
+        self.assertEqual(dry_run_status, 202)
+        self.assertEqual(apply_status, 403)
+        self.assertEqual(apply_payload["error"]["code"], "authorization_denied")
+
     def test_product_onboarding_endpoint_rejects_provider_target_conflict(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -3138,12 +3340,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         {
                             "repository": "cbusillo/launchplane",
                             "workflow_refs": [
-                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                                "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
                             ],
                             "event_names": ["workflow_dispatch"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["dokploy_target.setup"],
+                            "actions": ["dokploy_target.plan"],
                         }
                     ]
                 }
@@ -3154,7 +3356,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     _identity(
                         repository="cbusillo/launchplane",
                         workflow_ref=(
-                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
                         ),
                         event_name="workflow_dispatch",
                     )
@@ -3187,6 +3389,29 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "deploy_timeout_seconds": 900,
                     },
                 )
+            apply_status, apply_payload = _invoke_dokploy_target_setup_app(
+                app,
+                method="POST",
+                path="/v1/dokploy-targets/setup",
+                payload={
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "operation": "create-compose",
+                    "product": "launchplane",
+                    "context": "cm_website",
+                    "instance": "testing",
+                    "target_name": "cm-website-testing",
+                    "project_name": "Odoo",
+                    "environment_name": "testing",
+                    "server_id": "server-123",
+                    "domains": ["cm-website-testing.shinycomputers.com"],
+                    "runtime_port": 8069,
+                    "deploy_timeout_seconds": 900,
+                    "confirmation": "APPLY DOKPLOY TARGET SETUP",
+                    "reason": "Planner must not apply.",
+                },
+                headers={"Idempotency-Key": "planner-cannot-apply-target"},
+            )
             store = PostgresRecordStore(database_url=database_url)
             try:
                 target_records = store.list_dokploy_target_records()
@@ -3201,6 +3426,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "planned-compose-id",
         )
         self.assertEqual(target_records, ())
+        self.assertEqual(apply_status, 403)
+        self.assertEqual(apply_payload["error"]["code"], "authorization_denied")
 
     def test_dokploy_target_setup_endpoint_maps_click_exception_to_bad_request(
         self,
@@ -5127,6 +5354,157 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 503)
         self.assertEqual(payload["error"]["code"], "authz_policy_unavailable")
+
+    def test_generic_web_preview_authz_plan_reuses_managed_reconcile_contract(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [
+                                "authz_policy_grant.write",
+                                "generic_web_preview_authz.plan",
+                            ],
+                        }
+                    ],
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            plan_status, plan_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/generic-web-preview/plan",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "operation": "onboard",
+                    "target_product": "demo-web",
+                    "repository": "example/demo-web",
+                    "repository_id": "123",
+                    "repository_owner_id": "456",
+                    "default_branch": "main",
+                    "preview_context": "demo-web-preview",
+                    "launchplane_sha": "a" * 40,
+                    "reason": "Onboard demo web.",
+                    "related_issue": "#1970",
+                },
+            )
+            configuration = plan_payload["result"]["configuration"]
+            plan_sha256 = plan_payload["result"]["plan_sha256"]
+            reconcile_status, reconcile_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload={
+                    **configuration,
+                    "mode": "apply",
+                    "reviewed_plan_sha256": plan_sha256,
+                },
+                headers={"Idempotency-Key": "generic-web-preview-demo-web"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_record = store.list_authz_policy_records(status="active", limit=1)[0]
+            finally:
+                store.close()
+
+        self.assertEqual(plan_status, 202)
+        self.assertEqual(plan_payload["records"]["target_rule_count"], "6")
+        self.assertEqual(plan_payload["result"]["diff"]["added_rule_count"], 6)
+        self.assertEqual(
+            plan_payload["result"]["diff"]["operational_readiness_blocked_rule_count"],
+            0,
+        )
+        self.assertEqual(reconcile_status, 202)
+        self.assertEqual(reconcile_payload["result"]["diff"]["plan_sha256"], plan_sha256)
+        managed_rules = tuple(
+            rule
+            for rule in active_record.policy.github_actions
+            if rule.managed_set_id == "operator.generic-web-preview"
+        )
+        self.assertEqual(len(managed_rules), 6)
+        self.assertEqual({rule.products for rule in managed_rules}, {("demo-web",)})
+
+    def test_generic_web_preview_authz_plan_denies_missing_planner_authority(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_onboarding.apply"],
+                        }
+                    ],
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/generic-web-preview/plan",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "operation": "onboard",
+                    "target_product": "demo-web",
+                    "repository": "example/demo-web",
+                    "repository_id": "123",
+                    "repository_owner_id": "456",
+                    "default_branch": "main",
+                    "preview_context": "demo-web-preview",
+                    "launchplane_sha": "a" * 40,
+                    "reason": "Onboard demo web.",
+                    "related_issue": "#1970",
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_managed_authz_reconcile_migrates_policy_and_rejects_stale_digest(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

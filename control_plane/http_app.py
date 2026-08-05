@@ -4,6 +4,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
 from copy import deepcopy
 from dataclasses import replace
@@ -37,6 +38,16 @@ from control_plane import product_config_service as control_plane_product_config
 from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_health_monitoring as control_plane_product_health_monitoring
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
+from control_plane.generic_web_onboarding import (
+    GenericWebOnboardingIntent,
+    build_generic_web_onboarding_manifest,
+    generic_web_onboarding_plan_sha256,
+)
+from control_plane.generic_web_preview_authz import (
+    GenericWebPreviewAuthzPlanResult,
+    GenericWebPreviewAuthzPlanRequest,
+    build_generic_web_preview_authz_reconcile_request,
+)
 from control_plane import (
     product_prelaunch_rebuild_policy as control_plane_product_prelaunch_rebuild_policy,
 )
@@ -849,6 +860,9 @@ _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
 _AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE = "/v1/authz-diagnostics/github-actions/evaluate"
 _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE = "/v1/authz-policies/managed-rule-sets/reconcile"
+_GENERIC_WEB_PREVIEW_AUTHZ_PLAN_ROUTE = (
+    "/v1/authz-policies/managed-rule-sets/generic-web-preview/plan"
+)
 _AUTH_SESSION_ROUTE = "/v1/auth/session"
 _AUTH_GITHUB_LOGIN_ROUTE = "/auth/github/login"
 _AUTH_GITHUB_CALLBACK_ROUTE = "/auth/github/callback"
@@ -1632,13 +1646,39 @@ class ProductOnboardingApplyEnvelope(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     product: str
-    manifest: ProductOnboardingManifest
+    mode: Literal["dry_run", "apply"] = "apply"
+    reviewed_plan_sha256: str = ""
+    manifest: ProductOnboardingManifest | None = None
+    generic_web: GenericWebOnboardingIntent | None = None
+    resolved_target_id: str = ""
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "ProductOnboardingApplyEnvelope":
         if self.product.strip() != "launchplane":
             raise ValueError("Product onboarding writes require product 'launchplane'.")
         self.product = "launchplane"
+        self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
+        self.resolved_target_id = self.resolved_target_id.strip()
+        if (self.manifest is None) == (self.generic_web is None):
+            raise ValueError("Product onboarding requires exactly one of manifest or generic_web.")
+        if self.manifest is not None:
+            if self.mode != "apply":
+                raise ValueError("Legacy product onboarding manifests support apply mode only.")
+            if self.reviewed_plan_sha256 or self.resolved_target_id:
+                raise ValueError(
+                    "Legacy product onboarding manifests reject generic-web plan fields."
+                )
+            return self
+        if self.mode == "dry_run":
+            if self.reviewed_plan_sha256 or self.resolved_target_id:
+                raise ValueError(
+                    "Generic-web onboarding dry-run rejects reviewed plan and target id."
+                )
+            return self
+        if re.fullmatch(r"[0-9a-f]{64}", self.reviewed_plan_sha256) is None:
+            raise ValueError("Generic-web onboarding apply requires reviewed_plan_sha256.")
+        if not self.resolved_target_id:
+            raise ValueError("Generic-web onboarding apply requires resolved_target_id.")
         return self
 
 
@@ -12982,9 +13022,14 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
+        onboarding_action = (
+            "generic_web_onboarding.plan"
+            if onboarding_request.generic_web is not None and onboarding_request.mode == "dry_run"
+            else "product_onboarding.apply"
+        )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
-            action="product_onboarding.apply",
+            action=onboarding_action,
             product=onboarding_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ):
@@ -12992,12 +13037,60 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Workflow cannot apply Launchplane product onboarding manifests.",
+                message="Workflow cannot plan or apply Launchplane product onboarding.",
             )
         database_store = require_product_onboarding_database_store(
             record_store=record_store,
             trace_id=trace_id,
         )
+        onboarding_manifest = onboarding_request.manifest
+        generic_web_plan_sha256 = ""
+        if onboarding_request.generic_web is not None:
+            generic_web_plan_sha256 = generic_web_onboarding_plan_sha256(
+                onboarding_request.generic_web
+            )
+            if onboarding_request.mode == "dry_run":
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={
+                        "provider_target_count": "1",
+                        "provider_target_id_count": "1",
+                        "runtime_environment_record_count": "0",
+                        "secret_binding_count": "0",
+                    },
+                    result={
+                        "mode": "dry_run",
+                        "product": onboarding_request.generic_web.product,
+                        "repository": onboarding_request.generic_web.repository,
+                        "repository_id": onboarding_request.generic_web.repository_id,
+                        "repository_owner_id": (onboarding_request.generic_web.repository_owner_id),
+                        "default_branch": onboarding_request.generic_web.default_branch,
+                        "testing_context": onboarding_request.generic_web.testing_context,
+                        "preview_context": onboarding_request.generic_web.preview_context,
+                        "target_operation": "create-application",
+                        "plan_sha256": generic_web_plan_sha256,
+                    },
+                )
+            if onboarding_request.reviewed_plan_sha256 != generic_web_plan_sha256:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_onboarding_plan_mismatch",
+                    message=("Generic-web onboarding inputs no longer match the reviewed dry-run."),
+                )
+            try:
+                onboarding_manifest = build_generic_web_onboarding_manifest(
+                    intent=onboarding_request.generic_web,
+                    target_id=onboarding_request.resolved_target_id,
+                )
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_product_onboarding_manifest",
+                    message=str(error),
+                ) from error
+        assert onboarding_manifest is not None
         (
             normalized_idempotency_key,
             payload_fingerprint,
@@ -13016,7 +13109,7 @@ def create_launchplane_fastapi_app(
         try:
             onboarding_result, authority_bundle = plan_product_onboarding_authority_bundle(
                 record_store=database_store,
-                manifest=onboarding_request.manifest,
+                manifest=onboarding_manifest,
             )
         except ValueError as error:
             raise _launchplane_http_error(
@@ -13030,6 +13123,12 @@ def create_launchplane_fastapi_app(
                 onboarding_result
             )
         )
+        if generic_web_plan_sha256:
+            driver_result = {
+                **driver_result,
+                "mode": "apply",
+                "plan_sha256": generic_web_plan_sha256,
+            }
         onboarding_response = accepted_evidence_response(
             trace_id=trace_id,
             records={
@@ -13165,6 +13264,103 @@ def create_launchplane_fastapi_app(
         if record_id is None:
             return {}
         return {"authz_policy_record_id": str(record_id)}
+
+    async def plan_generic_web_preview_authz(
+        planning_request: GenericWebPreviewAuthzPlanRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message=("Generic-web preview authz planning requires Launchplane database storage."),
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="generic_web_preview_authz.plan",
+            product=planning_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot plan generic-web preview authorization.",
+            )
+        active_records = database_store.list_authz_policy_records(status="active", limit=2)
+        if not active_records:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_policy_unavailable",
+                message="Launchplane active authz policy is unavailable.",
+            )
+        if len(active_records) > 1:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_conflict",
+                message="Multiple active Launchplane authz policy records exist.",
+            )
+        observed_record = active_records[0]
+        try:
+            reconcile_request = build_generic_web_preview_authz_reconcile_request(
+                current_policy=observed_record.policy,
+                request=planning_request,
+            )
+            (
+                _,
+                current_record,
+                _,
+                diff,
+            ) = control_plane_authz_grant_service.plan_managed_authz_policy_reconcile(
+                record_store=database_store,
+                request=reconcile_request,
+            )
+        except control_plane_authz_grant_service.AuthzPolicyConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_conflict",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_generic_web_preview_authz_plan",
+                message=str(error),
+            ) from error
+        if current_record.policy_sha256 != observed_record.policy_sha256:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_policy_conflict",
+                message="Launchplane active authz policy changed while planning.",
+            )
+        target_rule_count = sum(
+            planning_request.target_product in rule.products
+            for rule in reconcile_request.desired_policy.github_actions
+        )
+        plan_result = GenericWebPreviewAuthzPlanResult(
+            operation=planning_request.operation,
+            target_product=planning_request.target_product,
+            target_rule_count=target_rule_count,
+            desired_rule_count=len(reconcile_request.desired_policy.github_actions),
+            plan_sha256=diff.plan_sha256,
+            configuration=reconcile_request.model_dump(mode="json"),
+            diff=diff.model_dump(mode="json"),
+        )
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "managed_set_id": diff.managed_set_id,
+                "desired_rule_count": str(plan_result.desired_rule_count),
+                "target_rule_count": str(plan_result.target_rule_count),
+            },
+            result=plan_result.model_dump(mode="json"),
+        )
 
     def validate_managed_authz_policy_payload(
         *,
@@ -17650,17 +17846,27 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        can_setup_target = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="dokploy_target.setup",
             product=setup_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
+        )
+        can_plan_target = setup_request.mode == "dry-run" and (
+            can_setup_target
+            or resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="dokploy_target.plan",
+                product=setup_request.product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+        )
+        if not (can_setup_target if setup_request.mode == "apply" else can_plan_target):
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Workflow cannot run Launchplane Dokploy target setup.",
+                message="Workflow cannot plan or apply Launchplane Dokploy target setup.",
             )
         if setup_request.mode == "apply":
             if setup_request.confirmation != "APPLY DOKPLOY TARGET SETUP":
@@ -20396,6 +20602,18 @@ def create_launchplane_fastapi_app(
             409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_PREVIEW_AUTHZ_PLAN_ROUTE,
+        plan_generic_web_preview_authz,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="plan_generic_web_preview_authz",
+        summary="Plan a generic-web preview managed authz rule-set change",
+        responses=authz_policy_route_responses,
     )
 
     app.add_api_route(

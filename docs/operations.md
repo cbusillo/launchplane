@@ -372,6 +372,7 @@ Current implementation scope:
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
 - `GET /v1/authz-policies/active`
+- `POST /v1/authz-policies/managed-rule-sets/generic-web-preview/plan`
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
 - `POST /v1/authz-diagnostics/github-actions/evaluate`
 - `GET /v1/route-bindings/records/current`
@@ -379,6 +380,7 @@ Current implementation scope:
 - `POST /v1/route-bindings/odoo-testing/controller/run-once`
 - `POST /v1/route-bindings/external/reconcile`
 - `POST /v1/provider-targets/operations`
+- `POST /v1/product-onboarding/apply`
 - `POST /v1/product-profiles/context-cutover/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
 - `POST /v1/every-code/notification-policies/apply`
@@ -430,16 +432,20 @@ policy-admin worker rules for the standalone authz wrapper and must declare the
 `operator.authz-policy-reconcile` managed-set identity;
 `LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` owns the generic
 GitHub-human manager preview approval writer set and must declare the exact
-`operator.manager-preview-approval` managed-set identity;
-`LAUNCHPLANE_AUTHZ_GENERIC_WEB_PREVIEW_MANAGED_SET_JSON` owns generic-web
-product preview caller grants and must declare the exact
-`operator.generic-web-preview` managed-set identity. Keep product repositories,
-numeric repository identities, caller workflow refs, immutable Launchplane
-worker refs, products, contexts, events, and actions inside that protected
-desired set rather than adding product-specific wrapper jobs. Relative nested
-reusable-workflow calls resolve at the caller's immutable Launchplane commit,
-so rotate lifecycle, verification, notice, and feedback worker rules through
-the reviewed overlap procedure before repinning product callers;
+`operator.manager-preview-approval` managed-set identity. Generic-web preview
+caller grants are no longer sourced from a per-product repository secret. The
+typed product-onboarding planner derives repository identity, caller workflow
+refs, immutable Launchplane worker refs, products, contexts, events, and actions
+and submits the complete `operator.generic-web-preview` desired set through the
+same protected managed reconcile contract. Relative nested reusable-workflow
+calls resolve at the caller's immutable Launchplane commit, so rotate lifecycle,
+verification, notice, and feedback worker rules through the planner's
+expand/contract operations before repinning product callers;
+`LAUNCHPLANE_AUTHZ_GENERIC_WEB_ONBOARDING_MANAGED_SET_JSON` owns only the
+permanent exact Launchplane workflow grants for typed onboarding planning,
+protected target/record/authz apply, and preview-authz rotation/retirement. It
+must declare `operator.generic-web-onboarding` and must not contain product
+repository, product context, target, domain, or per-product preview rules;
 `LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON` owns the generic
 Product Health Monitoring wrapper's exact immutable worker grant;
 `LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
@@ -1353,6 +1359,48 @@ Current derived-state behavior:
   reconciliation and is never sent again.
 
 ## Core Rules
+
+### Conventional generic-web onboarding
+
+Use the manual `Product Onboarding` workflow for a new generic-web product.
+Start with `mode=dry_run` when operator review of the exact plan is useful, or
+use `mode=apply` for one dispatch that pauses at the protected
+`launchplane-authz-admin` environment before any writes. Provide product,
+repository, image repository, runtime port, health path, and a reason/issue
+reference; optional names derive from the product key.
+
+The workflow resolves immutable GitHub identity, plans one non-production
+Dokploy application, plans Launchplane records, and plans the complete
+`operator.generic-web-preview` managed authz set. The apply job reuses the
+reviewed plan artifact and digests. Do not copy target ids, manifests, authz
+JSON, or database credentials into the conventional workflow.
+
+Planning authority is read-only and distinct: the plan job uses
+`dokploy_target.plan`, `generic_web_onboarding.plan`, and
+`generic_web_preview_authz.plan`. Only the protected apply worker receives
+`dokploy_target.setup`, `product_onboarding.apply`, and
+`authz_policy_grant.write`. Both protected workers are called by immutable
+full-SHA reusable-workflow refs so policy-admin grants never depend on a mutable
+branch identity.
+
+Use `Generic Web Preview Authorization` for reviewed `expand`, `contract`, and
+`retire` operations after onboarding. It derives the same conventional caller
+paths and immutable repository identity, submits no hand-authored policy JSON,
+and applies only through the protected managed reconcile contract.
+
+For products previously owned by the retired per-product generic-preview
+secret, run `expand` at the new Launchplane SHA, repin the product callers, then
+run `contract` at that same SHA. This reviewed overlap removes legacy managed
+rule identities without an authorization gap. Use `retire` when offboarding the
+product entirely.
+
+If provider creation succeeds and a later step fails, rerun the exact same
+workflow inputs, including the reason. Stable idempotency keys replay the provider result and prevent duplicate
+creation. If records succeed but authz fails, leave the records in place and
+rerun; the product remains unauthorized until the existing managed authz
+reconcile succeeds. Use `Product Onboarding Manifest (Advanced)` only when the
+typed generic-web contract does not fit, and use `Dokploy Target Setup` for
+adoption, production, compose, or repair operations.
 
 - Promotions and deploys reference explicit artifact identifiers.
 - Missing control-plane config is a hard error, not a silent fallback.
