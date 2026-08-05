@@ -266,6 +266,15 @@ class NpmplusClientTests(unittest.TestCase):
         with self.assertRaises(click.ClickException):
             client.list_proxy_hosts()
 
+    def test_list_proxy_hosts_normalizes_null_locations(self) -> None:
+        opener = _Opener()
+        opener.proxy_hosts_payload = [{**_proxy_host_payload(id=78), "locations": None}]
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+
+        proxy_hosts = client.list_proxy_hosts()
+
+        self.assertEqual(proxy_hosts[0].locations, ())
+
     def test_credentials_fail_closed_for_missing_secret(self) -> None:
         with self.assertRaises(ValueError):
             NpmplusCredentials(base_url="https://npmplus.example.test", identity="user", secret="")
