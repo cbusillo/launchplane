@@ -13050,13 +13050,27 @@ def create_launchplane_fastapi_app(
                 onboarding_request.generic_web
             )
             if onboarding_request.mode == "dry_run":
+                try:
+                    planned_manifest = build_generic_web_onboarding_manifest(
+                        intent=onboarding_request.generic_web,
+                        target_id="planned-provider-target",
+                    )
+                except ValueError as error:
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="invalid_product_onboarding_manifest",
+                        message=str(error),
+                    ) from error
                 return accepted_evidence_response(
                     trace_id=trace_id,
                     records={
-                        "provider_target_count": "1",
-                        "provider_target_id_count": "1",
-                        "runtime_environment_record_count": "0",
-                        "secret_binding_count": "0",
+                        "provider_target_count": str(len(planned_manifest.provider_targets)),
+                        "provider_target_id_count": str(len(planned_manifest.provider_targets)),
+                        "runtime_environment_record_count": str(
+                            len(planned_manifest.runtime_environments)
+                        ),
+                        "secret_binding_count": str(len(planned_manifest.secret_bindings)),
                     },
                     result={
                         "mode": "dry_run",
@@ -13067,6 +13081,7 @@ def create_launchplane_fastapi_app(
                         "default_branch": onboarding_request.generic_web.default_branch,
                         "testing_context": onboarding_request.generic_web.testing_context,
                         "preview_context": onboarding_request.generic_web.preview_context,
+                        "preview_base_url": onboarding_request.generic_web.preview_base_url,
                         "target_operation": "create-application",
                         "plan_sha256": generic_web_plan_sha256,
                     },

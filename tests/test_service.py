@@ -2729,6 +2729,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "image_repository": "ghcr.io/example/demo-web",
                 "runtime_port": 3000,
                 "health_path": "/healthz",
+                "preview_base_url": "https://demo-preview.example.com",
             }
             dry_run_status, dry_run_payload = _invoke_app(
                 app,
@@ -2788,11 +2789,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
             try:
                 profiles = store.list_product_profile_records()
                 profile = store.read_product_profile_record("demo-web")
+                runtime_environments = store.list_runtime_environment_records(
+                    context_name="demo-web-preview"
+                )
             finally:
                 store.close()
 
         self.assertEqual(dry_run_status, 202)
         self.assertRegex(plan_sha256, r"^[0-9a-f]{64}$")
+        self.assertEqual(dry_run_payload["records"]["runtime_environment_record_count"], "1")
+        self.assertEqual(
+            dry_run_payload["result"]["preview_base_url"],
+            "https://demo-preview.example.com",
+        )
         self.assertEqual(mismatch_status, 409)
         self.assertEqual(mismatch_payload["error"]["code"], "product_onboarding_plan_mismatch")
         self.assertEqual(apply_status, 202)
@@ -2809,6 +2818,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(profile.repository_owner_id, "456")
         self.assertEqual(profile.default_branch, "main")
         self.assertEqual(profile.preview.context, "demo-web-preview")
+        self.assertEqual(len(runtime_environments), 1)
+        self.assertEqual(
+            runtime_environments[0].env,
+            {"LAUNCHPLANE_PREVIEW_BASE_URL": "https://demo-preview.example.com"},
+        )
 
     def test_generic_web_onboarding_planner_cannot_apply_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2853,6 +2867,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "image_repository": "ghcr.io/example/demo-web",
                 "runtime_port": 3000,
                 "health_path": "/healthz",
+                "preview_base_url": "https://demo-preview.example.com",
             }
             dry_run_status, dry_run_payload = _invoke_app(
                 app,

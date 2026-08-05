@@ -47,6 +47,21 @@ class _ProductOnboardingStore:
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
         self.runtime_environments.append(record)
 
+    def list_runtime_environment_records(
+        self,
+        *,
+        scope: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        return tuple(
+            record
+            for record in self.runtime_environments
+            if (not scope or record.scope == scope)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
+
     def list_secret_bindings(
         self,
         *,
