@@ -107,8 +107,10 @@ default, derives a run-scoped idempotency key, calls the correct Launchplane
 route, and exposes the returned preview slug, preview URL, refresh status,
 destroy status, or feedback status as job outputs. Callers should omit preview
 context so Launchplane can derive it from the product profile before
-authorization and recording. It does not accept `preview_slug`, `preview_url`,
-provider target ids, feedback markdown, or idempotency keys as caller inputs.
+authorization and recording. The lifecycle boundary normalizes an omitted or
+empty driver timeout to 300 seconds before constructing refresh or destroy
+requests. It does not accept `preview_slug`, `preview_url`, provider target ids,
+feedback markdown, or idempotency keys as caller inputs.
 For generic-web application previews, `preview.domain_certificate_type="none"`
 means TLS terminates at the edge ingress: Launchplane creates the Dokploy domain
 on HTTP only, while the public preview URL remains HTTPS. `"letsencrypt"`
@@ -116,7 +118,10 @@ instead makes Dokploy terminate TLS for that domain. This keeps one TLS owner
 per preview route and avoids publishing an inner TLS route when Dokploy has no
 certificate to serve.
 
-When a generic-web refresh receives `403`, the lifecycle worker makes one
+The generic-web preview-refresh route may return `200` or `202` for a successful
+provider mutation. The reusable lifecycle worker accepts both responses and
+still validates the returned refresh and readiness statuses. When a generic-web
+refresh receives `403`, the lifecycle worker makes one
 same-identity call to the redacted GitHub Actions authz diagnostic route before
 failing the original refresh. That diagnostic still requires a separate,
 narrow `authz_diagnostic.evaluate` grant; without it, the workflow retains the

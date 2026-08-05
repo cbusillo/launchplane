@@ -263,6 +263,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
             parsed_workflow.job_uses("feedback-cleanup"),
             "./.github/workflows/reusable-preview-feedback-status.yml",
         )
+        self.assertEqual(parsed_workflow.job_permissions("resolve"), {"contents": "read"})
         self.assertIn("status: ${{ needs.resolve.outputs.status }}", workflow)
         self.assertIn("operation: destroy", workflow)
         self.assertIn("mode: cleanup", workflow)
@@ -283,27 +284,59 @@ class PreviewWorkflowContractTests(unittest.TestCase):
 
     def test_reusable_generic_web_preview_lifecycle_derives_preview_slug(self) -> None:
         workflow_path = REPO_ROOT / ".github/workflows/reusable-generic-web-preview-lifecycle.yml"
-        workflow = (workflow_path).read_text(encoding="utf-8")
-        workflow_inputs = workflow_call_inputs(load_workflow(workflow_path))
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        workflow = load_workflow(workflow_path)
+        workflow_inputs = workflow_call_inputs(workflow)
 
-        self.assertIn("route-path: /v1/drivers/generic-web/preview-refresh", workflow)
-        self.assertIn("route-path: /v1/drivers/generic-web/preview-destroy", workflow)
-        self.assertIn("route-path: /v1/authz-diagnostics/github-actions/evaluate", workflow)
-        self.assertIn('"action": "preview_refresh.execute"', workflow)
-        self.assertIn("expected-status: 200,202,403", workflow)
+        self.assertIn("route-path: /v1/drivers/generic-web/preview-refresh", workflow_text)
+        self.assertIn("route-path: /v1/drivers/generic-web/preview-destroy", workflow_text)
+        self.assertIn("route-path: /v1/authz-diagnostics/github-actions/evaluate", workflow_text)
+        self.assertIn('"action": "preview_refresh.execute"', workflow_text)
+        self.assertIn("expected-status: 200,202,403", workflow_text)
         self.assertIn(
-            "refresh.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}", workflow
+            "refresh.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}",
+            workflow_text,
         )
         self.assertIn(
-            "destroy.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}", workflow
+            "destroy.anchor_pr_number=${{ needs.resolve.outputs.anchor_pr_number }}",
+            workflow_text,
         )
+
+        resolve_outputs = cast(dict[str, object], workflow.job("resolve")["outputs"])
+        self.assertEqual(
+            resolve_outputs["timeout_seconds"],
+            "${{ steps.request.outputs.timeout_seconds }}",
+        )
+        resolver = workflow.step_named("resolve", "Resolve Launchplane preview request")
+        self.assertIsNotNone(resolver)
+        assert resolver is not None
+        self.assertIn('echo "timeout_seconds=$TIMEOUT_SECONDS"', resolver.run)
+        for job_id, field_name in (
+            ("refresh", "refresh.timeout_seconds"),
+            ("destroy", "destroy.timeout_seconds"),
+        ):
+            request = workflow.step_named(
+                job_id,
+                f"Request Launchplane generic-web preview {job_id}",
+            )
+            self.assertIsNotNone(request)
+            assert request is not None
+            payload_fields = cast(str, request.with_values["payload-fields"])
+            self.assertIn(
+                f"{field_name}=${{{{ needs.resolve.outputs.timeout_seconds }}}}",
+                payload_fields,
+            )
+            self.assertNotIn(
+                f"{field_name}=${{{{ inputs['timeout-seconds'] }}}}",
+                payload_fields,
+            )
 
         self.assertNotIn("preview_slug", workflow_inputs)
         self.assertNotIn("preview_url", workflow_inputs)
-        self.assertNotIn('CONTEXT="$PRODUCT"', workflow)
-        self.assertNotIn("PRODUCT CONTEXT ANCHOR_PR_NUMBER", workflow)
-        self.assertNotIn("refresh.preview_slug=", workflow)
-        self.assertNotIn("destroy.preview_slug=", workflow)
+        self.assertNotIn('CONTEXT="$PRODUCT"', workflow_text)
+        self.assertNotIn("PRODUCT CONTEXT ANCHOR_PR_NUMBER", workflow_text)
+        self.assertNotIn("refresh.preview_slug=", workflow_text)
+        self.assertNotIn("destroy.preview_slug=", workflow_text)
 
     def test_reusable_generic_web_preview_lifecycle_feedback_maps_record_status(
         self,
@@ -413,7 +446,6 @@ class PreviewWorkflowContractTests(unittest.TestCase):
     def test_reusable_generic_web_preview_facade_composes_typed_stages(self) -> None:
         workflow_path = REPO_ROOT / ".github/workflows/reusable-generic-web-preview.yml"
         workflow = load_workflow(workflow_path)
-        workflow_text = workflow_path.read_text(encoding="utf-8")
 
         self.assertEqual(
             workflow.job_uses("provision"),
@@ -424,10 +456,18 @@ class PreviewWorkflowContractTests(unittest.TestCase):
                 workflow.job_uses(job_id),
                 "./.github/workflows/reusable-generic-web-preview-verification.yml",
             )
+        provision_inputs = cast(dict[str, object], workflow.job("provision")["with"])
         self.assertEqual(
-            workflow_text.count("timeout-seconds: ${{ inputs['timeout-seconds'] || '300' }}"),
-            2,
+            provision_inputs["timeout-seconds"],
+            "${{ inputs['timeout-seconds'] }}",
         )
+        for job_id in ("record-verification-pass", "record-verification-fail"):
+            verification_inputs = cast(dict[str, object], workflow.job(job_id)["with"])
+            self.assertEqual(
+                verification_inputs["timeout-seconds"],
+                "${{ inputs['timeout-seconds'] || '300' }}",
+                job_id,
+            )
         self.assertEqual(
             workflow.job_uses("feedback-refresh"),
             "./.github/workflows/reusable-preview-feedback-status.yml",
@@ -442,6 +482,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertIn("author !== 'dependabot[bot]'", resolver_script)
         self.assertNotIn("action === 'closed'", resolver_script)
         self.assertNotIn("action === 'unlabeled'", resolver_script)
+        workflow_text = workflow_path.read_text(encoding="utf-8")
         self.assertNotIn("pull_request_target", workflow_text)
         self.assertIn("image_reference=${IMAGE_REPOSITORY}@${IMAGE_DIGEST}", workflow_text)
         self.assertLess(
