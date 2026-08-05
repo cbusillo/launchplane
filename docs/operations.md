@@ -441,6 +441,11 @@ same protected managed reconcile contract. Relative nested reusable-workflow
 calls resolve at the caller's immutable Launchplane commit, so rotate lifecycle,
 verification, notice, and feedback worker rules through the planner's
 expand/contract operations before repinning product callers;
+`LAUNCHPLANE_AUTHZ_GENERIC_WEB_ONBOARDING_MANAGED_SET_JSON` owns only the
+permanent exact Launchplane workflow grants for typed onboarding planning,
+protected target/record/authz apply, and preview-authz rotation/retirement. It
+must declare `operator.generic-web-onboarding` and must not contain product
+repository, product context, target, domain, or per-product preview rules;
 `LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON` owns the generic
 Product Health Monitoring wrapper's exact immutable worker grant;
 `LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent

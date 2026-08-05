@@ -56,6 +56,14 @@ title: Secrets
   uses the short-lived token only for repository metadata lookup, and does not
   persist the token or private key in plan/apply artifacts. Do not use a PAT or
   the Launchplane service GitHub App as a fallback.
+- The protected
+  `LAUNCHPLANE_AUTHZ_GENERIC_WEB_ONBOARDING_MANAGED_SET_JSON` secret contains
+  the permanent exact Launchplane workflow grants for onboarding and preview
+  authorization maintenance. It is generic worker authority, not per-product
+  policy: do not place product repositories, contexts, targets, domains, or
+  generated preview caller rules in it. Product rules are planned from typed
+  runtime input and persisted in the DB-backed `operator.generic-web-preview`
+  managed set.
 
 ## DB-Backed Secret Resolution
 
