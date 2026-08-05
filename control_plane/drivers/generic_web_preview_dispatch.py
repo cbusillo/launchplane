@@ -17,6 +17,7 @@ from control_plane.contracts.preview_inventory_scan_record import (
     build_preview_inventory_scan_id,
 )
 from control_plane.contracts.preview_mutation_request import (
+    PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
@@ -35,13 +36,16 @@ from control_plane.drivers.dispatch import (
     _validate_driver_envelope_product,
 )
 from control_plane.launchplane_mutations import (
+    LaunchplaneDestroyPreviewStore,
     LaunchplaneMutationStore,
+    apply_launchplane_destroy_preview_if_present,
     apply_launchplane_generation_evidence,
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
     GenericWebPreviewDestroyRequest,
+    GenericWebPreviewDestroyResult,
     GenericWebPreviewInventoryRequest,
     GenericWebPreviewReadinessRequest,
     GenericWebPreviewRefreshRequest,
@@ -345,6 +349,24 @@ def _generic_web_preview_anchor_pr_number(
     return pr_number
 
 
+def _generic_web_preview_destroy_anchor_pr_number(
+    *,
+    request: GenericWebPreviewDestroyRequest,
+    profile: LaunchplaneProductProfileRecord,
+) -> int:
+    if request.anchor_pr_number is not None:
+        return request.anchor_pr_number
+    pr_number = preview_pr_number_from_slug(
+        preview_slug=request.preview_slug,
+        slug_template=profile.preview.slug_template,
+    )
+    if pr_number is None:
+        raise click.ClickException(
+            "Generic web preview destroy requires anchor_pr_number when preview_slug does not match the profile slug_template."
+        )
+    return pr_number
+
+
 def _generic_web_preview_anchor_pr_url(
     *,
     request: GenericWebPreviewRefreshRequest,
@@ -511,6 +533,39 @@ def _apply_generic_web_preview_refresh_records(
         preview_request=preview_request,
         generation_request=generation_request,
     )
+
+
+def _apply_generic_web_preview_destroy_records(
+    *,
+    record_store: object,
+    request: GenericWebPreviewDestroyRequest,
+    driver_result: GenericWebPreviewDestroyResult,
+    context: str,
+    anchor_repo: str,
+    anchor_pr_number: int,
+) -> dict[str, object]:
+    locator: dict[str, object] = {
+        "context": context,
+        "anchor_repo": anchor_repo,
+        "anchor_pr_number": anchor_pr_number,
+    }
+    if driver_result.destroy_status != "pass":
+        return {**locator, "transition": "destroy_failed"}
+    transition = apply_launchplane_destroy_preview_if_present(
+        record_store=cast(LaunchplaneDestroyPreviewStore, record_store),
+        request=PreviewDestroyMutationRequest(
+            context=context,
+            anchor_repo=anchor_repo,
+            anchor_pr_number=anchor_pr_number,
+            destroyed_at=(
+                driver_result.destroy_finished_at.strip()
+                or driver_result.destroy_started_at.strip()
+                or utc_now_timestamp()
+            ),
+            destroy_reason=request.destroy_reason,
+        ),
+    )
+    return {**locator, **transition}
 
 
 def _apply_generic_web_preview_verification_records(

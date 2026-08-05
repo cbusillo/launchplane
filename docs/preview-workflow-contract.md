@@ -174,6 +174,16 @@ Product repos must not check out code, choose a checkout ref, render feedback
 markdown, build request payloads, or call `POST /v1/previews/pr-feedback`
 directly from their own trusted notice workflows.
 
+After native generic-web provider teardown succeeds, the destroy route records
+the matching preview as `destroyed` and clears its active and serving generation
+links before returning success. A destroy for a preview that was never recorded
+is a successful no-op, while provider teardown failure leaves durable preview
+state unchanged. Driver-transport extensions retain ownership of their own
+destroy transition. Because provider and record mutations cannot share a
+transaction, retrying destroy after a record-write failure is the supported
+convergence path; an already-absent provider application is treated as a
+successful teardown so that retry can repair the record.
+
 Manual `workflow_dispatch` may request `refresh` or `destroy` when a product repo
 needs an operator retry path. Manual refresh still follows the same build,
 publish, and Launchplane-refresh handoff as a PR refresh.

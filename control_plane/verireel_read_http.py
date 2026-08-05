@@ -36,7 +36,7 @@ from control_plane.drivers.generic_web_preview_dispatch import (
 from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.launchplane_mutations import (
     LaunchplaneMutationStore,
-    apply_launchplane_destroy_preview,
+    apply_launchplane_destroy_preview_if_present,
     apply_launchplane_generation_evidence,
 )
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
@@ -540,25 +540,20 @@ def apply_verireel_preview_destroy_records(
 ) -> dict[str, object]:
     if driver_result.destroy_status != "pass":
         return {"transition": "destroy_failed"}
-    try:
-        return apply_launchplane_destroy_preview(
-            record_store=cast(LaunchplaneMutationStore, record_store),
-            request=PreviewDestroyMutationRequest(
-                context=request.context,
-                anchor_repo=request.anchor_repo,
-                anchor_pr_number=request.anchor_pr_number,
-                destroyed_at=(
-                    driver_result.destroy_finished_at.strip()
-                    or driver_result.destroy_started_at.strip()
-                    or utc_now_timestamp()
-                ),
-                destroy_reason=request.destroy_reason,
+    return apply_launchplane_destroy_preview_if_present(
+        record_store=cast(LaunchplaneMutationStore, record_store),
+        request=PreviewDestroyMutationRequest(
+            context=request.context,
+            anchor_repo=request.anchor_repo,
+            anchor_pr_number=request.anchor_pr_number,
+            destroyed_at=(
+                driver_result.destroy_finished_at.strip()
+                or driver_result.destroy_started_at.strip()
+                or utc_now_timestamp()
             ),
-        )
-    except click.ClickException as error:
-        if str(error).startswith("No Launchplane preview found"):
-            return {"transition": "destroyed_missing_preview"}
-        raise
+            destroy_reason=request.destroy_reason,
+        ),
+    )
 
 
 def apply_verireel_testing_verification_records(
