@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
 import re
-from urllib.parse import unquote
 
 from control_plane.contracts.artifact_dependency_provenance import (
     normalize_artifact_relative_path,
@@ -172,7 +171,7 @@ def dependency_health_snapshot_from_trivy_report(
             ) in package_inventory
             has_embedded_package_evidence = _trivy_vulnerability_has_embedded_package_evidence(
                 vulnerability,
-                result_class=result_class,
+                package_name=package_name,
                 installed_version=installed_version,
             )
             if not has_package_inventory_evidence and not has_embedded_package_evidence:
@@ -218,10 +217,11 @@ def dependency_health_snapshot_from_trivy_report(
 def _trivy_vulnerability_has_embedded_package_evidence(
     vulnerability: Mapping[str, object],
     *,
-    result_class: str,
+    package_name: str,
     installed_version: str,
 ) -> bool:
-    if result_class != "lang-pkgs":
+    package_id = vulnerability.get("PkgID")
+    if package_id != f"{package_name}@{installed_version}":
         return False
     package_identifier = vulnerability.get("PkgIdentifier")
     if not isinstance(package_identifier, Mapping):
@@ -232,11 +232,7 @@ def _trivy_vulnerability_has_embedded_package_evidence(
         return False
     if not isinstance(uid, str) or not uid.strip():
         return False
-    purl_without_fragment = purl.split("#", 1)[0]
-    purl_without_qualifiers = purl_without_fragment.split("?", 1)[0]
-    if "@" not in purl_without_qualifiers:
-        return False
-    return unquote(purl_without_qualifiers.rsplit("@", 1)[1]) == installed_version
+    return purl.startswith("pkg:")
 
 
 def _trivy_advisory_aliases(
