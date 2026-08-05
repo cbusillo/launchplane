@@ -133,6 +133,47 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
         self.assertEqual(host.id, 78)
         self.assertEqual(host.domain_names, ("ingress-canary.example.test",))
 
+    def test_proxy_host_response_maps_public_access_list_fields(self) -> None:
+        host = NpmplusProxyHost.model_validate(
+            {
+                **_proxy_host_payload(id=78),
+                "npmplus_access_list_ids": [],
+                "npmplus_access_list_type": "public",
+            }
+        )
+
+        self.assertEqual(host.access_list_id, 0)
+
+    def test_proxy_host_response_maps_single_custom_access_list(self) -> None:
+        host = NpmplusProxyHost.model_validate(
+            {
+                **_proxy_host_payload(id=78),
+                "npmplus_access_list_ids": [42],
+                "npmplus_access_list_type": "custom",
+            }
+        )
+
+        self.assertEqual(host.access_list_id, 42)
+
+    def test_proxy_host_response_rejects_incomplete_access_list_fields(self) -> None:
+        with self.assertRaises(ValidationError):
+            NpmplusProxyHost.model_validate(
+                {
+                    **_proxy_host_payload(id=78),
+                    "npmplus_access_list_ids": [],
+                }
+            )
+
+    def test_proxy_host_response_rejects_multiple_custom_access_lists(self) -> None:
+        with self.assertRaises(ValidationError):
+            NpmplusProxyHost.model_validate(
+                {
+                    **_proxy_host_payload(id=78),
+                    "npmplus_access_list_ids": [42, 43],
+                    "npmplus_access_list_type": "custom",
+                }
+            )
+
     def test_location_payload_rejects_unknown_request_fields(self) -> None:
         with self.assertRaises(ValidationError):
             NpmplusLocationPayload.model_validate(
@@ -180,6 +221,21 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
         assert isinstance(locations, list)
         location = cast(dict[str, object], locations[0])
         self.assertNotIn("id", location)
+
+    def test_proxy_host_api_payload_maps_access_list_fields(self) -> None:
+        public_payload = NpmplusProxyHostPayload.model_validate(_proxy_host_payload())
+        restricted_payload = NpmplusProxyHostPayload.model_validate(
+            {**_proxy_host_payload(), "access_list_id": 42}
+        )
+
+        public_api_payload = public_payload.to_api_payload()
+        restricted_api_payload = restricted_payload.to_api_payload()
+
+        self.assertNotIn("access_list_id", public_api_payload)
+        self.assertEqual(public_api_payload["npmplus_access_list_ids"], [])
+        self.assertEqual(public_api_payload["npmplus_access_list_type"], "public")
+        self.assertEqual(restricted_api_payload["npmplus_access_list_ids"], [42])
+        self.assertEqual(restricted_api_payload["npmplus_access_list_type"], "custom")
 
 
 class NpmplusClientTests(unittest.TestCase):

@@ -109,7 +109,18 @@ class NpmplusProxyHostPayload(BaseModel):
         return self
 
     def to_api_payload(self) -> JsonObject:
-        return self.model_dump(mode="json", exclude={"locations": {"__all__": {"id"}}})
+        payload = self.model_dump(
+            mode="json",
+            exclude={
+                "access_list_id": True,
+                "locations": {"__all__": {"id"}},
+            },
+        )
+        payload["npmplus_access_list_ids"] = (
+            [] if self.access_list_id == 0 else [self.access_list_id]
+        )
+        payload["npmplus_access_list_type"] = "public" if self.access_list_id == 0 else "custom"
+        return payload
 
 
 class NpmplusProxyHost(NpmplusProxyHostPayload):
@@ -117,6 +128,38 @@ class NpmplusProxyHost(NpmplusProxyHostPayload):
 
     id: int = Field(ge=1)
     locations: tuple[NpmplusLocation, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_access_list_fields(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        access_list_ids = value.get("npmplus_access_list_ids")
+        access_list_type = value.get("npmplus_access_list_type")
+        if access_list_ids is None and access_list_type is None:
+            return value
+        if access_list_ids is None or access_list_type is None:
+            raise ValueError("NPMplus proxy host access-list fields must be provided together")
+        if not isinstance(access_list_ids, list) or any(
+            isinstance(access_list_id, bool)
+            or not isinstance(access_list_id, int)
+            or access_list_id < 1
+            for access_list_id in access_list_ids
+        ):
+            raise ValueError("NPMplus proxy host access-list ids must be positive integers")
+        if access_list_type == "public":
+            if access_list_ids:
+                raise ValueError("Public NPMplus proxy hosts cannot reference access-list ids")
+            normalized_access_list_id = 0
+        elif access_list_type == "custom":
+            if len(access_list_ids) != 1:
+                raise ValueError(
+                    "Launchplane requires exactly one access-list id for custom NPMplus hosts"
+                )
+            normalized_access_list_id = access_list_ids[0]
+        else:
+            raise ValueError("Unsupported NPMplus proxy host access-list type")
+        return {**value, "access_list_id": normalized_access_list_id}
 
     @field_validator("locations", mode="before")
     @classmethod
