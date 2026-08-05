@@ -4508,6 +4508,11 @@
             "title": "Default Branch",
             "type": "string"
           },
+          "include_ingress_operator": {
+            "default": false,
+            "title": "Include Ingress Operator",
+            "type": "boolean"
+          },
           "launchplane_sha": {
             "title": "Launchplane Sha",
             "type": "string"

@@ -12,6 +12,13 @@ from control_plane.service_auth import GitHubActionsPolicyRule, LaunchplaneAuthz
 GENERIC_WEB_PREVIEW_MANAGED_SET_ID = "operator.generic-web-preview"
 GENERIC_WEB_PREVIEW_CALLER_WORKFLOW_PATH = ".github/workflows/launchplane-preview.yml"
 GENERIC_WEB_PREVIEW_NOTICE_WORKFLOW_PATH = ".github/workflows/launchplane-preview-notice.yml"
+_LAUNCHPLANE_REPOSITORY = "cbusillo/launchplane"
+_INGRESS_PLAN_WORKFLOW_REF = (
+    f"{_LAUNCHPLANE_REPOSITORY}/.github/workflows/ingress-route-dry-run.yml@refs/heads/main"
+)
+_INGRESS_APPLY_WORKFLOW_REF = (
+    f"{_LAUNCHPLANE_REPOSITORY}/.github/workflows/ingress-route-apply.yml@refs/heads/main"
+)
 _PRODUCT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -32,6 +39,7 @@ class GenericWebPreviewAuthzPlanRequest(BaseModel):
     default_branch: str = "main"
     preview_context: str = ""
     launchplane_sha: str
+    include_ingress_operator: bool = False
     reason: str
     related_issue: str
 
@@ -118,7 +126,10 @@ def build_generic_web_preview_authz_reconcile_request(
         rule for rule in retained_github_rules if request.target_product in rule.products
     )
     if request.operation == "onboard" and current_target_rules:
-        generated_rules = generic_web_preview_rules(request)
+        generated_rules = _desired_generic_web_preview_rules(
+            current_policy=current_policy,
+            request=request,
+        )
         if _rules_by_managed_id(current_target_rules) != _rules_by_managed_id(generated_rules):
             raise ValueError(
                 "generic-web preview authz onboarding found different current managed preview "
@@ -135,7 +146,10 @@ def build_generic_web_preview_authz_reconcile_request(
         or request.target_product not in rule.products
     )
     if request.operation != "retire":
-        generated_rules = generic_web_preview_rules(request)
+        generated_rules = _desired_generic_web_preview_rules(
+            current_policy=current_policy,
+            request=request,
+        )
         existing_ids = {
             rule.managed_rule_id for rule in desired_github_rules if rule.managed_rule_id
         }
@@ -159,6 +173,97 @@ def build_generic_web_preview_authz_reconcile_request(
         related_issue=request.related_issue,
         desired_policy=desired_policy,
     )
+
+
+def _desired_generic_web_preview_rules(
+    *,
+    current_policy: LaunchplaneAuthzPolicy,
+    request: GenericWebPreviewAuthzPlanRequest,
+) -> tuple[GitHubActionsPolicyRule, ...]:
+    preview_rules = generic_web_preview_rules(request)
+    if not request.include_ingress_operator:
+        return preview_rules
+    return (
+        *preview_rules,
+        *generic_web_preview_ingress_operator_rules(
+            current_policy=current_policy,
+            request=request,
+        ),
+    )
+
+
+def generic_web_preview_ingress_operator_rules(
+    *,
+    current_policy: LaunchplaneAuthzPolicy,
+    request: GenericWebPreviewAuthzPlanRequest,
+) -> tuple[GitHubActionsPolicyRule, ...]:
+    generation = request.launchplane_sha[:7]
+    plan_template = _ingress_operator_rule_template(
+        current_policy=current_policy,
+        action="ingress_route.plan",
+        workflow_ref=_INGRESS_PLAN_WORKFLOW_REF,
+    )
+    apply_template = _ingress_operator_rule_template(
+        current_policy=current_policy,
+        action="ingress_route.apply",
+        workflow_ref=_INGRESS_APPLY_WORKFLOW_REF,
+    )
+
+    def rule(
+        *, slot: str, action: str, template: GitHubActionsPolicyRule
+    ) -> GitHubActionsPolicyRule:
+        return template.model_copy(
+            update={
+                "managed_set_id": GENERIC_WEB_PREVIEW_MANAGED_SET_ID,
+                "managed_rule_id": (
+                    f"generic-web-preview.{request.target_product}.{generation}.{slot}"
+                ),
+                "products": (request.target_product,),
+                "contexts": (request.preview_context,),
+                "instances": (),
+                "actions": (action,),
+            }
+        )
+
+    return (
+        rule(slot="ingress-plan", action="ingress_route.plan", template=plan_template),
+        rule(slot="ingress-apply", action="ingress_route.apply", template=apply_template),
+    )
+
+
+def _ingress_operator_rule_template(
+    *,
+    current_policy: LaunchplaneAuthzPolicy,
+    action: str,
+    workflow_ref: str,
+) -> GitHubActionsPolicyRule:
+    candidates = tuple(
+        rule
+        for rule in current_policy.github_actions
+        if rule.repository == _LAUNCHPLANE_REPOSITORY
+        and rule.workflow_refs == (workflow_ref,)
+        and rule.actions == (action,)
+        and rule.job_workflow_refs
+    )
+    templates = {
+        (
+            rule.repository,
+            rule.repository_id,
+            rule.repository_owner_id,
+            rule.workflow_refs,
+            rule.job_workflow_refs,
+            rule.event_names,
+            rule.refs,
+            rule.environments,
+        ): rule
+        for rule in candidates
+    }
+    if len(templates) != 1:
+        raise ValueError(
+            "generic-web preview ingress authorization requires one unambiguous pinned "
+            f"{action} workflow template in the active policy"
+        )
+    return next(iter(templates.values()))
 
 
 def generic_web_preview_rules(
@@ -194,7 +299,7 @@ def generic_web_preview_rules(
     ) -> GitHubActionsPolicyRule:
         return GitHubActionsPolicyRule(
             managed_set_id=GENERIC_WEB_PREVIEW_MANAGED_SET_ID,
-            managed_rule_id=(f"generic-web-preview.{request.target_product}.{generation}.{slot}"),
+            managed_rule_id=f"generic-web-preview.{request.target_product}.{generation}.{slot}",
             repository=request.repository,
             repository_id=request.repository_id,
             repository_owner_id=request.repository_owner_id,
