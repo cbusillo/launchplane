@@ -90,6 +90,9 @@ NOW = datetime(2026, 7, 15, 9, 0, tzinfo=UTC)
 TESTING_ARTIFACT = f"ghcr.io/example/atlas-commerce@sha256:{'a' * 64}"
 PROD_ARTIFACT = f"ghcr.io/example/atlas-commerce@sha256:{'b' * 64}"
 NEW_TESTING_ARTIFACT = f"ghcr.io/example/atlas-commerce@sha256:{'c' * 64}"
+TESTING_DEPLOY_REFERENCE = (
+    "ghcr.io/example/atlas-commerce:sha-1111111111111111111111111111111111111111"
+)
 TESTING_SOURCE_REF = "1" * 40
 PROD_SOURCE_REF = "2" * 40
 NEW_TESTING_SOURCE_REF = "3" * 40
@@ -173,6 +176,7 @@ def _inventory(
     instance: str,
     artifact_id: str,
     source_git_ref: str,
+    image_reference: str = "",
     updated_at: str = "2026-07-15T08:45:00Z",
 ) -> EnvironmentInventory:
     deployment_record_id = f"deployment-{instance}"
@@ -182,6 +186,7 @@ def _inventory(
         instance=instance,
         deployment_record_id=deployment_record_id,
         artifact_id=artifact_id,
+        image_reference=image_reference,
         source_git_ref=source_git_ref,
     )
     return EnvironmentInventory(
@@ -814,7 +819,16 @@ class ProductPromotionRequestTests(unittest.TestCase):
             )
 
     def test_workflow_request_carries_reviewed_runtime_identity(self) -> None:
-        profile, _, status = _status(_store())
+        profile, _, status = _status(
+            _store(
+                testing_inventory=_inventory(
+                    instance="testing",
+                    artifact_id=TESTING_ARTIFACT,
+                    image_reference=TESTING_DEPLOY_REFERENCE,
+                    source_git_ref=TESTING_SOURCE_REF,
+                )
+            )
+        )
         request = ProductPromotionWorkflowDispatchEnvelope(
             dry_run=False,
             reason="Ship reviewed release",
@@ -835,13 +849,24 @@ class ProductPromotionRequestTests(unittest.TestCase):
         )
 
         self.assertEqual(envelope.workflow.artifact_id, status.source.artifact_id)
+        self.assertEqual(envelope.workflow.deploy_reference, TESTING_DEPLOY_REFERENCE)
         self.assertEqual(envelope.workflow.source_git_ref, status.source.source_git_ref)
         self.assertNotIn("artifact_id", payload)
+        self.assertNotIn("deploy_reference", payload)
         self.assertNotIn("source_git_ref", payload)
         self.assertNotIn("context", payload)
 
     def test_product_promotion_intent_binds_current_target_evidence(self) -> None:
-        profile, _, status = _status(_store())
+        profile, _, status = _status(
+            _store(
+                testing_inventory=_inventory(
+                    instance="testing",
+                    artifact_id=TESTING_ARTIFACT,
+                    image_reference=TESTING_DEPLOY_REFERENCE,
+                    source_git_ref=TESTING_SOURCE_REF,
+                )
+            )
+        )
         workflow_request = ProductPromotionWorkflowDispatchEnvelope(
             dry_run=False,
             reason="Ship reviewed release",
@@ -866,6 +891,7 @@ class ProductPromotionRequestTests(unittest.TestCase):
         request = GenericWebProdPromotionRequest(
             product=profile.product,
             artifact_id=status.source.artifact_id,
+            deploy_reference=status.source.deploy_reference,
             source_git_ref=status.source.source_git_ref,
             promotion_intent_id=delivery.delivery_id,
         )

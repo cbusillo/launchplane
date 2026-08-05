@@ -133,14 +133,17 @@ def _deployment_record(**overrides: object) -> DeploymentRecord:
     deploy_status = cast(
         Literal["pending", "pass", "fail", "skipped"], overrides.pop("deploy_status", "pass")
     )
-    runtime_identity = RuntimeIdentity(
-        product="sellyouroutboard",
-        context=context,
-        instance=instance,
-        deployment_record_id="deployment-syo-prod-previous",
-        artifact_id=artifact_id,
-        source_git_ref=source_git_ref,
-    )
+    runtime_identity = cast(RuntimeIdentity | None, overrides.pop("runtime_identity", None))
+    if runtime_identity is None:
+        runtime_identity = RuntimeIdentity(
+            product="sellyouroutboard",
+            context=context,
+            instance=instance,
+            deployment_record_id="deployment-syo-prod-previous",
+            artifact_id=artifact_id,
+            source_git_ref=source_git_ref,
+            image_reference="ghcr.io/cbusillo/sellyouroutboard:sha-abc123",
+        )
     ship_request = ShipRequest(
         artifact_id=artifact_id,
         context=context,
@@ -303,7 +306,54 @@ class GenericWebRollbackPlanTests(unittest.TestCase):
             "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
         )
         self.assertEqual(planned_deploy.source_git_ref, "abc123")
+        self.assertEqual(
+            planned_deploy.deploy_reference,
+            "ghcr.io/cbusillo/sellyouroutboard:sha-abc123",
+        )
         self.assertEqual(plan.backup_gate.status, "skipped")
+
+    def test_plan_blocks_application_digest_without_deploy_reference(self) -> None:
+        artifact_id = "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123"
+        store = _GenericWebRollbackStore(_profile())
+        store.deployments["deployment-syo-prod-previous"] = _deployment_record(
+            runtime_identity=RuntimeIdentity(
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                deployment_record_id="deployment-syo-prod-previous",
+                artifact_id=artifact_id,
+                source_git_ref="abc123",
+            )
+        )
+
+        plan = build_generic_web_rollback_plan(record_store=store, request=_request())
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertIsNone(plan.planned_deploy)
+        self.assertIn("missing_deploy_reference", [blocker.code for blocker in plan.blockers])
+
+    def test_plan_preserves_provider_deploy_reference_for_digest_identity(self) -> None:
+        artifact_id = "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123"
+        deploy_reference = "ghcr.io/cbusillo/sellyouroutboard:sha-abcdef1234567890"
+        store = _GenericWebRollbackStore(_profile())
+        store.deployments["deployment-syo-prod-previous"] = _deployment_record(
+            runtime_identity=RuntimeIdentity(
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                deployment_record_id="deployment-syo-prod-previous",
+                artifact_id=artifact_id,
+                source_git_ref="abc123",
+                image_reference=deploy_reference,
+            )
+        )
+
+        plan = build_generic_web_rollback_plan(record_store=store, request=_request())
+
+        self.assertIsNotNone(plan.planned_deploy)
+        assert plan.planned_deploy is not None
+        self.assertEqual(plan.planned_deploy.artifact_id, artifact_id)
+        self.assertEqual(plan.planned_deploy.deploy_reference, deploy_reference)
 
     def test_execute_writes_ready_plan_record(self) -> None:
         store = _GenericWebRollbackStore(_profile())
@@ -367,9 +417,56 @@ class GenericWebRollbackPlanTests(unittest.TestCase):
             deploy_request.artifact_id,
             "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
         )
+        self.assertEqual(
+            deploy_request.deploy_reference,
+            "ghcr.io/cbusillo/sellyouroutboard:sha-abc123",
+        )
         self.assertEqual(deploy_request.source_git_ref, "abc123")
         self.assertEqual(deploy_request.timeout_seconds, 90)
         self.assertTrue(deploy_request.no_cache)
+
+    def test_execute_apply_passes_rollback_deploy_reference(self) -> None:
+        artifact_id = "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123"
+        deploy_reference = "ghcr.io/cbusillo/sellyouroutboard:sha-abcdef1234567890"
+        store = _GenericWebRollbackStore(_profile())
+        store.deployments["deployment-syo-prod-previous"] = _deployment_record(
+            runtime_identity=RuntimeIdentity(
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                deployment_record_id="deployment-syo-prod-previous",
+                artifact_id=artifact_id,
+                source_git_ref="abc123",
+                image_reference=deploy_reference,
+            )
+        )
+
+        with patch(
+            "control_plane.workflows.generic_web_rollback.execute_generic_web_deploy",
+            return_value=GenericWebDeployResult(
+                deployment_record_id="deployment-syo-prod-rollback",
+                deploy_status="pass",
+                deploy_started_at="2026-05-25T12:00:00Z",
+                deploy_finished_at="2026-05-25T12:01:00Z",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                target_name="syo-prod-app",
+                target_category="application",
+                provider_id="dokploy",
+                provider_target_type="application",
+                target_id="app-prod",
+            ),
+        ) as deploy:
+            execute_generic_web_rollback(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=_request(),
+            )
+
+        deploy_request = deploy.call_args.kwargs["request"]
+        self.assertEqual(deploy_request.artifact_id, artifact_id)
+        self.assertEqual(deploy_request.deploy_reference, deploy_reference)
 
     def test_execute_apply_forwards_post_deploy_extension_to_generic_deploy(self) -> None:
         store = _GenericWebRollbackStore(_profile())

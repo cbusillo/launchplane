@@ -23,6 +23,11 @@ name: Reusable Product Driver Stable Deploy
         description: Immutable image or Launchplane-resolvable artifact identity.
         required: true
         type: string
+      deploy_reference:
+        description: Optional provider-facing immutable image tag for digest identities.
+        required: false
+        default: ""
+        type: string
       source_git_ref:
         description: Source git ref attached to deployment evidence.
         required: true
@@ -106,6 +111,7 @@ jobs:
         env:
           ARTIFACT_ID: ${{ inputs.artifact_id }}
           CONTEXT: ${{ inputs.context }}
+          DEPLOY_REFERENCE: ${{ inputs.deploy_reference }}
           INSTANCE: ${{ inputs.instance }}
           PRODUCT: ${{ inputs.product }}
           SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
@@ -126,13 +132,14 @@ jobs:
           run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
           {
             echo "context=$CONTEXT"
-            printf '%s=%s:%s:%s:%s:%s:%s\n' \
+            printf '%s=%s:%s:%s:%s:%s:%s:%s\n' \
               idempotency_key \
               product-driver-stable-deploy \
               "$PRODUCT" \
               "$CONTEXT" \
               "$INSTANCE" \
               "$ARTIFACT_ID" \
+              "$DEPLOY_REFERENCE" \
               "$run_scope"
             echo "instance=$INSTANCE"
             echo "product=$PRODUCT"
@@ -159,6 +166,7 @@ jobs:
             deploy.context=${{ steps.request.outputs.context }}
             deploy.instance=${{ steps.request.outputs.instance }}
             deploy.artifact_id=${{ inputs.artifact_id }}
+            deploy.deploy_reference=${{ inputs.deploy_reference }}
             deploy.source_git_ref=${{ inputs.source_git_ref }}
           idempotency-key: ${{ steps.request.outputs.idempotency_key }}
           timeout-ms: ${{ inputs['timeout-ms'] }}

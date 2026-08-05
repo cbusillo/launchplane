@@ -364,6 +364,7 @@ class ProductPromotionWorkflowProfile(BaseModel):
     dry_run_input: str = "dry_run"
     bump_input: str = "bump"
     artifact_id_input: str = "artifact_id"
+    deploy_reference_input: str = "deploy_reference"
     source_git_ref_input: str = "source_git_ref"
     promotion_intent_input: str = "promotion_intent_id"
     default_bump: str = "patch"
@@ -380,6 +381,8 @@ class ProductPromotionWorkflowProfile(BaseModel):
             raise ValueError("product promotion workflow requires bump_input")
         if not self.artifact_id_input.strip():
             raise ValueError("product promotion workflow requires artifact_id_input")
+        if not self.deploy_reference_input.strip():
+            raise ValueError("product promotion workflow requires deploy_reference_input")
         if not self.source_git_ref_input.strip():
             raise ValueError("product promotion workflow requires source_git_ref_input")
         if not self.promotion_intent_input.strip():
@@ -388,6 +391,7 @@ class ProductPromotionWorkflowProfile(BaseModel):
             self.dry_run_input.strip(),
             self.bump_input.strip(),
             self.artifact_id_input.strip(),
+            self.deploy_reference_input.strip(),
             self.source_git_ref_input.strip(),
             self.promotion_intent_input.strip(),
         )

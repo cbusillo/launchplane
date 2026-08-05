@@ -17,6 +17,7 @@ from control_plane.contracts.deploy_target import (
     DeployTargetCompatibilityType,
     ProviderTargetRecord,
 )
+from control_plane.contracts.deploy_reference import validate_provider_deploy_reference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
@@ -115,6 +116,7 @@ def resolve_generic_web_provider_reconciliation_target(
     request_no_cache: bool,
     normalized_artifact_id: str,
     lane: ProductLaneProfile,
+    request_deploy_reference: str = "",
 ) -> GenericWebResolvedDeployTarget:
     normalized_key = reconciliation_key.strip()
     if not normalized_key.startswith(_GENERIC_WEB_RECONCILIATION_KEY_PREFIX):
@@ -132,6 +134,11 @@ def resolve_generic_web_provider_reconciliation_target(
     del request_artifact_id
     ship_request = ShipRequest(
         artifact_id=normalized_artifact_id,
+        deploy_reference=validate_provider_deploy_reference(
+            artifact_id=normalized_artifact_id,
+            deploy_reference=request_deploy_reference,
+            label="Generic web deploy",
+        ),
         context=context_name,
         instance=instance_name,
         source_git_ref=request_source_git_ref,
@@ -232,6 +239,7 @@ class GenericWebDeployProvider(Protocol):
         lane: ProductLaneProfile,
         normalized_artifact_id: str,
         fallback_target_name: str,
+        request_deploy_reference: str = "",
     ) -> GenericWebResolvedDeployTarget: ...
 
     def execute_artifact_deploy(
@@ -271,6 +279,7 @@ class DokployGenericWebDeployProvider:
         lane: ProductLaneProfile,
         normalized_artifact_id: str,
         fallback_target_name: str,
+        request_deploy_reference: str = "",
     ) -> GenericWebResolvedDeployTarget:
         del request_artifact_id, profile
         dokploy_store = _require_dokploy_deploy_store(record_store)
@@ -324,6 +333,11 @@ class DokployGenericWebDeployProvider:
         target_name = provider_target.display_name.strip() or fallback_target_name
         ship_request = ShipRequest(
             artifact_id=normalized_artifact_id,
+            deploy_reference=validate_provider_deploy_reference(
+                artifact_id=normalized_artifact_id,
+                deploy_reference=request_deploy_reference,
+                label="Generic web deploy",
+            ),
             context=context_name,
             instance=instance_name,
             source_git_ref=request_source_git_ref,

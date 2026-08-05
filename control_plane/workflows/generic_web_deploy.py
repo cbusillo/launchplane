@@ -9,6 +9,10 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.deploy_target import DeployTargetCategory
+from control_plane.contracts.deploy_reference import (
+    provider_image_reference,
+    validate_provider_deploy_reference,
+)
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
@@ -53,6 +57,7 @@ class GenericWebDeployRequest(BaseModel):
     product: str
     instance: str
     artifact_id: str
+    deploy_reference: str = ""
     source_git_ref: str
     timeout_seconds: int | None = Field(default=None, ge=1)
     no_cache: bool = False
@@ -65,6 +70,7 @@ class GenericWebDeployRequest(BaseModel):
             raise ValueError("Generic web deploy requires instance.")
         if not self.artifact_id.strip():
             raise ValueError("Generic web deploy requires artifact_id.")
+        self.deploy_reference = self.deploy_reference.strip()
         if not self.source_git_ref.strip():
             raise ValueError("Generic web deploy requires source_git_ref.")
         return self
@@ -264,7 +270,10 @@ def _build_runtime_identity(
         deployment_record_id=deployment_record_id,
         artifact_id=ship_request.artifact_id,
         source_git_ref=ship_request.source_git_ref,
-        image_reference=ship_request.artifact_id,
+        image_reference=provider_image_reference(
+            artifact_id=ship_request.artifact_id,
+            deploy_reference=ship_request.deploy_reference,
+        ),
         deployed_at=deployed_at,
     )
 
@@ -333,6 +342,7 @@ def _fallback_ship_request(
     lane: ProductLaneProfile,
     deploy_provider: GenericWebDeployProvider,
     artifact_id: str = "",
+    include_deploy_reference: bool = True,
 ) -> ShipRequest:
     provider_id = deploy_provider.provider_id.strip().lower()
     if not provider_id:
@@ -342,8 +352,16 @@ def _fallback_ship_request(
         profile=profile,
         artifact_id=request.artifact_id,
     )
+    deploy_reference = ""
+    if include_deploy_reference and request.deploy_reference:
+        deploy_reference = validate_provider_deploy_reference(
+            artifact_id=resolved_artifact_id,
+            deploy_reference=request.deploy_reference,
+            label="Generic web deploy",
+        )
     return ShipRequest(
         artifact_id=resolved_artifact_id,
+        deploy_reference=deploy_reference,
         context=lane.context,
         instance=lane.instance,
         source_git_ref=request.source_git_ref,
@@ -384,6 +402,7 @@ def _resolve_deploy_target(
             profile=profile,
             artifact_id=request.artifact_id,
         ),
+        request_deploy_reference=request.deploy_reference,
         fallback_target_name=_fallback_target_name(profile=profile, lane=lane),
     )
 
@@ -439,10 +458,10 @@ def execute_generic_web_deploy(
         )
         ship_request = prepared_deploy_target.ship_request
         resolved_target = prepared_deploy_target.resolved_target
-    except click.ClickException as exc:
+    except (click.ClickException, ValueError) as exc:
         finished_at = utc_now_timestamp()
         if fallback_request is None:
-            if resolved_profile.image.repository.strip():
+            if resolved_profile.image.repository.strip() and not request.deploy_reference:
                 raise
             fallback_request = _fallback_ship_request(
                 request=request,
@@ -450,6 +469,7 @@ def execute_generic_web_deploy(
                 lane=resolved_lane,
                 deploy_provider=resolved_deploy_provider,
                 artifact_id=request.artifact_id,
+                include_deploy_reference=False,
             )
         record_store.write_deployment_record(
             build_deployment_record(

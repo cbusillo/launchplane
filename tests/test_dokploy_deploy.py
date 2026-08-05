@@ -3,9 +3,13 @@ from unittest.mock import patch
 
 import click
 
+from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.promotion_record import HealthcheckEvidence
+from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.dokploy_deploy import (
     _canonical_registry_host,
     _docker_image_registry_host,
+    execute_dokploy_artifact_deploy,
     update_dokploy_target_artifact,
 )
 
@@ -292,6 +296,90 @@ class DokployDeployRegistryTests(unittest.TestCase):
             [request["path"] for request in requests],
             ["/api/application.saveDockerProvider"],
         )
+
+    def test_digest_only_application_deploy_fails_before_provider_mutation(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        with (
+            patch(
+                "control_plane.workflows.dokploy_deploy.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "applicationId": "app-123",
+                    "username": "every",
+                    "password": "secret-password",
+                    "registryUrl": "ghcr.io",
+                },
+            ),
+            patch(
+                "control_plane.workflows.dokploy_deploy.dokploy_api.dokploy_request",
+                side_effect=lambda **kwargs: requests.append(kwargs),
+            ),
+            patch(
+                "control_plane.workflows.dokploy_deploy.dokploy_api.update_dokploy_target_env",
+                side_effect=lambda **kwargs: requests.append(kwargs),
+            ),
+            self.assertRaisesRegex(
+                click.ClickException,
+                "requires deploy_reference.*repo:sha-<commit>",
+            ),
+        ):
+            update_dokploy_target_artifact(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_type="application",
+                target_id="app-123",
+                artifact_id="ghcr.io/every/example@sha256:"
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+
+        self.assertEqual(requests, [])
+
+    def test_compose_deploy_keeps_digest_when_deploy_reference_is_present(self) -> None:
+        artifact_id = (
+            "ghcr.io/every/example@sha256:"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        )
+        ship_request = ShipRequest(
+            artifact_id=artifact_id,
+            deploy_reference="ghcr.io/every/example:sha-abcdef1234567890",
+            context="example",
+            instance="testing",
+            source_git_ref="abcdef1234567890",
+            target_name="example-compose",
+            target_type="compose",
+            provider_id="dokploy",
+            target_category="compose",
+            provider_target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            verify_health=False,
+            destination_health=HealthcheckEvidence(status="skipped"),
+        )
+        resolved_target = ResolvedTargetEvidence(
+            target_type="compose",
+            target_id="compose-123",
+            target_name="example-compose",
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.dokploy_deploy.dokploy_api.latest_deployment_for_target",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.dokploy_deploy.update_dokploy_target_artifact"
+            ) as update_target,
+            patch("control_plane.workflows.dokploy_deploy.dokploy_api.trigger_deployment"),
+            patch("control_plane.workflows.dokploy_deploy.dokploy_api.wait_for_target_deployment"),
+        ):
+            execute_dokploy_artifact_deploy(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                ship_request=ship_request,
+                resolved_target=resolved_target,
+                deploy_timeout_seconds=60,
+            )
+
+        self.assertEqual(update_target.call_args.kwargs["artifact_id"], artifact_id)
 
 
 if __name__ == "__main__":

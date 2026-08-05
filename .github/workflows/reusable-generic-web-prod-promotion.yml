@@ -16,6 +16,11 @@ name: Reusable Generic Web Prod Promotion
         required: false
         default: ""
         type: string
+      deploy_reference:
+        description: Optional provider-facing immutable image tag for digest identities.
+        required: false
+        default: ""
+        type: string
       source_git_ref:
         description: >-
           Optional source revision override. Defaults to source inventory.
@@ -190,6 +195,7 @@ jobs:
         id: payload
         env:
           ARTIFACT_ID: ${{ inputs.artifact_id }}
+          DEPLOY_REFERENCE: ${{ inputs.deploy_reference }}
           DRY_RUN: ${{ inputs.dry_run }}
           FROM_INSTANCE: ${{ steps.request.outputs.from_instance }}
           HEALTH_TIMEOUT_SECONDS: ${{ inputs['health-timeout-seconds'] }}
@@ -231,6 +237,7 @@ jobs:
             schema_version: 1,
             product: process.env.PRODUCT,
             artifact_id: requestedArtifact,
+            deploy_reference: String(process.env.DEPLOY_REFERENCE ?? '').trim(),
             source_git_ref: requestedSource,
             from_instance: process.env.FROM_INSTANCE,
             to_instance: process.env.TO_INSTANCE,

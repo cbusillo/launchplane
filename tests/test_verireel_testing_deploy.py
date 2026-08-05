@@ -113,6 +113,93 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(deployment.runtime_identity.source_git_ref, request.source_git_ref)
             self.assertEqual(result.rollout_status, "pass")
 
+    def test_execute_keeps_digest_identity_and_provider_deploy_reference(self) -> None:
+        artifact_id = (
+            "ghcr.io/every/verireel-app@sha256:"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        )
+        deploy_reference = "ghcr.io/every/verireel-app:sha-abcdef1234567890abcdef1234567890abcdef12"
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            request = VeriReelStableDeployRequest(
+                artifact_id=artifact_id,
+                deploy_reference=deploy_reference,
+                source_git_ref="abcdef1234567890abcdef1234567890abcdef12",
+            )
+            ship_request = ShipRequest(
+                artifact_id=artifact_id,
+                deploy_reference=deploy_reference,
+                context="verireel",
+                instance="testing",
+                source_git_ref=request.source_git_ref,
+                target_name="ver-testing-app",
+                target_type="application",
+                provider_id="dokploy",
+                target_category="application",
+                provider_target_type="application",
+                deploy_mode="dokploy-application-api",
+                wait=True,
+                verify_health=False,
+                destination_health=HealthcheckEvidence(status="skipped"),
+            )
+
+            with (
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy.generate_deployment_record_id",
+                    return_value="deployment-verireel-testing-run-12345-attempt-1",
+                ),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy.utc_now_timestamp",
+                    side_effect=[
+                        "2026-04-20T18:20:00Z",
+                        "2026-04-20T18:21:15Z",
+                    ],
+                ),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy._resolve_ship_request",
+                    return_value=(
+                        ship_request,
+                        ResolvedTargetEvidence(
+                            target_type="application",
+                            target_id="testing-app-123",
+                            target_name="ver-testing-app",
+                        ),
+                        300,
+                    ),
+                ),
+                patch("control_plane.workflows.verireel_stable_deploy._execute_dokploy_deploy"),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy._verify_rollout",
+                    return_value=VeriReelRolloutVerificationResult(
+                        status="pass",
+                        base_url="https://ver-testing.shinycomputers.com",
+                        health_urls=("https://ver-testing.shinycomputers.com/api/health",),
+                    ),
+                ) as verify_rollout,
+            ):
+                execute_verireel_stable_deploy(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=request,
+                )
+
+            deployment = store.read_deployment_record(
+                "deployment-verireel-testing-run-12345-attempt-1"
+            )
+            self.assertIsNotNone(deployment.artifact_identity)
+            assert deployment.artifact_identity is not None
+            self.assertEqual(deployment.artifact_identity.artifact_id, artifact_id)
+            self.assertIsNotNone(deployment.runtime_identity)
+            assert deployment.runtime_identity is not None
+            self.assertEqual(deployment.runtime_identity.artifact_id, artifact_id)
+            self.assertEqual(deployment.runtime_identity.image_reference, deploy_reference)
+            verify_rollout.assert_called_once()
+            self.assertEqual(
+                verify_rollout.call_args.kwargs["request"].expected_build_tag,
+                "",
+            )
+
     def test_execute_writes_failed_deployment_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -192,7 +279,9 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             ship_request = ShipRequest(
-                artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                artifact_id="ghcr.io/every/verireel-app@sha256:"
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                deploy_reference="ghcr.io/every/verireel-app:sha-abcdef1234567890",
                 context="verireel",
                 instance="testing",
                 source_git_ref="abcdef1234567890",

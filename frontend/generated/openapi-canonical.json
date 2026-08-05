@@ -4450,6 +4450,11 @@
             "title": "Artifact Id",
             "type": "string"
           },
+          "deploy_reference": {
+            "default": "",
+            "title": "Deploy Reference",
+            "type": "string"
+          },
           "instance": {
             "title": "Instance",
             "type": "string"
@@ -5110,6 +5115,11 @@
             "title": "Backup Required",
             "type": "boolean"
           },
+          "deploy_reference": {
+            "default": "",
+            "title": "Deploy Reference",
+            "type": "string"
+          },
           "dry_run": {
             "default": false,
             "title": "Dry Run",
@@ -5269,6 +5279,11 @@
           "context": {
             "default": "",
             "title": "Context",
+            "type": "string"
+          },
+          "deploy_reference": {
+            "default": "",
+            "title": "Deploy Reference",
             "type": "string"
           },
           "deployment_record_id": {
@@ -5467,6 +5482,11 @@
           },
           "context": {
             "title": "Context",
+            "type": "string"
+          },
+          "deploy_reference": {
+            "default": "",
+            "title": "Deploy Reference",
             "type": "string"
           },
           "dry_run": {
@@ -15679,6 +15699,11 @@
             "title": "Context",
             "type": "string"
           },
+          "deploy_reference": {
+            "default": "",
+            "title": "Deploy Reference",
+            "type": "string"
+          },
           "deployment_record_id": {
             "default": "",
             "title": "Deployment Record Id",
@@ -15839,6 +15864,11 @@
           "artifact_id": {
             "default": "",
             "title": "Artifact Id",
+            "type": "string"
+          },
+          "deploy_reference": {
+            "default": "",
+            "title": "Deploy Reference",
             "type": "string"
           },
           "deployment_record_id": {
@@ -16508,6 +16538,11 @@
           "default_bump": {
             "default": "patch",
             "title": "Default Bump",
+            "type": "string"
+          },
+          "deploy_reference_input": {
+            "default": "deploy_reference",
+            "title": "Deploy Reference Input",
             "type": "string"
           },
           "dry_run_input": {
@@ -25513,6 +25548,11 @@
             "title": "Context",
             "type": "string"
           },
+          "deploy_reference": {
+            "default": "",
+            "title": "Deploy Reference",
+            "type": "string"
+          },
           "expected_build_revision": {
             "default": "",
             "title": "Expected Build Revision",
@@ -25755,6 +25795,11 @@
           "context": {
             "default": "verireel",
             "title": "Context",
+            "type": "string"
+          },
+          "deploy_reference": {
+            "default": "",
+            "title": "Deploy Reference",
             "type": "string"
           },
           "expected_build_revision": {
@@ -29304,6 +29349,11 @@
                         "title": "Artifact Id",
                         "type": "string"
                       },
+                      "deploy_reference": {
+                        "default": "",
+                        "title": "Deploy Reference",
+                        "type": "string"
+                      },
                       "instance": {
                         "title": "Instance",
                         "type": "string"
@@ -30454,6 +30504,11 @@
                         "title": "Backup Required",
                         "type": "boolean"
                       },
+                      "deploy_reference": {
+                        "default": "",
+                        "title": "Deploy Reference",
+                        "type": "string"
+                      },
                       "dry_run": {
                         "default": false,
                         "title": "Dry Run",
@@ -30704,6 +30759,11 @@
                       },
                       "context": {
                         "title": "Context",
+                        "type": "string"
+                      },
+                      "deploy_reference": {
+                        "default": "",
+                        "title": "Deploy Reference",
                         "type": "string"
                       },
                       "dry_run": {
@@ -39931,6 +39991,11 @@
                         "title": "Context",
                         "type": "string"
                       },
+                      "deploy_reference": {
+                        "default": "",
+                        "title": "Deploy Reference",
+                        "type": "string"
+                      },
                       "expected_build_revision": {
                         "default": "",
                         "title": "Expected Build Revision",
@@ -40145,6 +40210,11 @@
                       "context": {
                         "default": "verireel",
                         "title": "Context",
+                        "type": "string"
+                      },
+                      "deploy_reference": {
+                        "default": "",
+                        "title": "Deploy Reference",
                         "type": "string"
                       },
                       "expected_build_revision": {
@@ -40886,6 +40956,11 @@
                       "context": {
                         "default": "verireel",
                         "title": "Context",
+                        "type": "string"
+                      },
+                      "deploy_reference": {
+                        "default": "",
+                        "title": "Deploy Reference",
                         "type": "string"
                       },
                       "expected_build_revision": {
@@ -49374,6 +49449,11 @@
                       "default_bump": {
                         "default": "patch",
                         "title": "Default Bump",
+                        "type": "string"
+                      },
+                      "deploy_reference_input": {
+                        "default": "deploy_reference",
+                        "title": "Deploy Reference Input",
                         "type": "string"
                       },
                       "dry_run_input": {

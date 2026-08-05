@@ -773,18 +773,24 @@ repo action instead. Raw action calls are a lower-level compatibility surface
 when a Launchplane-owned reusable workflow does not exist yet.
 
 Generic web/service repos that deploy as Dokploy applications should build and
-push their own immutable image, then submit the image digest to Launchplane's
-`generic-web` deploy route. The workflow may derive the GHCR repository from the
-current GitHub repository, publish with `docker/login-action` and
+push their own immutable image digest plus an immutable SHA tag. Submit the
+digest-pinned image reference as `artifact_id` and the SHA tag as
+`deploy_reference` to Launchplane's `generic-web` deploy route. Launchplane keeps
+`artifact_id` as the evidence and runtime artifact identity, while using
+`deploy_reference` only for the provider-facing Dokploy Docker image. This avoids
+Dokploy application saved-registry failures for `repository@sha256:digest` while
+preserving digest equality evidence. The workflow may derive the GHCR repository
+from the current GitHub repository, publish with `docker/login-action` and
 `docker/build-push-action`, then pass the product key, stable-lane intent, tested
-source SHA, and immutable image digest. While the current `generic-web/deploy`
-route still requires context or instance compatibility fields, product workflows
-may supply those values from operator-seeded GitHub variables as scoped adapter
-inputs. They are not checked-in product topology or durable lifecycle authority,
-and #1528 owns reducing that bridge behind Launchplane-owned reusable lifecycle
-contracts. The checked-in workflow must not hard-code provider targets, Dokploy
-operations, runtime domains, managed secrets, or fixed product topology;
-Launchplane resolves those from DB-backed product and target records.
+source SHA, immutable image digest, and provider SHA tag. While the current
+`generic-web/deploy` route still requires context or instance compatibility
+fields, product workflows may supply those values from operator-seeded GitHub variables
+as scoped adapter inputs. They are not checked-in product topology or
+durable lifecycle authority, and #1528 owns reducing that bridge behind
+Launchplane-owned reusable lifecycle contracts. The checked-in workflow must not
+hard-code provider targets, Dokploy operations, runtime domains, managed secrets,
+or fixed product topology; Launchplane resolves those from DB-backed product and
+target records.
 
 For this compatibility shape, `.github/workflows/launchplane-deploy.yml` is the
 supported thin connector workflow name. It should call:
@@ -801,9 +807,9 @@ supported thin connector workflow name. It should call:
 ```
 
 The payload should include the product key, stable-lane intent required by the
-current route, immutable image digest as `artifact_id`, and tested source SHA.
-Mutable image tags and checked-in image references are not durable deploy
-inputs.
+current route, immutable image digest as `artifact_id`, provider SHA tag as
+`deploy_reference`, and tested source SHA. Mutable image tags such as `latest`,
+branch names, and environment tags remain invalid deploy references.
 
 ```yaml
 - name: Request Launchplane preview refresh

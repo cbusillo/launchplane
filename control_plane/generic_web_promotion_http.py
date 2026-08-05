@@ -98,6 +98,7 @@ class GenericWebProdPromotionResponseResult(BaseModel):
     from_instance: str = ""
     to_instance: str = ""
     artifact_id: str = ""
+    deploy_reference: str = ""
     source_git_ref: str = ""
     backup_record_id: str = ""
     promotion_record_id: str = ""
@@ -319,6 +320,11 @@ def build_generic_web_promotion_workflow_outbox_delivery(
         **(
             {workflow.artifact_id_input.strip(): request.workflow.artifact_id}
             if request.workflow.artifact_id
+            else {}
+        ),
+        **(
+            {workflow.deploy_reference_input.strip(): request.workflow.deploy_reference}
+            if request.workflow.deploy_reference
             else {}
         ),
         **(

@@ -5,6 +5,7 @@ from control_plane.contracts.deploy_target import (
     DeployTargetCompatibilityType,
     ensure_target_reference_matches,
 )
+from control_plane.contracts.deploy_reference import validate_provider_deploy_reference
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 
 
@@ -13,6 +14,7 @@ class ShipRequest(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     artifact_id: str
+    deploy_reference: str = ""
     context: str
     instance: str
     source_git_ref: str
@@ -36,6 +38,12 @@ class ShipRequest(BaseModel):
     def _validate_request(self) -> "ShipRequest":
         if not self.artifact_id.strip():
             raise ValueError("ship request requires artifact_id")
+        self.artifact_id = self.artifact_id.strip()
+        self.deploy_reference = validate_provider_deploy_reference(
+            artifact_id=self.artifact_id,
+            deploy_reference=self.deploy_reference,
+            label="ship request",
+        )
         if not self.context.strip():
             raise ValueError("ship request requires context")
         if not self.instance.strip():

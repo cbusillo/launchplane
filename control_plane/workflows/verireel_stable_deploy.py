@@ -8,6 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.deploy_target import DeployTargetCategory
+from control_plane.contracts.deploy_reference import (
+    provider_image_reference,
+    validate_provider_deploy_reference,
+)
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetType
@@ -45,6 +49,7 @@ class VeriReelStableDeployRequest(BaseModel):
     context: str = "verireel"
     instance: StableInstanceName = "testing"
     artifact_id: str
+    deploy_reference: str = ""
     source_git_ref: str
     expected_build_revision: str = ""
     expected_build_tag: str = ""
@@ -61,6 +66,11 @@ class VeriReelStableDeployRequest(BaseModel):
             raise ValueError("VeriReel stable deploy requires instance 'testing' or 'prod'.")
         if not self.artifact_id.strip():
             raise ValueError("VeriReel stable deploy requires artifact_id.")
+        self.deploy_reference = validate_provider_deploy_reference(
+            artifact_id=self.artifact_id,
+            deploy_reference=self.deploy_reference,
+            label="VeriReel stable deploy",
+        )
         if not self.source_git_ref.strip():
             raise ValueError("VeriReel stable deploy requires source_git_ref.")
         return self
@@ -109,6 +119,8 @@ class VeriReelStableDeployTargetResultFields(BaseModel):
 
 
 def _artifact_tag(artifact_id: str) -> str:
+    if "@" in artifact_id:
+        return ""
     artifact_name = artifact_id.rsplit("/", 1)[-1]
     if ":" not in artifact_name:
         return ""
@@ -120,7 +132,12 @@ def _expected_build_revision(request: VeriReelStableDeployRequest) -> str:
 
 
 def _expected_build_tag(request: VeriReelStableDeployRequest) -> str:
-    return request.expected_build_tag.strip() or _artifact_tag(request.artifact_id)
+    return request.expected_build_tag.strip() or _artifact_tag(
+        provider_image_reference(
+            artifact_id=request.artifact_id,
+            deploy_reference=request.deploy_reference,
+        )
+    )
 
 
 def _build_runtime_identity(
@@ -138,7 +155,10 @@ def _build_runtime_identity(
         deployment_record_id=deployment_record_id,
         artifact_id=ship_request.artifact_id,
         source_git_ref=ship_request.source_git_ref,
-        image_reference=ship_request.artifact_id,
+        image_reference=provider_image_reference(
+            artifact_id=ship_request.artifact_id,
+            deploy_reference=ship_request.deploy_reference,
+        ),
         deployed_at=deployed_at,
     )
 
@@ -159,6 +179,7 @@ def _default_target_name_for_instance(instance_name: StableInstanceName) -> str:
 def _fallback_ship_request(request: VeriReelStableDeployRequest) -> ShipRequest:
     return ShipRequest(
         artifact_id=request.artifact_id,
+        deploy_reference=request.deploy_reference,
         context=request.context,
         instance=request.instance,
         source_git_ref=request.source_git_ref,
@@ -255,6 +276,7 @@ def _resolve_ship_request(
     )
     ship_request = ShipRequest(
         artifact_id=request.artifact_id,
+        deploy_reference=request.deploy_reference,
         context=request.context,
         instance=request.instance,
         source_git_ref=request.source_git_ref,

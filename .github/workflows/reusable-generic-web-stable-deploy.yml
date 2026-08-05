@@ -19,6 +19,11 @@ name: Reusable Generic Web Stable Deploy
         description: Immutable image or Launchplane-resolvable artifact identity.
         required: true
         type: string
+      deploy_reference:
+        description: Optional provider-facing immutable image tag for digest identities.
+        required: false
+        default: ""
+        type: string
       source_git_ref:
         description: Source git ref attached to deployment evidence.
         required: true
@@ -71,6 +76,7 @@ jobs:
         id: request
         env:
           ARTIFACT_ID: ${{ inputs.artifact_id }}
+          DEPLOY_REFERENCE: ${{ inputs.deploy_reference }}
           INSTANCE: ${{ inputs.instance }}
           PRODUCT: ${{ inputs.product }}
           SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
@@ -92,11 +98,13 @@ jobs:
           {
             echo "product=$PRODUCT"
             echo "instance=$INSTANCE"
-            printf '%s=%s:%s:%s:%s\n' \
+            printf '%s=%s:%s:%s:%s:%s:%s\n' \
               idempotency_key \
               generic-web-stable-deploy \
               "$PRODUCT" \
               "$INSTANCE" \
+              "$ARTIFACT_ID" \
+              "$DEPLOY_REFERENCE" \
               "$run_scope"
           } >>"$GITHUB_OUTPUT"
 
@@ -120,6 +128,7 @@ jobs:
             deploy.product=${{ steps.request.outputs.product }}
             deploy.instance=${{ steps.request.outputs.instance }}
             deploy.artifact_id=${{ inputs.artifact_id }}
+            deploy.deploy_reference=${{ inputs.deploy_reference }}
             deploy.source_git_ref=${{ inputs.source_git_ref }}
           idempotency-key: >-
             ${{ steps.request.outputs.idempotency_key }}

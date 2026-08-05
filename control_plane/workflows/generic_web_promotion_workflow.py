@@ -30,6 +30,7 @@ class GenericWebPromotionWorkflowRequest(BaseModel):
     dry_run: bool = True
     bump: BumpLevel | None = None
     artifact_id: str = ""
+    deploy_reference: str = ""
     source_git_ref: str = ""
     evidence_fingerprint: str = ""
     observe_timeout_seconds: int = Field(default=12, ge=0, le=60)
@@ -39,6 +40,7 @@ class GenericWebPromotionWorkflowRequest(BaseModel):
         self.product = self.product.strip()
         self.context = self.context.strip()
         self.artifact_id = self.artifact_id.strip()
+        self.deploy_reference = self.deploy_reference.strip()
         self.source_git_ref = self.source_git_ref.strip()
         self.evidence_fingerprint = self.evidence_fingerprint.strip()
         if not self.product:
@@ -116,6 +118,11 @@ def dispatch_generic_web_promotion_workflow(
                 **(
                     {workflow.artifact_id_input.strip(): request.artifact_id}
                     if request.artifact_id
+                    else {}
+                ),
+                **(
+                    {workflow.deploy_reference_input.strip(): request.deploy_reference}
+                    if request.deploy_reference
                     else {}
                 ),
                 **(

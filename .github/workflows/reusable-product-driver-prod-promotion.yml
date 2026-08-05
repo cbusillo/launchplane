@@ -24,6 +24,11 @@ name: Reusable Product Driver Prod Promotion
         required: false
         default: ""
         type: string
+      deploy_reference:
+        description: Optional provider-facing immutable image tag for digest identities.
+        required: false
+        default: ""
+        type: string
       source_git_ref:
         description: Source git ref attached to promotion evidence.
         required: false
@@ -176,6 +181,7 @@ jobs:
           ARTIFACT_ID: ${{ inputs.artifact_id }}
           BACKUP_RECORD_ID: ${{ inputs.backup_record_id }}
           CONTEXT: ${{ inputs.context }}
+          DEPLOY_REFERENCE: ${{ inputs.deploy_reference }}
           DRIVER: ${{ inputs.driver }}
           FROM_INSTANCE: ${{ inputs.from_instance }}
           PRODUCT: ${{ inputs.product }}
@@ -215,7 +221,7 @@ jobs:
           if [ "$DRIVER" = "odoo" ]; then
             idempotency_key="opp:$CONTEXT:$run_scope"
           else
-            idempotency_key="product-driver-prod-promotion:$PRODUCT:$CONTEXT:$FROM_INSTANCE:$TO_INSTANCE:$PROMOTION_RECORD_ID:$run_scope"
+            idempotency_key="product-driver-prod-promotion:$PRODUCT:$CONTEXT:$FROM_INSTANCE:$TO_INSTANCE:$PROMOTION_RECORD_ID:$DEPLOY_REFERENCE:$run_scope"
           fi
           {
             echo "context=$CONTEXT"
@@ -250,6 +256,7 @@ jobs:
             promotion.from_instance=${{ steps.request.outputs.from_instance }}
             promotion.to_instance=${{ steps.request.outputs.to_instance }}
             promotion.artifact_id=${{ inputs.artifact_id }}
+            promotion.deploy_reference=${{ inputs.deploy_reference }}
             promotion.source_git_ref=${{ inputs.source_git_ref }}
             promotion.backup_record_id=${{ inputs.backup_record_id }}
             promotion.promotion_record_id=${{ inputs.promotion_record_id }}
