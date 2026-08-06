@@ -416,8 +416,6 @@ def _product_config_secret_inputs(
             raise ProductConfigError(f"Product config secret #{index} requires name.")
         if not isinstance(plaintext_value, str) or not plaintext_value.strip():
             raise ProductConfigError(f"Product config secret #{index} requires a non-empty value.")
-        secret_context = str(raw_secret.get("context", context_name) or "").strip()
-        secret_instance = str(raw_secret.get("instance", instance_name) or "").strip()
         expected_scope = _default_secret_scope(
             context_name=context_name, instance_name=instance_name
         )
@@ -428,23 +426,36 @@ def _product_config_secret_inputs(
             )
             or ""
         ).strip()
+        default_context = "" if scope == "global" else context_name
+        default_instance = instance_name if scope == "context_instance" else ""
+        secret_context = str(raw_secret.get("context", default_context) or "").strip()
+        secret_instance = str(raw_secret.get("instance", default_instance) or "").strip()
         validated_scope = _validate_product_config_secret_scope_route(
             scope=scope,
             context_name=secret_context,
             instance_name=secret_instance,
             index=index,
         )
-        if validated_scope != expected_scope:
+        context_scope_uses_instance_safety_target = (
+            validated_scope == "context" and expected_scope == "context_instance"
+        )
+        if validated_scope != expected_scope and not context_scope_uses_instance_safety_target:
             raise ProductConfigError(
                 f"Product config secret #{index} scope must match the top-level target."
             )
-        _validate_product_config_target_alignment(
-            target_kind=f"secret #{index}",
-            context_name=secret_context,
-            instance_name=secret_instance,
-            expected_context=context_name,
-            expected_instance=instance_name,
-        )
+        if context_scope_uses_instance_safety_target:
+            if secret_context != context_name:
+                raise ProductConfigError(
+                    f"Product config secret #{index} target must match the top-level target."
+                )
+        else:
+            _validate_product_config_target_alignment(
+                target_kind=f"secret #{index}",
+                context_name=secret_context,
+                instance_name=secret_instance,
+                expected_context=context_name,
+                expected_instance=instance_name,
+            )
         integration = str(
             raw_secret.get(
                 "integration",
