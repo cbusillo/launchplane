@@ -73,6 +73,9 @@ from control_plane.contracts.engineering_review_run import (
     start_engineering_review_run,
     submit_engineering_review_run,
 )
+from control_plane.contracts.engineering_review_decision import (
+    EngineeringReviewDecisionRecord,
+)
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
 from control_plane.contracts.idempotency_record import (
@@ -2164,6 +2167,40 @@ class LaunchplaneEngineeringReviewRunRow(Base):
     fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEngineeringReviewDecisionRow(Base):
+    __tablename__ = "launchplane_engineering_review_decisions"
+    __table_args__ = (
+        Index(
+            "launchplane_eng_review_decisions_target_idx",
+            "repository",
+            "pull_request_number",
+            "head_sha",
+            desc("evaluated_at"),
+        ),
+        Index(
+            "launchplane_eng_review_decisions_work_request_idx",
+            "work_request_id",
+            desc("evaluated_at"),
+        ),
+        Index(
+            "launchplane_eng_review_decisions_binding_uidx",
+            "decision_binding_sha256",
+            unique=True,
+        ),
+    )
+
+    decision_id: Mapped[str] = mapped_column(String, primary_key=True)
+    decision_binding_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    pull_request_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    head_sha: Mapped[str] = mapped_column(String, nullable=False)
+    tree_sha: Mapped[str] = mapped_column(String, nullable=False)
+    work_request_id: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    evaluated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -11241,6 +11278,88 @@ class PostgresRecordStore(HumanSessionStore):
         row.fencing_token = record.fencing_token
         row.updated_at = record.updated_at
         row.payload = self._payload_dict(record)
+
+    def write_engineering_review_decision_record_if_absent(
+        self,
+        record: EngineeringReviewDecisionRecord,
+    ) -> tuple[EngineeringReviewDecisionRecord, bool]:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            existing_row = session.get(
+                LaunchplaneEngineeringReviewDecisionRow,
+                record.decision_id,
+            )
+            if existing_row is not None:
+                existing = self._read_payload(
+                    model_type=EngineeringReviewDecisionRecord,
+                    payload=existing_row.payload,
+                )
+                if existing.decision_binding_sha256 != record.decision_binding_sha256:
+                    raise EngineeringReviewConflictError(
+                        "Engineering review decision id conflicts with stored evidence."
+                    )
+                session.rollback()
+                return existing, False
+            session.add(
+                LaunchplaneEngineeringReviewDecisionRow(
+                    decision_id=record.decision_id,
+                    decision_binding_sha256=record.decision_binding_sha256,
+                    repository=record.target.repository,
+                    pull_request_number=record.target.pull_request_number,
+                    head_sha=record.target.head_sha,
+                    tree_sha=record.target.tree_sha,
+                    work_request_id=record.work_request_id,
+                    status=record.status,
+                    evaluated_at=record.evaluated_at,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
+        return record, True
+
+    def read_engineering_review_decision_record(
+        self,
+        decision_id: str,
+    ) -> EngineeringReviewDecisionRecord:
+        return self._read_model(
+            model_type=EngineeringReviewDecisionRecord,
+            orm_model=LaunchplaneEngineeringReviewDecisionRow,
+            filters=(LaunchplaneEngineeringReviewDecisionRow.decision_id == decision_id,),
+        )
+
+    def list_engineering_review_decision_records(
+        self,
+        *,
+        repository: str = "",
+        pull_request_number: int | None = None,
+        head_sha: str = "",
+        work_request_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[EngineeringReviewDecisionRecord, ...]:
+        filters: list[object] = []
+        if repository:
+            filters.append(LaunchplaneEngineeringReviewDecisionRow.repository == repository)
+        if pull_request_number is not None:
+            filters.append(
+                LaunchplaneEngineeringReviewDecisionRow.pull_request_number
+                == pull_request_number
+            )
+        if head_sha:
+            filters.append(LaunchplaneEngineeringReviewDecisionRow.head_sha == head_sha)
+        if work_request_id:
+            filters.append(
+                LaunchplaneEngineeringReviewDecisionRow.work_request_id == work_request_id
+            )
+        return self._list_models(
+            model_type=EngineeringReviewDecisionRecord,
+            orm_model=LaunchplaneEngineeringReviewDecisionRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEngineeringReviewDecisionRow.evaluated_at.desc(),
+                LaunchplaneEngineeringReviewDecisionRow.decision_id.desc(),
+            ),
+            limit=limit,
+        )
 
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> None:
         self._write_row(
