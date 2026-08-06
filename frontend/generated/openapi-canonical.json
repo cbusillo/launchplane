@@ -1351,6 +1351,740 @@
         "title": "BootstrapEvidence",
         "type": "object"
       },
+      "ChangeImpactAffectedProduct": {
+        "additionalProperties": false,
+        "properties": {
+          "owner_acceptance_required": {
+            "const": true,
+            "default": true,
+            "title": "Owner Acceptance Required",
+            "type": "boolean"
+          },
+          "owner_action": {
+            "title": "Owner Action",
+            "type": "string"
+          },
+          "owner_environment": {
+            "title": "Owner Environment",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "system": {
+            "title": "System",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "system",
+          "owner_action",
+          "owner_environment"
+        ],
+        "title": "ChangeImpactAffectedProduct",
+        "type": "object"
+      },
+      "ChangeImpactComponentRule": {
+        "additionalProperties": false,
+        "properties": {
+          "affected_products": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ChangeImpactProductScope"
+            },
+            "title": "Affected Products",
+            "type": "array"
+          },
+          "component": {
+            "title": "Component",
+            "type": "string"
+          },
+          "path_prefixes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Path Prefixes",
+            "type": "array"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "review_tier": {
+            "default": "routine",
+            "enum": [
+              "routine",
+              "sensitive"
+            ],
+            "title": "Review Tier",
+            "type": "string"
+          },
+          "rule_id": {
+            "default": "",
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "component",
+          "path_prefixes",
+          "reason"
+        ],
+        "title": "ChangeImpactComponentRule",
+        "type": "object"
+      },
+      "ChangeImpactEvaluation": {
+        "additionalProperties": false,
+        "properties": {
+          "affected_products": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ChangeImpactAffectedProduct"
+            },
+            "title": "Affected Products",
+            "type": "array"
+          },
+          "authoritative": {
+            "const": false,
+            "default": false,
+            "title": "Authoritative",
+            "type": "boolean"
+          },
+          "enforcement_effect": {
+            "const": "none",
+            "default": "none",
+            "title": "Enforcement Effect",
+            "type": "string"
+          },
+          "engineering_review_tier": {
+            "default": "sensitive",
+            "enum": [
+              "routine",
+              "sensitive"
+            ],
+            "title": "Engineering Review Tier",
+            "type": "string"
+          },
+          "matched_evidence": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ChangeImpactMatchedEvidence"
+            },
+            "title": "Matched Evidence",
+            "type": "array"
+          },
+          "mode": {
+            "const": "shadow",
+            "default": "shadow",
+            "title": "Mode",
+            "type": "string"
+          },
+          "owner_impact": {
+            "default": "unknown",
+            "enum": [
+              "required",
+              "not_required",
+              "unknown"
+            ],
+            "title": "Owner Impact",
+            "type": "string"
+          },
+          "policy_digest": {
+            "default": "",
+            "title": "Policy Digest",
+            "type": "string"
+          },
+          "policy_record_id": {
+            "default": "",
+            "title": "Policy Record Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Revision"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "required_engineering_review_count": {
+            "default": 2,
+            "enum": [
+              1,
+              2
+            ],
+            "title": "Required Engineering Review Count",
+            "type": "integer"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "success",
+              "unknown",
+              "stale_head",
+              "stale_policy"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/ChangeImpactTarget"
+          },
+          "unknown_evidence": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Unknown Evidence",
+            "type": "array"
+          }
+        },
+        "required": [
+          "status",
+          "reason_code",
+          "target"
+        ],
+        "title": "ChangeImpactEvaluation",
+        "type": "object"
+      },
+      "ChangeImpactEvaluationMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "default": "",
+            "maxLength": 1000,
+            "title": "Reason",
+            "type": "string"
+          },
+          "request_id": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "title": "ChangeImpactEvaluationMetadata",
+        "type": "object"
+      },
+      "ChangeImpactEvaluationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "metadata": {
+            "$ref": "#/components/schemas/ChangeImpactEvaluationMetadata"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "target": {
+            "$ref": "#/components/schemas/ChangeImpactTargetReference"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "title": "ChangeImpactEvaluationRequest",
+        "type": "object"
+      },
+      "ChangeImpactEvaluationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "evaluation": {
+            "$ref": "#/components/schemas/ChangeImpactEvaluation"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "evaluation"
+        ],
+        "title": "ChangeImpactEvaluationResponse",
+        "type": "object"
+      },
+      "ChangeImpactMatchedEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "affected_products": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ChangeImpactProductScope"
+            },
+            "title": "Affected Products",
+            "type": "array"
+          },
+          "component": {
+            "default": "",
+            "title": "Component",
+            "type": "string"
+          },
+          "path": {
+            "default": "",
+            "title": "Path",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "review_tier": {
+            "anyOf": [
+              {
+                "enum": [
+                  "routine",
+                  "sensitive"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Tier"
+          },
+          "rule_id": {
+            "default": "",
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "enum": [
+              "server_diff",
+              "launchplane_dependency",
+              "launchplane_reviewer"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "reason"
+        ],
+        "title": "ChangeImpactMatchedEvidence",
+        "type": "object"
+      },
+      "ChangeImpactPolicyApplyEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_current_policy_digest": {
+            "default": "",
+            "title": "Expected Current Policy Digest",
+            "type": "string"
+          },
+          "expected_current_record_id": {
+            "default": "",
+            "title": "Expected Current Record Id",
+            "type": "string"
+          },
+          "mode": {
+            "default": "apply",
+            "enum": [
+              "dry_run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "record": {
+            "$ref": "#/components/schemas/ChangeImpactPolicyRecord"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "record"
+        ],
+        "title": "ChangeImpactPolicyApplyEnvelope",
+        "type": "object"
+      },
+      "ChangeImpactPolicyApplyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/ChangeImpactPolicyApplyResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "ChangeImpactPolicyApplyResponse",
+        "type": "object"
+      },
+      "ChangeImpactPolicyApplyResult": {
+        "additionalProperties": false,
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/ChangeImpactPolicyRecord"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "would_apply",
+              "would_replay",
+              "applied",
+              "replayed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "record"
+        ],
+        "title": "ChangeImpactPolicyApplyResult",
+        "type": "object"
+      },
+      "ChangeImpactPolicyReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "authoritative": {
+            "const": false,
+            "default": false,
+            "title": "Authoritative",
+            "type": "boolean"
+          },
+          "current_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChangeImpactPolicyRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enforcement_effect": {
+            "const": "none",
+            "default": "none",
+            "title": "Enforcement Effect",
+            "type": "string"
+          },
+          "mode": {
+            "const": "shadow",
+            "default": "shadow",
+            "title": "Mode",
+            "type": "string"
+          },
+          "policy_history_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Policy History Count",
+            "type": "integer"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repository_id"
+        ],
+        "title": "ChangeImpactPolicyReadModel",
+        "type": "object"
+      },
+      "ChangeImpactPolicyReadResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "read_model": {
+            "$ref": "#/components/schemas/ChangeImpactPolicyReadModel"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "read_model"
+        ],
+        "title": "ChangeImpactPolicyReadResponse",
+        "type": "object"
+      },
+      "ChangeImpactPolicyRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "component_rules": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeImpactComponentRule"
+            },
+            "title": "Component Rules",
+            "type": "array"
+          },
+          "default_unknown_review_tier": {
+            "const": "sensitive",
+            "default": "sensitive",
+            "title": "Default Unknown Review Tier",
+            "type": "string"
+          },
+          "effective_at": {
+            "title": "Effective At",
+            "type": "string"
+          },
+          "policy_digest": {
+            "default": "",
+            "title": "Policy Digest",
+            "type": "string"
+          },
+          "policy_revision": {
+            "minimum": 1.0,
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "default": "",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "title": "Repository Owner Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "supersedes_record_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Record Id"
+          }
+        },
+        "required": [
+          "repository_id",
+          "repository_owner_id",
+          "repository",
+          "policy_revision",
+          "component_rules",
+          "effective_at",
+          "source",
+          "reason"
+        ],
+        "title": "ChangeImpactPolicyRecord",
+        "type": "object"
+      },
+      "ChangeImpactProductScope": {
+        "additionalProperties": false,
+        "properties": {
+          "owner_action": {
+            "default": "pull_request.owner_acceptance",
+            "title": "Owner Action",
+            "type": "string"
+          },
+          "owner_environment": {
+            "default": "pull_request",
+            "title": "Owner Environment",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "system": {
+            "title": "System",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "system"
+        ],
+        "title": "ChangeImpactProductScope",
+        "type": "object"
+      },
+      "ChangeImpactTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "minimum": 1.0,
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "title": "Repository Owner Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "tree_sha": {
+            "title": "Tree Sha",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository_id",
+          "repository_owner_id",
+          "repository",
+          "pull_request_number",
+          "head_sha",
+          "tree_sha"
+        ],
+        "title": "ChangeImpactTarget",
+        "type": "object"
+      },
+      "ChangeImpactTargetReference": {
+        "additionalProperties": false,
+        "properties": {
+          "pull_request_number": {
+            "minimum": 1.0,
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repository",
+          "pull_request_number"
+        ],
+        "title": "ChangeImpactTargetReference",
+        "type": "object"
+      },
       "DataProvenance": {
         "additionalProperties": false,
         "properties": {
@@ -29196,6 +29930,234 @@
           }
         },
         "summary": "Reconcile managed authz policy rules"
+      }
+    },
+    "/v1/change-impact/evaluation": {
+      "post": {
+        "operationId": "evaluate_change_impact",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeImpactEvaluationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeImpactEvaluationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Evaluate",
+        "tags": [
+          "change-impact"
+        ]
+      }
+    },
+    "/v1/change-impact/policies/apply": {
+      "post": {
+        "operationId": "apply_change_impact_policy",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeImpactPolicyApplyEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeImpactPolicyApplyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Apply Policy",
+        "tags": [
+          "change-impact"
+        ]
+      }
+    },
+    "/v1/change-impact/policy": {
+      "get": {
+        "operationId": "read_change_impact_policy",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repository_id",
+            "required": true,
+            "schema": {
+              "title": "Repository Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeImpactPolicyReadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Policy",
+        "tags": [
+          "change-impact"
+        ]
       }
     },
     "/v1/contexts/{context}/driver-view": {

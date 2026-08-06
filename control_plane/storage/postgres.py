@@ -37,6 +37,7 @@ from control_plane.contracts.authz_policy_record import (
     build_authz_policy_record_id,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.change_impact import ChangeImpactPolicyRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -249,6 +250,10 @@ from control_plane.product_owner_service import (
     ProductOwnerRequirementSequenceError,
     ProductOwnerRoutingConflictError,
     ProductOwnerRoutingSequenceError,
+)
+from control_plane.change_impact_service import (
+    ChangeImpactPolicyConflictError,
+    ChangeImpactPolicySequenceError,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -1486,6 +1491,61 @@ class LaunchplanePreviewPrFeedbackNotificationPolicyRow(Base):
     repository: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneChangeImpactPolicyRow(Base):
+    __tablename__ = "launchplane_change_impact_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'superseded')",
+            name="launchplane_change_impact_policy_status_ck",
+        ),
+        CheckConstraint(
+            "policy_revision >= 1",
+            name="launchplane_change_impact_policy_revision_ck",
+        ),
+        CheckConstraint(
+            "default_unknown_review_tier = 'sensitive'",
+            name="launchplane_change_impact_policy_unknown_tier_ck",
+        ),
+        CheckConstraint(
+            "(policy_revision = 1 AND supersedes_record_id IS NULL) OR "
+            "(policy_revision > 1 AND supersedes_record_id IS NOT NULL)",
+            name="launchplane_change_impact_policy_supersedes_ck",
+        ),
+        Index(
+            "launchplane_change_impact_policy_revision_uidx",
+            "repository_id",
+            "policy_revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_change_impact_policy_active_uidx",
+            "repository_id",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "launchplane_change_impact_policy_current_idx",
+            "repository_id",
+            "status",
+            desc("policy_revision"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    repository_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository_owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    policy_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    default_unknown_review_tier: Mapped[str] = mapped_column(String, nullable=False)
+    effective_at: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    supersedes_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    policy_digest: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -14038,6 +14098,151 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def compare_and_write_change_impact_policy_record(
+        self,
+        record: ChangeImpactPolicyRecord,
+        *,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+    ) -> Literal["written", "replayed"]:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            try:
+                ChangeImpactPolicyRecord.model_validate(record.model_dump(mode="python"))
+            except ValueError as error:
+                raise ChangeImpactPolicyConflictError(
+                    "Incoming change impact policy payload does not match its derived identifiers."
+                ) from error
+            if record.status != "active":
+                raise ChangeImpactPolicySequenceError(
+                    "Incoming change impact policy revision must have active status."
+                )
+            if record.effective_at > _utc_now_timestamp():
+                raise ChangeImpactPolicySequenceError(
+                    "Incoming active change impact policy revision cannot take effect in the future."
+                )
+            if self.database_dialect_name == "postgresql":
+                session.execute(
+                    text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                    {"lock_name": f"change-impact:{record.repository_id}"},
+                )
+            statement = (
+                select(LaunchplaneChangeImpactPolicyRow)
+                .where(LaunchplaneChangeImpactPolicyRow.repository_id == record.repository_id)
+                .order_by(LaunchplaneChangeImpactPolicyRow.policy_revision.desc())
+            )
+            if self.database_dialect_name == "postgresql":
+                statement = statement.with_for_update()
+            rows = tuple(session.scalars(statement).all())
+            records = tuple(
+                self._read_payload(model_type=ChangeImpactPolicyRecord, payload=row.payload)
+                for row in rows
+            )
+            same_id = tuple(existing for existing in records if existing.record_id == record.record_id)
+            if same_id:
+                if len(same_id) != 1 or same_id[0].policy_digest != record.policy_digest:
+                    raise ChangeImpactPolicyConflictError(
+                        "change impact policy record id conflicts with history."
+                    )
+                if same_id[0].status != record.status:
+                    raise ChangeImpactPolicyConflictError(
+                        "change impact policy replay status conflicts with history."
+                    )
+                session.commit()
+                return "replayed"
+            current_records = tuple(existing for existing in records if existing.status == "active")
+            if len(current_records) > 1:
+                raise ChangeImpactPolicySequenceError(
+                    "change impact policy history has multiple active revisions."
+                )
+            current = current_records[0] if current_records else None
+            if current is None:
+                if record.policy_revision != 1:
+                    raise ChangeImpactPolicySequenceError(
+                        "Initial change impact policy revision must be 1."
+                    )
+                if expected_current_record_id.strip() or expected_current_policy_digest.strip():
+                    raise ChangeImpactPolicyConflictError(
+                        "Initial change impact policy expected tip must be absent."
+                    )
+            else:
+                if (
+                    expected_current_record_id.strip() != current.record_id
+                    or expected_current_policy_digest.strip().lower() != current.policy_digest
+                ):
+                    raise ChangeImpactPolicyConflictError(
+                        "Expected current change impact policy tip is stale."
+                    )
+                if record.policy_revision != current.policy_revision + 1:
+                    raise ChangeImpactPolicySequenceError(
+                        "Next change impact policy revision is not linear."
+                    )
+                if record.supersedes_record_id != current.record_id:
+                    raise ChangeImpactPolicySequenceError(
+                        "Next change impact policy must supersede the current record."
+                    )
+                if record.effective_at < current.effective_at:
+                    raise ChangeImpactPolicySequenceError(
+                        "Next change impact policy effective_at cannot precede current revision."
+                    )
+                session.merge(
+                    self._change_impact_policy_row(
+                        current.model_copy(update={"status": "superseded"})
+                    )
+                )
+            session.merge(self._change_impact_policy_row(record))
+            session.commit()
+            return "written"
+
+    def write_change_impact_policy_record(
+        self,
+        record: ChangeImpactPolicyRecord,
+    ) -> Literal["written", "replayed"]:
+        current = self.list_change_impact_policy_records(
+            repository_id=record.repository_id,
+            status="active",
+            limit=1,
+        )
+        return self.compare_and_write_change_impact_policy_record(
+            record,
+            expected_current_record_id=current[0].record_id if current else "",
+            expected_current_policy_digest=current[0].policy_digest if current else "",
+        )
+
+    def read_change_impact_policy_record(self, record_id: str) -> ChangeImpactPolicyRecord:
+        return self._read_model(
+            model_type=ChangeImpactPolicyRecord,
+            orm_model=LaunchplaneChangeImpactPolicyRow,
+            filters=(LaunchplaneChangeImpactPolicyRow.record_id == record_id,),
+        )
+
+    def list_change_impact_policy_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[ChangeImpactPolicyRecord, ...]:
+        filters: list[object] = []
+        if repository_id:
+            filters.append(LaunchplaneChangeImpactPolicyRow.repository_id == repository_id)
+        if repository:
+            filters.append(LaunchplaneChangeImpactPolicyRow.repository == repository.strip().lower())
+        if status:
+            filters.append(LaunchplaneChangeImpactPolicyRow.status == status)
+        return self._list_models(
+            model_type=ChangeImpactPolicyRecord,
+            orm_model=LaunchplaneChangeImpactPolicyRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneChangeImpactPolicyRow.policy_revision.desc(),
+                LaunchplaneChangeImpactPolicyRow.repository_id.desc(),
+                LaunchplaneChangeImpactPolicyRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
     def _product_owner_policy_row(
         self,
         record: ProductOwnerPolicyRecord,
@@ -14089,6 +14294,25 @@ class PostgresRecordStore(HumanSessionStore):
             source=record.source,
             supersedes_record_id=record.supersedes_record_id,
             routing_digest=record.routing_digest,
+            payload=self._payload_dict(record),
+        )
+
+    def _change_impact_policy_row(
+        self,
+        record: ChangeImpactPolicyRecord,
+    ) -> LaunchplaneChangeImpactPolicyRow:
+        return LaunchplaneChangeImpactPolicyRow(
+            record_id=record.record_id,
+            repository_id=record.repository_id,
+            repository_owner_id=record.repository_owner_id,
+            repository=record.repository,
+            status=record.status,
+            policy_revision=record.policy_revision,
+            default_unknown_review_tier=record.default_unknown_review_tier,
+            effective_at=record.effective_at,
+            source=record.source,
+            supersedes_record_id=record.supersedes_record_id,
+            policy_digest=record.policy_digest,
             payload=self._payload_dict(record),
         )
 
@@ -14199,6 +14423,7 @@ class PostgresRecordStore(HumanSessionStore):
             "inventory": 0,
             "odoo_instance_overrides": 0,
             "product_profiles": 0,
+            "change_impact_policies": 0,
             "product_owner_policies": 0,
             "product_owner_requirements": 0,
             "product_owner_routing": 0,
@@ -14256,6 +14481,15 @@ class PostgresRecordStore(HumanSessionStore):
                 owner_policy.model_copy(update={"status": "active"})
             )
             counts["product_owner_policies"] += 1
+        if hasattr(filesystem_store, "list_change_impact_policy_records"):
+            for impact_policy in sorted(
+                filesystem_store.list_change_impact_policy_records(),
+                key=lambda record: (record.repository_id, record.policy_revision),
+            ):
+                self.write_change_impact_policy_record(
+                    impact_policy.model_copy(update={"status": "active"})
+                )
+                counts["change_impact_policies"] += 1
         for owner_requirement in sorted(
             filesystem_store.list_product_owner_requirement_records(),
             key=lambda record: (

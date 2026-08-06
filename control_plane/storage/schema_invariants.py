@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "c1d2e3f4a5b6"
+EXPECTED_ALEMBIC_HEAD_REVISION = "d2e4f6a8b0c2"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -309,6 +309,16 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_product_owner_routing",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_change_impact_policies",
+        "policy_revision",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_change_impact_policies",
         "payload",
         ("jsonb",),
     ),
@@ -664,6 +674,24 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_product_owner_routing_current_idx",
         ("product", "system", "status", "routing_revision"),
     ),
+    CriticalIndex(
+        "launchplane_change_impact_policies",
+        "launchplane_change_impact_policy_revision_uidx",
+        ("repository_id", "policy_revision"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_change_impact_policies",
+        "launchplane_change_impact_policy_active_uidx",
+        ("repository_id",),
+        unique=True,
+        predicate_expression="status='active'",
+    ),
+    CriticalIndex(
+        "launchplane_change_impact_policies",
+        "launchplane_change_impact_policy_current_idx",
+        ("repository_id", "status", "policy_revision"),
+    ),
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
@@ -705,6 +733,10 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     ),
     CriticalPrimaryKey(
         "launchplane_product_owner_routing",
+        ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_change_impact_policies",
         ("record_id",),
     ),
 )

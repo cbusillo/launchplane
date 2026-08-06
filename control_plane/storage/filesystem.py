@@ -18,6 +18,7 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.change_impact import ChangeImpactPolicyRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
@@ -193,6 +194,10 @@ from control_plane.product_owner_service import (
     ProductOwnerRequirementSequenceError,
     ProductOwnerRoutingConflictError,
     ProductOwnerRoutingSequenceError,
+)
+from control_plane.change_impact_service import (
+    ChangeImpactPolicyConflictError,
+    ChangeImpactPolicySequenceError,
 )
 from control_plane.trusted_maintenance import (
     plan_trusted_maintenance_evidence_append,
@@ -1212,6 +1217,149 @@ class FilesystemRecordStore:
         )
         return tuple(cast(ProductOwnerRoutingRecord, record) for record in records)
 
+    def compare_and_write_change_impact_policy_record(
+        self,
+        record: ChangeImpactPolicyRecord,
+        *,
+        expected_current_record_id: str,
+        expected_current_policy_digest: str,
+    ) -> Literal["written", "replayed"]:
+        with self._product_authority_bundle_lock():
+            try:
+                ChangeImpactPolicyRecord.model_validate(record.model_dump(mode="python"))
+            except ValueError as error:
+                raise ChangeImpactPolicyConflictError(
+                    "Incoming change impact policy payload does not match its derived identifiers."
+                ) from error
+            if record.status != "active":
+                raise ChangeImpactPolicySequenceError(
+                    "Incoming change impact policy revision must have active status."
+                )
+            if record.effective_at > _utc_now_timestamp():
+                raise ChangeImpactPolicySequenceError(
+                    "Incoming active change impact policy revision cannot take effect in the future."
+                )
+            records = tuple(
+                existing
+                for existing in self._list_models_locked(
+                    ChangeImpactPolicyRecord,
+                    "launchplane_change_impact_policies",
+                )
+                if existing.repository_id == record.repository_id
+            )
+            same_id = tuple(existing for existing in records if existing.record_id == record.record_id)
+            if same_id:
+                if len(same_id) != 1 or same_id[0].policy_digest != record.policy_digest:
+                    raise ChangeImpactPolicyConflictError(
+                        "change impact policy record id conflicts with history."
+                    )
+                if same_id[0].status != record.status:
+                    raise ChangeImpactPolicyConflictError(
+                        "change impact policy replay status conflicts with history."
+                    )
+                return "replayed"
+            current_records = tuple(existing for existing in records if existing.status == "active")
+            if len(current_records) > 1:
+                raise ChangeImpactPolicySequenceError(
+                    "change impact policy history has multiple active revisions."
+                )
+            current = current_records[0] if current_records else None
+            if current is None:
+                if record.policy_revision != 1:
+                    raise ChangeImpactPolicySequenceError(
+                        "Initial change impact policy revision must be 1."
+                    )
+                if expected_current_record_id.strip() or expected_current_policy_digest.strip():
+                    raise ChangeImpactPolicyConflictError(
+                        "Initial change impact policy expected tip must be absent."
+                    )
+                self._write_model_locked(
+                    "launchplane_change_impact_policies",
+                    record.record_id,
+                    record,
+                )
+                return "written"
+            if (
+                expected_current_record_id.strip() != current.record_id
+                or expected_current_policy_digest.strip().lower() != current.policy_digest
+            ):
+                raise ChangeImpactPolicyConflictError(
+                    "Expected current change impact policy tip is stale."
+                )
+            if record.policy_revision != current.policy_revision + 1:
+                raise ChangeImpactPolicySequenceError(
+                    "Next change impact policy revision is not linear."
+                )
+            if record.supersedes_record_id != current.record_id:
+                raise ChangeImpactPolicySequenceError(
+                    "Next change impact policy must supersede the current record."
+                )
+            if record.effective_at < current.effective_at:
+                raise ChangeImpactPolicySequenceError(
+                    "Next change impact policy effective_at cannot precede current revision."
+                )
+            self._write_product_owner_revision_replacement_locked(
+                record_type="launchplane_change_impact_policies",
+                superseded_current_record=current.model_copy(update={"status": "superseded"}),
+                active_record=record,
+                step_label="change_impact_policy",
+            )
+            return "written"
+
+    def write_change_impact_policy_record(
+        self,
+        record: ChangeImpactPolicyRecord,
+    ) -> Literal["written", "replayed"]:
+        records = self.list_change_impact_policy_records(
+            repository_id=record.repository_id,
+            status="active",
+            limit=1,
+        )
+        current = records[0] if records else None
+        return self.compare_and_write_change_impact_policy_record(
+            record,
+            expected_current_record_id=current.record_id if current is not None else "",
+            expected_current_policy_digest=current.policy_digest if current is not None else "",
+        )
+
+    def read_change_impact_policy_record(self, record_id: str) -> ChangeImpactPolicyRecord:
+        return self._read_model(
+            ChangeImpactPolicyRecord,
+            "launchplane_change_impact_policies",
+            record_id,
+        )
+
+    def list_change_impact_policy_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[ChangeImpactPolicyRecord, ...]:
+        normalized_repository = repository.strip().lower()
+        records = [
+            record
+            for record in self._list_models(
+                ChangeImpactPolicyRecord,
+                "launchplane_change_impact_policies",
+            )
+            if (not repository_id or record.repository_id == repository_id)
+            and (not normalized_repository or record.repository == normalized_repository)
+            and (not status or record.status == status)
+        ]
+        records.sort(
+            key=lambda record: (
+                record.policy_revision,
+                record.repository_id,
+                record.record_id,
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
     def _compare_and_write_product_owner_revision_record(
         self,
         *,
@@ -1370,8 +1518,8 @@ class FilesystemRecordStore:
         records = [
             record
             for record in self._list_models(model_type, record_type)
-            if (not product or record.product == product)
-            and (not system or record.system == system)
+            if (not product or getattr(record, "product", "") == product)
+            and (not system or getattr(record, "system", "") == system)
             and (not status or record.status == status)
         ]
         records.sort(

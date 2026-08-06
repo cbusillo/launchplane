@@ -7976,6 +7976,7 @@ env_var = "GH_TOKEN"
                     "inventory": 1,
                     "odoo_instance_overrides": 1,
                     "product_profiles": 1,
+                    "change_impact_policies": 0,
                     "product_owner_policies": 0,
                     "product_owner_requirements": 0,
                     "product_owner_routing": 0,
