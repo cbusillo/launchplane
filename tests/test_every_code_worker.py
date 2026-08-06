@@ -25,6 +25,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_profile_record import ProductImageProfile
 from control_plane.contracts.product_profile_record import ProductPreviewProfile
 from control_plane.every_code_worker import (
+    _every_code_tmux_session_names,
     EveryCodeWorkerApiError,
     EveryCodeWorkerApiStore,
     apply_every_code_pr_feedback_for_host,
@@ -1121,6 +1122,27 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
         self.assertEqual(session_name, "every-code-every-code-cbusillo-code-123")
         self.assertEqual(fenced_session_name, "every-code-every-code-cbusillo-code-123-f2")
+
+    def test_tmux_missing_server_on_macos_is_an_empty_session_set(self) -> None:
+        def runner(
+            args: Sequence[str], env: Mapping[str, str] | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            del env
+            return subprocess.CompletedProcess(
+                args,
+                1,
+                "",
+                "error connecting to /private/tmp/tmux-501/default (No such file or directory)",
+            )
+
+        self.assertEqual(
+            _every_code_tmux_session_names(
+                tmux_binary="tmux",
+                request_id="every-code-cbusillo-launchplane-2015-test",
+                runner=runner,
+            ),
+            (),
+        )
 
     def test_long_session_names_keep_a_stable_fenced_prefix(self) -> None:
         request_id = "every-code-" + ("very-long-request-" * 10)
