@@ -110,6 +110,7 @@ class EngineeringReviewStore(Protocol):
         *,
         repository: str = "",
         pr_number: int | None = None,
+        head_sha: str = "",
         work_request_id: str = "",
         worker_runtime_id: str = "",
         worker_host: str = "",

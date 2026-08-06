@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Literal, Protocol, cast
 
 from control_plane.change_impact_service import (
@@ -18,7 +19,6 @@ from control_plane.contracts.engineering_review_decision import (
 from control_plane.contracts.engineering_review_run import EngineeringReviewRunRecord
 from control_plane.contracts.engineering_review_run import EngineeringReviewAuthorityRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
-from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.launchplane import github_pull_request_reference
 
 
@@ -45,6 +45,7 @@ class EngineeringReviewDecisionStore(Protocol):
         *,
         repository: str = "",
         pr_number: int | None = None,
+        head_sha: str = "",
         work_request_id: str = "",
         worker_runtime_id: str = "",
         worker_host: str = "",
@@ -117,7 +118,17 @@ def evaluate_engineering_review_decision(
             "Engineering review target does not match the stored work request repository."
         )
     reference = github_pull_request_reference(pr_url=work_request.result_pr_url)
-    if reference is None or int(reference["pr_number"]) != request.target.pull_request_number:
+    reference_repository = (
+        ""
+        if reference is None
+        else f"{reference['owner']}/{reference['repo']}".casefold()
+    )
+    if (
+        reference is None
+        or reference_repository != work_request.repository.casefold()
+        or reference_repository != request.target.repository.casefold()
+        or int(reference["pr_number"]) != request.target.pull_request_number
+    ):
         raise EngineeringReviewDecisionConflictError(
             "Engineering review target does not match the stored work request pull request."
         )
@@ -134,6 +145,7 @@ def evaluate_engineering_review_decision(
     runs = store.list_engineering_review_run_records(
         repository=target.repository,
         pr_number=target.pull_request_number,
+        head_sha=target.head_sha,
         work_request_id=work_request.request_id,
         limit=50,
     )
@@ -147,7 +159,7 @@ def evaluate_engineering_review_decision(
         impact=impact,
         runs=runs,
         active_authority=(active_authorities[0] if len(active_authorities) == 1 else None),
-        evaluated_at=evaluated_at.strip() or utc_now_timestamp(),
+        evaluated_at=evaluated_at.strip() or _decision_timestamp(),
     )
     return store.write_engineering_review_decision_record_if_absent(record)
 
@@ -243,3 +255,7 @@ def _distinct_slots(
     for run in sorted(runs, key=lambda candidate: (candidate.finished_at, candidate.run_id)):
         selected.setdefault(run.review_slot, run)
     return tuple(selected[slot] for slot in sorted(selected))
+
+
+def _decision_timestamp() -> str:
+    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")

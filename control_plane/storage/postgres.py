@@ -10994,6 +10994,7 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         repository: str = "",
         pr_number: int | None = None,
+        head_sha: str = "",
         work_request_id: str = "",
         worker_runtime_id: str = "",
         worker_host: str = "",
@@ -11006,6 +11007,8 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplaneEngineeringReviewRunRow.repository == repository)
         if pr_number is not None:
             filters.append(LaunchplaneEngineeringReviewRunRow.pr_number == pr_number)
+        if head_sha:
+            filters.append(LaunchplaneEngineeringReviewRunRow.head_sha == head_sha)
         if work_request_id:
             filters.append(LaunchplaneEngineeringReviewRunRow.work_request_id == work_request_id)
         if worker_runtime_id:

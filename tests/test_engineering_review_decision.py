@@ -152,6 +152,19 @@ def _request() -> EngineeringReviewDecisionRequest:
 
 
 class EngineeringReviewDecisionTests(unittest.TestCase):
+    def test_work_request_result_pr_repository_must_match_target(self) -> None:
+        store = _Store((_completed_run(slot=1, family="openai"),))
+        store.work_request = store.work_request.model_copy(
+            update={"result_pr_url": "https://github.com/other/repository/pull/20"}
+        )
+
+        with self.assertRaisesRegex(ValueError, "pull request"):
+            evaluate_engineering_review_decision(
+                store=store,
+                request=_request(),
+                repository_evidence_provider=_Provider(".github/workflows/ci.yml"),
+            )
+
     def test_routine_classification_schedules_only_one_review_run(self) -> None:
         store = _Store()
         target = EngineeringReviewPullRequestTarget(
