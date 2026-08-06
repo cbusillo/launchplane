@@ -20,6 +20,9 @@ from control_plane.http_routes.generic_web import (
     register_generic_web_rollback_write_routes,
     register_generic_web_write_routes,
 )
+from control_plane.http_routes.engineering_review_run import (
+    register_engineering_review_run_read_routes,
+)
 from control_plane.http_routes.every_code import (
     register_every_code_feedback_read_routes,
     register_every_code_notification_attempt_read_routes,

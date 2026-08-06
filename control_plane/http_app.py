@@ -17,7 +17,7 @@ from pathlib import Path as FilePath
 from typing import Annotated, Any, Literal, NoReturn, Protocol, cast
 from uuid import uuid4
 import click
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
 from fastapi.datastructures import DefaultPlaceholder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -97,6 +97,7 @@ from control_plane.http_routes import (
     register_dokploy_target_inspect_read_routes,
     register_driver_descriptor_read_routes,
     register_evidence_write_routes,
+    register_engineering_review_run_read_routes,
     register_every_code_feedback_read_routes,
     register_every_code_notification_attempt_read_routes,
     register_every_code_preview_gate_read_routes,
@@ -162,6 +163,13 @@ from control_plane.contracts.agent_write_intent import (
     secret_evidence_for_agent_write_intent,
 )
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
+from control_plane.contracts.engineering_review_run import (
+    EngineeringReviewRunRecord,
+    EngineeringReviewRunSubmission,
+    build_engineering_review_run_id,
+    generate_engineering_review_run_credential,
+    expire_engineering_review_run,
+)
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import (
     EveryCodePrFeedbackRecord,
@@ -10397,6 +10405,238 @@ def create_launchplane_fastapi_app(
             result={"gate": gate_record.model_dump(mode="json")},
         )
 
+    def require_engineering_review_run_write_store(
+        record_store: object,
+    ) -> object:
+        missing = [
+            m
+            for m in (
+                "create_engineering_review_run_record_if_absent",
+                "dispatch_engineering_review_run_record",
+            )
+            if not callable(getattr(record_store, m, None))
+        ]
+        if missing:
+            raise TypeError(
+                f"record store does not support engineering review run writes: {', '.join(missing)}"
+            )
+        return record_store
+
+    def require_engineering_review_run_submit_store(
+        record_store: object,
+    ) -> object:
+        if not callable(getattr(record_store, "submit_engineering_review_run_record", None)):
+            raise TypeError(
+                "record store does not support engineering review run submission"
+            )
+        return record_store
+
+    def require_engineering_review_run_expire_store(
+        record_store: object,
+    ) -> object:
+        missing = [
+            m
+            for m in (
+                "list_stale_engineering_review_run_records",
+                "expire_stale_engineering_review_run_record",
+            )
+            if not callable(getattr(record_store, m, None))
+        ]
+        if missing:
+            raise TypeError(
+                f"record store does not support engineering review run expiry: {', '.join(missing)}"
+            )
+        return record_store
+
+    def create_and_dispatch_engineering_review_run(
+        payload: dict[str, object],
+        _worker_token: Annotated[None, Depends(require_every_code_worker_write_token)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            review_store = require_engineering_review_run_write_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            repository = str(payload.get("repository", "")).strip()
+            pr_number_raw = payload.get("pr_number")
+            head_sha = str(payload.get("head_sha", "")).strip()
+            tree_sha = str(payload.get("tree_sha", "")).strip()
+            policy_revision = str(payload.get("policy_revision", "")).strip()
+            work_request_id = str(payload.get("work_request_id", "")).strip()
+            model_id = str(payload.get("model_id", "")).strip()
+            model_family = str(payload.get("model_family", "")).strip()
+            binary_digest = str(payload.get("binary_digest", "")).strip()
+            review_slot_raw = payload.get("review_slot")
+            dispatched_by_host = str(payload.get("dispatched_by_host", "")).strip()
+            lease_seconds_raw = payload.get("lease_seconds")
+
+            if not isinstance(pr_number_raw, int) or pr_number_raw < 1:
+                raise ValueError("create engineering review run requires pr_number (positive int)")
+            if not isinstance(review_slot_raw, int) or review_slot_raw < 1:
+                raise ValueError("create engineering review run requires review_slot (positive int)")
+            pr_number: int = pr_number_raw
+            review_slot: int = review_slot_raw
+            lease_seconds: int = (
+                int(lease_seconds_raw)
+                if isinstance(lease_seconds_raw, int) and lease_seconds_raw > 0
+                else 3600
+            )
+
+            run_id = build_engineering_review_run_id(
+                repository=repository,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                review_slot=review_slot,
+                policy_revision=policy_revision,
+            )
+            plaintext_credential, credential_hash = generate_engineering_review_run_credential()
+            now = utc_now_timestamp()
+            pending_record = EngineeringReviewRunRecord(
+                run_id=run_id,
+                review_slot=review_slot,
+                state="pending",
+                repository=repository,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                tree_sha=tree_sha,
+                policy_revision=policy_revision,
+                work_request_id=work_request_id,
+                model_id=model_id,
+                model_family=model_family,
+                binary_digest=binary_digest,
+                run_credential_hash=credential_hash,
+                created_at=now,
+                updated_at=now,
+                lease_expires_at=now,
+            )
+        except (ValueError, TypeError, KeyError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_payload",
+                message=str(error),
+            ) from error
+
+        review_store.create_engineering_review_run_record_if_absent(pending_record)
+        try:
+            dispatched_record = review_store.dispatch_engineering_review_run_record(
+                run_id=run_id,
+                dispatched_at=utc_now_timestamp(),
+                dispatched_by_host=dispatched_by_host,
+                lease_seconds=lease_seconds,
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="dispatch_failed",
+                message=str(error),
+            ) from error
+
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "run_id": run_id,
+                "review_slot": review_slot,
+                "state": "dispatched",
+            },
+            result={
+                "run": (dispatched_record or pending_record).model_dump(mode="json"),
+                "run_credential": plaintext_credential,
+            },
+        )
+
+    def submit_engineering_review_run(
+        run_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        payload: dict[str, object],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            submit_store = require_engineering_review_run_submit_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            submission = EngineeringReviewRunSubmission.model_validate(payload)
+        except (ValueError, ValidationError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_payload",
+                message=str(error),
+            ) from error
+        try:
+            completed_record = submit_store.submit_engineering_review_run_record(
+                run_id=run_id,
+                submission=submission,
+                completed_at=utc_now_timestamp(),
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="submission_rejected",
+                message=str(error),
+            ) from error
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "run_id": completed_record.run_id,
+                "state": completed_record.state,
+                "decision": completed_record.decision,
+            },
+            result={"run": completed_record.model_dump(mode="json")},
+        )
+
+    def expire_stale_engineering_review_runs(
+        _worker_token: Annotated[None, Depends(require_every_code_worker_write_token)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            expire_store = require_engineering_review_run_expire_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        now = utc_now_timestamp()
+        stale_records = expire_store.list_stale_engineering_review_run_records(as_of=now)
+        expired = 0
+        for stale in stale_records:
+            result = expire_store.expire_stale_engineering_review_run_record(
+                expected_record=stale,
+                expired_at=now,
+            )
+            if result is not None:
+                expired += 1
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={"expired": expired},
+            result={"expired": expired},
+        )
+
     def ensure_route_binding_allowed(
         *,
         identity: LaunchplaneIdentity,
@@ -20334,6 +20574,62 @@ def create_launchplane_fastapi_app(
         dependencies=read_route_dependencies,
         read_identity=read_every_code_worker_read_identity,
     )
+
+    register_engineering_review_run_read_routes(
+        app,
+        dependencies=read_route_dependencies,
+        read_identity=read_every_code_worker_read_identity,
+    )
+
+    app.add_api_route(
+        "/v1/engineering-review-runs/dispatch",
+        create_and_dispatch_engineering_review_run,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="create_and_dispatch_engineering_review_run",
+        summary="Create and dispatch an engineering review run (worker-owned)",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/engineering-review-runs/{run_id}/submit",
+        submit_engineering_review_run,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="submit_engineering_review_run",
+        summary="Submit reviewer decision against a pre-existing run (credential-gated, no identity)",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/engineering-review-runs/expire-stale",
+        expire_stale_engineering_review_runs,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="expire_stale_engineering_review_runs",
+        summary="Expire stale engineering review runs",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
     register_preview_notification_attempt_read_routes(
         app,
         dependencies=read_route_dependencies,

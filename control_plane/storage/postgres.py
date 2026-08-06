@@ -59,6 +59,13 @@ from control_plane.contracts.every_code_work_request import (
     heartbeat_every_code_work_request,
     recover_stale_every_code_work_request,
 )
+from control_plane.contracts.engineering_review_run import (
+    EngineeringReviewRunRecord,
+    EngineeringReviewRunSubmission,
+    dispatch_engineering_review_run,
+    expire_engineering_review_run,
+    submit_engineering_review_run,
+)
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
 from control_plane.contracts.idempotency_record import (
@@ -2054,6 +2061,41 @@ class LaunchplaneDokployTargetRow(Base):
 
     context: Mapped[str] = mapped_column(String, primary_key=True)
     instance: Mapped[str] = mapped_column(String, primary_key=True)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEngineeringReviewRunRow(Base):
+    __tablename__ = "launchplane_engineering_review_runs"
+    __table_args__ = (
+        Index(
+            "launchplane_eng_review_runs_pr_idx",
+            "repository",
+            "pr_number",
+            desc("created_at"),
+        ),
+        Index(
+            "launchplane_eng_review_runs_work_request_idx",
+            "work_request_id",
+            desc("created_at"),
+        ),
+        Index(
+            "launchplane_eng_review_runs_state_lease_idx",
+            "state",
+            "lease_expires_at",
+        ),
+    )
+
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    review_slot: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    head_sha: Mapped[str] = mapped_column(String, nullable=False)
+    work_request_id: Mapped[str] = mapped_column(String, nullable=False)
+    policy_revision: Mapped[str] = mapped_column(String, nullable=False)
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
@@ -10641,6 +10683,185 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def create_engineering_review_run_record_if_absent(
+        self, record: EngineeringReviewRunRecord
+    ) -> tuple[EngineeringReviewRunRecord, bool]:
+        with self._session_factory() as session:
+            session.add(
+                LaunchplaneEngineeringReviewRunRow(
+                    run_id=record.run_id,
+                    review_slot=record.review_slot,
+                    state=record.state,
+                    repository=record.repository,
+                    pr_number=record.pr_number,
+                    head_sha=record.head_sha,
+                    work_request_id=record.work_request_id,
+                    policy_revision=record.policy_revision,
+                    lease_expires_at=record.lease_expires_at,
+                    created_at=record.created_at,
+                    updated_at=record.updated_at,
+                    payload=self._payload_dict(record),
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                return self.read_engineering_review_run_record(record.run_id), False
+        return record, True
+
+    def read_engineering_review_run_record(self, run_id: str) -> EngineeringReviewRunRecord:
+        return self._read_model(
+            model_type=EngineeringReviewRunRecord,
+            orm_model=LaunchplaneEngineeringReviewRunRow,
+            filters=(LaunchplaneEngineeringReviewRunRow.run_id == run_id,),
+        )
+
+    def list_engineering_review_run_records(
+        self,
+        *,
+        repository: str = "",
+        pr_number: int | None = None,
+        work_request_id: str = "",
+        state: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[EngineeringReviewRunRecord, ...]:
+        filters: list[Any] = []
+        if repository:
+            filters.append(LaunchplaneEngineeringReviewRunRow.repository == repository)
+        if pr_number is not None:
+            filters.append(LaunchplaneEngineeringReviewRunRow.pr_number == pr_number)
+        if work_request_id:
+            filters.append(LaunchplaneEngineeringReviewRunRow.work_request_id == work_request_id)
+        if state:
+            filters.append(LaunchplaneEngineeringReviewRunRow.state == state)
+        return self._list_models(
+            model_type=EngineeringReviewRunRecord,
+            orm_model=LaunchplaneEngineeringReviewRunRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEngineeringReviewRunRow.created_at.desc(),
+                LaunchplaneEngineeringReviewRunRow.run_id.desc(),
+            ),
+            limit=limit,
+            offset=offset,
+        )
+
+    def dispatch_engineering_review_run_record(
+        self,
+        *,
+        run_id: str,
+        dispatched_at: str,
+        dispatched_by_host: str,
+        lease_seconds: int = 3600,
+    ) -> EngineeringReviewRunRecord | None:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneEngineeringReviewRunRow)
+                .where(LaunchplaneEngineeringReviewRunRow.run_id == run_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(run_id)
+            record = self._read_payload(model_type=EngineeringReviewRunRecord, payload=row.payload)
+            updated = dispatch_engineering_review_run(
+                record,
+                dispatched_at=dispatched_at,
+                dispatched_by_host=dispatched_by_host,
+                lease_seconds=lease_seconds,
+            )
+            self._sync_engineering_review_run_row(row, updated)
+            session.commit()
+            return updated
+
+    def submit_engineering_review_run_record(
+        self,
+        *,
+        run_id: str,
+        submission: EngineeringReviewRunSubmission,
+        completed_at: str,
+    ) -> EngineeringReviewRunRecord:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneEngineeringReviewRunRow)
+                .where(LaunchplaneEngineeringReviewRunRow.run_id == run_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(run_id)
+            record = self._read_payload(model_type=EngineeringReviewRunRecord, payload=row.payload)
+            updated = submit_engineering_review_run(record, submission, completed_at=completed_at)
+            self._sync_engineering_review_run_row(row, updated)
+            session.commit()
+            return updated
+
+    def list_stale_engineering_review_run_records(
+        self,
+        *,
+        as_of: str,
+        limit: int = 50,
+    ) -> tuple[EngineeringReviewRunRecord, ...]:
+        nonterminal_states = ("pending", "dispatched", "running")
+        filters: list[Any] = [
+            LaunchplaneEngineeringReviewRunRow.state.in_(nonterminal_states),
+            LaunchplaneEngineeringReviewRunRow.lease_expires_at != "",
+            LaunchplaneEngineeringReviewRunRow.lease_expires_at < as_of,
+        ]
+        return self._list_models(
+            model_type=EngineeringReviewRunRecord,
+            orm_model=LaunchplaneEngineeringReviewRunRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEngineeringReviewRunRow.lease_expires_at.asc(),
+                LaunchplaneEngineeringReviewRunRow.run_id.asc(),
+            ),
+            limit=limit,
+        )
+
+    def expire_stale_engineering_review_run_record(
+        self,
+        *,
+        expected_record: EngineeringReviewRunRecord,
+        expired_at: str,
+    ) -> EngineeringReviewRunRecord | None:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneEngineeringReviewRunRow)
+                .where(LaunchplaneEngineeringReviewRunRow.run_id == expected_record.run_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                return None
+            current = self._read_payload(
+                model_type=EngineeringReviewRunRecord, payload=row.payload
+            )
+            if self._payload_dict(current) != self._payload_dict(expected_record):
+                return None
+            updated = expire_engineering_review_run(current, expired_at=expired_at)
+            self._sync_engineering_review_run_row(row, updated)
+            session.commit()
+            return updated
+
+    def _sync_engineering_review_run_row(
+        self,
+        row: LaunchplaneEngineeringReviewRunRow,
+        record: EngineeringReviewRunRecord,
+    ) -> None:
+        row.state = record.state
+        row.lease_expires_at = record.lease_expires_at
+        row.updated_at = record.updated_at
+        row.payload = self._payload_dict(record)
 
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> None:
         self._write_row(
