@@ -134,6 +134,13 @@ def evaluate_engineering_review_decision(
         )
     repository_evidence = repository_evidence_provider.resolve(request.target)
     target = repository_evidence.target
+    if (
+        target.repository.casefold() != reference_repository
+        or target.pull_request_number != int(reference["pr_number"])
+    ):
+        raise EngineeringReviewDecisionConflictError(
+            "Server-resolved engineering review target does not match the stored work request."
+        )
     policies = store.list_change_impact_policy_records(repository_id=target.repository_id)
     stored_evidence = load_change_impact_stored_evidence(store=store, target=target)
     impact = evaluate_change_impact(

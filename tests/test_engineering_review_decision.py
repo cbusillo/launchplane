@@ -152,6 +152,24 @@ def _request() -> EngineeringReviewDecisionRequest:
 
 
 class EngineeringReviewDecisionTests(unittest.TestCase):
+    def test_server_resolved_target_must_match_work_request_pr(self) -> None:
+        store = _Store((_completed_run(slot=1, family="openai"),))
+        provider = _Provider(".github/workflows/ci.yml")
+        provider.evidence = provider.evidence.model_copy(
+            update={
+                "target": provider.evidence.target.model_copy(
+                    update={"repository": "other/repository"}
+                )
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "Server-resolved"):
+            evaluate_engineering_review_decision(
+                store=store,
+                request=_request(),
+                repository_evidence_provider=provider,
+            )
+
     def test_work_request_result_pr_repository_must_match_target(self) -> None:
         store = _Store((_completed_run(slot=1, family="openai"),))
         store.work_request = store.work_request.model_copy(
