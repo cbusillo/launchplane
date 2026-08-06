@@ -76,6 +76,7 @@ from control_plane.http_routes import (
     DriverReadRouteDependencies,
     EVIDENCE_INGRESS_ROUTES as _EVIDENCE_INGRESS_ROUTES,
     EvidenceWriteRouteDependencies,
+    EngineeringReviewDecisionRouteDependencies,
     EngineeringReviewWorkerIdentity,
     EngineeringReviewWriteRouteDependencies,
     GenericWebWriteRouteDependencies,
@@ -104,6 +105,7 @@ from control_plane.http_routes import (
     register_dokploy_target_inspect_read_routes,
     register_driver_descriptor_read_routes,
     register_evidence_write_routes,
+    register_engineering_review_decision_routes,
     register_engineering_review_routes,
     register_every_code_feedback_read_routes,
     register_every_code_notification_attempt_read_routes,
@@ -4310,6 +4312,27 @@ def create_launchplane_fastapi_app(
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
         target_resolver=resolved_engineering_review_target_resolver,
+        repository_evidence_provider=(
+            resolved_change_impact_repository_evidence_provider
+        ),
+    )
+    engineering_review_decision_route_dependencies = (
+        EngineeringReviewDecisionRouteDependencies(
+            read_write_identity=read_write_identity,
+            get_record_store=get_record_store,
+            next_trace_id=next_trace_id,
+            authorization_allows=resolved_authz_policy_runtime.allows,
+            http_error=_launchplane_http_error,
+            error_response_model=LaunchplaneErrorResponse,
+            repository_evidence_provider=(
+                resolved_change_impact_repository_evidence_provider
+            ),
+            github_token=lambda: resolve_launchplane_github_token(
+                control_plane_root=resolved_control_plane_root,
+                context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+            ),
+            github_api=github_api_request,
+        )
     )
     evidence_write_route_dependencies = EvidenceWriteRouteDependencies(
         read_write_identity=read_write_identity,
@@ -20387,6 +20410,11 @@ def create_launchplane_fastapi_app(
         read_dependencies=read_route_dependencies,
         write_dependencies=engineering_review_write_route_dependencies,
         read_identity=read_every_code_worker_read_identity,
+    )
+    register_engineering_review_decision_routes(
+        app,
+        read_dependencies=read_route_dependencies,
+        write_dependencies=engineering_review_decision_route_dependencies,
     )
 
     register_preview_notification_attempt_read_routes(

@@ -2047,12 +2047,38 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
             openapi["paths"]["/v1/engineering-review-runs/complete"]["post"]["operationId"],
             "complete_engineering_review_run",
         )
+        self.assertEqual(
+            openapi["paths"]["/v1/engineering-review-decisions/evaluate"]["post"][
+                "operationId"
+            ],
+            "evaluate_engineering_review_decision",
+        )
+        self.assertEqual(
+            openapi["paths"]["/v1/engineering-review-decisions/project"]["post"][
+                "operationId"
+            ],
+            "project_engineering_review_decision",
+        )
         create_schema = json.dumps(
             openapi["components"]["schemas"]["EngineeringReviewRunCreateRequest"]
         )
         self.assertIn("work_request_id", create_schema)
         for caller_field in ("model_id", "model_family", "review_slot", "repository", "head_sha"):
             self.assertNotIn(caller_field, create_schema)
+        decision_request_schema = json.dumps(
+            openapi["components"]["schemas"]["EngineeringReviewDecisionRequest"]
+        )
+        self.assertIn("work_request_id", decision_request_schema)
+        for caller_field in (
+            "reviewer",
+            "model_id",
+            "model_family",
+            "review_slot",
+            "head_sha",
+            "tree_sha",
+            "decision_binding_sha256",
+        ):
+            self.assertNotIn(caller_field, decision_request_schema)
         review_schemas = json.dumps(openapi["components"]["schemas"])
         self.assertNotIn("credential_hash", review_schemas)
         self.assertNotIn("credential_ciphertext", review_schemas)

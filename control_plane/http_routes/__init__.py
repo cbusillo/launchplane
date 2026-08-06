@@ -25,6 +25,10 @@ from control_plane.http_routes.engineering_review_run import (
     EngineeringReviewWriteRouteDependencies,
     register_engineering_review_routes,
 )
+from control_plane.http_routes.engineering_review_decision import (
+    EngineeringReviewDecisionRouteDependencies,
+    register_engineering_review_decision_routes,
+)
 from control_plane.http_routes.every_code import (
     register_every_code_feedback_read_routes,
     register_every_code_notification_attempt_read_routes,
@@ -160,7 +164,9 @@ __all__ = (
     "register_every_code_work_request_read_routes",
     "EngineeringReviewWriteRouteDependencies",
     "EngineeringReviewWorkerIdentity",
+    "EngineeringReviewDecisionRouteDependencies",
     "register_engineering_review_routes",
+    "register_engineering_review_decision_routes",
     "register_generic_web_rollback_write_routes",
     "register_generic_web_write_routes",
     "register_ingress_read_routes",

@@ -35,6 +35,7 @@ from control_plane.engineering_review_service import (
     require_engineering_review_authority_store,
     require_engineering_review_run_create_store,
 )
+from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.service_auth import LaunchplaneIdentity
 
@@ -109,6 +110,7 @@ class EngineeringReviewStore(Protocol):
         *,
         repository: str = "",
         pr_number: int | None = None,
+        head_sha: str = "",
         work_request_id: str = "",
         worker_runtime_id: str = "",
         worker_host: str = "",
@@ -168,6 +170,7 @@ class EngineeringReviewWriteRouteDependencies:
     http_error: Callable[..., Exception]
     error_response_model: type[BaseModel]
     target_resolver: EngineeringReviewTargetResolver
+    repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider
 
 
 def _store(record_store: object) -> EngineeringReviewStore:
@@ -286,6 +289,9 @@ def register_engineering_review_routes(
                 store=require_engineering_review_run_create_store(record_store),
                 work_request_id=request.work_request_id,
                 target_resolver=write_dependencies.target_resolver,
+                repository_evidence_provider=(
+                    write_dependencies.repository_evidence_provider
+                ),
             )
         except (
             TypeError,

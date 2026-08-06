@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "e3f5a7b9c1d3"
+EXPECTED_ALEMBIC_HEAD_REVISION = "f4a6c8e0b2d4"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -96,6 +96,11 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "launchplane_engineering_review_runs",
         "fencing_token",
         ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_engineering_review_decisions",
+        "payload",
+        ("jsonb",),
     ),
     CriticalColumnType(
         "launchplane_odoo_stable_bootstrap_operations",
@@ -406,6 +411,12 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_engineering_review_runs",
         "launchplane_eng_review_runs_credential_uidx",
         ("credential_hash",),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_engineering_review_decisions",
+        "launchplane_eng_review_decisions_binding_uidx",
+        ("decision_binding_sha256",),
         unique=True,
     ),
     CriticalIndex(
@@ -785,6 +796,10 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_engineering_review_runs",
         ("run_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_engineering_review_decisions",
+        ("decision_id",),
     ),
 )
 
