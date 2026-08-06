@@ -40,6 +40,9 @@ Use these docs as the source of truth for `launchplane`.
   context, caller profiles, scoped intent, redaction, and provenance boundary.
 - [product-owner-policy.md](product-owner-policy.md) — additive shadow-mode
   product/system Owner membership, requirement, routing, and evaluation contract.
+- [change-impact-policy.md](change-impact-policy.md) — additive shadow-mode
+  affected-product, Owner-impact, and engineering-review classification
+  contract.
 - [operations.md](operations.md) — operator workflows and runtime boundary rules.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — current blockers and exit criteria

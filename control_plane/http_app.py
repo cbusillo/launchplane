@@ -62,6 +62,8 @@ from control_plane import (
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
 from control_plane import live_target_runtime as control_plane_live_target_runtime
+from control_plane.change_impact_github import GitHubChangeImpactRepositoryEvidenceProvider
+from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
 from control_plane.http_routes import (
     AcceptedEvidenceResponse as AcceptedEvidenceResponse,
     BackupGateEvidenceRequest as BackupGateEvidenceRequest,
@@ -70,6 +72,10 @@ from control_plane.http_routes import (
     EVIDENCE_INGRESS_ROUTES as _EVIDENCE_INGRESS_ROUTES,
     EvidenceWriteRouteDependencies,
     GenericWebWriteRouteDependencies,
+    ChangeImpactReadRouteDependencies,
+    ChangeImpactWriteRouteDependencies,
+    CHANGE_IMPACT_EVALUATION_ROUTE,
+    CHANGE_IMPACT_POLICY_APPLY_ROUTE,
     PRODUCT_OWNER_POLICY_APPLY_ROUTE,
     PRODUCT_OWNER_REQUIREMENT_APPLY_ROUTE,
     PRODUCT_OWNER_ROUTING_APPLY_ROUTE,
@@ -85,6 +91,8 @@ from control_plane.http_routes import (
     provider_operation_response_payload as _provider_operation_response_payload,
     product_profile_context_cutover_contexts_allowed,
     register_agent_context_read_routes,
+    register_change_impact_read_routes,
+    register_change_impact_write_routes,
     register_deployment_promotion_read_routes,
     register_dokploy_target_inspect_read_routes,
     register_driver_descriptor_read_routes,
@@ -743,6 +751,8 @@ _TENANT_ADMISSION_CONTROLLER_RUN_ONCE_MAX_BODY_BYTES = 64 * 1024
 _TENANT_ADMISSION_STATUS_RECONCILE_MAX_BODY_BYTES = 64 * 1024
 _TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_OWNER_POLICY_MAX_BODY_BYTES = 64 * 1024
+_CHANGE_IMPACT_EVALUATION_MAX_BODY_BYTES = 16 * 1024
+_CHANGE_IMPACT_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE = "/v1/product-profiles/prelaunch-rebuild/apply"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
@@ -825,6 +835,18 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     TRUSTED_MAINTENANCE_POLICY_APPLY_ROUTE: (
         "Trusted-maintenance policy",
         _TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    CHANGE_IMPACT_EVALUATION_ROUTE: (
+        "Change impact evaluation",
+        _CHANGE_IMPACT_EVALUATION_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    CHANGE_IMPACT_POLICY_APPLY_ROUTE: (
+        "Change impact policy",
+        _CHANGE_IMPACT_POLICY_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -3491,6 +3513,9 @@ def create_launchplane_fastapi_app(
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
     work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
     work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
+    change_impact_repository_evidence_provider: (
+        ChangeImpactRepositoryEvidenceProvider | None
+    ) = None,
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
     preview_pr_feedback_discord_sender: Callable[
         [str, dict[str, object]], object
@@ -3504,6 +3529,15 @@ def create_launchplane_fastapi_app(
         control_plane_root_path or FilePath(__file__).resolve().parent.parent
     )
     resolved_state_dir = state_dir or resolved_control_plane_root / "state"
+    resolved_change_impact_repository_evidence_provider = (
+        change_impact_repository_evidence_provider
+        or GitHubChangeImpactRepositoryEvidenceProvider(
+            control_plane_root=resolved_control_plane_root,
+            github_token=resolve_launchplane_github_token,
+            github_api=github_api_request,
+            token_context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        )
+    )
     shared_record_store: object | None = (
         None
         if record_store_factory is not None
@@ -4215,6 +4249,14 @@ def create_launchplane_fastapi_app(
         error_response_model=LaunchplaneErrorResponse,
     )
     product_owner_write_route_dependencies = ProductOwnerWriteRouteDependencies(
+        read_write_identity=read_write_identity,
+        get_record_store=get_record_store,
+        next_trace_id=next_trace_id,
+        authorization_allows=resolved_authz_policy_runtime.allows,
+        http_error=_launchplane_http_error,
+        error_response_model=LaunchplaneErrorResponse,
+    )
+    change_impact_write_route_dependencies = ChangeImpactWriteRouteDependencies(
         read_write_identity=read_write_identity,
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
@@ -19860,6 +19902,15 @@ def create_launchplane_fastapi_app(
     )
 
     register_product_owner_read_routes(app, dependencies=read_route_dependencies)
+    register_change_impact_read_routes(
+        app,
+        dependencies=ChangeImpactReadRouteDependencies(
+            common=read_route_dependencies,
+            repository_evidence_provider=(
+                resolved_change_impact_repository_evidence_provider
+            ),
+        ),
+    )
 
     register_preview_readiness_read_routes(
         app,
@@ -20869,6 +20920,10 @@ def create_launchplane_fastapi_app(
     register_product_owner_write_routes(
         app,
         dependencies=product_owner_write_route_dependencies,
+    )
+    register_change_impact_write_routes(
+        app,
+        dependencies=change_impact_write_route_dependencies,
     )
 
     def read_operator_ui(path: str = "") -> Response:

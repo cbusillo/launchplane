@@ -993,7 +993,7 @@ class SchemaMigrationTests(unittest.TestCase):
         for table_name in owner_table_names:
             self.assertNotIn(table_name, downgraded_table_names)
 
-    def test_repository_human_admission_schema_invariants_are_expected(self) -> None:
+    def test_policy_schema_invariants_are_expected(self) -> None:
         column_types = {
             (column.table_name, column.column_name): column.accepted_type_tokens
             for column in CRITICAL_POSTGRES_COLUMN_TYPES
@@ -1004,10 +1004,27 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "c1d2e3f4a5b6")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "d2e4f6a8b0c2")
         self.assertEqual(
             column_types[("launchplane_repository_human_role_policies", "payload")],
             ("jsonb",),
+        )
+        self.assertEqual(
+            column_types[("launchplane_change_impact_policies", "payload")],
+            ("jsonb",),
+        )
+        self.assertEqual(
+            indexes[
+                (
+                    "launchplane_change_impact_policies",
+                    "launchplane_change_impact_policy_active_uidx",
+                )
+            ].predicate_expression,
+            "status='active'",
+        )
+        self.assertEqual(
+            primary_keys["launchplane_change_impact_policies"],
+            ("record_id",),
         )
         self.assertEqual(
             column_types[("launchplane_repository_human_role_policies", "role_policy_revision")],

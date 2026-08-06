@@ -252,6 +252,30 @@ The PostgreSQL tables are `launchplane_product_owner_policies`,
 `launchplane_product_owner_routing`. Migration `c1d2e3f4a5b6` creates these
 tables without inserting or inferring any owner data.
 
+## Change Impact Policy Records
+
+`ChangeImpactPolicyRecord` stores repository-scoped component/path impact rules
+for shadow pull-request classification. Each active revision binds the exact
+numeric GitHub repository ID, numeric owner ID, owner/name, component rules,
+affected product/system scopes, engineering review tier, source, reason,
+effective timestamp, predecessor, and canonical policy digest.
+
+Evaluations are derived responses, not durable authority records in this slice.
+They bind the exact repository, pull request number, head SHA, tree SHA, policy
+revision, and policy digest. Unknown paths, missing dependency evidence,
+ambiguous stored evidence, stale provider or OIDC head binding, provider
+failure, or invalid policy history fail closed to non-success output with the
+stricter two-review engineering requirement. Dependency and reviewer evidence
+is read only from exact-target Launchplane records; those record families remain
+future work under #2011 and #2001, so missing evidence cannot be replaced by a
+caller assertion.
+
+Filesystem rehearsal records live under `launchplane_change_impact_policies/`.
+PostgreSQL uses `launchplane_change_impact_policies` with one active policy per
+repository, unique repository/revision history, and JSONB payload storage.
+Migration `d2e4f6a8b0c2` creates the empty table and indexes without inferring
+runtime product inventory from checked-in repository files.
+
 ## Transactional Outbox
 
 External deliveries that are not safe to perform inside the request transaction

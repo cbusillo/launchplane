@@ -3499,6 +3499,21 @@ existing service route may use it as an authorization verdict in this slice.
 
 See `docs/product-owner-policy.md` for routes and persisted record contracts.
 
+## Change Impact Shadow API
+
+`POST /v1/change-impact/evaluation` accepts only a repository/pull-request
+target reference plus optional non-authoritative metadata. Launchplane uses its
+managed GitHub credential to resolve immutable repository identity, current
+head/tree, and changed files; GitHub Actions callers must also match the OIDC
+repository IDs/name and workflow `sha`. Dependency and reviewer evidence is
+read only from Launchplane storage. Missing records, stale heads, incomplete
+provider evidence, and provider failures cannot fall back to caller input and
+therefore fail closed.
+
+The response remains shadow-only with exact policy revision/digest and
+repository/PR/head/tree binding. See `docs/change-impact-policy.md` for the
+policy, evidence, and persistence contracts.
+
 ## Out Of Scope For This First Slice
 
 - full human/operator auth design
