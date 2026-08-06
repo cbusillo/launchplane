@@ -58,6 +58,20 @@ from tests.http_app_test_support import (
 )
 from tests.support.auth import _identity, _StubVerifier
 from tests.support.stores import _sqlite_database_url
+from tests.test_engineering_review_run import _pending_record as _pending_review_record
+
+
+class _EngineeringReviewReadStore:
+    def __init__(self) -> None:
+        self.record = _pending_review_record()[0]
+
+    def read_engineering_review_run_record(self, run_id: str):  # type: ignore[no-untyped-def]
+        if run_id != self.record.run_id:
+            raise FileNotFoundError(run_id)
+        return self.record
+
+    def list_engineering_review_run_records(self, **_filters: object):  # type: ignore[no-untyped-def]
+        return (self.record,)
 
 
 class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
@@ -1894,3 +1908,65 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(
                 "LaunchplaneErrorResponse", json.dumps(status_route["responses"][status_code])
             )
+
+    async def test_engineering_review_reads_redact_credential_material(self) -> None:
+        store = _EngineeringReviewReadStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: store,
+            bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+        )
+
+        response = await _asgi_get(
+            app,
+            f"/v1/engineering-review-runs/{store.record.run_id}",
+            headers={"Authorization": "Bearer worker-token"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        response_text = response.text
+        self.assertNotIn("credential_hash", response_text)
+        self.assertNotIn("credential_ciphertext", response_text)
+        self.assertNotIn("credential_key_id", response_text)
+        self.assertEqual(response.json()["run"]["rollout_mode"], "shadow")
+        self.assertFalse(response.json()["run"]["authoritative"])
+
+    async def test_engineering_review_openapi_has_scoped_write_routes_and_redaction(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=_EngineeringReviewReadStore,
+            bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        self.assertEqual(
+            openapi["paths"]["/v1/engineering-review-runs/{run_id}"]["get"]["operationId"],
+            "read_engineering_review_run",
+        )
+        self.assertEqual(
+            openapi["paths"]["/v1/engineering-review-runs"]["get"]["operationId"],
+            "list_engineering_review_runs",
+        )
+        self.assertEqual(
+            openapi["paths"]["/v1/engineering-review-runs/create"]["post"]["operationId"],
+            "create_engineering_review_runs",
+        )
+        self.assertEqual(
+            openapi["paths"]["/v1/engineering-review-runs/complete"]["post"]["operationId"],
+            "complete_engineering_review_run",
+        )
+        create_schema = json.dumps(
+            openapi["components"]["schemas"]["EngineeringReviewRunCreateRequest"]
+        )
+        self.assertIn("work_request_id", create_schema)
+        for caller_field in ("model_id", "model_family", "review_slot", "repository", "head_sha"):
+            self.assertNotIn(caller_field, create_schema)
+        review_schemas = json.dumps(openapi["components"]["schemas"])
+        self.assertNotIn("credential_hash", review_schemas)
+        self.assertNotIn("credential_ciphertext", review_schemas)
+        self.assertNotIn("credential_key_id", review_schemas)

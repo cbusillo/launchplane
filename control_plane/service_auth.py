@@ -674,6 +674,7 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
     action_parts = tuple(part for part in re.split(r"[_.-]+", normalized_action) if part)
     if normalized_action.startswith("authz_policy") or normalized_action in {
         "change_impact_policy.write",
+        "engineering_review_authority.write",
         "product_owner_policy.write",
         "product_owner_requirement.write",
         "product_owner_routing.write",

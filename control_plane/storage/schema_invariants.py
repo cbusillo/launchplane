@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "d2e4f6a8b0c2"
+EXPECTED_ALEMBIC_HEAD_REVISION = "e3f5a7b9c1d3"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -80,6 +80,21 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     CriticalColumnType(
         "launchplane_every_code_work_requests",
         "attempt",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_engineering_review_authorities",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_engineering_review_runs",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_engineering_review_runs",
+        "fencing_token",
         ("integer", "int4"),
     ),
     CriticalColumnType(
@@ -368,6 +383,30 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_every_code_work_requests",
         "launchplane_every_code_work_requests_lease_idx",
         ("state", "lease_expires_at"),
+    ),
+    CriticalIndex(
+        "launchplane_engineering_review_authorities",
+        "launchplane_eng_review_authority_active_uidx",
+        ("repository",),
+        unique=True,
+        predicate_tokens=("status", "active"),
+    ),
+    CriticalIndex(
+        "launchplane_engineering_review_runs",
+        "launchplane_eng_review_runs_state_lease_idx",
+        ("state", "lease_expires_at"),
+    ),
+    CriticalIndex(
+        "launchplane_engineering_review_runs",
+        "launchplane_eng_review_runs_assignment_uidx",
+        ("assignment_fingerprint",),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_engineering_review_runs",
+        "launchplane_eng_review_runs_credential_uidx",
+        ("credential_hash",),
+        unique=True,
     ),
     CriticalIndex(
         "launchplane_odoo_stable_bootstrap_operations",
@@ -738,6 +777,14 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_change_impact_policies",
         ("record_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_engineering_review_authorities",
+        ("authority_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_engineering_review_runs",
+        ("run_id",),
     ),
 )
 
