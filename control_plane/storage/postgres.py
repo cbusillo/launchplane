@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
 from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast, overload
 
 from pydantic import BaseModel
@@ -58,6 +59,19 @@ from control_plane.contracts.every_code_work_request import (
     claim_every_code_work_request,
     heartbeat_every_code_work_request,
     recover_stale_every_code_work_request,
+)
+from control_plane.contracts.engineering_review_run import (
+    EngineeringReviewAuthorityRecord,
+    EngineeringReviewConflictError,
+    EngineeringReviewRunFailure,
+    EngineeringReviewRunRecord,
+    EngineeringReviewRunSubmission,
+    EngineeringReviewSequenceError,
+    claim_engineering_review_run,
+    expire_engineering_review_run,
+    fail_engineering_review_run,
+    start_engineering_review_run,
+    submit_engineering_review_run,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
@@ -2054,6 +2068,101 @@ class LaunchplaneDokployTargetRow(Base):
 
     context: Mapped[str] = mapped_column(String, primary_key=True)
     instance: Mapped[str] = mapped_column(String, primary_key=True)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEngineeringReviewAuthorityRow(Base):
+    __tablename__ = "launchplane_engineering_review_authorities"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'retired')",
+            name="launchplane_eng_review_authority_status_ck",
+        ),
+        CheckConstraint(
+            "policy_revision >= 1",
+            name="launchplane_eng_review_authority_revision_ck",
+        ),
+        Index(
+            "launchplane_eng_review_authority_revision_uidx",
+            "repository",
+            "policy_revision",
+            unique=True,
+        ),
+        Index(
+            "launchplane_eng_review_authority_active_uidx",
+            "repository",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    authority_id: Mapped[str] = mapped_column(String, primary_key=True)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    policy_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    authority_digest: Mapped[str] = mapped_column(String, nullable=False)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEngineeringReviewRunRow(Base):
+    __tablename__ = "launchplane_engineering_review_runs"
+    __table_args__ = (
+        Index(
+            "launchplane_eng_review_runs_pr_idx",
+            "repository",
+            "pr_number",
+            desc("created_at"),
+        ),
+        Index(
+            "launchplane_eng_review_runs_work_request_idx",
+            "work_request_id",
+            desc("created_at"),
+        ),
+        Index(
+            "launchplane_eng_review_runs_state_lease_idx",
+            "state",
+            "lease_expires_at",
+        ),
+        Index(
+            "launchplane_eng_review_runs_worker_claim_idx",
+            "worker_host",
+            "worker_runtime_id",
+            "state",
+            "created_at",
+        ),
+        Index(
+            "launchplane_eng_review_runs_assignment_uidx",
+            "assignment_fingerprint",
+            unique=True,
+        ),
+        Index(
+            "launchplane_eng_review_runs_credential_uidx",
+            "credential_hash",
+            unique=True,
+        ),
+    )
+
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    assignment_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    review_slot: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    head_sha: Mapped[str] = mapped_column(String, nullable=False)
+    authority_id: Mapped[str] = mapped_column(String, nullable=False)
+    authority_digest: Mapped[str] = mapped_column(String, nullable=False)
+    work_request_id: Mapped[str] = mapped_column(String, nullable=False)
+    work_request_lifecycle_id: Mapped[str] = mapped_column(String, nullable=False)
+    policy_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    worker_runtime_id: Mapped[str] = mapped_column(String, nullable=False)
+    worker_host: Mapped[str] = mapped_column(String, nullable=False)
+    credential_hash: Mapped[str] = mapped_column(String, nullable=False)
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
@@ -10641,6 +10750,497 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def list_engineering_review_authority_records(
+        self,
+        *,
+        repository: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EngineeringReviewAuthorityRecord, ...]:
+        filters: list[Any] = []
+        if repository:
+            filters.append(LaunchplaneEngineeringReviewAuthorityRow.repository == repository)
+        if status:
+            filters.append(LaunchplaneEngineeringReviewAuthorityRow.status == status)
+        return self._list_models(
+            model_type=EngineeringReviewAuthorityRecord,
+            orm_model=LaunchplaneEngineeringReviewAuthorityRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEngineeringReviewAuthorityRow.policy_revision.desc(),
+                LaunchplaneEngineeringReviewAuthorityRow.authority_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def compare_and_write_engineering_review_authority_record(
+        self,
+        record: EngineeringReviewAuthorityRecord,
+        *,
+        expected_current_authority_id: str,
+        expected_current_authority_digest: str,
+    ) -> Literal["written", "replayed"]:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            if not self.database_url.startswith("sqlite"):
+                session.execute(
+                    text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                    {"lock_name": f"engineering-review-authority:{record.repository}"},
+                )
+            statement = select(LaunchplaneEngineeringReviewAuthorityRow).where(
+                LaunchplaneEngineeringReviewAuthorityRow.repository == record.repository,
+                LaunchplaneEngineeringReviewAuthorityRow.status == "active",
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            current_row = session.scalar(statement)
+            current = (
+                self._read_payload(
+                    model_type=EngineeringReviewAuthorityRecord,
+                    payload=current_row.payload,
+                )
+                if current_row is not None
+                else None
+            )
+            existing_row = session.get(
+                LaunchplaneEngineeringReviewAuthorityRow,
+                record.authority_id,
+            )
+            if existing_row is not None:
+                existing = self._read_payload(
+                    model_type=EngineeringReviewAuthorityRecord,
+                    payload=existing_row.payload,
+                )
+                if (
+                    existing.authority_digest == record.authority_digest
+                    and existing.status == record.status == "active"
+                    and current is not None
+                    and current.authority_id == existing.authority_id
+                ):
+                    session.rollback()
+                    return "replayed"
+                raise EngineeringReviewConflictError(
+                    "Engineering review authority id is stale or has different content."
+                )
+            if current is None:
+                if expected_current_authority_id or expected_current_authority_digest:
+                    raise EngineeringReviewConflictError(
+                        "Engineering review authority expected-current values are stale."
+                    )
+                if record.policy_revision != 1 or record.supersedes_authority_id is not None:
+                    raise EngineeringReviewSequenceError(
+                        "Initial engineering review authority must use revision 1."
+                    )
+            else:
+                if (
+                    current.authority_id != expected_current_authority_id
+                    or current.authority_digest != expected_current_authority_digest
+                ):
+                    raise EngineeringReviewConflictError(
+                        "Engineering review authority expected-current values are stale."
+                    )
+                if (
+                    record.policy_revision != current.policy_revision + 1
+                    or record.supersedes_authority_id != current.authority_id
+                ):
+                    raise EngineeringReviewSequenceError(
+                        "Engineering review authority successor is non-contiguous."
+                    )
+                assert current_row is not None
+                retired = current.model_copy(update={"status": "retired"})
+                current_row.status = retired.status
+                current_row.payload = self._payload_dict(retired)
+            session.add(
+                LaunchplaneEngineeringReviewAuthorityRow(
+                    authority_id=record.authority_id,
+                    repository=record.repository,
+                    status=record.status,
+                    policy_revision=record.policy_revision,
+                    authority_digest=record.authority_digest,
+                    recorded_at=record.recorded_at,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
+        return "written"
+
+    def create_engineering_review_run_record_if_absent(
+        self, record: EngineeringReviewRunRecord
+    ) -> tuple[EngineeringReviewRunRecord, bool]:
+        records, created = self.create_engineering_review_run_records_if_absent(
+            (record,),
+            expected_authority_id=record.authority_id,
+            expected_authority_digest=record.authority_digest,
+            expected_work_request_lifecycle_id=record.work_request_lifecycle_id,
+        )
+        return records[0], created
+
+    def create_engineering_review_run_records_if_absent(
+        self,
+        records: tuple[EngineeringReviewRunRecord, ...],
+        *,
+        expected_authority_id: str,
+        expected_authority_digest: str,
+        expected_work_request_lifecycle_id: str,
+    ) -> tuple[tuple[EngineeringReviewRunRecord, ...], bool]:
+        if not records:
+            raise ValueError("Engineering review scheduling requires at least one run.")
+        first = records[0]
+        if any(record.work_request_id != first.work_request_id for record in records):
+            raise ValueError("Engineering review run batch must share one work request.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            authority_statement = select(LaunchplaneEngineeringReviewAuthorityRow).where(
+                LaunchplaneEngineeringReviewAuthorityRow.repository == first.repository,
+                LaunchplaneEngineeringReviewAuthorityRow.status == "active",
+            )
+            work_request_statement = select(LaunchplaneEveryCodeWorkRequestRow).where(
+                LaunchplaneEveryCodeWorkRequestRow.request_id == first.work_request_id
+            )
+            if not self.database_url.startswith("sqlite"):
+                authority_statement = authority_statement.with_for_update()
+                work_request_statement = work_request_statement.with_for_update()
+            authority_row = session.scalar(authority_statement)
+            work_request_row = session.scalar(work_request_statement)
+            if authority_row is None or work_request_row is None:
+                raise EngineeringReviewConflictError(
+                    "Engineering review scheduling authority or work request disappeared."
+                )
+            authority = self._read_payload(
+                model_type=EngineeringReviewAuthorityRecord,
+                payload=authority_row.payload,
+            )
+            work_request = self._read_payload(
+                model_type=EveryCodeWorkRequestRecord,
+                payload=work_request_row.payload,
+            )
+            if (
+                authority.authority_id != expected_authority_id
+                or authority.authority_digest != expected_authority_digest
+                or work_request.lifecycle_id != expected_work_request_lifecycle_id
+                or work_request.state != "done"
+            ):
+                raise EngineeringReviewConflictError(
+                    "Engineering review scheduling evidence changed before persistence."
+                )
+            stored: list[EngineeringReviewRunRecord] = []
+            created_all = True
+            for record in records:
+                existing_row = session.get(LaunchplaneEngineeringReviewRunRow, record.run_id)
+                if existing_row is not None:
+                    existing = self._read_payload(
+                        model_type=EngineeringReviewRunRecord,
+                        payload=existing_row.payload,
+                    )
+                    if existing.assignment_fingerprint != record.assignment_fingerprint:
+                        raise EngineeringReviewConflictError(
+                            "Engineering review run id replay conflicts with stored assignment."
+                        )
+                    stored.append(existing)
+                    created_all = False
+                    continue
+                session.add(self._engineering_review_run_row(record))
+                stored.append(record)
+            session.commit()
+        return tuple(stored), created_all
+
+    def read_engineering_review_run_record(self, run_id: str) -> EngineeringReviewRunRecord:
+        return self._read_model(
+            model_type=EngineeringReviewRunRecord,
+            orm_model=LaunchplaneEngineeringReviewRunRow,
+            filters=(LaunchplaneEngineeringReviewRunRow.run_id == run_id,),
+        )
+
+    def list_engineering_review_run_records(
+        self,
+        *,
+        repository: str = "",
+        pr_number: int | None = None,
+        work_request_id: str = "",
+        worker_runtime_id: str = "",
+        worker_host: str = "",
+        state: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[EngineeringReviewRunRecord, ...]:
+        filters: list[Any] = []
+        if repository:
+            filters.append(LaunchplaneEngineeringReviewRunRow.repository == repository)
+        if pr_number is not None:
+            filters.append(LaunchplaneEngineeringReviewRunRow.pr_number == pr_number)
+        if work_request_id:
+            filters.append(LaunchplaneEngineeringReviewRunRow.work_request_id == work_request_id)
+        if worker_runtime_id:
+            filters.append(
+                LaunchplaneEngineeringReviewRunRow.worker_runtime_id == worker_runtime_id
+            )
+        if worker_host:
+            filters.append(LaunchplaneEngineeringReviewRunRow.worker_host == worker_host)
+        if state:
+            filters.append(LaunchplaneEngineeringReviewRunRow.state == state)
+        return self._list_models(
+            model_type=EngineeringReviewRunRecord,
+            orm_model=LaunchplaneEngineeringReviewRunRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEngineeringReviewRunRow.created_at.desc(),
+                LaunchplaneEngineeringReviewRunRow.run_id.desc(),
+            ),
+            limit=limit,
+            offset=offset,
+        )
+
+    def claim_engineering_review_run_record(
+        self,
+        *,
+        run_id: str,
+        worker_runtime_id: str,
+        worker_host: str,
+    ) -> EngineeringReviewRunRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = self._locked_engineering_review_run_row(session, run_id)
+            record = self._read_payload(
+                model_type=EngineeringReviewRunRecord,
+                payload=row.payload,
+            )
+            self._require_engineering_review_worker(record, worker_runtime_id, worker_host)
+            now = self._database_mutation_timestamp(session)
+            if record.state in {"claimed", "running"}:
+                if record.lease_expires_at <= now:
+                    expired = expire_engineering_review_run(record, expired_at=now)
+                    self._sync_engineering_review_run_row(row, expired)
+                    session.commit()
+                    raise EngineeringReviewConflictError("Engineering review run lease expired.")
+                session.rollback()
+                return record
+            if record.state != "pending":
+                raise EngineeringReviewConflictError(
+                    f"Engineering review run cannot be claimed from state {record.state!r}."
+                )
+            claimed = claim_engineering_review_run(record, claimed_at=now)
+            self._sync_engineering_review_run_row(row, claimed)
+            session.commit()
+            return claimed
+
+    def start_engineering_review_run_record(
+        self,
+        *,
+        run_id: str,
+        worker_runtime_id: str,
+        worker_host: str,
+        fencing_token: int,
+    ) -> EngineeringReviewRunRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = self._locked_engineering_review_run_row(session, run_id)
+            record = self._read_payload(
+                model_type=EngineeringReviewRunRecord,
+                payload=row.payload,
+            )
+            self._require_engineering_review_worker(
+                record,
+                worker_runtime_id,
+                worker_host,
+                fencing_token=fencing_token,
+            )
+            now = self._database_mutation_timestamp(session)
+            if record.state == "running":
+                session.rollback()
+                return record
+            if record.state != "claimed" or record.lease_expires_at <= now:
+                if record.state == "claimed" and record.lease_expires_at <= now:
+                    expired = expire_engineering_review_run(record, expired_at=now)
+                    self._sync_engineering_review_run_row(row, expired)
+                    session.commit()
+                raise EngineeringReviewConflictError("Engineering review run cannot start.")
+            running = start_engineering_review_run(record, started_at=now)
+            self._sync_engineering_review_run_row(row, running)
+            session.commit()
+            return running
+
+    def submit_engineering_review_run_record(
+        self,
+        submission: EngineeringReviewRunSubmission,
+    ) -> EngineeringReviewRunRecord:
+        credential_hash = hashlib.sha256(submission.credential.encode("utf-8")).hexdigest()
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = select(LaunchplaneEngineeringReviewRunRow).where(
+                LaunchplaneEngineeringReviewRunRow.credential_hash == credential_hash
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise EngineeringReviewConflictError("Engineering review submission rejected.")
+            record = self._read_payload(
+                model_type=EngineeringReviewRunRecord,
+                payload=row.payload,
+            )
+            now = self._database_mutation_timestamp(session)
+            if record.state in {"claimed", "running"} and record.lease_expires_at <= now:
+                expired = expire_engineering_review_run(record, expired_at=now)
+                self._sync_engineering_review_run_row(row, expired)
+                session.commit()
+                raise EngineeringReviewConflictError("Engineering review run lease expired.")
+            try:
+                completed = submit_engineering_review_run(
+                    record,
+                    submission,
+                    completed_at=now,
+                )
+            except ValueError as error:
+                raise EngineeringReviewConflictError(str(error)) from error
+            if completed == record:
+                session.rollback()
+                return record
+            self._sync_engineering_review_run_row(row, completed)
+            session.commit()
+            return completed
+
+    def fail_engineering_review_run_record(
+        self,
+        *,
+        run_id: str,
+        worker_runtime_id: str,
+        worker_host: str,
+        fencing_token: int,
+        failure: EngineeringReviewRunFailure,
+    ) -> EngineeringReviewRunRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = self._locked_engineering_review_run_row(session, run_id)
+            record = self._read_payload(
+                model_type=EngineeringReviewRunRecord,
+                payload=row.payload,
+            )
+            self._require_engineering_review_worker(
+                record,
+                worker_runtime_id,
+                worker_host,
+                fencing_token=fencing_token,
+            )
+            expected_error = f"{failure.error_code}: {failure.summary}"
+            if record.state == "failed":
+                if record.error_message == expected_error:
+                    session.rollback()
+                    return record
+                raise EngineeringReviewConflictError(
+                    "Engineering review failure replay conflicts with stored failure."
+                )
+            now = self._database_mutation_timestamp(session)
+            if record.state in {"claimed", "running"} and record.lease_expires_at <= now:
+                expired = expire_engineering_review_run(record, expired_at=now)
+                self._sync_engineering_review_run_row(row, expired)
+                session.commit()
+                raise EngineeringReviewConflictError("Engineering review run lease expired.")
+            failed = fail_engineering_review_run(record, failure, failed_at=now)
+            self._sync_engineering_review_run_row(row, failed)
+            session.commit()
+            return failed
+
+    def expire_stale_engineering_review_run_records(
+        self,
+        *,
+        limit: int = 50,
+    ) -> tuple[EngineeringReviewRunRecord, ...]:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            now = self._database_mutation_timestamp(session)
+            statement = (
+                select(LaunchplaneEngineeringReviewRunRow)
+                .where(
+                    LaunchplaneEngineeringReviewRunRow.state.in_(("claimed", "running")),
+                    LaunchplaneEngineeringReviewRunRow.lease_expires_at <= now,
+                )
+                .order_by(LaunchplaneEngineeringReviewRunRow.lease_expires_at.asc())
+                .limit(max(1, min(limit, 200)))
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update(skip_locked=True)
+            expired_records: list[EngineeringReviewRunRecord] = []
+            for row in session.scalars(statement):
+                record = self._read_payload(
+                    model_type=EngineeringReviewRunRecord,
+                    payload=row.payload,
+                )
+                expired = expire_engineering_review_run(record, expired_at=now)
+                self._sync_engineering_review_run_row(row, expired)
+                expired_records.append(expired)
+            session.commit()
+        return tuple(expired_records)
+
+    def _engineering_review_run_row(
+        self, record: EngineeringReviewRunRecord
+    ) -> LaunchplaneEngineeringReviewRunRow:
+        return LaunchplaneEngineeringReviewRunRow(
+            run_id=record.run_id,
+            assignment_fingerprint=record.assignment_fingerprint,
+            review_slot=record.review_slot,
+            state=record.state,
+            repository=record.repository,
+            pr_number=record.pr_number,
+            head_sha=record.head_sha,
+            authority_id=record.authority_id,
+            authority_digest=record.authority_digest,
+            work_request_id=record.work_request_id,
+            work_request_lifecycle_id=record.work_request_lifecycle_id,
+            policy_revision=record.policy_revision,
+            worker_runtime_id=record.worker_runtime_id,
+            worker_host=record.worker_host,
+            credential_hash=record.credential_hash,
+            lease_expires_at=record.lease_expires_at,
+            fencing_token=record.fencing_token,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+
+    def _locked_engineering_review_run_row(
+        self, session: Any, run_id: str
+    ) -> LaunchplaneEngineeringReviewRunRow:
+        statement = select(LaunchplaneEngineeringReviewRunRow).where(
+            LaunchplaneEngineeringReviewRunRow.run_id == run_id
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        row = cast(LaunchplaneEngineeringReviewRunRow | None, session.scalar(statement))
+        if row is None:
+            raise FileNotFoundError(f"Engineering review run not found: {run_id}")
+        return row
+
+    @staticmethod
+    def _require_engineering_review_worker(
+        record: EngineeringReviewRunRecord,
+        worker_runtime_id: str,
+        worker_host: str,
+        *,
+        fencing_token: int | None = None,
+    ) -> None:
+        if (
+            record.worker_runtime_id != worker_runtime_id.strip()
+            or record.worker_host != worker_host.strip()
+        ):
+            raise EngineeringReviewConflictError(
+                "Engineering review worker identity does not match the assignment."
+            )
+        if fencing_token is not None and record.fencing_token != fencing_token:
+            raise EngineeringReviewConflictError(
+                "Engineering review worker fencing token is stale."
+            )
+
+    def _sync_engineering_review_run_row(
+        self,
+        row: LaunchplaneEngineeringReviewRunRow,
+        record: EngineeringReviewRunRecord,
+    ) -> None:
+        row.state = record.state
+        row.lease_expires_at = record.lease_expires_at
+        row.fencing_token = record.fencing_token
+        row.updated_at = record.updated_at
+        row.payload = self._payload_dict(record)
 
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> None:
         self._write_row(

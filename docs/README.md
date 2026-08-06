@@ -38,6 +38,8 @@ Use these docs as the source of truth for `launchplane`.
   host hygiene evidence, budgets, and future apply boundary.
 - [agent-context-boundary.md](agent-context-boundary.md) — public-safe agent
   context, caller profiles, scoped intent, redaction, and provenance boundary.
+- [engineering-review-runs.md](engineering-review-runs.md) — shadow-only review
+  run records, redaction boundary, and the intentionally absent dispatch path.
 - [product-owner-policy.md](product-owner-policy.md) — additive shadow-mode
   product/system Owner membership, requirement, routing, and evaluation contract.
 - [change-impact-policy.md](change-impact-policy.md) — additive shadow-mode

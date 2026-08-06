@@ -195,6 +195,8 @@ class BearerIdentityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     every_code_worker_token: str = ""
+    engineering_review_worker_runtime_id: str = ""
+    engineering_review_worker_host: str = ""
     local_admin_token: str = ""
     local_admin_subject: str = ""
     local_admin_token_label: str = ""
@@ -674,6 +676,7 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
     action_parts = tuple(part for part in re.split(r"[_.-]+", normalized_action) if part)
     if normalized_action.startswith("authz_policy") or normalized_action in {
         "change_impact_policy.write",
+        "engineering_review_authority.write",
         "product_owner_policy.write",
         "product_owner_requirement.write",
         "product_owner_routing.write",

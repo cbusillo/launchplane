@@ -58,6 +58,14 @@ def _every_code_worker_token_from_env() -> str:
     return os.environ.get("LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN", "").strip()
 
 
+def _engineering_review_worker_runtime_id_from_env() -> str:
+    return os.environ.get("LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_RUNTIME_ID", "").strip()
+
+
+def _engineering_review_worker_host_from_env() -> str:
+    return os.environ.get("LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_HOST", "").strip()
+
+
 def _terminal_agent_read_token_from_env() -> str:
     return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN", "").strip()
 
@@ -97,6 +105,8 @@ def _local_admin_token_label_from_env() -> str:
 def _bearer_identity_config_from_env() -> BearerIdentityConfig:
     return BearerIdentityConfig(
         every_code_worker_token=_every_code_worker_token_from_env(),
+        engineering_review_worker_runtime_id=_engineering_review_worker_runtime_id_from_env(),
+        engineering_review_worker_host=_engineering_review_worker_host_from_env(),
         local_admin_token=_local_admin_token_from_env(),
         local_admin_subject=_local_admin_subject_from_env(),
         local_admin_token_label=_local_admin_token_label_from_env(),

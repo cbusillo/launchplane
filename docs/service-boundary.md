@@ -820,6 +820,13 @@ host while still allowing visible local Code/tmux work sessions to claim, rerun
 terminal requests, reconcile preview state, route failed checks, and report
 progress.
 
+Engineering-review worker routes reuse that bearer secret but do not trust
+caller-supplied host or runtime strings. The service derives the worker identity
+from `LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_RUNTIME_ID` and
+`LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_HOST`, then requires the active
+DB-backed review authority and each claimed run to match both values before a
+scoped review credential is decrypted or returned.
+
 The local worker uses a separate GitHub token for public claim comments. Provide
 `LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN` on the worker host, and set
 `LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR` when the operator expects a specific

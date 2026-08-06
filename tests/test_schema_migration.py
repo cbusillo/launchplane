@@ -1004,7 +1004,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "d2e4f6a8b0c2")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "e3f5a7b9c1d3")
         self.assertEqual(
             column_types[("launchplane_repository_human_role_policies", "payload")],
             ("jsonb",),
