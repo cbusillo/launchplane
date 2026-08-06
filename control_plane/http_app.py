@@ -19906,6 +19906,7 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=ChangeImpactReadRouteDependencies(
             common=read_route_dependencies,
+            read_evaluation_identity=read_bearer_identity,
             repository_evidence_provider=(
                 resolved_change_impact_repository_evidence_provider
             ),

@@ -62,6 +62,7 @@ class ChangeImpactWriteRouteDependencies:
 @dataclass(frozen=True, slots=True)
 class ChangeImpactReadRouteDependencies:
     common: ReadRouteDependencies
+    read_evaluation_identity: Callable[..., LaunchplaneIdentity]
     repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider
 
 
@@ -149,7 +150,10 @@ def register_change_impact_read_routes(
 
     def evaluate(
         envelope: ChangeImpactEvaluationRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        identity: Annotated[
+            LaunchplaneIdentity,
+            Depends(dependencies.read_evaluation_identity),
+        ],
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> ChangeImpactEvaluationResponse:
         trace_id = common.next_trace_id()

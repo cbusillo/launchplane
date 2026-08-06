@@ -222,6 +222,7 @@ def _app(
         registrar,
         dependencies=ChangeImpactReadRouteDependencies(
             common=common,
+            read_evaluation_identity=lambda: resolved_identity,
             repository_evidence_provider=provider,
         ),
     )
