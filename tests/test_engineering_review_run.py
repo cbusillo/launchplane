@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from control_plane.contracts.engineering_review_run import (
     EngineeringReviewAuthorityRecord,
+    EngineeringReviewConflictError,
     EngineeringReviewModelSlot,
     EngineeringReviewPullRequestTarget,
     EngineeringReviewRunRecord,
@@ -220,6 +221,42 @@ class EngineeringReviewRunTests(unittest.TestCase):
 
 
 class EngineeringReviewRunStorageTests(unittest.TestCase):
+    def test_retired_authority_cannot_replay_after_successor_is_active(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "records.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{database_path}")
+            store.ensure_schema()
+            first = _authority()
+            successor = EngineeringReviewAuthorityRecord.model_validate(
+                {
+                    **first.model_dump(
+                        mode="json",
+                        exclude={"authority_id", "authority_digest", "supersedes_authority_id"},
+                    ),
+                    "policy_revision": 2,
+                    "recorded_at": "2026-08-06T00:01:00Z",
+                    "reason": "Rotate controlled shadow review authority.",
+                    "supersedes_authority_id": first.authority_id,
+                }
+            )
+            store.compare_and_write_engineering_review_authority_record(
+                first,
+                expected_current_authority_id="",
+                expected_current_authority_digest="",
+            )
+            store.compare_and_write_engineering_review_authority_record(
+                successor,
+                expected_current_authority_id=first.authority_id,
+                expected_current_authority_digest=first.authority_digest,
+            )
+
+            with self.assertRaisesRegex(EngineeringReviewConflictError, "stale"):
+                store.compare_and_write_engineering_review_authority_record(
+                    first,
+                    expected_current_authority_id=first.authority_id,
+                    expected_current_authority_digest=first.authority_digest,
+                )
+
     def test_record_round_trip_preserves_internal_authority(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "records.sqlite3"

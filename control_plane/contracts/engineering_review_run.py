@@ -373,15 +373,10 @@ class EngineeringReviewRunClaimRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run_id: str
-    worker_runtime_id: str
-    worker_host: str
 
     @model_validator(mode="after")
     def _validate_claim(self) -> EngineeringReviewRunClaimRequest:
         _validate_identifier(self.run_id, "run_id")
-        _validate_identifier(self.worker_runtime_id, "worker_runtime_id")
-        if self.worker_host.strip() != self.worker_host or not self.worker_host:
-            raise ValueError("Engineering review claim requires canonical worker_host")
         return self
 
 
@@ -389,16 +384,11 @@ class EngineeringReviewRunWorkerUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run_id: str
-    worker_runtime_id: str
-    worker_host: str
     fencing_token: int = Field(ge=1)
 
     @model_validator(mode="after")
     def _validate_update(self) -> EngineeringReviewRunWorkerUpdate:
         _validate_identifier(self.run_id, "run_id")
-        _validate_identifier(self.worker_runtime_id, "worker_runtime_id")
-        if self.worker_host.strip() != self.worker_host or not self.worker_host:
-            raise ValueError("Engineering review worker update requires canonical worker_host")
         return self
 
 

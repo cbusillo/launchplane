@@ -21,6 +21,7 @@ from control_plane.http_routes.generic_web import (
     register_generic_web_write_routes,
 )
 from control_plane.http_routes.engineering_review_run import (
+    EngineeringReviewWorkerIdentity,
     EngineeringReviewWriteRouteDependencies,
     register_engineering_review_routes,
 )
@@ -158,6 +159,7 @@ __all__ = (
     "register_every_code_preview_gate_read_routes",
     "register_every_code_work_request_read_routes",
     "EngineeringReviewWriteRouteDependencies",
+    "EngineeringReviewWorkerIdentity",
     "register_engineering_review_routes",
     "register_generic_web_rollback_write_routes",
     "register_generic_web_write_routes",

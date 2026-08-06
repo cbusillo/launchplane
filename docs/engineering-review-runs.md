@@ -20,16 +20,20 @@ Run creation accepts only `work_request_id`. Launchplane loads the stored
 `EveryCodeWorkRequestRecord`, requires its completed linked PR, resolves the
 exact current GitHub head and tree through authenticated server evidence, loads
 the one active authority, and creates deterministic pending assignments. Until
-issue #2000 provides server-derived routine classification, creation always selects
-the first two contiguous, model-family-diverse slots.
+integration issue #2001 consumes the server-derived classification foundation,
+creation always selects the first two contiguous, model-family-diverse slots.
 
 ## Worker lifecycle
 
 The controlled worker lists and claims only pending assignments matching its
-exact host and runtime. Claims, starts, failures, completion, and expiry use
-row locks, compare-and-swap fencing, and database time. Credential handoff
-decrypts the managed-secret envelope before claim mutation; retrying the same
-claim returns the same scoped credential without exposing its hash or envelope.
+exact host and runtime. The service derives both values from
+`LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_RUNTIME_ID` and
+`LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_HOST` after authenticating the worker
+token; request payloads cannot select or override them. Claims, starts,
+failures, completion, and expiry use row locks, compare-and-swap fencing, and
+database time. Credential handoff decrypts the managed-secret envelope only
+after the claim verifies that server-bound identity; retrying the same claim
+returns the same scoped credential without exposing its hash or envelope.
 
 Before launch, the worker verifies the configured absolute executable SHA-256
 and requires the existing Every Code PR worktree to be at the exact GitHub head.

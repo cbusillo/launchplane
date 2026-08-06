@@ -10788,21 +10788,6 @@ class PostgresRecordStore(HumanSessionStore):
                     text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
                     {"lock_name": f"engineering-review-authority:{record.repository}"},
                 )
-            existing_row = session.get(
-                LaunchplaneEngineeringReviewAuthorityRow,
-                record.authority_id,
-            )
-            if existing_row is not None:
-                existing = self._read_payload(
-                    model_type=EngineeringReviewAuthorityRecord,
-                    payload=existing_row.payload,
-                )
-                if existing.authority_digest == record.authority_digest:
-                    session.rollback()
-                    return "replayed"
-                raise EngineeringReviewConflictError(
-                    "Engineering review authority id already exists with different content."
-                )
             statement = select(LaunchplaneEngineeringReviewAuthorityRow).where(
                 LaunchplaneEngineeringReviewAuthorityRow.repository == record.repository,
                 LaunchplaneEngineeringReviewAuthorityRow.status == "active",
@@ -10818,6 +10803,26 @@ class PostgresRecordStore(HumanSessionStore):
                 if current_row is not None
                 else None
             )
+            existing_row = session.get(
+                LaunchplaneEngineeringReviewAuthorityRow,
+                record.authority_id,
+            )
+            if existing_row is not None:
+                existing = self._read_payload(
+                    model_type=EngineeringReviewAuthorityRecord,
+                    payload=existing_row.payload,
+                )
+                if (
+                    existing.authority_digest == record.authority_digest
+                    and existing.status == record.status == "active"
+                    and current is not None
+                    and current.authority_id == existing.authority_id
+                ):
+                    session.rollback()
+                    return "replayed"
+                raise EngineeringReviewConflictError(
+                    "Engineering review authority id is stale or has different content."
+                )
             if current is None:
                 if expected_current_authority_id or expected_current_authority_digest:
                     raise EngineeringReviewConflictError(

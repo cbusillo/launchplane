@@ -76,6 +76,7 @@ from control_plane.http_routes import (
     DriverReadRouteDependencies,
     EVIDENCE_INGRESS_ROUTES as _EVIDENCE_INGRESS_ROUTES,
     EvidenceWriteRouteDependencies,
+    EngineeringReviewWorkerIdentity,
     EngineeringReviewWriteRouteDependencies,
     GenericWebWriteRouteDependencies,
     ChangeImpactReadRouteDependencies,
@@ -4101,6 +4102,26 @@ def create_launchplane_fastapi_app(
             return
         raise _authentication_required_error("Every Code worker token is required.")
 
+    def read_engineering_review_worker_identity(
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+    ) -> EngineeringReviewWorkerIdentity:
+        require_every_code_worker_write_token(authorization)
+        assert bearer_identity_config is not None
+        try:
+            return EngineeringReviewWorkerIdentity(
+                worker_runtime_id=(
+                    bearer_identity_config.engineering_review_worker_runtime_id
+                ),
+                worker_host=bearer_identity_config.engineering_review_worker_host,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=next_trace_id(),
+                code="engineering_review_worker_identity_unavailable",
+                message="Engineering review worker identity is not configured.",
+            ) from error
+
     async def handle_every_code_github_webhook(
         request: Request,
         x_github_event: Annotated[str, Header(alias="X-GitHub-Event")] = "",
@@ -4282,7 +4303,7 @@ def create_launchplane_fastapi_app(
     )
     engineering_review_write_route_dependencies = EngineeringReviewWriteRouteDependencies(
         read_write_identity=read_write_identity,
-        require_worker_token=require_every_code_worker_write_token,
+        read_worker_identity=read_engineering_review_worker_identity,
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
         authorization_allows=resolved_authz_policy_runtime.allows,

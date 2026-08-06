@@ -90,6 +90,18 @@ class EngineeringReviewRunMaintenanceResponse(BaseModel):
     expired_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class EngineeringReviewWorkerIdentity:
+    worker_runtime_id: str
+    worker_host: str
+
+    def __post_init__(self) -> None:
+        if not self.worker_runtime_id or self.worker_runtime_id.strip() != self.worker_runtime_id:
+            raise ValueError("Engineering review worker runtime id must be canonical.")
+        if not self.worker_host or self.worker_host.strip() != self.worker_host:
+            raise ValueError("Engineering review worker host must be canonical.")
+
+
 class EngineeringReviewStore(Protocol):
     def read_engineering_review_run_record(self, run_id: str) -> EngineeringReviewRunRecord: ...
     def list_engineering_review_run_records(
@@ -149,7 +161,7 @@ class EngineeringReviewStore(Protocol):
 @dataclass(frozen=True, slots=True)
 class EngineeringReviewWriteRouteDependencies:
     read_write_identity: Callable[..., LaunchplaneIdentity]
-    require_worker_token: Callable[..., None]
+    read_worker_identity: Callable[..., EngineeringReviewWorkerIdentity]
     get_record_store: Callable[[], object]
     next_trace_id: Callable[[], str]
     authorization_allows: Callable[..., bool]
@@ -288,15 +300,16 @@ def register_engineering_review_routes(
         )
 
     def list_pending(
-        worker_runtime_id: Annotated[str, Query(min_length=1)],
-        worker_host: Annotated[str, Query(min_length=1)],
-        _token: Annotated[None, Depends(write_dependencies.require_worker_token)],
+        worker_identity: Annotated[
+            EngineeringReviewWorkerIdentity,
+            Depends(write_dependencies.read_worker_identity),
+        ],
         record_store: Annotated[object, Depends(write_dependencies.get_record_store)],
     ) -> EngineeringReviewRunsResponse:
         trace_id = write_dependencies.next_trace_id()
         runs = _store(record_store).list_engineering_review_run_records(
-            worker_runtime_id=worker_runtime_id,
-            worker_host=worker_host,
+            worker_runtime_id=worker_identity.worker_runtime_id,
+            worker_host=worker_identity.worker_host,
             state="pending",
             limit=50,
         )
@@ -308,20 +321,23 @@ def register_engineering_review_routes(
 
     async def claim_run(
         request: EngineeringReviewRunClaimRequest,
-        _token: Annotated[None, Depends(write_dependencies.require_worker_token)],
+        worker_identity: Annotated[
+            EngineeringReviewWorkerIdentity,
+            Depends(write_dependencies.read_worker_identity),
+        ],
         record_store: Annotated[object, Depends(write_dependencies.get_record_store)],
     ) -> EngineeringReviewRunClaimResponse:
         trace_id = write_dependencies.next_trace_id()
         try:
             review_store = _store(record_store)
-            before = review_store.read_engineering_review_run_record(request.run_id)
-            credential = control_plane_secrets._decrypt_secret_value(
-                before.credential_ciphertext, before.credential_key_id
-            )
             claimed = review_store.claim_engineering_review_run_record(
                 run_id=request.run_id,
-                worker_runtime_id=request.worker_runtime_id,
-                worker_host=request.worker_host,
+                worker_runtime_id=worker_identity.worker_runtime_id,
+                worker_host=worker_identity.worker_host,
+            )
+            credential = control_plane_secrets._decrypt_secret_value(
+                claimed.credential_ciphertext,
+                claimed.credential_key_id,
             )
         except Exception as error:
             raise route_error(trace_id, error) from error
@@ -337,26 +353,39 @@ def register_engineering_review_routes(
 
     async def start_run(
         request: EngineeringReviewRunWorkerUpdate,
-        _token: Annotated[None, Depends(write_dependencies.require_worker_token)],
+        worker_identity: Annotated[
+            EngineeringReviewWorkerIdentity,
+            Depends(write_dependencies.read_worker_identity),
+        ],
         record_store: Annotated[object, Depends(write_dependencies.get_record_store)],
     ) -> EngineeringReviewRunResponse:
         trace_id = write_dependencies.next_trace_id()
         try:
-            run = _store(record_store).start_engineering_review_run_record(**request.model_dump())
+            run = _store(record_store).start_engineering_review_run_record(
+                run_id=request.run_id,
+                worker_runtime_id=worker_identity.worker_runtime_id,
+                worker_host=worker_identity.worker_host,
+                fencing_token=request.fencing_token,
+            )
         except Exception as error:
             raise route_error(trace_id, error) from error
         return EngineeringReviewRunResponse(trace_id=trace_id, run=engineering_review_run_view(run))
 
     async def fail_run(
         request: EngineeringReviewRunWorkerFailure,
-        _token: Annotated[None, Depends(write_dependencies.require_worker_token)],
+        worker_identity: Annotated[
+            EngineeringReviewWorkerIdentity,
+            Depends(write_dependencies.read_worker_identity),
+        ],
         record_store: Annotated[object, Depends(write_dependencies.get_record_store)],
     ) -> EngineeringReviewRunResponse:
         trace_id = write_dependencies.next_trace_id()
-        payload = request.model_dump(exclude={"error_code", "summary"})
         try:
             run = _store(record_store).fail_engineering_review_run_record(
-                **payload,
+                run_id=request.run_id,
+                worker_runtime_id=worker_identity.worker_runtime_id,
+                worker_host=worker_identity.worker_host,
+                fencing_token=request.fencing_token,
                 failure=EngineeringReviewRunFailure(
                     error_code=request.error_code, summary=request.summary
                 ),
@@ -377,7 +406,10 @@ def register_engineering_review_routes(
         return EngineeringReviewRunResponse(trace_id=trace_id, run=engineering_review_run_view(run))
 
     async def expire_runs(
-        _token: Annotated[None, Depends(write_dependencies.require_worker_token)],
+        _worker_identity: Annotated[
+            EngineeringReviewWorkerIdentity,
+            Depends(write_dependencies.read_worker_identity),
+        ],
         record_store: Annotated[object, Depends(write_dependencies.get_record_store)],
     ) -> EngineeringReviewRunMaintenanceResponse:
         trace_id = write_dependencies.next_trace_id()

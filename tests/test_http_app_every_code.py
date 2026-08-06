@@ -74,6 +74,48 @@ class _EngineeringReviewReadStore:
         return (self.record,)
 
 
+class _EngineeringReviewWorkerStore(_EngineeringReviewReadStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.claimed_identity: tuple[str, str] | None = None
+
+    def claim_engineering_review_run_record(
+        self,
+        *,
+        run_id: str,
+        worker_runtime_id: str,
+        worker_host: str,
+    ) -> object:
+        if run_id != self.record.run_id:
+            raise FileNotFoundError(run_id)
+        self.claimed_identity = (worker_runtime_id, worker_host)
+        return self.record.model_copy(
+            update={
+                "state": "claimed",
+                "claimed_at": "2026-08-06T00:01:00Z",
+                "updated_at": "2026-08-06T00:01:00Z",
+                "lease_expires_at": "2026-08-06T00:31:00Z",
+                "claim_attempt": 1,
+                "fencing_token": 1,
+            }
+        )
+
+    def list_engineering_review_authority_records(self, **_filters: object):  # type: ignore[no-untyped-def]
+        return ()
+
+    def start_engineering_review_run_record(self, **_payload: object):  # type: ignore[no-untyped-def]
+        raise AssertionError("start is not expected")
+
+    def submit_engineering_review_run_record(self, _submission: object):  # type: ignore[no-untyped-def]
+        raise AssertionError("submit is not expected")
+
+    def fail_engineering_review_run_record(self, **_payload: object):  # type: ignore[no-untyped-def]
+        raise AssertionError("fail is not expected")
+
+    def expire_stale_engineering_review_run_records(self, **_payload: object):  # type: ignore[no-untyped-def]
+        return ()
+
+
 class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_every_code_work_request_create_queues_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1931,6 +1973,51 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("credential_key_id", response_text)
         self.assertEqual(response.json()["run"]["rollout_mode"], "shadow")
         self.assertFalse(response.json()["run"]["authoritative"])
+
+    async def test_engineering_review_claim_uses_server_bound_worker_identity(self) -> None:
+        store = _EngineeringReviewWorkerStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: store,
+            bearer_identity_config=BearerIdentityConfig(
+                every_code_worker_token="worker-token",
+                engineering_review_worker_runtime_id="controlled-worker-1",
+                engineering_review_worker_host="controlled-worker.example.test",
+            ),
+        )
+
+        with patch.object(
+            control_plane_secrets,
+            "_decrypt_secret_value",
+            return_value="scoped-review-credential",
+        ):
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/engineering-review-runs/claim",
+                headers={"Authorization": "Bearer worker-token"},
+                payload={"run_id": store.record.run_id},
+            )
+            forged = await _asgi_request(
+                app,
+                "POST",
+                "/v1/engineering-review-runs/claim",
+                headers={"Authorization": "Bearer worker-token"},
+                payload={
+                    "run_id": store.record.run_id,
+                    "worker_runtime_id": "attacker-runtime",
+                    "worker_host": "attacker.example.test",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            store.claimed_identity,
+            ("controlled-worker-1", "controlled-worker.example.test"),
+        )
+        self.assertEqual(response.json()["assignment"]["credential"], "scoped-review-credential")
+        self.assertEqual(forged.status_code, 400, forged.text)
 
     async def test_engineering_review_openapi_has_scoped_write_routes_and_redaction(self) -> None:
         app = create_launchplane_fastapi_app(

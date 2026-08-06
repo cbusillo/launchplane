@@ -317,17 +317,23 @@ def _validate_authority_append(
     expected_current_authority_id: str,
     expected_current_authority_digest: str,
 ) -> bool:
+    active = next((candidate for candidate in records if candidate.status == "active"), None)
     same_revision = next(
         (candidate for candidate in records if candidate.policy_revision == record.policy_revision),
         None,
     )
     if same_revision is not None:
-        if same_revision.authority_digest == record.authority_digest:
+        if (
+            same_revision.authority_id == record.authority_id
+            and same_revision.authority_digest == record.authority_digest
+            and same_revision.status == record.status == "active"
+            and active is not None
+            and active.authority_id == same_revision.authority_id
+        ):
             return True
         raise EngineeringReviewConflictError(
-            "Engineering review authority revision already exists with different content."
+            "Engineering review authority revision is stale or has different content."
         )
-    active = next((candidate for candidate in records if candidate.status == "active"), None)
     if active is None:
         if record.policy_revision != 1 or record.supersedes_authority_id is not None:
             raise EngineeringReviewSequenceError(

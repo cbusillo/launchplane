@@ -4193,20 +4193,10 @@
           "run_id": {
             "title": "Run Id",
             "type": "string"
-          },
-          "worker_host": {
-            "title": "Worker Host",
-            "type": "string"
-          },
-          "worker_runtime_id": {
-            "title": "Worker Runtime Id",
-            "type": "string"
           }
         },
         "required": [
-          "run_id",
-          "worker_runtime_id",
-          "worker_host"
+          "run_id"
         ],
         "title": "EngineeringReviewRunClaimRequest",
         "type": "object"
@@ -4597,20 +4587,10 @@
             "minLength": 1,
             "title": "Summary",
             "type": "string"
-          },
-          "worker_host": {
-            "title": "Worker Host",
-            "type": "string"
-          },
-          "worker_runtime_id": {
-            "title": "Worker Runtime Id",
-            "type": "string"
           }
         },
         "required": [
           "run_id",
-          "worker_runtime_id",
-          "worker_host",
           "fencing_token",
           "error_code",
           "summary"
@@ -4629,20 +4609,10 @@
           "run_id": {
             "title": "Run Id",
             "type": "string"
-          },
-          "worker_host": {
-            "title": "Worker Host",
-            "type": "string"
-          },
-          "worker_runtime_id": {
-            "title": "Worker Runtime Id",
-            "type": "string"
           }
         },
         "required": [
           "run_id",
-          "worker_runtime_id",
-          "worker_host",
           "fencing_token"
         ],
         "title": "EngineeringReviewRunWorkerUpdate",
@@ -45373,26 +45343,6 @@
       "get": {
         "operationId": "list_pending_engineering_review_runs",
         "parameters": [
-          {
-            "in": "query",
-            "name": "worker_runtime_id",
-            "required": true,
-            "schema": {
-              "minLength": 1,
-              "title": "Worker Runtime Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "worker_host",
-            "required": true,
-            "schema": {
-              "minLength": 1,
-              "title": "Worker Host",
-              "type": "string"
-            }
-          },
           {
             "in": "header",
             "name": "Authorization",

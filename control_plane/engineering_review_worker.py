@@ -8,7 +8,6 @@ from pathlib import Path
 import secrets
 import subprocess
 from typing import Callable, Mapping, Protocol, Sequence
-from urllib.parse import urlencode
 
 from control_plane.contracts.engineering_review_run import (
     EngineeringReviewRunAssignment,
@@ -55,12 +54,14 @@ class EngineeringReviewWorkerApiStore:
     def list_pending(
         self, *, worker_runtime_id: str, worker_host: str
     ) -> tuple[EngineeringReviewRunView, ...]:
-        query = urlencode({"worker_runtime_id": worker_runtime_id, "worker_host": worker_host})
-        payload = self._api()._request("GET", f"/v1/engineering-review-runs/pending?{query}")
+        payload = self._api()._request("GET", "/v1/engineering-review-runs/pending")
         raw_runs = payload.get("runs")
         if not isinstance(raw_runs, list):
             raise RuntimeError("Engineering review pending response is invalid.")
-        return tuple(EngineeringReviewRunView.model_validate(item) for item in raw_runs)
+        runs = tuple(EngineeringReviewRunView.model_validate(item) for item in raw_runs)
+        if any(run.worker_runtime_id != worker_runtime_id for run in runs):
+            raise RuntimeError("Engineering review service returned another worker runtime.")
+        return runs
 
     def claim(self, request: EngineeringReviewRunClaimRequest) -> EngineeringReviewRunAssignment:
         payload = self._api()._request(
@@ -115,11 +116,11 @@ def run_engineering_review_worker_once(
     assignment = store.claim(
         EngineeringReviewRunClaimRequest(
             run_id=selected.run_id,
-            worker_runtime_id=worker_runtime_id,
-            worker_host=worker_host,
         )
     )
     run = assignment.run
+    if run.worker_runtime_id != worker_runtime_id or assignment.worker_host != worker_host:
+        raise RuntimeError("Engineering review assignment does not match this worker identity.")
     executable = Path(assignment.executable_path)
     try:
         _verify_executable(executable, run.binary_sha256)
@@ -128,8 +129,6 @@ def run_engineering_review_worker_once(
         _verify_worktree(worktree, run.head_sha, run.tree_sha)
         update = EngineeringReviewRunWorkerUpdate(
             run_id=run.run_id,
-            worker_runtime_id=worker_runtime_id,
-            worker_host=worker_host,
             fencing_token=run.fencing_token,
         )
         store.start(update)
@@ -173,8 +172,6 @@ def run_engineering_review_worker_once(
         return store.fail(
             EngineeringReviewRunWorkerFailure(
                 run_id=run.run_id,
-                worker_runtime_id=worker_runtime_id,
-                worker_host=worker_host,
                 fencing_token=run.fencing_token,
                 error_code="review_worker_failed",
                 summary=_failure_summary(error),
