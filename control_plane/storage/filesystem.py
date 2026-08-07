@@ -1397,7 +1397,11 @@ class FilesystemRecordStore:
                     f"Incoming active {step_label.replace('_', ' ')} revision cannot take effect "
                     "in the future."
                 )
-            records = self._list_models_locked(model_type, record_type)
+            records = tuple(
+                existing
+                for existing in self._list_models_locked(model_type, record_type)
+                if existing.product == record.product and existing.system == record.system
+            )
             same_id = tuple(
                 existing for existing in records if existing.record_id == record.record_id
             )

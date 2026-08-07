@@ -10,10 +10,12 @@ from control_plane.change_impact_service import (
     require_change_impact_policy_read_store,
 )
 from control_plane.contracts.change_impact import (
+    ChangeImpactAffectedProduct,
     ChangeImpactEvaluation,
     ChangeImpactTargetReference,
 )
 from control_plane.contracts.owner_acceptance import (
+    OWNER_ACCEPTANCE_STATUS_PRECEDENCE,
     OwnerAcceptanceAction,
     OwnerAcceptanceAuthorization,
     OwnerAcceptanceBinding,
@@ -22,6 +24,7 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceEventRecord,
     OwnerAcceptanceEventWriteStatus,
     OwnerAcceptancePreviewBinding,
+    OwnerAcceptanceProductDecision,
     OwnerAcceptanceReasonCode,
     OwnerAcceptanceSourceEventKind,
     owner_acceptance_runtime_identity_binding,
@@ -142,84 +145,9 @@ def evaluate_owner_acceptance(
             reason_code="change_impact_unavailable",
             evaluated_at=normalized_evaluated_at,
         )
-    if len(impact.affected_products) != 1:
-        return _decision(
-            status="unavailable",
-            reason_code="multi_product_unsupported",
-            evaluated_at=normalized_evaluated_at,
-        )
-    try:
-        binding = _binding_from_impact(
-            impact=impact,
-            product_index=0,
-            store=store,
-            actor=None,
-            evaluated_at=normalized_evaluated_at,
-        )
-    except OwnerAcceptanceEvaluationUnavailableError:
-        affected_product = impact.affected_products[0]
-        preview_events = tuple(
-            event
-            for event in require_owner_acceptance_event_store(
-                store
-            ).list_owner_acceptance_event_records(
-                repository_id=impact.target.repository_id,
-                pull_request_number=impact.target.pull_request_number,
-                product=affected_product.product,
-                system=affected_product.system,
-                action=affected_product.owner_action,
-            )
-            if event.binding.preview is not None and event.occurred_at <= normalized_evaluated_at
-        )
-        if preview_events:
-            current_event = max(
-                preview_events,
-                key=lambda event: (event.occurred_at, event.event_id),
-            )
-            return _decision(
-                status="stale",
-                reason_code="preview_evidence_stale",
-                binding=current_event.binding,
-                event=current_event,
-                evaluated_at=normalized_evaluated_at,
-            )
-        return _decision(
-            status="unavailable",
-            reason_code="preview_evidence_unavailable",
-            evaluated_at=normalized_evaluated_at,
-        )
-    if binding is None:
-        return _decision(
-            status="unavailable",
-            reason_code="owner_authority_unavailable",
-            evaluated_at=normalized_evaluated_at,
-        )
-    events = require_owner_acceptance_event_store(store).list_owner_acceptance_event_records(
-        repository_id=binding.repository_id,
-        pull_request_number=binding.pull_request_number,
-        product=binding.product,
-        system=binding.system,
-        action=binding.action,
-    )
-    effective_preview_events = tuple(
-        event
-        for event in events
-        if event.binding.preview is not None and event.occurred_at <= normalized_evaluated_at
-    )
-    if binding.preview is None and effective_preview_events:
-        return _decision(
-            status="stale",
-            reason_code="preview_evidence_stale",
-            binding=binding,
-            event=max(
-                effective_preview_events,
-                key=lambda event: (event.occurred_at, event.event_id),
-            ),
-            evaluated_at=normalized_evaluated_at,
-        )
-    return evaluate_owner_acceptance_for_binding(
-        binding=binding,
-        events=events,
+    return _evaluate_owner_acceptance_for_impact(
+        impact=impact,
+        store=store,
         evaluated_at=normalized_evaluated_at,
     )
 
@@ -260,7 +188,50 @@ def record_owner_acceptance_event(
         raise OwnerAcceptanceBindingConflictError(
             "Owner acceptance binding changed; evaluate the exact change again before recording."
         )
-    if len(impact.affected_products) != 1:
+    event_store = require_owner_acceptance_event_store(store)
+    target_events = event_store.list_owner_acceptance_event_records(
+        repository_id=impact.target.repository_id,
+        pull_request_number=impact.target.pull_request_number,
+    )
+    prewrite_decision = _evaluate_owner_acceptance_for_impact(
+        impact=impact,
+        store=store,
+        evaluated_at=normalized_occurred_at,
+        events=target_events,
+    )
+    normalized_expected_binding_sha256 = expected_binding_sha256.strip().lower()
+    current_matches = tuple(
+        product_index
+        for product_index, product_decision in enumerate(prewrite_decision.products)
+        if product_decision.binding is not None
+        and product_decision.binding.binding_sha256 == normalized_expected_binding_sha256
+    )
+    selected_product_index = current_matches[0] if len(current_matches) == 1 else None
+    if selected_product_index is None:
+        historical_subjects = {
+            (
+                event.binding.product,
+                event.binding.system,
+                event.binding.action,
+                event.binding.environment,
+            )
+            for event in target_events
+            if event.binding.binding_sha256 == normalized_expected_binding_sha256
+        }
+        historical_matches = tuple(
+            product_index
+            for product_index, affected_product in enumerate(impact.affected_products)
+            if (
+                affected_product.product,
+                affected_product.system,
+                affected_product.owner_action,
+                affected_product.owner_environment,
+            )
+            in historical_subjects
+        )
+        if len(historical_matches) == 1:
+            selected_product_index = historical_matches[0]
+    if selected_product_index is None:
         raise OwnerAcceptanceBindingConflictError(
             "Owner acceptance binding changed; evaluate the exact change again before recording."
         )
@@ -270,7 +241,7 @@ def record_owner_acceptance_event(
     )
     binding = _binding_from_impact(
         impact=impact,
-        product_index=0,
+        product_index=selected_product_index,
         store=store,
         actor=actor,
         evaluated_at=normalized_occurred_at,
@@ -301,13 +272,16 @@ def record_owner_acceptance_event(
         reason=reason,
         authorization=authorization,
     )
-    event_store = require_owner_acceptance_event_store(store)
-    prior_events = event_store.list_owner_acceptance_event_records(
-        repository_id=binding.repository_id,
-        pull_request_number=binding.pull_request_number,
-        product=binding.product,
-        system=binding.system,
-        action=binding.action,
+    prior_events = tuple(
+        event
+        for event in event_store.list_owner_acceptance_event_records(
+            repository_id=binding.repository_id,
+            pull_request_number=binding.pull_request_number,
+            product=binding.product,
+            system=binding.system,
+            action=binding.action,
+        )
+        if event.binding.environment == binding.environment
     )
     if binding.preview is None and any(event.binding.preview is not None for event in prior_events):
         raise OwnerAcceptanceEvaluationUnavailableError(
@@ -316,15 +290,18 @@ def record_owner_acceptance_event(
     write_status = event_store.write_owner_acceptance_event_record(record)
     if write_status == "replayed":
         record = event_store.read_owner_acceptance_event_record(record.event_id)
-    decision = evaluate_owner_acceptance_for_binding(
+    selected_decision = evaluate_owner_acceptance_for_binding(
         binding=binding,
-        events=event_store.list_owner_acceptance_event_records(
-            repository_id=binding.repository_id,
-            pull_request_number=binding.pull_request_number,
-            product=binding.product,
-            system=binding.system,
-            action=binding.action,
-        ),
+        events=(*prior_events, record),
+        evaluated_at=normalized_occurred_at,
+    )
+    product_decisions = list(prewrite_decision.products)
+    product_decisions[selected_product_index] = _product_decision(
+        affected_product=impact.affected_products[selected_product_index],
+        decision=selected_decision,
+    )
+    decision = aggregate_owner_acceptance_decision(
+        products=tuple(product_decisions),
         evaluated_at=normalized_occurred_at,
     )
     return OwnerAcceptanceWriteResult(
@@ -420,6 +397,158 @@ def evaluate_owner_acceptance_for_binding(
         binding=binding,
         event=latest,
         evaluated_at=normalized_evaluated_at,
+    )
+
+
+def aggregate_owner_acceptance_decision(
+    *,
+    products: tuple[OwnerAcceptanceProductDecision, ...],
+    evaluated_at: str,
+) -> OwnerAcceptanceDecision:
+    if not products:
+        raise ValueError("Owner acceptance aggregate requires at least one product decision.")
+    precedence = {status: index for index, status in enumerate(OWNER_ACCEPTANCE_STATUS_PRECEDENCE)}
+    _, governing = min(
+        enumerate(products),
+        key=lambda item: (precedence[item[1].status], item[0]),
+    )
+    return _decision(
+        status=governing.status,
+        reason_code=governing.reason_code,
+        binding=governing.binding,
+        event=governing.current_event,
+        products=products,
+        evaluated_at=evaluated_at,
+    )
+
+
+def _evaluate_owner_acceptance_for_impact(
+    *,
+    impact: ChangeImpactEvaluation,
+    store: object,
+    evaluated_at: str,
+    events: tuple[OwnerAcceptanceEventRecord, ...] | None = None,
+) -> OwnerAcceptanceDecision:
+    resolved_events = events
+    if resolved_events is None:
+        resolved_events = require_owner_acceptance_event_store(
+            store
+        ).list_owner_acceptance_event_records(
+            repository_id=impact.target.repository_id,
+            pull_request_number=impact.target.pull_request_number,
+        )
+    products = tuple(
+        _evaluate_owner_acceptance_product(
+            impact=impact,
+            affected_product=affected_product,
+            product_index=product_index,
+            store=store,
+            events=resolved_events,
+            evaluated_at=evaluated_at,
+        )
+        for product_index, affected_product in enumerate(impact.affected_products)
+    )
+    return aggregate_owner_acceptance_decision(products=products, evaluated_at=evaluated_at)
+
+
+def _evaluate_owner_acceptance_product(
+    *,
+    impact: ChangeImpactEvaluation,
+    affected_product: ChangeImpactAffectedProduct,
+    product_index: int,
+    store: object,
+    events: tuple[OwnerAcceptanceEventRecord, ...],
+    evaluated_at: str,
+) -> OwnerAcceptanceProductDecision:
+    product_events = tuple(
+        event
+        for event in events
+        if event.binding.product == affected_product.product
+        and event.binding.system == affected_product.system
+        and event.binding.action == affected_product.owner_action
+        and event.binding.environment == affected_product.owner_environment
+    )
+    try:
+        binding = _binding_from_impact(
+            impact=impact,
+            product_index=product_index,
+            store=store,
+            actor=None,
+            evaluated_at=evaluated_at,
+        )
+    except OwnerAcceptanceEvaluationUnavailableError:
+        preview_events = tuple(
+            event
+            for event in product_events
+            if event.binding.preview is not None and event.occurred_at <= evaluated_at
+        )
+        if preview_events:
+            current_event = max(
+                preview_events,
+                key=lambda event: (event.occurred_at, event.event_id),
+            )
+            decision = _decision(
+                status="stale",
+                reason_code="preview_evidence_stale",
+                binding=current_event.binding,
+                event=current_event,
+                evaluated_at=evaluated_at,
+            )
+        else:
+            decision = _decision(
+                status="unavailable",
+                reason_code="preview_evidence_unavailable",
+                evaluated_at=evaluated_at,
+            )
+        return _product_decision(affected_product=affected_product, decision=decision)
+    if binding is None:
+        return _product_decision(
+            affected_product=affected_product,
+            decision=_decision(
+                status="unavailable",
+                reason_code="owner_authority_unavailable",
+                evaluated_at=evaluated_at,
+            ),
+        )
+    effective_preview_events = tuple(
+        event
+        for event in product_events
+        if event.binding.preview is not None and event.occurred_at <= evaluated_at
+    )
+    if binding.preview is None and effective_preview_events:
+        decision = _decision(
+            status="stale",
+            reason_code="preview_evidence_stale",
+            binding=binding,
+            event=max(
+                effective_preview_events,
+                key=lambda event: (event.occurred_at, event.event_id),
+            ),
+            evaluated_at=evaluated_at,
+        )
+    else:
+        decision = evaluate_owner_acceptance_for_binding(
+            binding=binding,
+            events=product_events,
+            evaluated_at=evaluated_at,
+        )
+    return _product_decision(affected_product=affected_product, decision=decision)
+
+
+def _product_decision(
+    *,
+    affected_product: ChangeImpactAffectedProduct,
+    decision: OwnerAcceptanceDecision,
+) -> OwnerAcceptanceProductDecision:
+    return OwnerAcceptanceProductDecision(
+        product=affected_product.product,
+        system=affected_product.system,
+        action=affected_product.owner_action,
+        environment=affected_product.owner_environment,
+        status=decision.status,
+        reason_code=decision.reason_code,
+        binding=decision.binding,
+        current_event=decision.current_event,
     )
 
 
@@ -690,12 +819,14 @@ def _decision(
     evaluated_at: str,
     binding: OwnerAcceptanceBinding | None = None,
     event: OwnerAcceptanceEventRecord | None = None,
+    products: tuple[OwnerAcceptanceProductDecision, ...] = (),
 ) -> OwnerAcceptanceDecision:
     return OwnerAcceptanceDecision(
         status=status,
         reason_code=reason_code,
         binding=binding,
         current_event=event,
+        products=products,
         evaluated_at=evaluated_at,
     )
 

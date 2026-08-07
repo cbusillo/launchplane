@@ -269,8 +269,12 @@ generation IDs, immutable artifact image digest, manifest fingerprint,
 canonical URL, and an explicit verified-runtime identity projection. Changed
 head, tree, policy, requirement, membership, preview generation, artifact,
 manifest, URL, or runtime identity stales earlier acceptance for the new exact
-binding. Multi-product aggregation remains deferred and fails closed rather
-than accepting partial evidence.
+binding. Multi-product evaluation returns one independently authorized decision
+per affected product and accepts only when every current product decision is
+accepted. The top-level status and singular binding mirror the deterministic
+worst current product decision for compatibility. Event writes use the reviewed
+binding digest to select one server-derived product binding and never accept a
+caller-supplied product.
 
 Filesystem rehearsal records live under `launchplane_owner_acceptance_events/`.
 PostgreSQL stores the ledger in `launchplane_owner_acceptance_events` with an

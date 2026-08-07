@@ -39,6 +39,7 @@ from control_plane.owner_acceptance import (
     OwnerAcceptanceBindingConflictError,
     OwnerAcceptanceEvaluationUnavailableError,
     OwnerAcceptanceEventConflictError,
+    aggregate_owner_acceptance_decision,
     evaluate_owner_acceptance,
     record_owner_acceptance_event,
 )
@@ -140,12 +141,13 @@ def _impact_policy(
 
 def _owner_policy(
     *,
+    product: str = PRODUCT,
     revision: int = 1,
     supersedes_record_id: str | None = None,
     owners: tuple[ProductOwnerGrant, ...] | None = None,
 ) -> ProductOwnerPolicyRecord:
     return ProductOwnerPolicyRecord(
-        product=PRODUCT,
+        product=product,
         system=SYSTEM,
         policy_revision=revision,
         owners=owners
@@ -167,11 +169,12 @@ def _owner_policy(
 
 def _owner_requirement(
     *,
+    product: str = PRODUCT,
     revision: int = 1,
     supersedes_record_id: str | None = None,
 ) -> ProductOwnerRequirementRecord:
     return ProductOwnerRequirementRecord(
-        product=PRODUCT,
+        product=product,
         system=SYSTEM,
         requirement_revision=revision,
         requirements=(
@@ -192,13 +195,23 @@ def _store(
     root: Path,
     *,
     include_dependency_evidence: bool = True,
-    shared_dependency_evidence: bool = False,
+    shared_dependency_evidence: bool | list[bool] = False,
+    include_second_product_authority: bool | None = None,
     invalid_product_profile: bool = False,
+    product_profile_read_limit: int | None = None,
 ) -> FilesystemRecordStore:
     class _OwnerAcceptanceStore(FilesystemRecordStore):
+        product_profile_read_count = 0
+
         def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
+            self.product_profile_read_count += 1
             if invalid_product_profile:
                 raise ValueError("invalid product profile")
+            if (
+                product_profile_read_limit is not None
+                and self.product_profile_read_count > product_profile_read_limit
+            ):
+                raise ValueError("product profile read limit exceeded")
             return super().read_product_profile_record(product)
 
         def list_change_impact_stored_evidence(
@@ -211,7 +224,12 @@ def _store(
         ) -> tuple[ChangeImpactStoredEvidence, ...]:
             if not include_dependency_evidence:
                 return ()
-            if shared_dependency_evidence:
+            shared_evidence_enabled = (
+                shared_dependency_evidence[0]
+                if isinstance(shared_dependency_evidence, list)
+                else shared_dependency_evidence
+            )
+            if shared_evidence_enabled:
                 return (
                     ChangeImpactStoredEvidence(
                         record_id="dependency-shared",
@@ -240,6 +258,13 @@ def _store(
     store.write_change_impact_policy_record(_impact_policy())
     store.write_product_owner_policy_record(_owner_policy())
     store.write_product_owner_requirement_record(_owner_requirement())
+    if (
+        bool(shared_dependency_evidence)
+        if include_second_product_authority is None
+        else include_second_product_authority
+    ):
+        store.write_product_owner_policy_record(_owner_policy(product=SECOND_PRODUCT))
+        store.write_product_owner_requirement_record(_owner_requirement(product=SECOND_PRODUCT))
     return store
 
 
@@ -934,7 +959,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
             assert binding is not None
             self.assertEqual(binding.owner_policy_revision, 2)
 
-    def test_multi_product_change_fails_closed(self) -> None:
+    def test_multi_product_change_requires_acceptance_per_product(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory), shared_dependency_evidence=True)
             decision = evaluate_owner_acceptance(
@@ -949,9 +974,244 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 evaluated_at="2026-08-07T12:00:00Z",
             )
 
-            self.assertEqual(decision.status, "unavailable")
-            self.assertEqual(decision.reason_code, "multi_product_unsupported")
+            self.assertEqual(decision.status, "pending")
+            self.assertEqual(decision.reason_code, "acceptance_missing")
+            self.assertEqual(
+                tuple(product.product for product in decision.products),
+                (PRODUCT, SECOND_PRODUCT),
+            )
+            self.assertEqual(
+                tuple(product.status for product in decision.products),
+                ("pending", "pending"),
+            )
+            self.assertIsNotNone(decision.binding)
+            assert decision.binding is not None
+            self.assertEqual(decision.binding.product, PRODUCT)
             self.assertEqual(store.list_owner_acceptance_event_records(), ())
+
+    def test_multi_product_write_selects_each_server_derived_binding(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory), shared_dependency_evidence=True)
+            provider = _EvidenceProvider(_repository_evidence(path="src/shared/app.py"))
+            target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            initial = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+            bindings = {product.product: product.binding for product in initial.products}
+            self.assertTrue(all(binding is not None for binding in bindings.values()))
+
+            second = bindings[SECOND_PRODUCT]
+            assert second is not None
+            accepted_second = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="accepted",
+                expected_binding_sha256=second.binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="accept-both-products",
+                occurred_at="2026-08-07T12:05:00Z",
+            )
+            self.assertEqual(accepted_second.record.binding.product, SECOND_PRODUCT)
+            self.assertEqual(accepted_second.decision.status, "pending")
+            self.assertEqual(
+                tuple(product.status for product in accepted_second.decision.products),
+                ("pending", "accepted"),
+            )
+
+            first = bindings[PRODUCT]
+            assert first is not None
+            accepted_first = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="accepted",
+                expected_binding_sha256=first.binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="accept-both-products",
+                occurred_at="2026-08-07T12:10:00Z",
+            )
+            self.assertEqual(accepted_first.record.binding.product, PRODUCT)
+            self.assertEqual(accepted_first.decision.status, "accepted")
+            self.assertEqual(
+                tuple(product.status for product in accepted_first.decision.products),
+                ("accepted", "accepted"),
+            )
+            events = store.list_owner_acceptance_event_records()
+            self.assertEqual(len(events), 2)
+            self.assertEqual(len({event.event_id for event in events}), 2)
+
+    def test_write_does_not_re_resolve_aggregate_after_persisting(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory), product_profile_read_limit=3)
+            provider = _EvidenceProvider(_repository_evidence())
+            target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            evaluated = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+            assert evaluated.binding is not None
+
+            result = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="accepted",
+                expected_binding_sha256=evaluated.binding.binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="accept-with-bounded-evidence-reads",
+                occurred_at="2026-08-07T12:05:00Z",
+            )
+
+            self.assertEqual(result.status, "written")
+            self.assertEqual(result.decision.status, "accepted")
+            self.assertEqual(getattr(store, "product_profile_read_count"), 3)
+
+    def test_multi_product_aggregate_fails_closed_for_missing_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(
+                Path(directory),
+                shared_dependency_evidence=True,
+                include_second_product_authority=False,
+            )
+            decision = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(
+                    _repository_evidence(path="src/shared/app.py")
+                ),
+                target=ChangeImpactTargetReference(
+                    repository=REPOSITORY,
+                    pull_request_number=2022,
+                ),
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+
+            self.assertEqual(decision.status, "unavailable")
+            self.assertEqual(decision.reason_code, "owner_authority_unavailable")
+            self.assertEqual(
+                tuple(product.status for product in decision.products),
+                ("pending", "unavailable"),
+            )
+            self.assertIsNone(decision.binding)
+
+    def test_aggregate_status_precedence_and_tie_break_are_deterministic(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory), shared_dependency_evidence=True)
+            initial = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(
+                    _repository_evidence(path="src/shared/app.py")
+                ),
+                target=ChangeImpactTargetReference(
+                    repository=REPOSITORY,
+                    pull_request_number=2022,
+                ),
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+            first, second = initial.products
+            cases = (
+                ("unavailable", "owner_authority_unavailable", "accepted", "acceptance_valid"),
+                ("stale", "acceptance_stale", "revoked", "acceptance_revoked"),
+                ("revoked", "acceptance_revoked", "changes_requested", "changes_requested"),
+                ("changes_requested", "changes_requested", "pending", "acceptance_missing"),
+                ("pending", "acceptance_missing", "accepted", "acceptance_valid"),
+                ("accepted", "acceptance_valid", "not_required", "engineering_only"),
+            )
+            for first_status, first_reason, second_status, second_reason in cases:
+                with self.subTest(first_status=first_status, second_status=second_status):
+                    aggregate = aggregate_owner_acceptance_decision(
+                        products=(
+                            first.model_copy(
+                                update={"status": first_status, "reason_code": first_reason}
+                            ),
+                            second.model_copy(
+                                update={"status": second_status, "reason_code": second_reason}
+                            ),
+                        ),
+                        evaluated_at="2026-08-07T12:00:00Z",
+                    )
+                    self.assertEqual(aggregate.status, first_status)
+                    self.assertEqual(aggregate.reason_code, first_reason)
+
+            tied = aggregate_owner_acceptance_decision(
+                products=(first, second),
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+            self.assertIsNotNone(tied.binding)
+            assert tied.binding is not None
+            self.assertEqual(tied.binding.product, PRODUCT)
+
+    def test_product_set_drift_is_deterministic_and_read_only(self) -> None:
+        with TemporaryDirectory() as directory:
+            shared_evidence_enabled = [False]
+            store = _store(
+                Path(directory),
+                shared_dependency_evidence=shared_evidence_enabled,
+                include_second_product_authority=True,
+            )
+            target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            single_provider = _EvidenceProvider(_repository_evidence(path="src/runtime/app.py"))
+            single = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=single_provider,
+                target=target,
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+            assert single.binding is not None
+            accepted = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=single_provider,
+                target=target,
+                identity=_human(),
+                action="accepted",
+                expected_binding_sha256=single.binding.binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="accept-before-product-set-drift",
+                occurred_at="2026-08-07T12:05:00Z",
+            )
+
+            shared_evidence_enabled[0] = True
+            expanded_provider = _EvidenceProvider(
+                _repository_evidence(path="src/shared/app.py", head="c" * 40)
+            )
+            expanded = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=expanded_provider,
+                target=target,
+                evaluated_at="2026-08-07T12:10:00Z",
+            )
+            self.assertEqual(
+                tuple(product.status for product in expanded.products),
+                ("stale", "pending"),
+            )
+            self.assertNotEqual(
+                expanded.products[0].binding.binding_sha256
+                if expanded.products[0].binding is not None
+                else "",
+                accepted.record.binding.binding_sha256,
+            )
+
+            shared_evidence_enabled[0] = False
+            contracted_provider = _EvidenceProvider(
+                _repository_evidence(path="src/runtime/app.py", head="c" * 40)
+            )
+            contracted = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=contracted_provider,
+                target=target,
+                evaluated_at="2026-08-07T12:15:00Z",
+            )
+            self.assertEqual(contracted.status, "stale")
+            self.assertEqual(tuple(product.product for product in contracted.products), (PRODUCT,))
+            self.assertEqual(len(store.list_owner_acceptance_event_records()), 1)
 
 
 if __name__ == "__main__":
