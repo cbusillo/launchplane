@@ -869,7 +869,13 @@ def _every_code_tmux_session_names(
     if result.returncode != 0:
         detail = f"{result.stdout}\n{result.stderr}".lower()
         if any(
-            marker in detail for marker in ("no server running", "failed to connect", "no sessions")
+            marker in detail
+            for marker in (
+                "no server running",
+                "failed to connect",
+                "error connecting to",
+                "no sessions",
+            )
         ):
             return ()
         return None
