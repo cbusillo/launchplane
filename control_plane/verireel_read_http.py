@@ -523,6 +523,7 @@ def apply_verireel_preview_refresh_records(
         overall_health_status="pending" if refresh_passed else "fail",
         failure_stage="" if refresh_passed else "provision",
         failure_summary="" if refresh_passed else failure_summary,
+        runtime_identity=driver_result.runtime_identity,
     )
     return apply_launchplane_generation_evidence(
         control_plane_root_path=control_plane_root,

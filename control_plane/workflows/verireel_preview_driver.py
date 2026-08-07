@@ -16,7 +16,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
-from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.contracts.runtime_identity import (
+    RuntimeIdentity,
+    health_payload_runtime_identity_status,
+    runtime_identity_env,
+)
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import (
@@ -39,6 +43,7 @@ DEFAULT_PREVIEW_TIMEOUT_SECONDS = 300
 PREVIEW_APP_PREFIX = "ver-preview"
 PREVIEW_DATABASE_PREFIX = "verireel_preview_"
 PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
+_HARD_RUNTIME_IDENTITY_FIELDS = frozenset({"product", "context", "instance", "environment_kind"})
 _PREVIEW_REFRESH_GENERATED_ENV_KEYS = frozenset(
     {
         "BETTER_AUTH_SECRET",
@@ -150,6 +155,7 @@ class VeriReelPreviewRefreshResult(BaseModel):
     application_name: str
     application_id: str
     preview_url: str
+    runtime_identity: RuntimeIdentity | None = None
     error_message: str = ""
 
 
@@ -1135,9 +1141,14 @@ def _build_preview_database_command(
     )
 
 
-def _wait_for_preview_health(*, preview_url: str, timeout_seconds: int) -> None:
+def _wait_for_preview_health(
+    *,
+    preview_url: str,
+    timeout_seconds: int,
+    expected_runtime_identity: RuntimeIdentity,
+) -> RuntimeIdentity:
     health_url = f"{preview_url.rstrip('/')}/api/health"
-    deadline = timeout_seconds
+    started_at = time.monotonic()
     request = Request(
         health_url,
         headers={
@@ -1145,18 +1156,48 @@ def _wait_for_preview_health(*, preview_url: str, timeout_seconds: int) -> None:
             "Cache-Control": "no-store",
         },
     )
-    while deadline > 0:
+    last_detail = "health endpoint did not return matching runtime identity"
+    while time.monotonic() - started_at <= timeout_seconds:
+        remaining_seconds = max(1, timeout_seconds - int(time.monotonic() - started_at))
         try:
-            with urlopen(request, timeout=min(15, deadline)) as response:
+            with urlopen(request, timeout=min(15, remaining_seconds)) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-            if payload.get("ok") is True:
-                return
+            if not isinstance(payload, dict):
+                last_detail = "health endpoint returned non-object JSON"
+            elif payload.get("ok") is not True:
+                last_detail = "health endpoint did not report ok=true"
+            else:
+                status, detail, observed = health_payload_runtime_identity_status(
+                    expected=expected_runtime_identity,
+                    payload=payload,
+                    json_parse_failed=False,
+                )
+                if status == "match" and observed is not None:
+                    return observed
+                if status == "mismatch" and _runtime_identity_mismatch_is_hard(detail):
+                    raise click.ClickException(
+                        "Preview runtime identity did not match the expected deployment identity: "
+                        f"{detail}."
+                    )
+                last_detail = detail
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError):
-            pass
-        sleep_seconds = min(5, deadline)
+            last_detail = "health endpoint request failed or returned invalid JSON"
+        elapsed_seconds = time.monotonic() - started_at
+        if elapsed_seconds >= timeout_seconds:
+            break
+        sleep_seconds = min(5, timeout_seconds - elapsed_seconds)
         time.sleep(sleep_seconds)
-        deadline -= sleep_seconds
-    raise click.ClickException(f"Timed out waiting for {health_url} to report ok=true.")
+    raise click.ClickException(
+        f"Timed out waiting for {health_url} to report the expected runtime identity: {last_detail}."
+    )
+
+
+def _runtime_identity_mismatch_is_hard(detail: str) -> bool:
+    prefix = "Runtime identity mismatched fields: "
+    if not detail.startswith(prefix):
+        return False
+    fields = {field.strip() for field in detail.removeprefix(prefix).split(",") if field.strip()}
+    return bool(fields & _HARD_RUNTIME_IDENTITY_FIELDS)
 
 
 def _resolve_existing_preview_database(
@@ -1260,6 +1301,7 @@ def execute_verireel_preview_refresh(
             ),
             timeout_seconds=request.timeout_seconds,
         )
+        expected_runtime_identity = _build_preview_runtime_identity(request=request)
         env_text = dokploy_api.render_dokploy_env_text_with_overrides(
             str(template_application.get("env") or ""),
             updates={
@@ -1298,7 +1340,7 @@ def execute_verireel_preview_refresh(
                     generate=_random_urlsafe_secret,
                     template_env_map=template_env_map,
                 ),
-                **runtime_identity_env(_build_preview_runtime_identity(request=request)),
+                **runtime_identity_env(expected_runtime_identity),
             },
         )
         application = _ensure_application(
@@ -1364,7 +1406,11 @@ def execute_verireel_preview_refresh(
             command="node prisma/seed.mjs",
             timeout_seconds=request.timeout_seconds,
         )
-        _wait_for_preview_health(preview_url=preview_url, timeout_seconds=request.timeout_seconds)
+        observed_runtime_identity = _wait_for_preview_health(
+            preview_url=preview_url,
+            timeout_seconds=request.timeout_seconds,
+            expected_runtime_identity=expected_runtime_identity,
+        )
         for stale_domain_id in stale_domain_ids:
             _delete_domain(host=host, token=token, domain_id=stale_domain_id)
     except click.ClickException as exc:
@@ -1432,6 +1478,7 @@ def execute_verireel_preview_refresh(
         application_name=application_name,
         application_id=str((resolved_application or {}).get("applicationId") or "").strip(),
         preview_url=preview_url,
+        runtime_identity=observed_runtime_identity,
     )
 
 
