@@ -197,12 +197,17 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 browser_identity=TerminalAgentIdentity(subject="agent", token_label="local"),
             )
             async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                expected_binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
                 response = await client.post(
                     OWNER_ACCEPTANCE_EVENTS_ROUTE,
                     json={
                         "target": {"repository": REPOSITORY, "pull_request_number": 2022},
                         "action": "accepted",
-                        "expected_binding_sha256": "0" * 64,
+                        "expected_binding_sha256": expected_binding_sha256,
                     },
                     headers={"Idempotency-Key": "accept-agent"},
                 )
@@ -225,12 +230,17 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                expected_binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
                 response = await client.post(
                     OWNER_ACCEPTANCE_EVENTS_ROUTE,
                     json={
                         "target": {"repository": REPOSITORY, "pull_request_number": 2022},
                         "action": "accepted",
-                        "expected_binding_sha256": "0" * 64,
+                        "expected_binding_sha256": expected_binding_sha256,
                     },
                     headers={"Idempotency-Key": "accept-other"},
                 )
@@ -251,6 +261,23 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             self.assertEqual(response.status_code, 422, response.text)
+
+    async def test_event_route_requires_reviewed_binding_digest(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            app = _app(store=store)
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": {"repository": REPOSITORY, "pull_request_number": 2022},
+                        "action": "accepted",
+                    },
+                    headers={"Idempotency-Key": "accept-missing-binding"},
+                )
+
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertEqual(store.list_owner_acceptance_event_records(), ())
 
     async def test_event_route_rejects_binding_changed_after_evaluation(self) -> None:
         with TemporaryDirectory() as directory:

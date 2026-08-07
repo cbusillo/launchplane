@@ -81,12 +81,16 @@ def _repository_evidence(
     )
 
 
-def _impact_policy() -> ChangeImpactPolicyRecord:
+def _impact_policy(
+    *,
+    revision: int = 1,
+    supersedes_record_id: str | None = None,
+) -> ChangeImpactPolicyRecord:
     return ChangeImpactPolicyRecord(
         repository_id=REPOSITORY_ID,
         repository_owner_id=REPOSITORY_OWNER_ID,
         repository=REPOSITORY,
-        policy_revision=1,
+        policy_revision=revision,
         component_rules=(
             ChangeImpactComponentRule(
                 component="runtime",
@@ -113,9 +117,10 @@ def _impact_policy() -> ChangeImpactPolicyRecord:
                 reason="Shared runtime affects two products.",
             ),
         ),
-        effective_at="2026-08-07T00:00:00Z",
+        effective_at=f"2026-08-07T0{revision - 1}:00:00Z",
         source="test",
         reason="Owner acceptance policy.",
+        supersedes_record_id=supersedes_record_id,
     )
 
 
@@ -123,12 +128,14 @@ def _owner_policy(
     *,
     revision: int = 1,
     supersedes_record_id: str | None = None,
+    owners: tuple[ProductOwnerGrant, ...] | None = None,
 ) -> ProductOwnerPolicyRecord:
     return ProductOwnerPolicyRecord(
         product=PRODUCT,
         system=SYSTEM,
         policy_revision=revision,
-        owners=(
+        owners=owners
+        or (
             ProductOwnerGrant(
                 identity=ProductOwnerIdentity(
                     provider="github", provider_subject_id=str(OWNER_GITHUB_ID)
@@ -418,6 +425,84 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 )
 
             self.assertEqual(store.list_owner_acceptance_event_records(), ())
+
+    def test_authority_policy_drift_conflicts_before_owner_authorization(self) -> None:
+        for drift in ("change_impact", "owner_policy", "owner_requirement", "owner_membership"):
+            with self.subTest(drift=drift), TemporaryDirectory() as directory:
+                store = _store(Path(directory))
+                target = ChangeImpactTargetReference(
+                    repository=REPOSITORY,
+                    pull_request_number=2022,
+                )
+                provider = _EvidenceProvider(_repository_evidence())
+                expected_binding_sha256 = _expected_binding_sha256(store=store, provider=provider)
+
+                if drift == "change_impact":
+                    current_impact_policy = store.list_change_impact_policy_records(
+                        status="active"
+                    )[0]
+                    successor_impact_policy = _impact_policy(
+                        revision=2,
+                        supersedes_record_id=current_impact_policy.record_id,
+                    )
+                    store.compare_and_write_change_impact_policy_record(
+                        successor_impact_policy,
+                        expected_current_record_id=current_impact_policy.record_id,
+                        expected_current_policy_digest=current_impact_policy.policy_digest,
+                    )
+                elif drift in {"owner_policy", "owner_membership"}:
+                    current_owner_policy = store.list_product_owner_policy_records(status="active")[
+                        0
+                    ]
+                    successor_owner_policy = _owner_policy(
+                        revision=2,
+                        supersedes_record_id=current_owner_policy.record_id,
+                        owners=(
+                            ProductOwnerGrant(
+                                identity=ProductOwnerIdentity(
+                                    provider="github",
+                                    provider_subject_id="9999",
+                                ),
+                                repository_ids=(REPOSITORY_ID,),
+                                environments=("pull_request",),
+                            ),
+                        )
+                        if drift == "owner_membership"
+                        else None,
+                    )
+                    store.compare_and_write_product_owner_policy_record(
+                        successor_owner_policy,
+                        expected_current_record_id=current_owner_policy.record_id,
+                        expected_current_policy_digest=current_owner_policy.policy_digest,
+                    )
+                else:
+                    current_owner_requirement = store.list_product_owner_requirement_records(
+                        status="active"
+                    )[0]
+                    successor_owner_requirement = _owner_requirement(
+                        revision=2,
+                        supersedes_record_id=current_owner_requirement.record_id,
+                    )
+                    store.compare_and_write_product_owner_requirement_record(
+                        successor_owner_requirement,
+                        expected_current_record_id=current_owner_requirement.record_id,
+                        expected_current_requirement_digest=current_owner_requirement.requirement_digest,
+                    )
+
+                with self.assertRaises(OwnerAcceptanceBindingConflictError):
+                    record_owner_acceptance_event(
+                        store=store,
+                        repository_evidence_provider=provider,
+                        target=target,
+                        identity=_human(),
+                        action="accepted",
+                        expected_binding_sha256=expected_binding_sha256,
+                        source_event_kind="browser_api",
+                        source_event_id=f"accept-{drift}-drift",
+                        occurred_at="2026-08-07T12:00:00Z",
+                    )
+
+                self.assertEqual(store.list_owner_acceptance_event_records(), ())
 
     def test_evaluation_uses_any_owner_covering_the_exact_scope(self) -> None:
         with TemporaryDirectory() as directory:

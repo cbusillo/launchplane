@@ -24,6 +24,10 @@ change:
 - active product Owner policy and requirement record IDs, revisions, and
   digests.
 
+Preferred Owner routing affects notification order only; it does not grant or
+deny Owner authority and is intentionally excluded from the acceptance
+binding.
+
 The first HTTP slice intentionally does not accept caller-supplied head, tree,
 policy, or Owner provenance. Verified preview/runtime binding is deliberately
 deferred to the next Owner-acceptance slice rather than accepting caller-owned

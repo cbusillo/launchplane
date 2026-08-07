@@ -32,7 +32,6 @@ from control_plane.product_owner_service import (
     evaluate_product_owner_shadow_authority,
     require_product_owner_policy_read_store,
     require_product_owner_requirement_read_store,
-    require_product_owner_routing_read_store,
 )
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 
@@ -181,16 +180,16 @@ def record_owner_acceptance_event(
             "Owner acceptance requires current server-derived change-impact evidence."
         )
     if impact.owner_impact != "required":
-        raise OwnerAcceptanceAuthorizationError(
-            "Owner acceptance is not required for this exact change."
+        raise OwnerAcceptanceBindingConflictError(
+            "Owner acceptance binding changed; evaluate the exact change again before recording."
         )
     if not impact.affected_products:
-        raise OwnerAcceptanceEvaluationUnavailableError(
-            "Owner acceptance requires an affected product for Owner-impacting changes."
+        raise OwnerAcceptanceBindingConflictError(
+            "Owner acceptance binding changed; evaluate the exact change again before recording."
         )
     if len(impact.affected_products) != 1:
-        raise OwnerAcceptanceEvaluationUnavailableError(
-            "Owner acceptance does not yet support multi-product changes."
+        raise OwnerAcceptanceBindingConflictError(
+            "Owner acceptance binding changed; evaluate the exact change again before recording."
         )
     actor = ProductOwnerActorIdentity(
         provider="github",
@@ -202,14 +201,11 @@ def record_owner_acceptance_event(
         store=store,
         actor=actor,
         evaluated_at=normalized_occurred_at,
+        expected_binding_sha256=expected_binding_sha256,
     )
     if binding is None:
-        raise OwnerAcceptanceAuthorizationError(
+        raise OwnerAcceptanceEvaluationUnavailableError(
             "Owner acceptance cannot bind unavailable Owner authority."
-        )
-    if expected_binding_sha256.strip().lower() != binding.binding_sha256:
-        raise OwnerAcceptanceBindingConflictError(
-            "Owner acceptance binding changed; evaluate the exact change again before recording."
         )
     authorization = OwnerAcceptanceAuthorization(
         owner_identity_id=actor.identity_id,
@@ -387,6 +383,7 @@ def _binding_from_impact(
     store: object,
     actor: ProductOwnerActorIdentity | None,
     evaluated_at: str,
+    expected_binding_sha256: str = "",
 ) -> OwnerAcceptanceBinding | None:
     if impact.policy_revision is None or not impact.policy_digest or not impact.policy_record_id:
         return None
@@ -402,7 +399,6 @@ def _binding_from_impact(
     )
     policy_store = require_product_owner_policy_read_store(store)
     requirement_store = require_product_owner_requirement_read_store(store)
-    routing_store = require_product_owner_routing_read_store(store)
     policies = policy_store.list_product_owner_policy_records(
         product=context.product,
         system=context.system,
@@ -414,19 +410,23 @@ def _binding_from_impact(
     active_policies = tuple(record for record in policies if record.status == "active")
     active_requirements = tuple(record for record in requirements if record.status == "active")
     if len(active_policies) != 1 or len(active_requirements) != 1:
+        if expected_binding_sha256:
+            raise OwnerAcceptanceBindingConflictError(
+                "Owner acceptance binding changed; evaluate the exact change again before recording."
+            )
         return None
     if not active_policies[0].owners:
-        return None
-    owner_actors = (
-        (actor,)
-        if actor is not None
-        else tuple(
-            ProductOwnerActorIdentity(
-                provider=owner.identity.provider,
-                provider_subject_id=owner.identity.provider_subject_id,
+        if expected_binding_sha256:
+            raise OwnerAcceptanceBindingConflictError(
+                "Owner acceptance binding changed; evaluate the exact change again before recording."
             )
-            for owner in active_policies[0].owners
+        return None
+    owner_actors = tuple(
+        ProductOwnerActorIdentity(
+            provider=owner.identity.provider,
+            provider_subject_id=owner.identity.provider_subject_id,
         )
+        for owner in active_policies[0].owners
     )
     authority = None
     for owner_actor in owner_actors:
@@ -435,10 +435,7 @@ def _binding_from_impact(
             actor=owner_actor,
             policies=policies,
             requirements=requirements,
-            routings=routing_store.list_product_owner_routing_records(
-                product=context.product,
-                system=context.system,
-            ),
+            routings=(),
             claimed_policy_revision=active_policies[0].policy_revision,
             claimed_policy_digest=active_policies[0].policy_digest,
             claimed_requirement_revision=active_requirements[0].requirement_revision,
@@ -448,14 +445,12 @@ def _binding_from_impact(
         if candidate.decision == "authorized":
             authority = candidate
             break
-        if actor is not None:
-            authority = candidate
     if authority is None:
+        if expected_binding_sha256:
+            raise OwnerAcceptanceBindingConflictError(
+                "Owner acceptance binding changed; evaluate the exact change again before recording."
+            )
         return None
-    if authority.decision not in {"authorized", "denied"}:
-        return None
-    if actor is not None and authority.decision != "authorized":
-        raise OwnerAcceptanceAuthorizationError("Caller is not a current product Owner.")
     if (
         not authority.policy_record_id
         or authority.policy_revision is None
@@ -465,7 +460,7 @@ def _binding_from_impact(
         or not authority.requirement_digest
     ):
         return None
-    return OwnerAcceptanceBinding(
+    binding = OwnerAcceptanceBinding(
         repository_id=impact.target.repository_id,
         repository_owner_id=impact.target.repository_owner_id,
         repository=impact.target.repository,
@@ -486,6 +481,29 @@ def _binding_from_impact(
         owner_requirement_revision=authority.requirement_revision,
         owner_requirement_digest=authority.requirement_digest,
     )
+    if (
+        expected_binding_sha256
+        and expected_binding_sha256.strip().lower() != binding.binding_sha256
+    ):
+        raise OwnerAcceptanceBindingConflictError(
+            "Owner acceptance binding changed; evaluate the exact change again before recording."
+        )
+    if actor is not None:
+        actor_authority = evaluate_product_owner_shadow_authority(
+            context=context,
+            actor=actor,
+            policies=policies,
+            requirements=requirements,
+            routings=(),
+            claimed_policy_revision=active_policies[0].policy_revision,
+            claimed_policy_digest=active_policies[0].policy_digest,
+            claimed_requirement_revision=active_requirements[0].requirement_revision,
+            claimed_requirement_digest=active_requirements[0].requirement_digest,
+            evaluated_at=evaluated_at,
+        )
+        if actor_authority.decision != "authorized":
+            raise OwnerAcceptanceAuthorizationError("Caller is not a current product Owner.")
+    return binding
 
 
 def _decision(

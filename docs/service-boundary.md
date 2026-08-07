@@ -3516,6 +3516,8 @@ provenance from service-owned providers and records. The pure read cannot
 consume a request body and does not expand the cookie-capable mutation route
 inventory. Engineering-only changes return `not_required` and write no event.
 Incomplete change-impact or Owner authority evidence fails closed.
+Preferred Owner routing remains notification-only, does not participate in the
+authority decision, and is not part of the exact acceptance binding.
 
 `POST /v1/owner-acceptance/events` uses the browser mutation identity path and
 requires a browser-authenticated GitHub human plus a bounded `Idempotency-Key`.
