@@ -64481,6 +64481,7 @@
     "/v1/drivers": "read_driver_descriptors",
     "/v1/every-code/summary": "read_every_code_summary",
     "/v1/every-code/work-requests": "list_every_code_work_requests",
+    "/v1/owner-acceptance/evaluation": "evaluate_owner_acceptance",
     "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",
     "/v1/previews/readiness": "read_preview_readiness",
     "/v1/product-profiles": "list_product_profiles",
@@ -64503,6 +64504,7 @@
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation"
   },
   "x-launchplane-ui-write-operations": {
+    "/v1/owner-acceptance/events": "write_owner_acceptance_event",
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",
