@@ -25,6 +25,7 @@ from control_plane.contracts.product_owner import (
 )
 from control_plane.owner_acceptance import (
     OwnerAcceptanceAuthorizationError,
+    OwnerAcceptanceBindingConflictError,
     OwnerAcceptanceEventConflictError,
     evaluate_owner_acceptance,
     record_owner_acceptance_event,
@@ -215,17 +216,39 @@ def _store(
     return store
 
 
+def _expected_binding_sha256(
+    *,
+    store: object,
+    provider: ChangeImpactRepositoryEvidenceProvider,
+) -> str:
+    decision = evaluate_owner_acceptance(
+        store=store,
+        repository_evidence_provider=provider,
+        target=ChangeImpactTargetReference(
+            repository=REPOSITORY,
+            pull_request_number=2022,
+        ),
+        evaluated_at="2026-08-07T12:00:00Z",
+    )
+    if decision.binding is None:
+        raise AssertionError("Expected Owner acceptance binding")
+    return decision.binding.binding_sha256
+
+
 class OwnerAcceptanceTests(unittest.TestCase):
     def test_acceptance_records_and_replays_for_exact_binding(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
             target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            provider = _EvidenceProvider(_repository_evidence())
+            expected_binding_sha256 = _expected_binding_sha256(store=store, provider=provider)
             result = record_owner_acceptance_event(
                 store=store,
-                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                repository_evidence_provider=provider,
                 target=target,
                 identity=_human(),
                 action="accepted",
+                expected_binding_sha256=expected_binding_sha256,
                 source_event_kind="browser_api",
                 source_event_id="accept-1",
                 occurred_at="2026-08-07T12:00:00Z",
@@ -235,10 +258,11 @@ class OwnerAcceptanceTests(unittest.TestCase):
 
             replay = record_owner_acceptance_event(
                 store=store,
-                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                repository_evidence_provider=provider,
                 target=target,
                 identity=_human(),
                 action="accepted",
+                expected_binding_sha256=expected_binding_sha256,
                 source_event_kind="browser_api",
                 source_event_id="accept-1",
                 occurred_at="2026-08-07T12:01:00Z",
@@ -272,6 +296,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
             store = _store(Path(directory))
             target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
             provider = _EvidenceProvider(_repository_evidence())
+            expected_binding_sha256 = _expected_binding_sha256(store=store, provider=provider)
             with self.assertRaises(OwnerAcceptanceAuthorizationError):
                 record_owner_acceptance_event(
                     store=store,
@@ -279,6 +304,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
                     target=target,
                     identity=TerminalAgentIdentity(subject="agent", token_label="local"),
                     action="accepted",
+                    expected_binding_sha256=expected_binding_sha256,
                     source_event_kind="browser_api",
                     source_event_id="accept-agent",
                     occurred_at="2026-08-07T12:00:00Z",
@@ -290,6 +316,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
                     target=target,
                     identity=_human(github_id=9999),
                     action="accepted",
+                    expected_binding_sha256=expected_binding_sha256,
                     source_event_kind="browser_api",
                     source_event_id="accept-other",
                     occurred_at="2026-08-07T12:00:00Z",
@@ -299,12 +326,15 @@ class OwnerAcceptanceTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
             target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            provider = _EvidenceProvider(_repository_evidence())
+            expected_binding_sha256 = _expected_binding_sha256(store=store, provider=provider)
             accepted = record_owner_acceptance_event(
                 store=store,
-                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                repository_evidence_provider=provider,
                 target=target,
                 identity=_human(),
                 action="accepted",
+                expected_binding_sha256=expected_binding_sha256,
                 source_event_kind="browser_api",
                 source_event_id="accept-1",
                 occurred_at="2026-08-07T12:00:00Z",
@@ -344,16 +374,19 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 expected_current_record_id=current_requirement.record_id,
                 expected_current_requirement_digest=current_requirement.requirement_digest,
             )
+            provider = _EvidenceProvider(_repository_evidence())
+            expected_binding_sha256 = _expected_binding_sha256(store=store, provider=provider)
 
             result = record_owner_acceptance_event(
                 store=store,
-                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                repository_evidence_provider=provider,
                 target=ChangeImpactTargetReference(
                     repository=REPOSITORY,
                     pull_request_number=2022,
                 ),
                 identity=_human(),
                 action="accepted",
+                expected_binding_sha256=expected_binding_sha256,
                 source_event_kind="browser_api",
                 source_event_id="accept-revision-2",
                 occurred_at="2026-08-07T12:00:00Z",
@@ -362,6 +395,29 @@ class OwnerAcceptanceTests(unittest.TestCase):
             self.assertEqual(result.status, "written")
             self.assertEqual(result.record.binding.owner_policy_revision, 2)
             self.assertEqual(result.record.binding.owner_requirement_revision, 2)
+
+    def test_write_rejects_binding_changed_after_owner_evaluation(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            provider = _EvidenceProvider(_repository_evidence())
+            expected_binding_sha256 = _expected_binding_sha256(store=store, provider=provider)
+            provider.evidence = _repository_evidence(head="c" * 40)
+
+            with self.assertRaises(OwnerAcceptanceBindingConflictError):
+                record_owner_acceptance_event(
+                    store=store,
+                    repository_evidence_provider=provider,
+                    target=target,
+                    identity=_human(),
+                    action="accepted",
+                    expected_binding_sha256=expected_binding_sha256,
+                    source_event_kind="browser_api",
+                    source_event_id="accept-stale-binding",
+                    occurred_at="2026-08-07T12:00:00Z",
+                )
+
+            self.assertEqual(store.list_owner_acceptance_event_records(), ())
 
     def test_evaluation_uses_any_owner_covering_the_exact_scope(self) -> None:
         with TemporaryDirectory() as directory:

@@ -235,7 +235,7 @@ class OwnerAcceptanceEventRecord(BaseModel):
     occurred_at: str
     source_event_kind: OwnerAcceptanceSourceEventKind
     source_event_id: str = Field(min_length=1, max_length=128)
-    reason: str = ""
+    reason: str = Field(default="", max_length=4000)
     authorization: OwnerAcceptanceAuthorization | None = None
 
     @model_validator(mode="after")

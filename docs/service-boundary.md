@@ -3519,7 +3519,10 @@ Incomplete change-impact or Owner authority evidence fails closed.
 
 `POST /v1/owner-acceptance/events` uses the browser mutation identity path and
 requires a browser-authenticated GitHub human plus a bounded `Idempotency-Key`.
-The service then verifies that
+It also requires the `expected_binding_sha256` returned by evaluation. The
+digest is a compare-only precondition: Launchplane re-resolves all evidence and
+returns a conflict without writing when the exact binding changed. The service
+then verifies that
 the immutable GitHub user ID is a current Owner for the affected exact scope
 before writing `accepted`, `changes_requested`, or `revoked`. Agents, workers,
 GitHub Actions, local operators, and other bearer identities cannot satisfy this

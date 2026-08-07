@@ -19,6 +19,7 @@ from control_plane.http_routes.support import (
 )
 from control_plane.owner_acceptance import (
     OwnerAcceptanceAuthorizationError,
+    OwnerAcceptanceBindingConflictError,
     OwnerAcceptanceEvaluationUnavailableError,
     OwnerAcceptanceEventConflictError,
     OwnerAcceptanceWriteResult,
@@ -47,10 +48,13 @@ class OwnerAcceptanceEventEnvelope(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     target: ChangeImpactTargetReference
     action: Literal["accepted", "changes_requested", "revoked"]
+    expected_binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     reason: str = Field(default="", max_length=4000)
 
     @model_validator(mode="after")
     def _validate_reason(self) -> "OwnerAcceptanceEventEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Owner acceptance event envelope schema version.")
         self.reason = self.reason.strip()
         if self.action != "accepted" and not self.reason:
             raise ValueError(f"Owner acceptance action {self.action!r} requires a reason")
@@ -183,6 +187,7 @@ def register_owner_acceptance_routes(
                 target=envelope.target,
                 identity=identity,
                 action=envelope.action,
+                expected_binding_sha256=envelope.expected_binding_sha256,
                 source_event_kind="browser_api",
                 source_event_id=idempotency_key,
                 reason=envelope.reason,
@@ -199,6 +204,13 @@ def register_owner_acceptance_routes(
                 status_code=409,
                 trace_id=trace_id,
                 code="owner_acceptance_event_conflict",
+                message=str(error),
+            ) from error
+        except OwnerAcceptanceBindingConflictError as error:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="owner_acceptance_binding_changed",
                 message=str(error),
             ) from error
         except (OwnerAcceptanceEvaluationUnavailableError, ValueError):

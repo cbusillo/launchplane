@@ -11624,6 +11624,11 @@
             "title": "Action",
             "type": "string"
           },
+          "expected_binding_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expected Binding Sha256",
+            "type": "string"
+          },
           "reason": {
             "default": "",
             "maxLength": 4000,
@@ -11642,7 +11647,8 @@
         },
         "required": [
           "target",
-          "action"
+          "action",
+          "expected_binding_sha256"
         ],
         "title": "OwnerAcceptanceEventEnvelope",
         "type": "object"
@@ -11714,6 +11720,7 @@
           },
           "reason": {
             "default": "",
+            "maxLength": 4000,
             "title": "Reason",
             "type": "string"
           },

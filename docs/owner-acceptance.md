@@ -48,10 +48,19 @@ affected product.
 ## Event Authoring
 
 `POST /v1/owner-acceptance/events` is for browser-authenticated GitHub humans
-and requires an `Idempotency-Key` header.
+and requires an `Idempotency-Key` header plus the
+`expected_binding_sha256` returned by the latest evaluation.
 The route requires the browser mutation channel, then the service checks that
 the human's immutable GitHub user ID is a current Owner for the affected
 product/system, repository, action, and environment.
+
+The binding digest is a compare-only precondition, not caller-owned evidence.
+Launchplane re-resolves all exact-change and authority evidence at write time
+and returns `409 owner_acceptance_binding_changed` without writing an event if
+the current binding differs from the one the Owner reviewed. This prevents a
+force-push, policy revision, requirement revision, or Owner-scope change
+between evaluation and event authoring from silently changing what the human
+accepts.
 
 Human actions are:
 

@@ -45,6 +45,10 @@ class OwnerAcceptanceAuthorizationError(PermissionError):
     """Raised when a caller cannot author a human Owner acceptance event."""
 
 
+class OwnerAcceptanceBindingConflictError(RuntimeError):
+    """Raised when the current exact binding differs from the Owner-reviewed binding."""
+
+
 class OwnerAcceptanceEvaluationUnavailableError(RuntimeError):
     """Raised when server-owned exact-change evidence cannot be resolved."""
 
@@ -155,6 +159,7 @@ def record_owner_acceptance_event(
     target: ChangeImpactTargetReference,
     identity: LaunchplaneIdentity,
     action: OwnerAcceptanceAction,
+    expected_binding_sha256: str,
     source_event_kind: OwnerAcceptanceSourceEventKind,
     source_event_id: str,
     reason: str = "",
@@ -201,6 +206,10 @@ def record_owner_acceptance_event(
     if binding is None:
         raise OwnerAcceptanceAuthorizationError(
             "Owner acceptance cannot bind unavailable Owner authority."
+        )
+    if expected_binding_sha256.strip().lower() != binding.binding_sha256:
+        raise OwnerAcceptanceBindingConflictError(
+            "Owner acceptance binding changed; evaluate the exact change again before recording."
         )
     authorization = OwnerAcceptanceAuthorization(
         owner_identity_id=actor.identity_id,

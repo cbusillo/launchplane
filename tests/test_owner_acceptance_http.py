@@ -40,6 +40,7 @@ def _app(
     store: object,
     identity: LaunchplaneIdentity | None = None,
     browser_identity: LaunchplaneIdentity | None = None,
+    repository_evidence_provider: _EvidenceProvider | None = None,
 ) -> FastAPI:
     resolved_identity = identity or _human()
     resolved_browser_identity = browser_identity or resolved_identity
@@ -57,7 +58,9 @@ def _app(
         dependencies=OwnerAcceptanceRouteDependencies(
             common=common,
             read_browser_mutation_identity=lambda: resolved_browser_identity,
-            repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+            repository_evidence_provider=(
+                repository_evidence_provider or _EvidenceProvider(_repository_evidence())
+            ),
         ),
     )
     return app
@@ -74,11 +77,20 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
             }
 
             async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params=target,
+                )
+                self.assertEqual(evaluated.status_code, 200, evaluated.text)
+                self.assertEqual(evaluated.json()["decision"]["status"], "pending")
+                expected_binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
+
                 injected = await client.post(
                     OWNER_ACCEPTANCE_EVENTS_ROUTE,
                     json={
                         "target": target,
                         "action": "accepted",
+                        "expected_binding_sha256": expected_binding_sha256,
                         "head_sha": "c" * 40,
                     },
                     headers={"Idempotency-Key": "accept-1"},
@@ -86,18 +98,12 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(injected.status_code, 422, injected.text)
                 self.assertEqual(store.list_owner_acceptance_event_records(), ())
 
-                evaluated = await client.get(
-                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
-                    params=target,
-                )
-                self.assertEqual(evaluated.status_code, 200, evaluated.text)
-                self.assertEqual(evaluated.json()["decision"]["status"], "pending")
-
                 written = await client.post(
                     OWNER_ACCEPTANCE_EVENTS_ROUTE,
                     json={
                         "target": target,
                         "action": "accepted",
+                        "expected_binding_sha256": expected_binding_sha256,
                     },
                     headers={"Idempotency-Key": "accept-1"},
                 )
@@ -113,7 +119,11 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
 
                 replayed = await client.post(
                     OWNER_ACCEPTANCE_EVENTS_ROUTE,
-                    json={"target": target, "action": "accepted"},
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": expected_binding_sha256,
+                    },
                     headers={"Idempotency-Key": "accept-1"},
                 )
                 self.assertEqual(replayed.status_code, 202, replayed.text)
@@ -139,9 +149,21 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 store = _store(Path(directory))
                 app = _app(store=store)
                 async with lifespan_client(app) as client:
+                    evaluated = await client.get(
+                        OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                        params=target,
+                    )
+                    self.assertEqual(evaluated.status_code, 200, evaluated.text)
+                    expected_binding_sha256 = evaluated.json()["decision"]["binding"][
+                        "binding_sha256"
+                    ]
                     missing_reason = await client.post(
                         OWNER_ACCEPTANCE_EVENTS_ROUTE,
-                        json={"target": target, "action": action},
+                        json={
+                            "target": target,
+                            "action": action,
+                            "expected_binding_sha256": expected_binding_sha256,
+                        },
                         headers={"Idempotency-Key": f"{action}-missing-reason"},
                     )
                     self.assertEqual(missing_reason.status_code, 422, missing_reason.text)
@@ -152,6 +174,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                         json={
                             "target": target,
                             "action": action,
+                            "expected_binding_sha256": expected_binding_sha256,
                             "reason": "Owner provided actionable feedback.",
                         },
                         headers={"Idempotency-Key": action},
@@ -179,6 +202,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                     json={
                         "target": {"repository": REPOSITORY, "pull_request_number": 2022},
                         "action": "accepted",
+                        "expected_binding_sha256": "0" * 64,
                     },
                     headers={"Idempotency-Key": "accept-agent"},
                 )
@@ -206,6 +230,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                     json={
                         "target": {"repository": REPOSITORY, "pull_request_number": 2022},
                         "action": "accepted",
+                        "expected_binding_sha256": "0" * 64,
                     },
                     headers={"Idempotency-Key": "accept-other"},
                 )
@@ -221,10 +246,42 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                     json={
                         "target": {"repository": REPOSITORY, "pull_request_number": 2022},
                         "action": "accepted",
+                        "expected_binding_sha256": "0" * 64,
                     },
                 )
 
             self.assertEqual(response.status_code, 422, response.text)
+
+    async def test_event_route_rejects_binding_changed_after_evaluation(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            provider = _EvidenceProvider(_repository_evidence())
+            app = _app(store=store, repository_evidence_provider=provider)
+            target: dict[str, str | int] = {
+                "repository": REPOSITORY,
+                "pull_request_number": 2022,
+            }
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params=target,
+                )
+                expected_binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
+                provider.evidence = _repository_evidence(head="c" * 40)
+
+                response = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": expected_binding_sha256,
+                    },
+                    headers={"Idempotency-Key": "accept-stale-binding"},
+                )
+
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["detail"]["code"], "owner_acceptance_binding_changed")
+            self.assertEqual(store.list_owner_acceptance_event_records(), ())
 
     def test_routes_are_bounded(self) -> None:
         self.assertNotIn(OWNER_ACCEPTANCE_EVALUATION_ROUTE, _BOUNDED_REQUEST_BODY_CONTRACTS)
