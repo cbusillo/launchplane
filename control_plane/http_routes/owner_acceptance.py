@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from fastapi import Depends, Header, Path, Query
@@ -11,7 +12,6 @@ from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
     OWNER_ACCEPTANCE_READ_ACTION,
     OwnerAcceptanceDecision,
-    OwnerAcceptanceDecisionStatus,
     OwnerAcceptanceEventRecord,
 )
 from control_plane.http_routes.support import (
@@ -102,6 +102,10 @@ class OwnerAcceptanceQueueResponse(BaseModel):
     authoritative: Literal[False] = False
     enforcement_effect: Literal["none"] = "none"
     generated_at: str
+    total: int
+    candidate: int
+    truncated: bool
+    has_more: bool
     entry_count: int
     entries: tuple[OwnerAcceptanceQueueEntry, ...]
 
@@ -313,9 +317,10 @@ def register_owner_acceptance_routes(
                 message="Caller cannot read Owner acceptance queue.",
             )
         try:
-            entries = build_owner_acceptance_queue(
+            result = build_owner_acceptance_queue(
                 store=record_store,
-                repository_evidence_provider=dependencies.repository_evidence_provider,
+                repository=repository,
+                status=status,
             )
         except TypeError as error:
             raise common.http_error(
@@ -324,20 +329,20 @@ def register_owner_acceptance_routes(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        normalized_repository = repository.strip().lower()
-        normalized_status = status.strip().lower()
-        filtered = tuple(
-            entry
-            for entry in entries
-            if (not normalized_repository or entry.repository == normalized_repository)
-            and (not normalized_status or entry.owner_acceptance_decision.status == normalized_status)
+        generated_at = (
+            datetime.now(timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
         )
-        from control_plane.owner_acceptance_queue import _now_utc
         return OwnerAcceptanceQueueResponse(
             trace_id=trace_id,
-            generated_at=_now_utc(),
-            entry_count=len(filtered),
-            entries=filtered,
+            generated_at=generated_at,
+            total=result.total,
+            candidate=result.candidate,
+            truncated=result.truncated,
+            has_more=result.has_more,
+            entry_count=len(result.entries),
+            entries=result.entries,
         )
 
     errors = {

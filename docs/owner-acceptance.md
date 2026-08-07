@@ -139,39 +139,44 @@ or tenant-admission evidence.
 
 ## Acceptance Queue
 
-`GET /v1/owner-acceptance/queue` returns a read-only queue of Owner acceptance
-candidates. Queue candidates are assembled **server-side** from two sources:
+`GET /v1/owner-acceptance/queue` is a **ledger-only** endpoint. It derives
+candidates exclusively from `OwnerAcceptanceEventRecord` history with no
+repository evidence provider calls, no GitHub API calls, and no engineering
+review decision store dependency.
 
-1. The latest engineering review decision record per (repository, PR) from the
-   server-owned engineering review decision ledger.
-2. The (repository, PR) subjects present in the Owner acceptance event history.
+**Folding:** Events are folded by their full subject key:
+`(repository_id, pull_request_number, product, system, action, environment)`.
+For each unique subject, the latest event is selected deterministically by
+`(occurred_at, event_id)`.
 
-The union of both sources is bounded to at most 50 entries, deterministically
-sorted newest-first by the latest engineering review decision evaluated-at or
-acceptance event occurred-at timestamp. For each candidate, `evaluate_owner_acceptance`
-is called server-side using the same repository evidence provider as the
-evaluation route.
+**Ledger status:** Each entry carries a `ledger_status` and `next_action`
+derived from the latest recorded event action:
+- `accepted` → `accepted`
+- `changes_requested` → `changes_requested`
+- `revoked` → `revoked`
+- `superseded` → `stale`
+- `invalidated` → `unavailable`
 
-The browser supplies only optional filter query parameters (`repository`,
-`status`) applied after server-side evaluation. It cannot supply candidate
-targets, head SHAs, binding digests, or any evidence input. No mutation route
-is exposed through this endpoint.
+**Pagination counts:** The response exposes `total` (unique subjects in the
+scan), `candidate` (after optional filters), `truncated` / `has_more` (whether
+filters exceed the 50-entry limit), and `entry_count` (entries in this
+response).
 
-Each queue entry carries:
+**Provenance:** Every entry includes `latest_event` (full persisted event
+record), `latest_binding` (the exact binding from that event), `occurred_at`,
+and `verification_required: true`.
 
-- `repository`, `pull_request_number` — the PR identity.
-- `mode: shadow`, `authoritative: false`, `enforcement_effect: none` — explicit
-  governance framing on every row.
-- `engineering_review_decision` — the latest server-recorded engineering review
-  decision record for this PR, or `null` if the candidate came from event history
-  only.
-- `owner_acceptance_decision` — the current evaluated Owner acceptance decision,
-  including per-product decisions with exact bindings and current events.
-- `next_action` — a human-readable next-action string derived from the current
-  decision status.
+**Limitation:** The queue reflects what has been explicitly recorded in the
+ledger. PRs with no acceptance events do not appear. Use
+`GET /v1/owner-acceptance/evaluation` for a live current evaluation of any
+PR, including never-acted PRs.
 
-The route uses the existing read authorization action. No Owner mutation
-controls are exposed.
+The browser supplies only optional filter query parameters (`repository`
+substring, `status` exact). It cannot supply candidate targets, head SHAs,
+binding digests, or any evidence input. Malformed event actions are not
+silently skipped — they fail the route. No mutation route is exposed.
+
+The route uses the existing read authorization action.
 
 ## Engineering Ops Workbench
 
@@ -181,11 +186,15 @@ from `GET /v1/owner-acceptance/queue` with:
 
 - loading, error, denied, and empty states via `EngineeringResourceGate`;
 - a boundary note explaining shadow-mode, the 50-entry limit, and the
-  server-side candidate assembly;
-- optional client-side filters by status and repository;
-- per-entry engineering review decision evidence and per-product acceptance
-  bindings with recorded/current framing;
-- a passive note that no Owner mutation controls are exposed.
+  ledger-only derivation (no current GitHub evidence);
+- optional client-side filters by status (exact) and repository (substring);
+- per-entry recorded binding and event provenance with `verification_required`
+  framing — rows are labeled **Recorded**, not Current;
+- a passive note that no Owner mutation controls are exposed;
+- an **Exact Lookup** pane that calls `GET /v1/owner-acceptance/evaluation`
+  for a current live decision of any repository and PR number, including
+  never-acted PRs. Provider failures are scoped to this pane and do not
+  affect the queue list state.
 
 No write or mutation controls appear on this surface.
 

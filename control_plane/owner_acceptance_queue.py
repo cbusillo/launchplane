@@ -1,21 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict
 
-from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
-from control_plane.contracts.change_impact import ChangeImpactTargetReference
-from control_plane.contracts.engineering_review_decision import EngineeringReviewDecisionRecord
 from control_plane.contracts.owner_acceptance import (
-    OwnerAcceptanceDecision,
+    OwnerAcceptanceBinding,
+    OwnerAcceptanceDecisionStatus,
     OwnerAcceptanceEventRecord,
-)
-from control_plane.owner_acceptance import (
-    OwnerAcceptanceEvaluationUnavailableError,
-    evaluate_owner_acceptance,
-    require_owner_acceptance_event_store,
 )
 
 OWNER_ACCEPTANCE_QUEUE_LIMIT = 50
@@ -23,16 +17,6 @@ _QUEUE_SCAN_LIMIT = 500
 
 
 class OwnerAcceptanceQueueReadStore(Protocol):
-    def list_engineering_review_decision_records(
-        self,
-        *,
-        repository: str = "",
-        pull_request_number: int | None = None,
-        head_sha: str = "",
-        work_request_id: str = "",
-        limit: int | None = None,
-    ) -> tuple[EngineeringReviewDecisionRecord, ...]: ...
-
     def list_owner_acceptance_event_records(
         self,
         *,
@@ -48,12 +32,8 @@ class OwnerAcceptanceQueueReadStore(Protocol):
 
 
 def require_owner_acceptance_queue_read_store(store: object) -> OwnerAcceptanceQueueReadStore:
-    for method in (
-        "list_engineering_review_decision_records",
-        "list_owner_acceptance_event_records",
-    ):
-        if not callable(getattr(store, method, None)):
-            raise TypeError(f"Owner acceptance queue storage requires {method}.")
+    if not callable(getattr(store, "list_owner_acceptance_event_records", None)):
+        raise TypeError("Owner acceptance queue storage requires list_owner_acceptance_event_records.")
     return cast(OwnerAcceptanceQueueReadStore, store)
 
 
@@ -61,86 +41,117 @@ class OwnerAcceptanceQueueEntry(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = 1
+    repository_id: str
     repository: str
     pull_request_number: int
+    product: str
+    system: str
+    action: str
+    environment: str
     mode: Literal["shadow"] = "shadow"
     authoritative: Literal[False] = False
     enforcement_effect: Literal["none"] = "none"
-    engineering_review_decision: EngineeringReviewDecisionRecord | None
-    owner_acceptance_decision: OwnerAcceptanceDecision
+    verification_required: Literal[True] = True
+    ledger_status: OwnerAcceptanceDecisionStatus
     next_action: str
+    latest_event: OwnerAcceptanceEventRecord
+    latest_binding: OwnerAcceptanceBinding
+    occurred_at: str
+
+
+@dataclass(frozen=True)
+class OwnerAcceptanceQueueBuildResult:
+    total: int
+    candidate: int
+    truncated: bool
+    has_more: bool
+    entries: tuple[OwnerAcceptanceQueueEntry, ...]
 
 
 def build_owner_acceptance_queue(
     *,
     store: object,
-    repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider,
+    repository: str = "",
+    status: str = "",
     limit: int = OWNER_ACCEPTANCE_QUEUE_LIMIT,
-) -> tuple[OwnerAcceptanceQueueEntry, ...]:
+) -> OwnerAcceptanceQueueBuildResult:
     queue_store = require_owner_acceptance_queue_read_store(store)
 
-    all_erds = queue_store.list_engineering_review_decision_records(limit=_QUEUE_SCAN_LIMIT)
-    latest_erd_by_target: dict[tuple[str, int], EngineeringReviewDecisionRecord] = {}
-    for erd in all_erds:
-        key = (erd.target.repository, erd.target.pull_request_number)
-        if key not in latest_erd_by_target:
-            latest_erd_by_target[key] = erd
+    all_events = queue_store.list_owner_acceptance_event_records(limit=_QUEUE_SCAN_LIMIT)
 
-    event_store = require_owner_acceptance_event_store(store)
-    all_events = event_store.list_owner_acceptance_event_records(limit=_QUEUE_SCAN_LIMIT)
-    event_targets: set[tuple[str, int]] = {
-        (event.binding.repository, event.binding.pull_request_number)
-        for event in all_events
-    }
-
-    all_targets = event_targets | set(latest_erd_by_target.keys())
-
-    latest_event_at: dict[tuple[str, int], str] = {}
+    # Fold by full subject: (repository_id, pull_request_number, product, system, action, environment)
+    # Latest event per subject by (occurred_at, event_id) — deterministic tie-break
+    latest_by_subject: dict[tuple[str, int, str, str, str, str], OwnerAcceptanceEventRecord] = {}
     for event in all_events:
-        key = (event.binding.repository, event.binding.pull_request_number)
-        if key not in latest_event_at or event.occurred_at > latest_event_at[key]:
-            latest_event_at[key] = event.occurred_at
+        b = event.binding
+        key = (b.repository_id, b.pull_request_number, b.product, b.system, b.action, b.environment)
+        existing = latest_by_subject.get(key)
+        if existing is None or (event.occurred_at, event.event_id) > (existing.occurred_at, existing.event_id):
+            latest_by_subject[key] = event
 
-    def _sort_key(target: tuple[str, int]) -> str:
-        erd = latest_erd_by_target.get(target)
-        if erd is not None:
-            return erd.evaluated_at
-        return latest_event_at.get(target, "")
+    total = len(latest_by_subject)
 
-    sorted_targets = sorted(all_targets, key=_sort_key, reverse=True)
-    bounded_targets = sorted_targets[:limit]
-
-    evaluated_at = _now_utc()
-    entries: list[OwnerAcceptanceQueueEntry] = []
-    for repository, pull_request_number in bounded_targets:
-        erd = latest_erd_by_target.get((repository, pull_request_number))
-        try:
-            decision = evaluate_owner_acceptance(
-                store=store,
-                repository_evidence_provider=repository_evidence_provider,
-                target=ChangeImpactTargetReference(
-                    repository=repository,
-                    pull_request_number=pull_request_number,
-                ),
-                evaluated_at=evaluated_at,
-            )
-        except (OwnerAcceptanceEvaluationUnavailableError, TypeError, ValueError):
-            continue
-        entries.append(
+    # Build candidate entries — malformed actions raise ValueError and fail the route
+    all_entries: list[OwnerAcceptanceQueueEntry] = []
+    for event in latest_by_subject.values():
+        ledger_status = _ledger_status_from_action(event.action)
+        all_entries.append(
             OwnerAcceptanceQueueEntry(
-                repository=repository,
-                pull_request_number=pull_request_number,
-                engineering_review_decision=erd,
-                owner_acceptance_decision=decision,
-                next_action=_next_action(decision),
+                repository_id=event.binding.repository_id,
+                repository=event.binding.repository,
+                pull_request_number=event.binding.pull_request_number,
+                product=event.binding.product,
+                system=event.binding.system,
+                action=event.binding.action,
+                environment=event.binding.environment,
+                ledger_status=ledger_status,
+                next_action=_next_action(ledger_status),
+                latest_event=event,
+                latest_binding=event.binding,
+                occurred_at=event.occurred_at,
             )
         )
 
-    return tuple(entries)
+    # Apply repository/status filters BEFORE bounded pagination
+    normalized_repository = repository.strip().lower()
+    normalized_status = status.strip().lower()
+    filtered = [
+        entry for entry in all_entries
+        if (not normalized_repository or normalized_repository in entry.repository)
+        and (not normalized_status or entry.ledger_status == normalized_status)
+    ]
+    candidate = len(filtered)
+
+    # Sort newest-first by occurred_at, then event_id for determinism
+    filtered.sort(key=lambda e: (e.occurred_at, e.latest_event.event_id), reverse=True)
+
+    truncated = candidate > limit
+    entries = tuple(filtered[:limit])
+
+    return OwnerAcceptanceQueueBuildResult(
+        total=total,
+        candidate=candidate,
+        truncated=truncated,
+        has_more=truncated,
+        entries=entries,
+    )
 
 
-def _next_action(decision: OwnerAcceptanceDecision) -> str:
-    status = decision.status
+def _ledger_status_from_action(action: str) -> OwnerAcceptanceDecisionStatus:
+    if action == "accepted":
+        return "accepted"
+    if action == "changes_requested":
+        return "changes_requested"
+    if action == "revoked":
+        return "revoked"
+    if action == "superseded":
+        return "stale"
+    if action == "invalidated":
+        return "unavailable"
+    raise ValueError(f"Unknown Owner acceptance action: {action!r}")
+
+
+def _next_action(status: OwnerAcceptanceDecisionStatus) -> str:
     if status == "pending":
         return "Owner acceptance required"
     if status == "changes_requested":
@@ -158,7 +169,7 @@ def _next_action(decision: OwnerAcceptanceDecision) -> str:
     return ""
 
 
-def _now_utc() -> str:
+def now_utc() -> str:
     return (
         datetime.now(timezone.utc)
         .isoformat(timespec="microseconds")

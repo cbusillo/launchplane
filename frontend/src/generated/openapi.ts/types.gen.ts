@@ -187,16 +187,6 @@ export type BootstrapEvidence = {
     run_status: 'pending' | 'pass' | 'fail' | 'skipped';
 };
 
-export type ChangeImpactTarget = {
-    head_sha: string;
-    pull_request_number: number;
-    repository: string;
-    repository_id: string;
-    repository_owner_id: string;
-    schema_version: number;
-    tree_sha: string;
-};
-
 export type DataProvenance = {
     detail: string;
     freshness_status: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
@@ -380,32 +370,6 @@ export type DriverView = {
     lane_summary: LaunchplaneLaneSummary | null;
     preview_inventory_provenance: DataProvenance | null;
     preview_summaries: Array<LaunchplanePreviewSummary>;
-};
-
-export type EngineeringReviewDecisionRecord = {
-    authoritative: false;
-    authority_digest: string;
-    authority_id: string;
-    authority_policy_revision: number | null;
-    change_impact_policy_digest: string;
-    change_impact_policy_record_id: string;
-    change_impact_policy_revision: number | null;
-    change_impact_status: 'success' | 'unknown' | 'stale_head' | 'stale_policy';
-    decision_binding_sha256: string;
-    decision_id: string;
-    enforcement_effect: 'none';
-    engineering_review_tier: 'routine' | 'sensitive';
-    evaluated_at: string;
-    mode: 'shadow';
-    qualifying_model_families: Array<string>;
-    qualifying_run_ids: Array<string>;
-    reason_code: string;
-    required_review_count: 1 | 2;
-    schema_version: number;
-    status: 'approved' | 'changes_requested' | 'blocked' | 'pending' | 'unknown' | 'stale';
-    target: ChangeImpactTarget;
-    work_request_id: string;
-    work_request_lifecycle_id: string;
 };
 
 export type EnvironmentInventory = {
@@ -936,19 +900,6 @@ export type OwnerAcceptanceBinding = {
     tree_sha: string;
 };
 
-export type OwnerAcceptanceDecision = {
-    authoritative: false;
-    binding: OwnerAcceptanceBinding | null;
-    current_event: OwnerAcceptanceEventRecord | null;
-    enforcement_effect: 'none';
-    evaluated_at: string;
-    mode: 'shadow';
-    products: Array<OwnerAcceptanceProductDecision>;
-    reason_code: 'engineering_only' | 'acceptance_missing' | 'acceptance_valid' | 'changes_requested' | 'acceptance_revoked' | 'acceptance_stale' | 'change_impact_unavailable' | 'change_impact_stale' | 'multi_product_unsupported' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'preview_evidence_unavailable' | 'preview_evidence_stale';
-    schema_version: number;
-    status: 'not_required' | 'pending' | 'accepted' | 'changes_requested' | 'revoked' | 'stale' | 'unavailable';
-};
-
 export type OwnerAcceptanceEventRecord = {
     acceptance_id: string;
     action: 'accepted' | 'changes_requested' | 'revoked' | 'superseded' | 'invalidated';
@@ -974,39 +925,39 @@ export type OwnerAcceptancePreviewBinding = {
     serving_generation_id: string;
 };
 
-export type OwnerAcceptanceProductDecision = {
-    action: string;
-    binding: OwnerAcceptanceBinding | null;
-    current_event: OwnerAcceptanceEventRecord | null;
-    environment: string;
-    product: string;
-    reason_code: 'engineering_only' | 'acceptance_missing' | 'acceptance_valid' | 'changes_requested' | 'acceptance_revoked' | 'acceptance_stale' | 'change_impact_unavailable' | 'change_impact_stale' | 'multi_product_unsupported' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'preview_evidence_unavailable' | 'preview_evidence_stale';
-    schema_version: number;
-    status: 'not_required' | 'pending' | 'accepted' | 'changes_requested' | 'revoked' | 'stale' | 'unavailable';
-    system: string;
-};
-
 export type OwnerAcceptanceQueueEntry = {
+    action: string;
     authoritative: false;
     enforcement_effect: 'none';
-    engineering_review_decision: EngineeringReviewDecisionRecord | null;
+    environment: string;
+    latest_binding: OwnerAcceptanceBinding;
+    latest_event: OwnerAcceptanceEventRecord;
+    ledger_status: 'not_required' | 'pending' | 'accepted' | 'changes_requested' | 'revoked' | 'stale' | 'unavailable';
     mode: 'shadow';
     next_action: string;
-    owner_acceptance_decision: OwnerAcceptanceDecision;
+    occurred_at: string;
+    product: string;
     pull_request_number: number;
     repository: string;
+    repository_id: string;
     schema_version: number;
+    system: string;
+    verification_required: true;
 };
 
 export type OwnerAcceptanceQueueResponse = {
     authoritative: false;
+    candidate: number;
     enforcement_effect: 'none';
     entries: Array<OwnerAcceptanceQueueEntry>;
     entry_count: number;
     generated_at: string;
+    has_more: boolean;
     mode: 'shadow';
     status: 'ok';
+    total: number;
     trace_id: string;
+    truncated: boolean;
 };
 
 export type OwnerAcceptanceRuntimeIdentityBinding = {

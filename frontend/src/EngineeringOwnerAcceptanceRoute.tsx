@@ -1,12 +1,19 @@
 import {
   ExternalLink,
   History,
+  Search,
   ShieldOff,
   UserCheck,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
-import { readOwnerAcceptanceQueue } from "./api";
+import {
+  evaluateOwnerAcceptance,
+  readOwnerAcceptanceQueue,
+  type LaunchplaneApiError,
+  type OwnerAcceptanceDecision,
+  type OwnerAcceptanceProductDecision,
+} from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import {
   filterOwnerAcceptanceEntries,
@@ -30,7 +37,6 @@ import { safeExternalUrl } from "./url";
 
 import type {
   OwnerAcceptanceBinding,
-  OwnerAcceptanceProductDecision,
   OwnerAcceptanceQueueEntry,
   OwnerAcceptanceQueueResponse,
 } from "./generated/openapi.ts";
@@ -73,7 +79,7 @@ export function EngineeringOwnerAcceptanceRoute({
           state={resource.state}
         />
       }
-      description="Inspect current Owner acceptance decisions for repository pull requests. Queue candidates are server-derived from engineering review records and acceptance event history. No Owner mutations are exposed here."
+      description="Inspect recorded Owner acceptance history for repository pull requests. The queue is derived solely from the acceptance event ledger — no GitHub calls. Use the exact lookup below for a current live evaluation."
       icon={UserCheck}
       title="Owner acceptance"
       view="owner-acceptance"
@@ -81,10 +87,14 @@ export function EngineeringOwnerAcceptanceRoute({
       <EngineeringBoundaryNote title="Shadow mode — read only">
         All decisions are <code>mode: shadow</code>, <code>authoritative: false</code>,{" "}
         <code>enforcement_effect: none</code>. Showing at most {QUEUE_LIMIT} entries,
-        newest-first. Queue candidates are assembled server-side from engineering review
-        decision records and acceptance event history — the browser supplies only optional
-        display filters.
+        newest-first. Queue entries are{" "}
+        <strong>Recorded</strong> — derived from the persisted acceptance event ledger
+        with no live GitHub calls. Use the Exact Lookup pane below for a{" "}
+        <strong>Current</strong> live evaluation of any repository and PR.
       </EngineeringBoundaryNote>
+
+      <OwnerAcceptanceLookupPane fixtureMode={fixtureMode} />
+
       <EngineeringResourceGate
         noun="Owner acceptance queue"
         refresh={resource.refresh}
@@ -101,6 +111,126 @@ export function EngineeringOwnerAcceptanceRoute({
         )}
       </EngineeringResourceGate>
     </EngineeringRouteFrame>
+  );
+}
+
+function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMode }) {
+  const [repository, setRepository] = useState("");
+  const [prNumber, setPrNumber] = useState("");
+  const [decision, setDecision] = useState<OwnerAcceptanceDecision | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const handleLookup = useCallback(async () => {
+    const repo = repository.trim();
+    const pr = parseInt(prNumber, 10);
+    if (!repo || !pr || pr < 1) return;
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setLoading(true);
+    setDecision(null);
+    setError(null);
+
+    try {
+      if (fixtureMode) {
+        const fixtures = await loadDevFixtures();
+        const result = fixtures.ownerAcceptanceEvaluationForFixture(fixtureMode);
+        if (!controller.signal.aborted) {
+          setDecision(result);
+        }
+      } else {
+        const result = await evaluateOwnerAcceptance(repo, pr, controller.signal);
+        if (!controller.signal.aborted) {
+          setDecision(result.decision);
+        }
+      }
+    } catch (err: unknown) {
+      if (!controller.signal.aborted) {
+        const apiErr = err as LaunchplaneApiError;
+        setError(
+          apiErr?.message
+            ? `${apiErr.message} (${apiErr.statusCode ?? "error"})`
+            : "Evaluation unavailable. Check that the repository and PR exist and evidence is ready.",
+        );
+      }
+    } finally {
+      if (!controller.signal.aborted) {
+        setLoading(false);
+      }
+    }
+  }, [repository, prNumber, fixtureMode]);
+
+  const isValid = repository.trim().includes("/") && parseInt(prNumber, 10) >= 1;
+
+  return (
+    <section className="engineering-owner-acceptance-lookup" aria-label="Exact PR lookup">
+      <header>
+        <Search size={14} aria-hidden="true" />
+        <span>Exact lookup — Current evaluation</span>
+        <small>
+          Shows the live decision from the evaluation route, including never-acted PRs. Provider
+          failures appear here only, not as a global error.
+        </small>
+      </header>
+      <div className="engineering-owner-acceptance-lookup-form">
+        <label>
+          <span>Repository</span>
+          <input
+            type="text"
+            placeholder="owner/repo"
+            value={repository}
+            onChange={(e) => setRepository(e.target.value)}
+            aria-label="Repository (owner/repo)"
+          />
+        </label>
+        <label>
+          <span>PR number</span>
+          <input
+            type="number"
+            placeholder="1234"
+            min={1}
+            value={prNumber}
+            onChange={(e) => setPrNumber(e.target.value)}
+            aria-label="Pull request number"
+          />
+        </label>
+        <button
+          className="button"
+          type="button"
+          disabled={!isValid || loading}
+          onClick={handleLookup}
+          aria-label="Look up current Owner acceptance evaluation"
+        >
+          {loading ? "Loading…" : "Look up"}
+        </button>
+      </div>
+      {error ? (
+        <p className="engineering-owner-acceptance-lookup-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+      {decision ? (
+        <div className="engineering-owner-acceptance-lookup-result" aria-label="Current evaluation result">
+          <div className="engineering-chip-row">
+            <span className="engineering-status-chip" data-status={ownerAcceptanceDecisionTone(decision.status)}>
+              <StatusIcon status={ownerAcceptanceDecisionTone(decision.status)} />
+              Current: {humanizeStatus(decision.status)}
+            </span>
+            <span>reason: {humanizeStatus(decision.reason_code)}</span>
+            {decision.evaluated_at ? (
+              <span>evaluated {formatTime(decision.evaluated_at)}</span>
+            ) : null}
+          </div>
+          {decision.products && decision.products.length > 0 ? (
+            <OwnerAcceptanceProductList products={decision.products} />
+          ) : null}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -122,26 +252,24 @@ function OwnerAcceptanceContent({
     [data.entries, statusFilter, repositoryFilter],
   );
 
-  const pending = data.entries.filter(
-    (e) => e.owner_acceptance_decision.status === "pending",
-  ).length;
-  const accepted = data.entries.filter(
-    (e) => e.owner_acceptance_decision.status === "accepted",
-  ).length;
+  const accepted = data.entries.filter((e) => e.ledger_status === "accepted").length;
   const actioned = data.entries.filter((e) =>
-    ["changes_requested", "revoked"].includes(e.owner_acceptance_decision.status),
+    ["changes_requested", "revoked"].includes(e.ledger_status),
+  ).length;
+  const staleOrUnavailable = data.entries.filter((e) =>
+    ["stale", "unavailable"].includes(e.ledger_status),
   ).length;
 
   return (
     <div className="engineering-owner-acceptance">
-      <section className="engineering-metric-grid" aria-label="Owner acceptance summary">
+      <section className="engineering-metric-grid" aria-label="Recorded ledger summary">
         <div className="engineering-metric" data-tone="unknown">
-          <span>Total</span>
-          <strong>{data.entry_count}</strong>
+          <span>Ledger subjects</span>
+          <strong>{data.total}</strong>
         </div>
-        <div className="engineering-metric" data-tone={pending ? "pending" : "pass"}>
-          <span>Pending</span>
-          <strong>{pending}</strong>
+        <div className="engineering-metric" data-tone={data.candidate !== data.total ? "pending" : "unknown"}>
+          <span>Matching filters</span>
+          <strong>{data.candidate}</strong>
         </div>
         <div className="engineering-metric" data-tone={accepted ? "pass" : "unknown"}>
           <span>Accepted</span>
@@ -151,6 +279,12 @@ function OwnerAcceptanceContent({
           <span>Actioned</span>
           <strong>{actioned}</strong>
         </div>
+        {staleOrUnavailable ? (
+          <div className="engineering-metric" data-tone="unknown">
+            <span>Stale / unavailable</span>
+            <strong>{staleOrUnavailable}</strong>
+          </div>
+        ) : null}
       </section>
 
       <section className="engineering-evidence-strip" aria-label="Queue provenance">
@@ -171,6 +305,12 @@ function OwnerAcceptanceContent({
           <span>Enforcement</span>
           <strong>{data.enforcement_effect}</strong>
         </div>
+        {data.truncated ? (
+          <div>
+            <span>Truncated</span>
+            <strong>yes — {data.candidate} candidates, {QUEUE_LIMIT} shown</strong>
+          </div>
+        ) : null}
       </section>
 
       <div className="engineering-filter-row" role="search" aria-label="Filter queue">
@@ -181,22 +321,21 @@ function OwnerAcceptanceContent({
             onChange={(e) => onStatusFilter(e.target.value as OwnerAcceptanceStatusFilter)}
           >
             <option value="all">All statuses</option>
-            <option value="pending">Pending</option>
             <option value="accepted">Accepted</option>
             <option value="changes_requested">Changes requested</option>
             <option value="revoked">Revoked</option>
             <option value="stale">Stale</option>
-            <option value="not_required">Not required</option>
             <option value="unavailable">Unavailable</option>
           </select>
         </label>
         <label>
-          <span>Repository</span>
+          <span>Repository (substring)</span>
           <input
             type="search"
-            placeholder="owner/repo"
+            placeholder="partial owner/repo"
             value={repositoryFilter}
             onChange={(e) => onRepositoryFilter(e.target.value)}
+            aria-label="Filter by repository substring"
           />
         </label>
         {(statusFilter !== "all" || repositoryFilter) ? (
@@ -217,16 +356,16 @@ function OwnerAcceptanceContent({
         <EngineeringEmpty
           detail={
             statusFilter !== "all" || repositoryFilter
-              ? "No queue entries match the current filters."
-              : "No Owner acceptance candidates found. Queue candidates appear when engineering review decision records or acceptance events exist."
+              ? "No recorded entries match the current filters."
+              : "No recorded Owner acceptance candidates. Entries appear when acceptance events exist in the ledger."
           }
           icon={History}
-          title="No queue entries"
+          title="No recorded entries"
         />
       ) : (
         <ol className="engineering-owner-acceptance-list">
           {entries.map((entry) => (
-            <li key={`${entry.repository}#${entry.pull_request_number}`}>
+            <li key={`${entry.repository_id}:${entry.pull_request_number}:${entry.product}:${entry.system}:${entry.action}:${entry.environment}`}>
               <OwnerAcceptanceEntryCard entry={entry} />
             </li>
           ))}
@@ -237,8 +376,7 @@ function OwnerAcceptanceContent({
 }
 
 function OwnerAcceptanceEntryCard({ entry }: { entry: OwnerAcceptanceQueueEntry }) {
-  const decision = entry.owner_acceptance_decision;
-  const tone = ownerAcceptanceDecisionTone(decision.status);
+  const tone = ownerAcceptanceDecisionTone(entry.ledger_status);
   const prUrl = safeExternalUrl(
     `https://github.com/${entry.repository}/pull/${entry.pull_request_number}`,
   );
@@ -248,23 +386,24 @@ function OwnerAcceptanceEntryCard({ entry }: { entry: OwnerAcceptanceQueueEntry 
       <header>
         <div>
           <span className="engineering-kicker">
-            {entry.repository} · PR #{entry.pull_request_number}
+            Recorded · {entry.repository} · PR #{entry.pull_request_number}
           </span>
           <h2>
-            {entry.repository} #{entry.pull_request_number}
+            {entry.product} — {entry.system} · {entry.action} · {entry.environment}
           </h2>
         </div>
         <span className="engineering-status-chip" data-status={tone}>
           <StatusIcon status={tone} />
-          {humanizeStatus(decision.status)}
+          {humanizeStatus(entry.ledger_status)}
         </span>
       </header>
 
       <div className="engineering-chip-row">
         <span data-mode={entry.mode}>{entry.mode}</span>
         <span>enforcement: {entry.enforcement_effect}</span>
-        {decision.evaluated_at ? (
-          <span>Evaluated {formatTime(decision.evaluated_at)}</span>
+        <span>verification required: {String(entry.verification_required)}</span>
+        {entry.occurred_at ? (
+          <span>Recorded {formatTime(entry.occurred_at)}</span>
         ) : null}
       </div>
 
@@ -274,56 +413,31 @@ function OwnerAcceptanceEntryCard({ entry }: { entry: OwnerAcceptanceQueueEntry 
           <p>{entry.next_action || "No next action recorded."}</p>
         </div>
         <div>
-          <span>Reason</span>
-          <p>{decision.reason_code ? humanizeStatus(decision.reason_code) : "—"}</p>
+          <span>Event action</span>
+          <p>{humanizeStatus(entry.latest_event.action)}</p>
         </div>
       </div>
 
-      {decision.products && decision.products.length > 0 ? (
-        <OwnerAcceptanceProductList products={decision.products} />
-      ) : null}
+      <OwnerAcceptanceBindingSection binding={entry.latest_binding} label="Recorded binding" />
 
-      {decision.binding ? (
-        <OwnerAcceptanceBindingSection binding={decision.binding} label="Current binding" />
-      ) : null}
-
-      {entry.engineering_review_decision ? (
-        <div className="engineering-provenance-row">
-          <div>
-            <span>Engineering review</span>
-            <strong>{entry.engineering_review_decision.status}</strong>
-            <small>
-              Evaluated {formatTime(entry.engineering_review_decision.evaluated_at)}
-            </small>
-          </div>
-          <div>
-            <span>Review tier</span>
-            <strong>{entry.engineering_review_decision.engineering_review_tier}</strong>
-            <small>
-              Required reviews: {entry.engineering_review_decision.required_review_count}
-            </small>
-          </div>
-          {entry.engineering_review_decision.target.head_sha ? (
-            <div>
-              <span>Head SHA</span>
-              <strong>
-                <code>{entry.engineering_review_decision.target.head_sha.slice(0, 12)}</code>
-              </strong>
-              <small>
-                {entry.engineering_review_decision.target.repository}
-              </small>
-            </div>
-          ) : null}
+      <div className="engineering-provenance-row">
+        <div>
+          <span>Event ID</span>
+          <code>{entry.latest_event.event_id.slice(0, 32)}…</code>
+          <small>{entry.latest_event.source_event_kind}</small>
         </div>
-      ) : (
-        <div className="engineering-provenance-row">
-          <div>
-            <span>Engineering review</span>
-            <strong>No recorded decision</strong>
-            <small>Candidate sourced from acceptance event history.</small>
-          </div>
+        <div>
+          <span>Acceptance ID</span>
+          <code>{entry.latest_event.acceptance_id.slice(0, 32)}…</code>
         </div>
-      )}
+        {entry.latest_event.authorization ? (
+          <div>
+            <span>Authorized by</span>
+            <strong>{entry.latest_event.authorization.owner_login}</strong>
+            <small>GitHub ID {entry.latest_event.authorization.owner_github_id}</small>
+          </div>
+        ) : null}
+      </div>
 
       <div className="engineering-link-row">
         {prUrl ? (

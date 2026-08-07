@@ -10,7 +10,7 @@ import type { Status } from "./types";
 
 export type OwnerAcceptanceStatusFilter =
   | "all"
-  | OwnerAcceptanceQueueEntry["owner_acceptance_decision"]["status"];
+  | OwnerAcceptanceQueueEntry["ledger_status"];
 
 export type WorkGraphStateFilter =
   | "all"
@@ -218,7 +218,7 @@ export function scalarEvidence(
 }
 
 export function ownerAcceptanceDecisionTone(
-  status: OwnerAcceptanceQueueEntry["owner_acceptance_decision"]["status"],
+  status: OwnerAcceptanceQueueEntry["ledger_status"],
 ): Status {
   if (status === "accepted") return "pass";
   if (status === "not_required") return "pass";
@@ -235,9 +235,10 @@ export function filterOwnerAcceptanceEntries(
   status: OwnerAcceptanceStatusFilter,
   repository: string,
 ): OwnerAcceptanceQueueEntry[] {
+  const normalized = repository.trim().toLowerCase();
   return entries.filter(
     (entry) =>
-      (status === "all" || entry.owner_acceptance_decision.status === status) &&
-      (!repository || entry.repository === repository.trim().toLowerCase()),
+      (status === "all" || entry.ledger_status === status) &&
+      (!normalized || entry.repository.includes(normalized)),
   );
 }

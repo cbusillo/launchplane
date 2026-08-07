@@ -501,3 +501,77 @@ export function readOwnerAcceptanceQueue(
     signal,
   );
 }
+
+import type { OwnerAcceptanceBinding, OwnerAcceptanceEventRecord } from "./generated/openapi.ts";
+
+type OwnerAcceptanceDecisionStatus =
+  | "not_required"
+  | "pending"
+  | "accepted"
+  | "changes_requested"
+  | "revoked"
+  | "stale"
+  | "unavailable";
+
+type OwnerAcceptanceReasonCode =
+  | "engineering_only"
+  | "acceptance_missing"
+  | "acceptance_valid"
+  | "changes_requested"
+  | "acceptance_revoked"
+  | "acceptance_stale"
+  | "change_impact_unavailable"
+  | "change_impact_stale"
+  | "multi_product_unsupported"
+  | "owner_authority_unavailable"
+  | "owner_authority_denied"
+  | "preview_evidence_unavailable"
+  | "preview_evidence_stale";
+
+export type OwnerAcceptanceProductDecision = {
+  schema_version: number;
+  product: string;
+  system: string;
+  action: string;
+  environment: string;
+  status: OwnerAcceptanceDecisionStatus;
+  reason_code: OwnerAcceptanceReasonCode;
+  binding: OwnerAcceptanceBinding | null;
+  current_event: OwnerAcceptanceEventRecord | null;
+};
+
+export type OwnerAcceptanceDecision = {
+  schema_version: number;
+  mode: "shadow";
+  authoritative: false;
+  enforcement_effect: "none";
+  status: OwnerAcceptanceDecisionStatus;
+  reason_code: OwnerAcceptanceReasonCode;
+  binding: OwnerAcceptanceBinding | null;
+  current_event: OwnerAcceptanceEventRecord | null;
+  products: OwnerAcceptanceProductDecision[];
+  evaluated_at: string;
+};
+
+export type OwnerAcceptanceEvaluationResult = {
+  status: "ok";
+  trace_id: string;
+  decision: OwnerAcceptanceDecision;
+};
+
+export function evaluateOwnerAcceptance(
+  repository: string,
+  pullRequestNumber: number,
+  signal?: AbortSignal,
+): Promise<OwnerAcceptanceEvaluationResult> {
+  const params = new URLSearchParams({
+    repository,
+    pull_request_number: String(pullRequestNumber),
+  });
+  return requestJson<OwnerAcceptanceEvaluationResult>(
+    `/v1/owner-acceptance/evaluation?${params.toString()}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
