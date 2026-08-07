@@ -72,6 +72,17 @@ class GenericWebPreviewExtensionTests(unittest.TestCase):
                 "application_name": "ver-preview-pr-42",
                 "application_id": "app-pr-42",
                 "preview_url": "https://pr-42.preview.example.test",
+                "runtime_identity": {
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "instance": "pr-42",
+                    "environment_kind": "preview",
+                    "deployment_record_id": "deployment-verireel-testing-pr-42",
+                    "artifact_id": "ghcr.io/cbusillo/verireel-app:pr-42-a1b2c3d4",
+                    "source_git_ref": "a1b2c3d4",
+                    "image_reference": "ghcr.io/cbusillo/verireel-app:pr-42-a1b2c3d4",
+                    "preview_id": "pr-42",
+                },
                 "error_message": "",
             },
         )
@@ -98,6 +109,18 @@ class GenericWebPreviewExtensionTests(unittest.TestCase):
         self.assertEqual(result["product"], "verireel")
         self.assertEqual(result["context"], "verireel-testing")
         self.assertEqual(result["preview_slug"], "pr-42")
+        readiness = result["readiness"]
+        smoke = result["smoke"]
+        runtime_identity = result["runtime_identity"]
+        self.assertIsInstance(readiness, dict)
+        self.assertIsInstance(smoke, dict)
+        self.assertIsInstance(runtime_identity, dict)
+        assert isinstance(readiness, dict)
+        assert isinstance(smoke, dict)
+        assert isinstance(runtime_identity, dict)
+        self.assertEqual(readiness["readiness_status"], "pass")
+        self.assertEqual(smoke["smoke_status"], "pass")
+        self.assertEqual(runtime_identity["source_git_ref"], "a1b2c3d4")
         delegated = apply_refresh.call_args.kwargs["request"].refresh
         self.assertEqual(delegated.context, "verireel-testing")
         self.assertEqual(delegated.anchor_repo, "verireel")

@@ -63,6 +63,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
 )
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.runner_host_hygiene import (
     RunnerHostHygieneApplyAuditRecord,
     RunnerHostHygieneApplyPolicy,
@@ -10031,6 +10032,17 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     application_name="ver-preview-pr-123-app",
                     application_id="preview-app-123",
                     preview_url="https://pr-123.ver-preview.shinycomputers.com",
+                    runtime_identity=RuntimeIdentity(
+                        product="verireel",
+                        context="verireel-testing",
+                        instance="pr-123",
+                        environment_kind="preview",
+                        deployment_record_id="deployment-verireel-testing-pr-123",
+                        artifact_id="ghcr.io/every/verireel-app:pr-123-sha-6b3c9d7",
+                        source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                        image_reference="ghcr.io/every/verireel-app:pr-123-sha-6b3c9d7",
+                        preview_id="pr-123",
+                    ),
                 ),
             ) as execute_mock:
                 refresh_payload = {
@@ -10087,6 +10099,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(generation.state, "verifying")
             self.assertEqual(generation.deploy_status, "pass")
             self.assertEqual(generation.verify_status, "pending")
+            self.assertIsNotNone(generation.runtime_identity)
+            assert generation.runtime_identity is not None
+            self.assertEqual(
+                generation.runtime_identity.source_git_ref,
+                "6b3c9d7e8f901234567890abcdef1234567890ab",
+            )
             self.assertEqual(
                 generation.resolved_manifest_fingerprint,
                 "verireel-preview-manifest-pr-123-6b3c9d7",

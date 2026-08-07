@@ -1,9 +1,10 @@
 import base64
+import json
 import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import click
 
@@ -19,6 +20,7 @@ from control_plane.dokploy import DokployTargetDefinition
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestroyRequest
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshRequest
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshTransportError
+from control_plane.workflows.verireel_preview_driver import _build_preview_runtime_identity
 from control_plane.workflows.verireel_preview_driver import _build_preview_database_command
 from control_plane.workflows.verireel_preview_driver import (
     _enforce_verireel_preview_runtime_key_safety,
@@ -29,6 +31,7 @@ from control_plane.workflows.verireel_preview_driver import _resolve_preview_sec
 from control_plane.workflows.verireel_preview_driver import _resolve_preview_url
 from control_plane.workflows.verireel_preview_driver import _run_application_command
 from control_plane.workflows.verireel_preview_driver import _run_application_command_with_retries
+from control_plane.workflows.verireel_preview_driver import _wait_for_preview_health
 from control_plane.workflows.verireel_preview_driver import _verireel_template_runtime_secret_keys
 from control_plane.workflows.verireel_preview_driver import execute_verireel_preview_refresh
 
@@ -687,7 +690,10 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
             ),
-            patch("control_plane.workflows.verireel_preview_driver._wait_for_preview_health"),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._wait_for_preview_health",
+                side_effect=lambda **kwargs: kwargs["expected_runtime_identity"],
+            ),
         ):
             result = execute_verireel_preview_refresh(
                 control_plane_root=Path(temporary_directory_name),
@@ -775,7 +781,10 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
             ) as run_command_with_retries,
-            patch("control_plane.workflows.verireel_preview_driver._wait_for_preview_health"),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._wait_for_preview_health",
+                side_effect=lambda **kwargs: kwargs["expected_runtime_identity"],
+            ),
         ):
             result = execute_verireel_preview_refresh(
                 control_plane_root=Path(temporary_directory_name),
@@ -784,6 +793,9 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             )
 
         self.assertEqual(result.refresh_status, "pass")
+        self.assertEqual(
+            result.runtime_identity, _build_preview_runtime_identity(request=_refresh_request())
+        )
         self.assertEqual(captured_env["BETTER_AUTH_SECRET"], "existing-auth-secret")
         self.assertEqual(captured_env["VERIREEL_CRON_SECRET"], "existing-cron-secret")
         self.assertEqual(
@@ -802,6 +814,85 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             run_command_with_retries.call_args_list[1].kwargs["command"],
             "node prisma/seed.mjs",
         )
+
+    def test_wait_for_preview_health_returns_matching_runtime_identity(self) -> None:
+        expected = _build_preview_runtime_identity(request=_refresh_request())
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "ok": True,
+                "runtime_identity": expected.model_dump(mode="json"),
+            }
+        ).encode("utf-8")
+        response.__enter__.return_value = response
+        with patch(
+            "control_plane.workflows.verireel_preview_driver.urlopen", return_value=response
+        ):
+            observed = _wait_for_preview_health(
+                preview_url="https://pr-71.preview.example.test",
+                timeout_seconds=30,
+                expected_runtime_identity=expected,
+            )
+
+        self.assertEqual(observed, expected)
+
+    def test_wait_for_preview_health_rejects_runtime_identity_mismatch(self) -> None:
+        expected = _build_preview_runtime_identity(request=_refresh_request())
+        mismatched = expected.model_copy(update={"source_git_ref": "a" * 40})
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "ok": True,
+                "runtime_identity": mismatched.model_dump(mode="json"),
+            }
+        ).encode("utf-8")
+        response.__enter__.return_value = response
+        with (
+            patch("control_plane.workflows.verireel_preview_driver.urlopen", return_value=response),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.time.monotonic",
+                side_effect=(0.0, 0.0, 0.0, 2.0),
+            ),
+            patch("control_plane.workflows.verireel_preview_driver.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(click.ClickException, "source_git_ref"):
+                _wait_for_preview_health(
+                    preview_url="https://pr-71.preview.example.test",
+                    timeout_seconds=1,
+                    expected_runtime_identity=expected,
+                )
+
+        sleep.assert_not_called()
+
+    def test_wait_for_preview_health_fails_immediately_on_hard_identity_mismatch(
+        self,
+    ) -> None:
+        expected = _build_preview_runtime_identity(request=_refresh_request())
+        mismatched = expected.model_copy(update={"product": "different-product"})
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "ok": True,
+                "runtime_identity": mismatched.model_dump(mode="json"),
+            }
+        ).encode("utf-8")
+        response.__enter__.return_value = response
+        with (
+            patch("control_plane.workflows.verireel_preview_driver.urlopen", return_value=response),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.time.monotonic",
+                side_effect=(0.0, 0.0, 0.0),
+            ),
+            patch("control_plane.workflows.verireel_preview_driver.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(click.ClickException, "product"):
+                _wait_for_preview_health(
+                    preview_url="https://pr-71.preview.example.test",
+                    timeout_seconds=30,
+                    expected_runtime_identity=expected,
+                )
+
+        sleep.assert_not_called()
 
     def test_preview_destroy_request_requires_pr_scoped_preview_slug(self) -> None:
         with self.assertRaisesRegex(ValueError, "preview_slug to match anchor_pr_number"):

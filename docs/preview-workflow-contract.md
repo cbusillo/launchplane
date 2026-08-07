@@ -140,6 +140,11 @@ behavior. Dokploy schedule failures remain failed refreshes. Launchplane attache
 bounded redacted deployment output when the provider exposes it, and retries only
 typed transient failures that occur before schedule execution; deterministic
 remote exits and ambiguous post-trigger failures are not executed again.
+After a driver-owned refresh passes its provisioning and health boundary, the
+generic response records successful readiness and smoke evidence and persists the
+same exact runtime identity injected into the serving application. Later product
+verification may advance that generation from verifying to ready, but it must not
+replace or fabricate the serving artifact or source revision.
 
 Preview comment updates that are not part of the lifecycle workflow use
 `cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@<launchplane-sha>`.
