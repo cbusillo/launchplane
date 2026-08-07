@@ -22,16 +22,22 @@ change:
 - active change-impact policy record ID, revision, and digest;
 - affected product, system, Owner action, and environment from change-impact;
 - active product Owner policy and requirement record IDs, revisions, and
-  digests.
+  digests;
+- when an enabled product preview has one active serving record, its context,
+  preview and generation IDs, artifact ID and immutable image digest, manifest
+  fingerprint, canonical URL, and an explicit verified-runtime identity
+  projection.
 
 Preferred Owner routing affects notification order only; it does not grant or
 deny Owner authority and is intentionally excluded from the acceptance
 binding.
 
-The first HTTP slice intentionally does not accept caller-supplied head, tree,
-policy, or Owner provenance. Verified preview/runtime binding is deliberately
-deferred to the next Owner-acceptance slice rather than accepting caller-owned
-runtime assertions.
+The API does not accept caller-supplied head, tree, policy, Owner, preview,
+artifact, manifest, or runtime provenance. Launchplane resolves all of it from
+service-owned GitHub, product-profile, preview, generation, and runtime records.
+The runtime projection deliberately excludes deployment time, so redeploying
+the same verified identity does not stale acceptance, while any identity field
+used to prove the serving artifact remains bound.
 
 ## Evaluation
 
@@ -45,9 +51,13 @@ Engineering-only changes return `not_required` and write no event. Product
 changes with incomplete change-impact evidence, unavailable Owner policy, or
 missing Owner requirement fail closed to `unavailable`. Once any event exists
 for an older exact binding, a changed head, tree, policy, requirement,
-or membership evaluates as `stale` for the new binding. Multi-product changes
-also fail closed until evaluation can require and aggregate one acceptance per
-affected product.
+membership, serving generation, artifact, manifest, preview URL, or verified
+runtime identity evaluates as `stale` for the new binding. An enabled preview
+with ambiguous, incomplete, non-serving, or failed verification evidence is
+`unavailable`. If a preview-bound acceptance already exists, preview teardown
+evaluates as `preview_evidence_stale` and cannot be replaced by a weaker
+exact-change-only acceptance. Multi-product changes also fail closed until
+evaluation can require and aggregate one acceptance per affected product.
 
 ## Event Authoring
 
@@ -62,9 +72,9 @@ The binding digest is a compare-only precondition, not caller-owned evidence.
 Launchplane re-resolves all exact-change and authority evidence at write time
 and returns `409 owner_acceptance_binding_changed` without writing an event if
 the current binding differs from the one the Owner reviewed. This prevents a
-force-push, policy revision, requirement revision, or Owner-scope change
-between evaluation and event authoring from silently changing what the human
-accepts.
+force-push, policy revision, requirement revision, Owner-scope change, or
+serving-preview/runtime change between evaluation and event authoring from
+silently changing what the human accepts.
 
 Human actions are:
 
@@ -87,7 +97,9 @@ PostgreSQL stores the append-only ledger in
 `launchplane_owner_acceptance_events` with an event-id primary key, subject,
 binding, and acceptance indexes, and JSONB payload storage. Replaying an
 identical event is deterministic; replaying the same event ID with a changed
-payload is a conflict.
+payload is a conflict. Optional preview evidence lives inside the existing JSONB
+payload; non-preview bindings omit the field and preserve the original binding,
+acceptance, event, and replay digests byte-for-byte.
 
 Migration `f3a5c7e9b1d4` creates the empty table and indexes only. It performs
 no backfill from GitHub comments, manager-preview approvals, technical waivers,
@@ -100,6 +112,5 @@ or tenant-admission evidence.
 - frontend Owner workbench
 - tenant-admission cutover
 - multi-product aggregation
-- verified preview/runtime evidence
 - manager/delegate cleanup
 - break-glass acceptance

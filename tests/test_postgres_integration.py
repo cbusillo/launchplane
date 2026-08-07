@@ -42,6 +42,8 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceAuthorization,
     OwnerAcceptanceBinding,
     OwnerAcceptanceEventRecord,
+    OwnerAcceptancePreviewBinding,
+    owner_acceptance_runtime_identity_binding,
 )
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
@@ -864,6 +866,29 @@ def _owner_acceptance_event() -> OwnerAcceptanceEventRecord:
         owner_requirement_record_id="product-owner-requirement-example-site-r1",
         owner_requirement_revision=1,
         owner_requirement_digest="c" * 64,
+        preview=OwnerAcceptancePreviewBinding(
+            context="example-site-preview",
+            preview_id="preview-example-site-pr-17",
+            serving_generation_id="preview-example-site-pr-17-generation-0001",
+            artifact_id="artifact-example-site-pr-17",
+            artifact_image_digest=f"sha256:{'d' * 64}",
+            manifest_fingerprint="manifest-example-site-pr-17",
+            preview_url="https://pr-17.example.test",
+            runtime_identity=owner_acceptance_runtime_identity_binding(
+                RuntimeIdentity(
+                    product="example-site",
+                    context="example-site-preview",
+                    instance="preview-pr-17",
+                    environment_kind="preview",
+                    deployment_record_id="deployment-example-site-pr-17",
+                    artifact_id="artifact-example-site-pr-17",
+                    source_git_ref="1" * 40,
+                    image_reference=f"ghcr.io/example/example-site@sha256:{'d' * 64}",
+                    preview_id="preview-example-site-pr-17",
+                    preview_generation_id="preview-example-site-pr-17-generation-0001",
+                )
+            ),
+        ),
     )
     return OwnerAcceptanceEventRecord(
         binding=binding,

@@ -53,6 +53,28 @@ OCCURRED_AT = "2026-07-30T12:00:00Z"
 
 
 class ManagerPreviewApprovalTests(unittest.TestCase):
+    def test_verified_binding_digest_remains_compatible_after_evidence_extraction(self) -> None:
+        binding = build_current_manager_preview_approval_binding(
+            product=PRODUCT,
+            preview=_preview(),
+            generation=_generation(),
+        )
+
+        self.assertEqual(
+            binding.binding_sha256,
+            "4484dd9b84b4cd956a23cbfcc335d1ad72fecf0fdd20de9e3097646ea82fa60c",
+        )
+
+    def test_legacy_binding_allows_blank_runtime_generation_identity(self) -> None:
+        binding = build_current_manager_preview_approval_binding(
+            product=PRODUCT,
+            preview=_preview(),
+            generation=_generation(runtime_identity=_runtime_identity(preview_generation_id="")),
+        )
+
+        self.assertEqual(binding.serving_generation_id, "generation-17")
+        self.assertEqual(binding.runtime_identity.preview_generation_id, "")
+
     def test_records_approval_only_after_exact_manager_authorization(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))

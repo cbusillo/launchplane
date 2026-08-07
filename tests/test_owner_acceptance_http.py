@@ -28,6 +28,7 @@ from tests.test_owner_acceptance import (
     _human,
     _repository_evidence,
     _store,
+    _write_preview_evidence,
 )
 
 
@@ -304,6 +305,49 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                         "expected_binding_sha256": expected_binding_sha256,
                     },
                     headers={"Idempotency-Key": "accept-stale-binding"},
+                )
+
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["detail"]["code"], "owner_acceptance_binding_changed")
+            self.assertEqual(store.list_owner_acceptance_event_records(), ())
+
+    async def test_event_route_rejects_serving_preview_drift(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_preview_evidence(store)
+            provider = _EvidenceProvider(_repository_evidence())
+            app = _app(store=store, repository_evidence_provider=provider)
+            target: dict[str, str | int] = {
+                "repository": REPOSITORY,
+                "pull_request_number": 2022,
+            }
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params=target,
+                )
+                self.assertEqual(evaluated.status_code, 200, evaluated.text)
+                preview = evaluated.json()["decision"]["binding"]["preview"]
+                self.assertEqual(
+                    preview["serving_generation_id"],
+                    "preview-generic-web-a-pr-2022-generation-0001",
+                )
+                expected_binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
+                _write_preview_evidence(
+                    store,
+                    generation_id="preview-generic-web-a-pr-2022-generation-0002",
+                    artifact_id="artifact-generic-web-a-pr-2022-v2",
+                    image_digest="b" * 64,
+                )
+
+                response = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": expected_binding_sha256,
+                    },
+                    headers={"Idempotency-Key": "accept-preview-drift"},
                 )
 
             self.assertEqual(response.status_code, 409, response.text)

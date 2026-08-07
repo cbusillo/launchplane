@@ -14,7 +14,6 @@ from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalEventRecord,
     ManagerPreviewApprovalEventWriteStatus,
     ManagerPreviewApprovalReasonCode,
-    immutable_image_digest,
 )
 from control_plane.contracts.repository_human_admission import (
     RepositoryHumanRolePolicyRecord,
@@ -25,6 +24,10 @@ from control_plane.repository_human_admission import (
     RepositoryHumanRolePolicyError,
     manager_authority_current,
     manager_role_policy_provenance,
+)
+from control_plane.preview_serving_evidence import (
+    PreviewServingEvidenceError,
+    verify_serving_preview,
 )
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity
 from control_plane.service_auth import matching_github_human_policy_rules
@@ -97,78 +100,32 @@ def build_current_manager_preview_approval_binding(
     preview: PreviewRecord,
     generation: PreviewGenerationRecord,
 ) -> ManagerPreviewApprovalBinding:
-    if preview.state != "active":
-        raise ManagerPreviewApprovalEvidenceError(
-            code="preview_inactive",
-            message="The preview is not active.",
-        )
-    if not preview.serving_generation_id:
-        raise ManagerPreviewApprovalEvidenceError(
-            code="serving_generation_missing",
-            message="The preview does not have a serving generation.",
-        )
-    if (
-        generation.preview_id != preview.preview_id
-        or generation.generation_id != preview.serving_generation_id
-    ):
-        raise ManagerPreviewApprovalEvidenceError(
-            code="serving_generation_mismatch",
-            message="The supplied generation is not the preview's serving generation.",
-        )
-    if generation.state != "ready":
-        raise ManagerPreviewApprovalEvidenceError(
-            code="generation_not_ready",
-            message="The serving preview generation is not ready.",
-        )
-    if any(
-        status != "pass"
-        for status in (
-            generation.deploy_status,
-            generation.verify_status,
-            generation.overall_health_status,
-        )
-    ):
-        raise ManagerPreviewApprovalEvidenceError(
-            code="generation_verification_failed",
-            message="The serving preview generation has not passed deployment and verification.",
-        )
-    if (
-        generation.anchor_summary.repo.lower() != preview.anchor_repo.lower()
-        or generation.anchor_summary.pr_number != preview.anchor_pr_number
-        or generation.anchor_summary.pr_url != preview.anchor_pr_url
-        or preview.latest_manifest_fingerprint != generation.resolved_manifest_fingerprint
-    ):
-        raise ManagerPreviewApprovalEvidenceError(
-            code="preview_identity_mismatch",
-            message="The preview and serving generation identity do not match.",
-        )
-    if not generation.artifact_id:
-        raise ManagerPreviewApprovalEvidenceError(
-            code="artifact_identity_missing",
-            message="The serving preview generation does not have immutable artifact identity.",
-        )
-    if generation.runtime_identity is None:
-        raise ManagerPreviewApprovalEvidenceError(
-            code="runtime_identity_missing",
-            message="The serving preview generation does not have verified runtime identity.",
-        )
     try:
-        artifact_image_digest = immutable_image_digest(generation.runtime_identity.image_reference)
+        evidence = verify_serving_preview(
+            product=product,
+            preview=preview,
+            generation=generation,
+        )
         return ManagerPreviewApprovalBinding(
             product=product,
-            context=preview.context,
-            repository=preview.anchor_repo,
-            pr_number=preview.anchor_pr_number,
-            pr_url=preview.anchor_pr_url,
-            head_sha=generation.anchor_summary.head_sha,
-            preview_id=preview.preview_id,
-            serving_generation_id=generation.generation_id,
-            artifact_id=generation.artifact_id,
-            artifact_image_digest=artifact_image_digest,
-            manifest_fingerprint=generation.resolved_manifest_fingerprint,
-            preview_url=preview.canonical_url,
-            runtime_identity=generation.runtime_identity,
+            context=evidence.context,
+            repository=evidence.anchor_repo,
+            pr_number=evidence.anchor_pr_number,
+            pr_url=evidence.anchor_pr_url,
+            head_sha=evidence.head_sha,
+            preview_id=evidence.preview_id,
+            serving_generation_id=evidence.serving_generation_id,
+            artifact_id=evidence.artifact_id,
+            artifact_image_digest=evidence.artifact_image_digest,
+            manifest_fingerprint=evidence.manifest_fingerprint,
+            preview_url=evidence.preview_url,
+            runtime_identity=evidence.runtime_identity,
         )
+    except PreviewServingEvidenceError as error:
+        raise ManagerPreviewApprovalEvidenceError(
+            code=error.code,
+            message=str(error),
+        ) from error
     except ValueError as error:
         raise ManagerPreviewApprovalEvidenceError(
             code="runtime_identity_mismatch",

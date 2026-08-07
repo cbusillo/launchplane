@@ -3518,6 +3518,15 @@ inventory. Engineering-only changes return `not_required` and write no event.
 Incomplete change-impact or Owner authority evidence fails closed.
 Preferred Owner routing remains notification-only, does not participate in the
 authority decision, and is not part of the exact acceptance binding.
+When an enabled product preview has an active record for the exact repository
+and pull request, Launchplane requires one unambiguous ready serving generation
+whose deploy, verification, and health evidence passed. The binding then adds
+the preview/generation IDs, immutable artifact image digest, manifest
+fingerprint, canonical preview URL, and an explicit verified-runtime identity
+projection. Preview, artifact, manifest, and runtime evidence remains entirely
+server-derived. Ambiguous or incomplete evidence fails closed, and a prior
+preview-bound event prevents later downgrade to a non-preview binding after
+teardown.
 
 `POST /v1/owner-acceptance/events` uses the browser mutation identity path and
 requires a browser-authenticated GitHub human plus a bounded `Idempotency-Key`.

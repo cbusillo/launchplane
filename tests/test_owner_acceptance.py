@@ -16,6 +16,17 @@ from control_plane.contracts.change_impact import (
     ChangeImpactTargetReference,
 )
 from control_plane.contracts.owner_acceptance import OwnerAcceptanceEventRecord
+from control_plane.contracts.preview_generation_record import (
+    PreviewGenerationRecord,
+    PreviewPullRequestSummary,
+)
+from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+    ProductLaneProfile,
+    ProductPreviewProfile,
+)
 from control_plane.contracts.product_owner import (
     ProductOwnerGrant,
     ProductOwnerIdentity,
@@ -26,11 +37,13 @@ from control_plane.contracts.product_owner import (
 from control_plane.owner_acceptance import (
     OwnerAcceptanceAuthorizationError,
     OwnerAcceptanceBindingConflictError,
+    OwnerAcceptanceEvaluationUnavailableError,
     OwnerAcceptanceEventConflictError,
     evaluate_owner_acceptance,
     record_owner_acceptance_event,
 )
 from control_plane.service_auth import GitHubHumanIdentity, TerminalAgentIdentity
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.storage.filesystem import FilesystemRecordStore
 
 
@@ -40,6 +53,7 @@ REPOSITORY = "example/web"
 PRODUCT = "generic-web-a"
 SECOND_PRODUCT = "generic-web-b"
 SYSTEM = "web"
+PREVIEW_CONTEXT = "generic-web-a-preview"
 OWNER_GITHUB_ID = 3001
 HEAD_SHA = "a" * 40
 TREE_SHA = "b" * 40
@@ -179,8 +193,14 @@ def _store(
     *,
     include_dependency_evidence: bool = True,
     shared_dependency_evidence: bool = False,
+    invalid_product_profile: bool = False,
 ) -> FilesystemRecordStore:
     class _OwnerAcceptanceStore(FilesystemRecordStore):
+        def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
+            if invalid_product_profile:
+                raise ValueError("invalid product profile")
+            return super().read_product_profile_record(product)
+
         def list_change_impact_stored_evidence(
             self,
             *,
@@ -223,6 +243,105 @@ def _store(
     return store
 
 
+def _preview_profile() -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product=PRODUCT,
+        display_name="Generic Web A",
+        repository=REPOSITORY,
+        driver_id="generic-web",
+        image=ProductImageProfile(repository="ghcr.io/example/web"),
+        runtime_port=3000,
+        health_path="/health",
+        lanes=(
+            ProductLaneProfile(
+                instance="testing",
+                context="generic-web-a-testing",
+                base_url="https://testing.example.test",
+                health_url="https://testing.example.test/health",
+            ),
+        ),
+        preview=ProductPreviewProfile(
+            enabled=True,
+            context=PREVIEW_CONTEXT,
+            slug_template="pr-{number}",
+            app_name_prefix="generic-web-a-preview",
+        ),
+        updated_at="2026-08-07T00:00:00Z",
+        source="test",
+    )
+
+
+def _write_preview_evidence(
+    store: FilesystemRecordStore,
+    *,
+    head_sha: str = HEAD_SHA,
+    preview_id: str = "preview-generic-web-a-pr-2022",
+    generation_id: str = "preview-generic-web-a-pr-2022-generation-0001",
+    runtime_generation_id: str | None = None,
+    artifact_id: str = "artifact-generic-web-a-pr-2022",
+    image_digest: str = "a" * 64,
+    preview_state: str = "active",
+    generation_state: str = "ready",
+    verify_status: str = "pass",
+) -> None:
+    preview = PreviewRecord(
+        preview_id=preview_id,
+        context=PREVIEW_CONTEXT,
+        anchor_repo="web",
+        anchor_pr_number=2022,
+        anchor_pr_url="https://github.com/example/web/pull/2022",
+        preview_label="preview",
+        canonical_url="https://pr-2022.example.test",
+        state=preview_state,  # type: ignore[arg-type]
+        created_at="2026-08-07T00:00:00Z",
+        updated_at="2026-08-07T01:00:00Z",
+        eligible_at="2026-08-07T00:00:00Z",
+        active_generation_id=generation_id,
+        serving_generation_id=generation_id,
+        latest_generation_id=generation_id,
+        latest_manifest_fingerprint=f"manifest-{generation_id}",
+    )
+    runtime_identity = RuntimeIdentity(
+        product=PRODUCT,
+        context=PREVIEW_CONTEXT,
+        instance="preview-pr-2022",
+        environment_kind="preview",
+        deployment_record_id=f"deployment-{generation_id}",
+        artifact_id=artifact_id,
+        source_git_ref=head_sha,
+        image_reference=f"ghcr.io/example/web@sha256:{image_digest}",
+        preview_id=preview.preview_id,
+        preview_generation_id=(
+            generation_id if runtime_generation_id is None else runtime_generation_id
+        ),
+    )
+    generation = PreviewGenerationRecord(
+        generation_id=generation_id,
+        preview_id=preview.preview_id,
+        sequence=1,
+        state=generation_state,  # type: ignore[arg-type]
+        requested_reason="Owner acceptance preview evidence.",
+        requested_at="2026-08-07T00:00:00Z",
+        ready_at="2026-08-07T01:00:00Z",
+        resolved_manifest_fingerprint=preview.latest_manifest_fingerprint,
+        artifact_id=artifact_id,
+        source_map=(),
+        anchor_summary=PreviewPullRequestSummary(
+            repo="web",
+            pr_number=2022,
+            head_sha=head_sha,
+            pr_url=preview.anchor_pr_url,
+        ),
+        deploy_status="pass",
+        verify_status=verify_status,  # type: ignore[arg-type]
+        overall_health_status="pass",
+        runtime_identity=runtime_identity,
+    )
+    store.write_product_profile_record(_preview_profile())
+    store.write_preview_generation_record(generation)
+    store.write_preview_record(preview)
+
+
 def _expected_binding_sha256(
     *,
     store: object,
@@ -243,6 +362,264 @@ def _expected_binding_sha256(
 
 
 class OwnerAcceptanceTests(unittest.TestCase):
+    def test_non_preview_binding_digest_remains_backward_compatible(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+
+            self.assertEqual(
+                _expected_binding_sha256(
+                    store=store,
+                    provider=_EvidenceProvider(_repository_evidence()),
+                ),
+                "6f61c0b708961a549242c3ae7c97b599149648955c8bebd8fb540567c409c04a",
+            )
+
+    def test_preview_backed_acceptance_binds_verified_serving_runtime(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_preview_evidence(store)
+            provider = _EvidenceProvider(_repository_evidence())
+            target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+
+            decision = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+
+            self.assertEqual(decision.status, "pending")
+            self.assertIsNotNone(decision.binding)
+            assert decision.binding is not None
+            self.assertIsNotNone(decision.binding.preview)
+            assert decision.binding.preview is not None
+            self.assertEqual(decision.binding.preview.context, PREVIEW_CONTEXT)
+            self.assertEqual(
+                decision.binding.preview.artifact_image_digest,
+                f"sha256:{'a' * 64}",
+            )
+            result = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="accepted",
+                expected_binding_sha256=decision.binding.binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="accept-preview",
+                occurred_at="2026-08-07T12:00:00Z",
+            )
+            self.assertEqual(result.decision.status, "accepted")
+            self.assertIsNotNone(result.record.binding.preview)
+
+    def test_preview_drift_conflicts_without_writing(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_preview_evidence(store)
+            provider = _EvidenceProvider(_repository_evidence())
+            expected_binding_sha256 = _expected_binding_sha256(store=store, provider=provider)
+            _write_preview_evidence(
+                store,
+                generation_id="preview-generic-web-a-pr-2022-generation-0002",
+                artifact_id="artifact-generic-web-a-pr-2022-v2",
+                image_digest="b" * 64,
+            )
+
+            with self.assertRaises(OwnerAcceptanceBindingConflictError):
+                record_owner_acceptance_event(
+                    store=store,
+                    repository_evidence_provider=provider,
+                    target=ChangeImpactTargetReference(
+                        repository=REPOSITORY,
+                        pull_request_number=2022,
+                    ),
+                    identity=_human(),
+                    action="accepted",
+                    expected_binding_sha256=expected_binding_sha256,
+                    source_event_kind="browser_api",
+                    source_event_id="accept-preview-drift",
+                    occurred_at="2026-08-07T12:00:00Z",
+                )
+
+            self.assertEqual(store.list_owner_acceptance_event_records(), ())
+
+    def test_incomplete_preview_fails_closed(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_preview_evidence(store, verify_status="fail")
+
+            decision = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                target=ChangeImpactTargetReference(
+                    repository=REPOSITORY,
+                    pull_request_number=2022,
+                ),
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+
+            self.assertEqual(decision.status, "unavailable")
+            self.assertEqual(decision.reason_code, "preview_evidence_unavailable")
+            self.assertEqual(store.list_owner_acceptance_event_records(), ())
+
+    def test_enabled_preview_without_active_evidence_fails_closed(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            store.write_product_profile_record(_preview_profile())
+
+            decision = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                target=ChangeImpactTargetReference(
+                    repository=REPOSITORY,
+                    pull_request_number=2022,
+                ),
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+
+            self.assertEqual(decision.status, "unavailable")
+            self.assertEqual(decision.reason_code, "preview_evidence_unavailable")
+            self.assertEqual(store.list_owner_acceptance_event_records(), ())
+
+    def test_malformed_preview_profile_fails_closed(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory), invalid_product_profile=True)
+            with self.assertRaisesRegex(ValueError, "invalid product profile"):
+                store.read_product_profile_record(PRODUCT)
+
+            decision = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                target=ChangeImpactTargetReference(
+                    repository=REPOSITORY,
+                    pull_request_number=2022,
+                ),
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+
+            self.assertEqual(decision.status, "unavailable")
+            self.assertEqual(decision.reason_code, "preview_evidence_unavailable")
+            self.assertEqual(store.list_owner_acceptance_event_records(), ())
+
+    def test_owner_binding_requires_runtime_generation_identity(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_preview_evidence(store, runtime_generation_id="")
+
+            decision = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                target=ChangeImpactTargetReference(
+                    repository=REPOSITORY,
+                    pull_request_number=2022,
+                ),
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+
+            self.assertEqual(decision.status, "unavailable")
+            self.assertEqual(decision.reason_code, "preview_evidence_unavailable")
+            self.assertEqual(store.list_owner_acceptance_event_records(), ())
+
+    def test_ambiguous_serving_previews_fail_closed(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_preview_evidence(store)
+            _write_preview_evidence(
+                store,
+                preview_id="preview-generic-web-a-pr-2022-duplicate",
+                generation_id="preview-generic-web-a-pr-2022-generation-duplicate",
+                artifact_id="artifact-generic-web-a-pr-2022-duplicate",
+                image_digest="b" * 64,
+            )
+
+            decision = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                target=ChangeImpactTargetReference(
+                    repository=REPOSITORY,
+                    pull_request_number=2022,
+                ),
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+
+            self.assertEqual(decision.status, "unavailable")
+            self.assertEqual(decision.reason_code, "preview_evidence_unavailable")
+            self.assertEqual(store.list_owner_acceptance_event_records(), ())
+
+    def test_destroyed_preview_cannot_downgrade_prior_acceptance(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_preview_evidence(store)
+            provider = _EvidenceProvider(_repository_evidence())
+            target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            expected_binding_sha256 = _expected_binding_sha256(store=store, provider=provider)
+            record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="accepted",
+                expected_binding_sha256=expected_binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="accept-preview",
+                occurred_at="2026-08-07T12:00:00Z",
+            )
+            _write_preview_evidence(store, preview_state="destroyed")
+
+            decision = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                evaluated_at="2026-08-07T12:30:00Z",
+            )
+
+            self.assertEqual(decision.status, "stale")
+            self.assertEqual(decision.reason_code, "preview_evidence_stale")
+            self.assertIsNotNone(decision.binding)
+            assert decision.binding is not None
+            with self.assertRaises(OwnerAcceptanceEvaluationUnavailableError):
+                record_owner_acceptance_event(
+                    store=store,
+                    repository_evidence_provider=provider,
+                    target=target,
+                    identity=_human(),
+                    action="accepted",
+                    expected_binding_sha256=decision.binding.binding_sha256,
+                    source_event_kind="browser_api",
+                    source_event_id="accept-preview-downgrade",
+                    occurred_at="2026-08-07T12:30:00Z",
+                )
+
+    def test_future_preview_acceptance_is_not_effective_after_teardown(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            _write_preview_evidence(store)
+            provider = _EvidenceProvider(_repository_evidence())
+            target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="accepted",
+                expected_binding_sha256=_expected_binding_sha256(store=store, provider=provider),
+                source_event_kind="browser_api",
+                source_event_id="future-preview-acceptance",
+                occurred_at="2026-08-07T13:00:00Z",
+            )
+            _write_preview_evidence(store, preview_state="destroyed")
+
+            decision = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+
+            self.assertEqual(decision.status, "unavailable")
+            self.assertEqual(decision.reason_code, "preview_evidence_unavailable")
+            self.assertIsNone(decision.current_event)
+
     def test_acceptance_records_and_replays_for_exact_binding(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
