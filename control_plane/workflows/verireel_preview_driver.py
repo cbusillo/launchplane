@@ -958,24 +958,10 @@ def _run_application_command(
         schedule_name=schedule_name,
         command=command,
     )
-    latest_before = dokploy_api.latest_deployment_for_schedule(
+    dokploy_api.run_dokploy_schedule(
         host=host,
         token=token,
         schedule_id=schedule_id,
-    )
-    dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.runManually",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-        timeout_seconds=timeout_seconds,
-    )
-    dokploy_api.wait_for_dokploy_schedule_deployment(
-        host=host,
-        token=token,
-        schedule_id=schedule_id,
-        before_key=dokploy_api.deployment_key(latest_before),
         timeout_seconds=timeout_seconds,
     )
 
@@ -1004,8 +990,8 @@ def _run_application_command_with_retries(
                 timeout_seconds=timeout_seconds,
             )
             return
-        except click.ClickException:
-            if attempt >= attempts:
+        except click.ClickException as error:
+            if attempt >= attempts or not dokploy_api.is_transient_dokploy_error(error):
                 raise
             time.sleep(retry_delay_seconds)
 
@@ -1367,7 +1353,7 @@ def execute_verireel_preview_refresh(
             token=token,
             application_id=application_id,
             schedule_name=f"{app_name}-migrate",
-            command="npx prisma migrate deploy --config prisma.config.ts",
+            command="./node_modules/.bin/prisma migrate deploy --config prisma.config.ts",
             timeout_seconds=request.timeout_seconds,
         )
         _run_application_command_with_retries(

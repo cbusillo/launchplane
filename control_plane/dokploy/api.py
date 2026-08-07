@@ -12,14 +12,21 @@ import click
 
 DEFAULT_DOKPLOY_LOG_LINE_COUNT = 200
 MAX_DOKPLOY_LOG_LINE_COUNT = 1000
+_DOKPLOY_SCHEDULE_DIAGNOSTIC_LINE_COUNT = 20
+_MAX_DOKPLOY_ERROR_DETAIL_LENGTH = 2000
+_MAX_DOKPLOY_SCHEDULE_DIAGNOSTIC_LENGTH = 4000
+_SECRET_LOG_KEY_PATTERN = (
+    r"[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|"
+    r"DATABASE_URL|CREDENTIAL|ARGS_BASE64|PAYLOAD_BASE64)[A-Z0-9_]*"
+)
 _LIKELY_SECRET_LOG_VALUE_PATTERN = re.compile(
-    r"(?i)(\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|DATABASE_URL)[A-Z0-9_]*\s*[=:]\s*)([^\s,;]+)"
+    rf"(?i)(\b{_SECRET_LOG_KEY_PATTERN}\s*[=:]\s*)([^\s,;]+)"
 )
 _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
-    r'(?i)("?\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|DATABASE_URL)[A-Z0-9_]*"?\s*[=:]\s*)"[^"\r\n]*"'
+    rf'(?i)("?\b{_SECRET_LOG_KEY_PATTERN}"?\s*[=:]\s*)"[^"\r\n]*"'
 )
 _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
-    r"(?i)('?\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|DATABASE_URL)[A-Z0-9_]*'?\s*[=:]\s*)'[^'\r\n]*'"
+    rf"(?i)('?\b{_SECRET_LOG_KEY_PATTERN}'?\s*[=:]\s*)'[^'\r\n]*'"
 )
 _BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
 _DATABASE_URI_CREDENTIAL_PATTERN = re.compile(
@@ -44,6 +51,61 @@ class DokployDeploymentFailed(click.ClickException):
         self.deployment_id = deployment_id
         self.deployment_status = deployment_status
         super().__init__(f"{message_prefix}: deployment={deployment_id} status={deployment_status}")
+
+
+class DokployRequestFailed(click.ClickException):
+    def __init__(
+        self,
+        *,
+        method: str,
+        path: str,
+        detail: str,
+        status_code: int | None = None,
+        remote_command_failed: bool = False,
+    ) -> None:
+        self.method = method
+        self.path = path
+        self.status_code = status_code
+        self.remote_command_failed = remote_command_failed
+        self.retryable = status_code is None or status_code in {408, 425, 429} or status_code >= 500
+        if status_code is None:
+            message = f"Dokploy API {method} {path} request failed: {detail}"
+        else:
+            message = f"Dokploy API {method} {path} failed ({status_code}): {detail}"
+        super().__init__(message)
+
+
+class DokployScheduleExecutionFailed(click.ClickException):
+    def __init__(
+        self,
+        *,
+        schedule_id: str,
+        deployment_id: str,
+        deployment_status: str,
+        cause: str,
+        provider_detail: str = "",
+        recent_output: tuple[str, ...] = (),
+    ) -> None:
+        self.schedule_id = schedule_id
+        self.deployment_id = deployment_id
+        self.deployment_status = deployment_status
+        self.cause = cause
+        self.provider_detail = provider_detail
+        self.recent_output = recent_output
+        message = (
+            "Dokploy schedule execution failed: "
+            f"schedule={schedule_id} deployment={deployment_id or 'unavailable'} "
+            f"status={deployment_status or 'unknown'} cause={cause}."
+        )
+        if provider_detail:
+            message = f"{message} Provider detail: {provider_detail}"
+        if recent_output:
+            message = f"{message}\nRecent redacted deployment output:\n" + "\n".join(recent_output)
+        super().__init__(message)
+
+
+def is_transient_dokploy_error(error: BaseException) -> bool:
+    return isinstance(error, DokployRequestFailed) and error.retryable
 
 
 def trigger_deployment(
@@ -664,6 +726,155 @@ def wait_for_dokploy_schedule_deployment(
     )
 
 
+def run_dokploy_schedule(
+    *,
+    host: str,
+    token: str,
+    schedule_id: str,
+    timeout_seconds: int,
+) -> str:
+    latest_before = latest_deployment_for_schedule(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+    )
+    before_key = deployment_key(latest_before)
+    try:
+        dokploy_request(
+            host=host,
+            token=token,
+            path="/api/schedule.runManually",
+            method="POST",
+            payload={"scheduleId": schedule_id},
+            timeout_seconds=timeout_seconds,
+        )
+    except DokployRequestFailed as error:
+        deployment = _latest_new_schedule_deployment(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            before_key=before_key,
+        )
+        cause = "remote_command_exit" if error.remote_command_failed else "trigger_request_failed"
+        raise _schedule_execution_failure(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            deployment=deployment,
+            cause=cause,
+            provider_detail=str(error),
+        ) from error
+
+    try:
+        return wait_for_dokploy_schedule_deployment(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            before_key=before_key,
+            timeout_seconds=timeout_seconds,
+        )
+    except DokployDeploymentFailed as error:
+        deployment = _latest_new_schedule_deployment(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            before_key=before_key,
+        )
+        if deployment_key(deployment) != error.deployment_id:
+            deployment = {
+                "deploymentId": error.deployment_id,
+                "status": error.deployment_status,
+            }
+        raise _schedule_execution_failure(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            deployment=deployment,
+            cause="remote_command_exit",
+        ) from error
+    except click.ClickException as error:
+        deployment = _latest_new_schedule_deployment(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            before_key=before_key,
+        )
+        raise _schedule_execution_failure(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            deployment=deployment,
+            cause="deployment_observation_failed",
+            provider_detail=str(error),
+        ) from error
+
+
+def _latest_new_schedule_deployment(
+    *,
+    host: str,
+    token: str,
+    schedule_id: str,
+    before_key: str,
+) -> JsonObject | None:
+    try:
+        deployment = latest_deployment_for_schedule(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+        )
+    except click.ClickException:
+        return None
+    deployment_id = deployment_key(deployment)
+    if not deployment_id or deployment_id == before_key:
+        return None
+    return deployment
+
+
+def _schedule_execution_failure(
+    *,
+    host: str,
+    token: str,
+    schedule_id: str,
+    deployment: JsonObject | None,
+    cause: str,
+    provider_detail: str = "",
+) -> DokployScheduleExecutionFailed:
+    deployment_id = deployment_key(deployment)
+    recent_output: tuple[str, ...] = ()
+    if deployment_id:
+        try:
+            recent_output = fetch_dokploy_deployment_logs(
+                host=host,
+                token=token,
+                deployment_id=deployment_id,
+                line_count=_DOKPLOY_SCHEDULE_DIAGNOSTIC_LINE_COUNT,
+            )
+        except click.ClickException:
+            recent_output = ()
+    redacted_provider_detail = redact_dokploy_log_line(provider_detail).strip()
+    redacted_recent_output = _bounded_redacted_log_lines(recent_output)
+    return DokployScheduleExecutionFailed(
+        schedule_id=schedule_id,
+        deployment_id=deployment_id,
+        deployment_status=deployment_status(deployment),
+        cause=cause,
+        provider_detail=redacted_provider_detail[:_MAX_DOKPLOY_ERROR_DETAIL_LENGTH],
+        recent_output=redacted_recent_output,
+    )
+
+
+def _bounded_redacted_log_lines(lines: tuple[str, ...]) -> tuple[str, ...]:
+    remaining_length = _MAX_DOKPLOY_SCHEDULE_DIAGNOSTIC_LENGTH
+    redacted_lines: list[str] = []
+    for line in lines:
+        if remaining_length <= 0:
+            break
+        redacted_line = redact_dokploy_log_line(line)
+        redacted_lines.append(redacted_line[:remaining_length])
+        remaining_length -= len(redacted_lines[-1])
+    return tuple(redacted_lines)
+
+
 def list_dokploy_schedules(
     *,
     host: str,
@@ -813,12 +1024,21 @@ def dokploy_request(
             raw_payload = response.read()
     except HTTPError as error:
         error_body = error.read().decode(errors="replace").strip()
-        raise click.ClickException(
-            f"Dokploy API {method} {normalized_path} failed ({error.code}): {error_body}"
+        redacted_error_body = redact_dokploy_log_line(error_body).strip()
+        raise DokployRequestFailed(
+            method=method,
+            path=normalized_path,
+            status_code=error.code,
+            detail=redacted_error_body[:_MAX_DOKPLOY_ERROR_DETAIL_LENGTH],
+            remote_command_failed=_is_remote_command_failure(error_body),
         ) from error
     except URLError as error:
-        raise click.ClickException(
-            f"Dokploy API {method} {normalized_path} request failed: {error.reason}"
+        raise DokployRequestFailed(
+            method=method,
+            path=normalized_path,
+            detail=redact_dokploy_log_line(str(error.reason)).strip()[
+                :_MAX_DOKPLOY_ERROR_DETAIL_LENGTH
+            ],
         ) from error
 
     if not raw_payload:
@@ -827,6 +1047,18 @@ def dokploy_request(
         return _normalize_json_value(json.loads(raw_payload))
     except json.JSONDecodeError:
         return {"raw": raw_payload.decode("utf-8", errors="replace")}
+
+
+def _is_remote_command_failure(error_body: str) -> bool:
+    try:
+        payload = json.loads(error_body)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        message = str(payload.get("message") or "")
+    else:
+        message = error_body
+    return "remote command failed with exit code" in message.lower()
 
 
 def _string_items(value: JsonValue | None) -> list[str]:
