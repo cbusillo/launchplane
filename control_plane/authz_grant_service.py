@@ -19,6 +19,10 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
+from control_plane.contracts.owner_acceptance import (
+    OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
+    OWNER_ACCEPTANCE_READ_ACTION,
+)
 from control_plane.service_auth import (
     AuthzInstanceSelectors,
     GitHubActionsIdentity,
@@ -161,8 +165,40 @@ _IMMUTABLE_WORKFLOW_ACTION_SAFETIES = frozenset(
 )
 _MANAGED_AUTHZ_RECONCILE_SOURCE = "service:authz-managed-rule-set-reconcile"
 _AUTHZ_POLICY_ADMIN_ACTION = "authz_policy_grant.write"
+_OWNER_ACCEPTANCE_MANAGED_SET_ID = "operator.owner-acceptance"
+_OWNER_ACCEPTANCE_ACTIONS = frozenset(
+    {OWNER_ACCEPTANCE_READ_ACTION, OWNER_ACCEPTANCE_EVENT_WRITE_ACTION}
+)
 AuthzSchemaMigrationMode = Literal["reject", "migrate_v1_to_v2"]
 AuthzUnmanagedAdoptionMode = Literal["reject", "adopt_matching"]
+
+
+def _validate_owner_acceptance_managed_set(policy: LaunchplaneAuthzPolicy) -> None:
+    if any(
+        rules
+        for principal_type, rules in _authz_policy_rule_collections(policy)
+        if principal_type != "github_humans"
+    ):
+        raise ValueError("Owner Acceptance managed authz may contain only GitHub human rules.")
+    for rule in policy.github_humans:
+        if not rule.github_ids or rule.logins or rule.organizations or rule.teams:
+            raise ValueError(
+                "Owner Acceptance managed authz rules require only immutable GitHub IDs."
+            )
+        if rule.roles != ("read_only",):
+            raise ValueError("Owner Acceptance managed authz rules require the read_only role.")
+        if rule.products != ("launchplane",) or rule.contexts != ("owner-acceptance",):
+            raise ValueError(
+                "Owner Acceptance managed authz rules require the exact Launchplane workbench scope."
+            )
+        if rule.instances:
+            raise ValueError(
+                "Owner Acceptance managed authz rules cannot declare instance selectors."
+            )
+        if frozenset(rule.actions) != _OWNER_ACCEPTANCE_ACTIONS:
+            raise ValueError(
+                "Owner Acceptance managed authz rules require only the read and event-write actions."
+            )
 
 
 class AuthzManagedPolicyReconcileEnvelope(BaseModel):
@@ -206,6 +242,8 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
         if self.desired_policy.schema_version != 2:
             raise ValueError("Managed authz desired policy must use schema version 2.")
         self.desired_policy = _normalize_desired_authz_policy(self.desired_policy)
+        if self.managed_set_id == _OWNER_ACCEPTANCE_MANAGED_SET_ID:
+            _validate_owner_acceptance_managed_set(self.desired_policy)
         for principal_type, rules in _authz_policy_rule_collections(self.desired_policy):
             for rule in rules:
                 if rule.managed_set_id != self.managed_set_id or not rule.managed_rule_id:
