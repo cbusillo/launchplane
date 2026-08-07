@@ -15407,12 +15407,14 @@ class PostgresRecordStore(HumanSessionStore):
             self.write_preview_generation_record(generation_record)
             counts["preview_generations"] += 1
         if hasattr(filesystem_store, "list_manager_preview_approval_event_records"):
-            for event_record in filesystem_store.list_manager_preview_approval_event_records():
-                self.write_manager_preview_approval_event_record(event_record)
+            for manager_approval_event in (
+                filesystem_store.list_manager_preview_approval_event_records()
+            ):
+                self.write_manager_preview_approval_event_record(manager_approval_event)
                 counts["manager_preview_approval_events"] += 1
         if hasattr(filesystem_store, "list_owner_acceptance_event_records"):
-            for event_record in filesystem_store.list_owner_acceptance_event_records():
-                self.write_owner_acceptance_event_record(event_record)
+            for owner_acceptance_event in filesystem_store.list_owner_acceptance_event_records():
+                self.write_owner_acceptance_event_record(owner_acceptance_event)
                 counts["owner_acceptance_events"] += 1
         if hasattr(filesystem_store, "list_preview_inventory_scan_records"):
             for scan_record in filesystem_store.list_preview_inventory_scan_records():
