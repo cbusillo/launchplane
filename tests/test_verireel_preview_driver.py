@@ -27,6 +27,7 @@ from control_plane.workflows.verireel_preview_driver import _ensure_application
 from control_plane.workflows.verireel_preview_driver import _preview_database_admin_module_source
 from control_plane.workflows.verireel_preview_driver import _resolve_preview_secret
 from control_plane.workflows.verireel_preview_driver import _resolve_preview_url
+from control_plane.workflows.verireel_preview_driver import _run_application_command
 from control_plane.workflows.verireel_preview_driver import _run_application_command_with_retries
 from control_plane.workflows.verireel_preview_driver import _verireel_template_runtime_secret_keys
 from control_plane.workflows.verireel_preview_driver import execute_verireel_preview_refresh
@@ -773,7 +774,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
-            ),
+            ) as run_command_with_retries,
             patch("control_plane.workflows.verireel_preview_driver._wait_for_preview_health"),
         ):
             result = execute_verireel_preview_refresh(
@@ -793,6 +794,14 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             captured_env["VERIREEL_SECRETS_MASTER_KEY"],
             base64.b64encode(bytes(range(32))).decode("ascii"),
         )
+        self.assertEqual(
+            run_command_with_retries.call_args_list[0].kwargs["command"],
+            "./node_modules/.bin/prisma migrate deploy --config prisma.config.ts",
+        )
+        self.assertEqual(
+            run_command_with_retries.call_args_list[1].kwargs["command"],
+            "node prisma/seed.mjs",
+        )
 
     def test_preview_destroy_request_requires_pr_scoped_preview_slug(self) -> None:
         with self.assertRaisesRegex(ValueError, "preview_slug to match anchor_pr_number"):
@@ -804,11 +813,43 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 }
             )
 
-    def test_run_application_command_with_retries_retries_after_click_exception(self) -> None:
+    def test_run_application_command_uses_shared_schedule_runner(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.verireel_preview_driver._upsert_application_schedule",
+                return_value="schedule-one",
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.dokploy_api.run_dokploy_schedule"
+            ) as run_schedule,
+        ):
+            _run_application_command(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                application_id="application-123",
+                schedule_name="preview-migrate",
+                command="./node_modules/.bin/prisma migrate deploy --config prisma.config.ts",
+                timeout_seconds=60,
+            )
+
+        run_schedule.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            schedule_id="schedule-one",
+            timeout_seconds=60,
+        )
+
+    def test_run_application_command_with_retries_retries_transient_provider_failure(self) -> None:
+        transient_error = control_plane_dokploy.DokployRequestFailed(
+            method="GET",
+            path="/api/schedule.list",
+            status_code=503,
+            detail="provider unavailable",
+        )
         with (
             patch(
                 "control_plane.workflows.verireel_preview_driver._run_application_command",
-                side_effect=[click.ClickException("not ready"), None],
+                side_effect=[transient_error, None],
             ) as run_command,
             patch("control_plane.workflows.verireel_preview_driver.time.sleep") as sleep,
         ):
@@ -817,7 +858,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 token="secret-token",
                 application_id="application-123",
                 schedule_name="preview-migrate",
-                command="npx prisma migrate deploy --config prisma.config.ts",
+                command="./node_modules/.bin/prisma migrate deploy --config prisma.config.ts",
                 timeout_seconds=60,
                 attempts=2,
                 retry_delay_seconds=1.5,
@@ -826,12 +867,14 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self.assertEqual(run_command.call_count, 2)
         sleep.assert_called_once_with(1.5)
 
-    def test_run_application_command_with_retries_raises_after_last_attempt(self) -> None:
+    def test_run_application_command_with_retries_does_not_repeat_deterministic_failure(
+        self,
+    ) -> None:
         with (
             patch(
                 "control_plane.workflows.verireel_preview_driver._run_application_command",
                 side_effect=click.ClickException("still failing"),
-            ),
+            ) as run_command,
             patch("control_plane.workflows.verireel_preview_driver.time.sleep") as sleep,
         ):
             with self.assertRaises(click.ClickException):
@@ -846,7 +889,8 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                     retry_delay_seconds=2.0,
                 )
 
-        sleep.assert_called_once_with(2.0)
+        self.assertEqual(run_command.call_count, 1)
+        sleep.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -7,10 +7,13 @@ import sys
 import tarfile
 import tomllib
 import unittest
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import click
 from click.testing import CliRunner, Result
@@ -140,6 +143,76 @@ class _FakeDokployTargetStore:
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_dokploy_request_redacts_http_error_body(self) -> None:
+        error = HTTPError(
+            url="https://dokploy.example/api/schedule.runManually",
+            code=500,
+            msg="Internal Server Error",
+            hdrs=Message(),
+            fp=BytesIO(
+                b'{"message":"Remote command failed with exit code 1",'
+                b'"DATABASE_URL":"postgresql://user:password@database/example",'
+                b'"SERVICE_TOKEN":"secret-token"}'
+            ),
+        )
+        with patch("control_plane.dokploy.api.urlopen", side_effect=error):
+            with self.assertRaises(dokploy_api.DokployRequestFailed) as raised:
+                dokploy_api.dokploy_request(
+                    host="https://dokploy.example",
+                    token="provider-token",
+                    path="/api/schedule.runManually",
+                    method="POST",
+                    payload={"scheduleId": "schedule-one"},
+                )
+
+        self.assertTrue(raised.exception.remote_command_failed)
+        self.assertNotIn("password", raised.exception.format_message())
+        self.assertNotIn("secret-token", raised.exception.format_message())
+        self.assertIn("[redacted]", raised.exception.format_message())
+
+    def test_run_dokploy_schedule_enriches_synchronous_remote_exit(self) -> None:
+        request_error = dokploy_api.DokployRequestFailed(
+            method="POST",
+            path="/api/schedule.runManually",
+            status_code=500,
+            detail='{"message":"Remote command failed with exit code 1"}',
+            remote_command_failed=True,
+        )
+        with (
+            patch(
+                "control_plane.dokploy.api.latest_deployment_for_schedule",
+                side_effect=(
+                    {"deploymentId": "deployment-before", "status": "success"},
+                    {"deploymentId": "deployment-failed", "status": "failed"},
+                ),
+            ),
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=request_error),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
+                return_value=(
+                    "sh: 1: npx: not found",
+                    "DATABASE_URL=postgresql://user:password@database/example",
+                    "PREVIEW_DB_ARGS_BASE64=opaque-secret-payload",
+                ),
+            ),
+        ):
+            with self.assertRaises(dokploy_api.DokployScheduleExecutionFailed) as raised:
+                dokploy_api.run_dokploy_schedule(
+                    host="https://dokploy.example",
+                    token="provider-token",
+                    schedule_id="schedule-one",
+                    timeout_seconds=30,
+                )
+
+        self.assertEqual(raised.exception.cause, "remote_command_exit")
+        self.assertEqual(raised.exception.deployment_id, "deployment-failed")
+        self.assertEqual(raised.exception.deployment_status, "failed")
+        self.assertIn("npx: not found", raised.exception.format_message())
+        self.assertNotIn("password", raised.exception.format_message())
+        self.assertNotIn("opaque-secret-payload", raised.exception.format_message())
+        self.assertIn("DATABASE_URL=[redacted]", raised.exception.format_message())
+        self.assertIn("PREVIEW_DB_ARGS_BASE64=[redacted]", raised.exception.format_message())
+
     def test_wait_for_schedule_deployment_exposes_exact_terminal_failure(self) -> None:
         with (
             patch(
