@@ -69,6 +69,10 @@ from control_plane.engineering_review_service import (
     resolve_engineering_review_pull_request_target,
 )
 from control_plane.every_code_worker import EVERY_CODE_GITHUB_TOKEN_ENV_KEY
+from control_plane.github_app_identity import (
+    mint_repository_installation_token,
+    resolve_advisory_github_app_identity,
+)
 from control_plane.http_routes import (
     AcceptedEvidenceResponse as AcceptedEvidenceResponse,
     BackupGateEvidenceRequest as BackupGateEvidenceRequest,
@@ -85,6 +89,7 @@ from control_plane.http_routes import (
     CHANGE_IMPACT_EVALUATION_ROUTE,
     CHANGE_IMPACT_POLICY_APPLY_ROUTE,
     OWNER_ACCEPTANCE_EVENTS_ROUTE,
+    OWNER_ACCEPTANCE_PROJECT_ROUTE,
     PRODUCT_OWNER_POLICY_APPLY_ROUTE,
     PRODUCT_OWNER_REQUIREMENT_APPLY_ROUTE,
     PRODUCT_OWNER_ROUTING_APPLY_ROUTE,
@@ -860,6 +865,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     ),
     OWNER_ACCEPTANCE_EVENTS_ROUTE: (
         "Owner acceptance event",
+        _OWNER_ACCEPTANCE_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    OWNER_ACCEPTANCE_PROJECT_ROUTE: (
+        "Owner acceptance projection",
         _OWNER_ACCEPTANCE_MAX_BODY_BYTES,
         True,
         True,
@@ -4121,9 +4132,7 @@ def create_launchplane_fastapi_app(
         assert bearer_identity_config is not None
         try:
             return EngineeringReviewWorkerIdentity(
-                worker_runtime_id=(
-                    bearer_identity_config.engineering_review_worker_runtime_id
-                ),
+                worker_runtime_id=(bearer_identity_config.engineering_review_worker_runtime_id),
                 worker_host=bearer_identity_config.engineering_review_worker_host,
             )
         except ValueError as error:
@@ -4322,27 +4331,25 @@ def create_launchplane_fastapi_app(
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
         target_resolver=resolved_engineering_review_target_resolver,
-        repository_evidence_provider=(
-            resolved_change_impact_repository_evidence_provider
-        ),
+        repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
     )
-    engineering_review_decision_route_dependencies = (
-        EngineeringReviewDecisionRouteDependencies(
-            read_write_identity=read_write_identity,
-            get_record_store=get_record_store,
-            next_trace_id=next_trace_id,
-            authorization_allows=resolved_authz_policy_runtime.allows,
-            http_error=_launchplane_http_error,
-            error_response_model=LaunchplaneErrorResponse,
-            repository_evidence_provider=(
-                resolved_change_impact_repository_evidence_provider
+    engineering_review_decision_route_dependencies = EngineeringReviewDecisionRouteDependencies(
+        read_write_identity=read_write_identity,
+        get_record_store=get_record_store,
+        next_trace_id=next_trace_id,
+        authorization_allows=resolved_authz_policy_runtime.allows,
+        http_error=_launchplane_http_error,
+        error_response_model=LaunchplaneErrorResponse,
+        repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
+        github_app_token=lambda repository, repository_id: mint_repository_installation_token(
+            identity=resolve_advisory_github_app_identity(
+                control_plane_root=resolved_control_plane_root
             ),
-            github_token=lambda: resolve_launchplane_github_token(
-                control_plane_root=resolved_control_plane_root,
-                context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
-            ),
-            github_api=github_api_request,
-        )
+            repository=repository,
+            repository_id=repository_id,
+            api_request=github_api_request,
+        ),
+        github_api=github_api_request,
     )
     evidence_write_route_dependencies = EvidenceWriteRouteDependencies(
         read_write_identity=read_write_identity,
@@ -19987,19 +19994,25 @@ def create_launchplane_fastapi_app(
         dependencies=ChangeImpactReadRouteDependencies(
             common=read_route_dependencies,
             read_evaluation_identity=read_bearer_identity,
-            repository_evidence_provider=(
-                resolved_change_impact_repository_evidence_provider
-            ),
+            repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
         ),
     )
     register_owner_acceptance_routes(
         app,
         dependencies=OwnerAcceptanceRouteDependencies(
             common=read_route_dependencies,
+            read_write_identity=read_write_identity,
             read_browser_mutation_identity=read_browser_mutation_identity,
-            repository_evidence_provider=(
-                resolved_change_impact_repository_evidence_provider
+            repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
+            github_app_token=lambda repository, repository_id: mint_repository_installation_token(
+                identity=resolve_advisory_github_app_identity(
+                    control_plane_root=resolved_control_plane_root
+                ),
+                repository=repository,
+                repository_id=repository_id,
+                api_request=github_api_request,
             ),
+            github_api=github_api_request,
         ),
     )
 

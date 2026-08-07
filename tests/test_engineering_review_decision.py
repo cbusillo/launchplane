@@ -18,6 +18,7 @@ from control_plane.contracts.every_code_work_request import EveryCodeWorkRequest
 from control_plane.engineering_review_decision_projection import (
     project_engineering_review_decision,
 )
+from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.engineering_review_decision_service import (
     evaluate_engineering_review_decision,
 )
@@ -45,9 +46,7 @@ def _shared_authority() -> EngineeringReviewAuthorityRecord:
     base_authority = _authority()
     return EngineeringReviewAuthorityRecord.model_validate(
         {
-            **base_authority.model_dump(
-                mode="json", exclude={"authority_id", "authority_digest"}
-            ),
+            **base_authority.model_dump(mode="json", exclude={"authority_id", "authority_digest"}),
             "repository": REPOSITORY,
         }
     )
@@ -246,9 +245,7 @@ class EngineeringReviewDecisionTests(unittest.TestCase):
         self.assertEqual(approved.qualifying_model_families, ("anthropic", "openai"))
 
     def test_blocking_result_wins_and_stale_run_is_ignored(self) -> None:
-        stale = _completed_run(slot=1, family="openai").model_copy(
-            update={"head_sha": "c" * 40}
-        )
+        stale = _completed_run(slot=1, family="openai").model_copy(update={"head_sha": "c" * 40})
         blocked = _completed_run(slot=2, family="anthropic", decision="blocked")
         store = _Store((stale, blocked))
 
@@ -279,7 +276,7 @@ class EngineeringReviewDecisionTests(unittest.TestCase):
         self.assertFalse(second_created)
         self.assertEqual(first.decision_id, second.decision_id)
 
-    def test_projection_is_idempotent_and_shadow_named(self) -> None:
+    def test_projection_is_idempotent_and_advisory_named(self) -> None:
         store = _Store((_completed_run(slot=1, family="openai"),))
         record, _created = evaluate_engineering_review_decision(
             store=store,
@@ -292,14 +289,34 @@ class EngineeringReviewDecisionTests(unittest.TestCase):
             calls.append(kwargs)
             if kwargs.get("method") == "POST":
                 body = kwargs["body"]
-                return {"context": body["context"], "state": body["state"], "sha": HEAD_SHA}
-            return {"statuses": []}
+                return {
+                    "id": 91,
+                    "name": body["name"],
+                    "head_sha": body["head_sha"],
+                    "status": body["status"],
+                    "conclusion": body["conclusion"],
+                    "external_id": body["external_id"],
+                    "details_url": body["details_url"],
+                    "output": body["output"],
+                    "app": {"id": 42},
+                }
+            return {"check_runs": []}
 
         result = project_engineering_review_decision(
-            record=record, token="token", api_request=api_request
+            record=record,
+            installation_token=GitHubAppInstallationToken(
+                token="token",
+                app_id=42,
+                installation_id=43,
+                repository_id=int(record.target.repository_id),
+                repository=record.target.repository,
+                expires_at="2026-08-07T15:00:00Z",
+            ),
+            api_request=api_request,
         )
         self.assertEqual(result.status, "projected")
-        self.assertEqual(calls[-1]["body"]["context"], "launchplane/engineering-review-shadow")
+        self.assertEqual(calls[-1]["body"]["name"], "launchplane/engineering-review")
+        self.assertEqual(calls[-1]["body"]["conclusion"], "neutral")
 
 
 if __name__ == "__main__":

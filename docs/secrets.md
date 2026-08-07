@@ -59,6 +59,16 @@ title: Secrets
   uses the short-lived token only for repository metadata lookup, and does not
   persist the token or private key in plan/apply artifacts. Do not use a PAT or
   the Launchplane service GitHub App as a fallback.
+- Advisory engineering and Owner check-run projection uses its own dedicated
+  GitHub App. Store its numeric id as the DB-backed Launchplane service-context
+  runtime value `LAUNCHPLANE_ADVISORY_GITHUB_APP_ID` and its private key as the
+  managed-secret value `LAUNCHPLANE_ADVISORY_GITHUB_APP_PRIVATE_KEY`. Install
+  it only on repositories that receive advisory governance checks and grant
+  only Checks write plus mandatory Metadata read. Launchplane mints a
+  repository-scoped installation token, verifies exact App, installation,
+  repository, and permission identity, revokes the token after use, and never
+  persists or logs the token.
+  Do not reuse onboarding, runner-host-hygiene, PAT, or ordinary service tokens.
 - The protected
   `LAUNCHPLANE_AUTHZ_GENERIC_WEB_ONBOARDING_MANAGED_SET_JSON` secret contains
   the permanent exact Launchplane workflow grants for onboarding and preview

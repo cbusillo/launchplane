@@ -59,6 +59,9 @@ Use these docs as the source of truth for `launchplane`.
   supply-chain pinning, source classification, provenance, and update policy.
 - [dependency-health-contract.md](dependency-health-contract.md) — causal
   pull-request dependency comparisons and absolute health evidence.
+- [advisory-governance-checks.md](advisory-governance-checks.md) — dedicated
+  GitHub App identity, stable advisory engineering/Owner check runs, replay,
+  drift, and authority self-exclusion.
 - [style/python.md](style/python.md) — Python conventions.
 - [style/testing.md](style/testing.md) — testing conventions.
 - [policies/coding-standards.md](policies/coding-standards.md) — naming and

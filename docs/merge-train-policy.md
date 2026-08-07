@@ -41,6 +41,10 @@ Tenant merge eligibility (`evaluate_tenant_merge_eligibility`) and repository cl
 - Unified tenant admission is recomputed from DB records. The GitHub `tenant-admission` commit status is a public projection, not merge authority.
 - The tenant admission controller is a separate exact-PR landing path. It re-fetches current GitHub identity/head/mergeability facts, recomputes admission, reads the live required-status-check policy, filters admission projection contexts out of that policy, enforces strict base freshness when configured, and rechecks all three immediately before an expected-SHA merge. Missing or malformed required-check policy or evidence fails closed. It does not enqueue work or reuse scheduler ordering, labels, batch candidates, stack collapse, or failure policy.
 - The tenant controller and merge train share the repository/base controller-state row only as a mutual-exclusion and crash-reconciliation fence. Acquisition writes a controller-specific initial action atomically and adoption is action-aware, so one controller cannot rewrite another controller's unfinished recovery state even before its first checkpoint. The row cannot make a tenant admission decision and a green GitHub status is never merge authority.
+- Advisory `launchplane/engineering-review` and
+  `launchplane/owner-acceptance` check runs are visibility projections and are
+  excluded from merge-train and tenant-admission technical-check inputs. Their
+  presence, state, or provider replay cannot change a Launchplane verdict.
 - Engineering repositories remain on their existing flow; invoking the tenant controller for an engineering classification returns not-applicable without merging.
 
 ## Controller Lease And Resume State

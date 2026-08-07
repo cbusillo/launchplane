@@ -6,6 +6,7 @@ from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
@@ -1114,7 +1115,11 @@ def _check_runs_status(payload: dict[str, object]) -> MergeTrainCheckStatus:
     statuses: list[MergeTrainCheckStatus] = []
     for item in check_runs:
         check_run = _json_object(item, "GitHub check run")
+        if is_launchplane_projected_check(str(check_run.get("name") or "")):
+            continue
         statuses.append(_check_run_status(check_run))
+    if not statuses:
+        return "unknown"
     return _combine_check_statuses(*statuses)
 
 

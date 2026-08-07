@@ -8,6 +8,12 @@ from urllib.parse import quote, urlencode
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.advisory_check_projection import (
+    ENGINEERING_REVIEW_CHECK_NAME,
+    LEGACY_ENGINEERING_REVIEW_STATUS_CONTEXT,
+    OWNER_ACCEPTANCE_CHECK_NAME,
+    is_launchplane_projected_check,
+)
 from control_plane.contracts.manager_preview_approval_projection import (
     MANAGER_PREVIEW_APPROVAL_CHECK_NAME,
 )
@@ -168,6 +174,9 @@ class TenantAdmissionTechnicalChecks(BaseModel):
     excluded_contexts: tuple[str, ...] = (
         MANAGER_PREVIEW_APPROVAL_CHECK_NAME,
         TENANT_ADMISSION_STATUS_CONTEXT,
+        ENGINEERING_REVIEW_CHECK_NAME,
+        OWNER_ACCEPTANCE_CHECK_NAME,
+        LEGACY_ENGINEERING_REVIEW_STATUS_CONTEXT,
     )
     evaluated_at: str
     binding_sha256: str = ""
@@ -1030,10 +1039,7 @@ def _technical_status_signals(
             error_type=TenantAdmissionControllerError,
         )
         normalized_context = context.casefold()
-        if (
-            normalized_context in _EXCLUDED_TECHNICAL_CONTEXTS
-            or normalized_context in seen_contexts
-        ):
+        if _is_excluded_technical_context(context) or normalized_context in seen_contexts:
             continue
         seen_contexts.add(normalized_context)
         signals.append(
@@ -1083,7 +1089,7 @@ def _technical_check_run_signals(
             "GitHub check run app requires a positive id.",
             error_type=TenantAdmissionControllerError,
         )
-        if name.casefold() in _EXCLUDED_TECHNICAL_CONTEXTS:
+        if _is_excluded_technical_context(name):
             continue
         signals.append(
             TenantAdmissionTechnicalCheckSignal(
@@ -1124,7 +1130,7 @@ def _required_technical_checks(
             error_type=TenantAdmissionControllerError,
         )
         normalized_context = context.casefold()
-        if normalized_context in _EXCLUDED_TECHNICAL_CONTEXTS:
+        if _is_excluded_technical_context(context):
             continue
         raw_app_id = check.get("app_id")
         if raw_app_id is None:
@@ -1147,10 +1153,7 @@ def _required_technical_checks(
             error_type=TenantAdmissionControllerError,
         )
         normalized_context = context.casefold()
-        if (
-            normalized_context in _EXCLUDED_TECHNICAL_CONTEXTS
-            or normalized_context in detailed_contexts
-        ):
+        if _is_excluded_technical_context(context) or normalized_context in detailed_contexts:
             continue
         required_checks[(normalized_context, None)] = TenantAdmissionRequiredTechnicalCheck(
             name=context,
@@ -1176,6 +1179,13 @@ def _optional_github_app_id(payload: dict[str, object]) -> int | None:
         app.get("id"),
         "GitHub commit status app requires a positive id.",
         error_type=TenantAdmissionControllerError,
+    )
+
+
+def _is_excluded_technical_context(name: str) -> bool:
+    return (
+        name.strip().casefold() in _EXCLUDED_TECHNICAL_CONTEXTS
+        or is_launchplane_projected_check(name)
     )
 
 

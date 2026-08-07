@@ -7,6 +7,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.advisory_check_projection import (
+    ENGINEERING_REVIEW_CHECK_NAME,
+)
 from control_plane.contracts.change_impact import (
     ChangeImpactDecisionStatus,
     ChangeImpactReviewTier,
@@ -22,7 +25,7 @@ EngineeringReviewDecisionStatus = Literal[
 ENGINEERING_REVIEW_DECISION_CREATE_ACTION = "engineering_review_decision.create"
 ENGINEERING_REVIEW_DECISION_READ_ACTION = "engineering_review_decision.read"
 ENGINEERING_REVIEW_DECISION_PROJECT_ACTION = "engineering_review_decision.project"
-ENGINEERING_REVIEW_STATUS_CONTEXT = "launchplane/engineering-review-shadow"
+ENGINEERING_REVIEW_STATUS_CONTEXT = ENGINEERING_REVIEW_CHECK_NAME
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -116,12 +119,15 @@ class EngineeringReviewDecisionProjectionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = Field(default=1, ge=1)
-    status: Literal["projected", "replayed"]
-    context: Literal["launchplane/engineering-review-shadow"] = (
-        "launchplane/engineering-review-shadow"
-    )
+    status: Literal["projected", "updated", "replayed"]
+    context: Literal["launchplane/engineering-review"] = "launchplane/engineering-review"
     state: Literal["pending", "success", "failure", "error"]
     head_sha: str
+    external_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    app_id: int = Field(ge=1)
+    installation_id: int = Field(ge=1)
+    check_run_id: int = Field(ge=1)
+    conclusion: Literal["neutral"] = "neutral"
 
 
 def build_engineering_review_decision_binding(

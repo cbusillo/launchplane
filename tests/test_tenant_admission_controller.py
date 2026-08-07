@@ -75,6 +75,44 @@ class TenantAdmissionControllerTests(unittest.TestCase):
                 self.assertEqual(checks.status, "pass")
                 self.assertFalse(transport.merge_called)
 
+    def test_launchplane_advisory_checks_are_excluded_from_technical_inputs(self) -> None:
+        admission = _status_with_path_states(
+            trusted_state="pending",
+            waiver_state="pending",
+            manager_state="satisfied",
+        )
+        with TemporaryDirectory() as temporary_name, TemporaryDirectory() as baseline_name:
+            transport = _TenantControllerTransport(include_launchplane_projection_signals=True)
+            baseline_transport = _TenantControllerTransport()
+            with (
+                patch(
+                    "control_plane.tenant_admission_controller.get_tenant_admission_status",
+                    return_value=admission,
+                ),
+                patch(
+                    "control_plane.tenant_admission_controller.utc_now_timestamp",
+                    return_value=EVALUATED_AT,
+                ),
+            ):
+                result = execute_tenant_admission_controller_run_once(
+                    request=_request(mutate=False),
+                    store=FilesystemRecordStore(state_dir=Path(temporary_name)),
+                    token="token",
+                    trace_id="trace-advisory-exclusion",
+                    transport_factory=lambda _token: transport,
+                )
+                baseline = execute_tenant_admission_controller_run_once(
+                    request=_request(mutate=False),
+                    store=FilesystemRecordStore(state_dir=Path(baseline_name)),
+                    token="token",
+                    trace_id="trace-advisory-baseline",
+                    transport_factory=lambda _token: baseline_transport,
+                )
+
+        self.assertEqual(result.outcome, baseline.outcome)
+        assert result.technical_checks is not None
+        self.assertEqual(result.technical_checks, baseline.technical_checks)
+
     def test_mutate_merges_exact_head_and_excludes_admission_statuses(self) -> None:
         with TemporaryDirectory() as temporary_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_name))
@@ -921,6 +959,7 @@ class _TenantControllerTransport:
         required_check_app_ids: tuple[int, ...] = (),
         strict_required_checks: object = True,
         head_contains_base: bool = True,
+        include_launchplane_projection_signals: bool = False,
     ) -> None:
         self.technical_state = technical_state
         self.include_technical_signals = include_technical_signals
@@ -938,6 +977,7 @@ class _TenantControllerTransport:
         self.required_check_app_ids = list(required_check_app_ids)
         self.strict_required_checks = strict_required_checks
         self.head_contains_base = head_contains_base
+        self.include_launchplane_projection_signals = include_launchplane_projection_signals
         self.merge_called = False
         self.technical_checks_read = False
         self.requests: list[tuple[str, str, dict[str, object] | None]] = []
@@ -961,17 +1001,27 @@ class _TenantControllerTransport:
             required_check_app_id = (
                 self.required_check_app_ids.pop(0) if self.required_check_app_ids else 15368
             )
+            contexts = ["ci/build", "unit-tests"]
+            checks = [
+                {"context": "ci/build", "app_id": None},
+                {"context": "unit-tests", "app_id": required_check_app_id},
+            ]
+            if self.include_launchplane_projection_signals:
+                contexts.extend(["launchplane/engineering-review", "launchplane/owner-acceptance"])
+                checks.extend(
+                    [
+                        {"context": "launchplane/engineering-review", "app_id": 42},
+                        {"context": "launchplane/owner-acceptance", "app_id": 42},
+                    ]
+                )
             return {
                 **(
                     {"strict": self.strict_required_checks}
                     if self.strict_required_checks is not None
                     else {}
                 ),
-                "contexts": ["ci/build", "unit-tests"],
-                "checks": [
-                    {"context": "ci/build", "app_id": None},
-                    {"context": "unit-tests", "app_id": required_check_app_id},
-                ],
+                "contexts": contexts,
+                "checks": checks,
             }
         if method == "GET" and path.endswith("/status"):
             self.technical_checks_read = True
@@ -989,6 +1039,16 @@ class _TenantControllerTransport:
                         "app": None,
                     }
                 )
+            if self.include_launchplane_projection_signals:
+                statuses.extend(
+                    [
+                        {
+                            "context": "launchplane/engineering-review-shadow",
+                            "state": "failure",
+                        },
+                        {"context": "launchplane/owner-acceptance", "state": "failure"},
+                    ]
+                )
             return {
                 "sha": self.status_response_sha or _candidate().head_sha,
                 "total_count": len(statuses),
@@ -996,7 +1056,7 @@ class _TenantControllerTransport:
             }
         if method == "GET" and "/check-runs?" in path:
             self.technical_checks_read = True
-            check_runs = (
+            check_runs: list[dict[str, object]] = (
                 [
                     {
                         "name": "unit-tests",
@@ -1009,6 +1069,25 @@ class _TenantControllerTransport:
                 if self.include_technical_signals
                 else []
             )
+            if self.include_launchplane_projection_signals:
+                check_runs.extend(
+                    [
+                        {
+                            "name": "launchplane/engineering-review",
+                            "head_sha": _candidate().head_sha,
+                            "app": {"id": 42},
+                            "status": "completed",
+                            "conclusion": "failure",
+                        },
+                        {
+                            "name": "launchplane/owner-acceptance",
+                            "head_sha": _candidate().head_sha,
+                            "app": {"id": 42},
+                            "status": "queued",
+                            "conclusion": None,
+                        },
+                    ]
+                )
             return {"total_count": len(check_runs), "check_runs": check_runs}
         if method == "PUT" and path.endswith("/merge"):
             self.merge_called = True
