@@ -993,6 +993,74 @@ class SchemaMigrationTests(unittest.TestCase):
         for table_name in owner_table_names:
             self.assertNotIn(table_name, downgraded_table_names)
 
+    def test_owner_acceptance_migration_upgrades_and_downgrades(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = _alembic_config(database_url)
+
+            command.upgrade(config, "f3a5c7e9b1d4")
+            engine = create_engine(database_url)
+            try:
+                inspector = inspect(engine)
+                table_names = set(inspector.get_table_names())
+                columns = {
+                    column["name"]
+                    for column in inspector.get_columns("launchplane_owner_acceptance_events")
+                }
+                indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes("launchplane_owner_acceptance_events")
+                }
+                primary_key = inspector.get_pk_constraint("launchplane_owner_acceptance_events")
+            finally:
+                engine.dispose()
+
+            command.downgrade(config, "f4a6c8e0b2d4")
+            engine = create_engine(database_url)
+            try:
+                downgraded_table_names = set(inspect(engine).get_table_names())
+            finally:
+                engine.dispose()
+
+        self.assertIn("launchplane_owner_acceptance_events", table_names)
+        self.assertGreaterEqual(
+            columns,
+            {
+                "event_id",
+                "acceptance_id",
+                "binding_sha256",
+                "repository_id",
+                "repository_owner_id",
+                "repository",
+                "pr_number",
+                "head_sha",
+                "tree_sha",
+                "product",
+                "system",
+                "owner_action",
+                "environment",
+                "action",
+                "owner_github_id",
+                "owner_login",
+                "occurred_at",
+                "payload",
+            },
+        )
+        self.assertEqual(primary_key["constrained_columns"], ["event_id"])
+        self.assertEqual(
+            indexes["launchplane_owner_acceptance_events_subject_idx"]["column_names"],
+            [
+                "repository_id",
+                "pr_number",
+                "product",
+                "system",
+                "owner_action",
+                "occurred_at",
+            ],
+        )
+        self.assertNotIn("launchplane_owner_acceptance_events", downgraded_table_names)
+
     def test_policy_schema_invariants_are_expected(self) -> None:
         column_types = {
             (column.table_name, column.column_name): column.accepted_type_tokens
@@ -1004,7 +1072,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "f4a6c8e0b2d4")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "f3a5c7e9b1d4")
         self.assertEqual(
             column_types[("launchplane_repository_human_role_policies", "payload")],
             ("jsonb",),
@@ -1042,6 +1110,38 @@ class SchemaMigrationTests(unittest.TestCase):
                 )
             ],
             ("bigint", "int8"),
+        )
+        self.assertEqual(
+            column_types[("launchplane_owner_acceptance_events", "payload")],
+            ("jsonb",),
+        )
+        self.assertEqual(
+            column_types[("launchplane_owner_acceptance_events", "owner_github_id")],
+            ("bigint", "int8"),
+        )
+        self.assertEqual(
+            column_types[("launchplane_owner_acceptance_events", "pr_number")],
+            ("bigint", "int8"),
+        )
+        self.assertEqual(
+            indexes[
+                (
+                    "launchplane_owner_acceptance_events",
+                    "launchplane_owner_acceptance_events_subject_idx",
+                )
+            ].column_names,
+            (
+                "repository_id",
+                "pr_number",
+                "product",
+                "system",
+                "owner_action",
+                "occurred_at",
+            ),
+        )
+        self.assertEqual(
+            primary_keys["launchplane_owner_acceptance_events"],
+            ("event_id",),
         )
         self.assertEqual(
             primary_keys["launchplane_repository_human_role_policies"],

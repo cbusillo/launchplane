@@ -92,6 +92,11 @@ from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalEventRecord,
     ManagerPreviewApprovalEventWriteStatus,
 )
+from control_plane.contracts.owner_acceptance import (
+    OwnerAcceptanceEventRecord,
+    OwnerAcceptanceEventWriteStatus,
+    owner_acceptance_event_replay_digest,
+)
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchLandingPlanRecord,
@@ -166,6 +171,7 @@ from control_plane.contracts.private_health_endpoint_record import (
     private_health_endpoint_record_sha256,
 )
 from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
+from control_plane.owner_acceptance import OwnerAcceptanceEventConflictError
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     route_binding_record_sha256,
@@ -853,6 +859,50 @@ class LaunchplaneManagerPreviewApprovalEventRow(Base):
     manager_login: Mapped[str] = mapped_column(String, nullable=False, server_default="")
     policy_record_id: Mapped[str] = mapped_column(String, nullable=False, server_default="")
     policy_sha256: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOwnerAcceptanceEventRow(Base):
+    __tablename__ = "launchplane_owner_acceptance_events"
+    __table_args__ = (
+        Index(
+            "launchplane_owner_acceptance_events_subject_idx",
+            "repository_id",
+            "pr_number",
+            "product",
+            "system",
+            "owner_action",
+            desc("occurred_at"),
+        ),
+        Index(
+            "launchplane_owner_acceptance_events_binding_idx",
+            "binding_sha256",
+            desc("occurred_at"),
+        ),
+        Index(
+            "launchplane_owner_acceptance_events_acceptance_idx",
+            "acceptance_id",
+            desc("occurred_at"),
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    acceptance_id: Mapped[str] = mapped_column(String, nullable=False)
+    binding_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    repository_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository_owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    pr_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    head_sha: Mapped[str] = mapped_column(String, nullable=False)
+    tree_sha: Mapped[str] = mapped_column(String, nullable=False)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    system: Mapped[str] = mapped_column(String, nullable=False)
+    owner_action: Mapped[str] = mapped_column(String, nullable=False)
+    environment: Mapped[str] = mapped_column(String, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    owner_github_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    owner_login: Mapped[str] = mapped_column(String, nullable=False, server_default="")
     occurred_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
@@ -8080,6 +8130,61 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 return "replayed"
 
+    def write_owner_acceptance_event_record(
+        self, record: OwnerAcceptanceEventRecord
+    ) -> OwnerAcceptanceEventWriteStatus:
+        row = LaunchplaneOwnerAcceptanceEventRow(
+            event_id=record.event_id,
+            acceptance_id=record.acceptance_id,
+            binding_sha256=record.binding.binding_sha256,
+            repository_id=record.binding.repository_id,
+            repository_owner_id=record.binding.repository_owner_id,
+            repository=record.binding.repository,
+            pr_number=record.binding.pull_request_number,
+            head_sha=record.binding.head_sha,
+            tree_sha=record.binding.tree_sha,
+            product=record.binding.product,
+            system=record.binding.system,
+            owner_action=record.binding.action,
+            environment=record.binding.environment,
+            action=record.action,
+            owner_github_id=(record.authorization.owner_github_id if record.authorization else 0),
+            owner_login=(record.authorization.owner_login if record.authorization else ""),
+            occurred_at=record.occurred_at,
+            payload=self._payload_dict(record),
+        )
+        with self._session_factory() as session:
+            session.add(row)
+            try:
+                session.commit()
+                return "written"
+            except IntegrityError:
+                session.rollback()
+                existing_row = session.get(LaunchplaneOwnerAcceptanceEventRow, record.event_id)
+                if existing_row is None:
+                    raise
+                existing = self._read_payload(
+                    model_type=OwnerAcceptanceEventRecord,
+                    payload=existing_row.payload,
+                )
+                if owner_acceptance_event_replay_digest(
+                    existing
+                ) != owner_acceptance_event_replay_digest(record):
+                    raise OwnerAcceptanceEventConflictError(
+                        "Owner acceptance event replay changed the persisted payload."
+                    )
+                return "replayed"
+
+    def read_owner_acceptance_event_record(
+        self,
+        event_id: str,
+    ) -> OwnerAcceptanceEventRecord:
+        return self._read_model(
+            model_type=OwnerAcceptanceEventRecord,
+            orm_model=LaunchplaneOwnerAcceptanceEventRow,
+            filters=(LaunchplaneOwnerAcceptanceEventRow.event_id == event_id,),
+        )
+
     def _repository_human_role_policy_row(
         self, record: RepositoryHumanRolePolicyRecord
     ) -> LaunchplaneRepositoryHumanRolePolicyRow:
@@ -10286,6 +10391,46 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(
                 LaunchplaneManagerPreviewApprovalEventRow.occurred_at.desc(),
                 LaunchplaneManagerPreviewApprovalEventRow.event_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def list_owner_acceptance_event_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository: str = "",
+        pull_request_number: int | None = None,
+        product: str = "",
+        system: str = "",
+        action: str = "",
+        acceptance_action: str = "",
+        limit: int | None = None,
+    ) -> tuple[OwnerAcceptanceEventRecord, ...]:
+        filters: list[object] = []
+        if repository_id:
+            filters.append(
+                LaunchplaneOwnerAcceptanceEventRow.repository_id == repository_id.strip()
+            )
+        if repository:
+            filters.append(LaunchplaneOwnerAcceptanceEventRow.repository == repository.lower())
+        if pull_request_number is not None:
+            filters.append(LaunchplaneOwnerAcceptanceEventRow.pr_number == pull_request_number)
+        if product:
+            filters.append(LaunchplaneOwnerAcceptanceEventRow.product == product.strip())
+        if system:
+            filters.append(LaunchplaneOwnerAcceptanceEventRow.system == system.strip())
+        if action:
+            filters.append(LaunchplaneOwnerAcceptanceEventRow.owner_action == action.strip())
+        if acceptance_action:
+            filters.append(LaunchplaneOwnerAcceptanceEventRow.action == acceptance_action.strip())
+        return self._list_models(
+            model_type=OwnerAcceptanceEventRecord,
+            orm_model=LaunchplaneOwnerAcceptanceEventRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneOwnerAcceptanceEventRow.occurred_at.desc(),
+                LaunchplaneOwnerAcceptanceEventRow.event_id.desc(),
             ),
             limit=limit,
         )
@@ -15153,6 +15298,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_enablement": 0,
             "preview_generations": 0,
             "manager_preview_approval_events": 0,
+            "owner_acceptance_events": 0,
             "preview_desired_states": 0,
             "preview_inventory_scans": 0,
             "preview_lifecycle_cleanups": 0,
@@ -15261,9 +15407,15 @@ class PostgresRecordStore(HumanSessionStore):
             self.write_preview_generation_record(generation_record)
             counts["preview_generations"] += 1
         if hasattr(filesystem_store, "list_manager_preview_approval_event_records"):
-            for event_record in filesystem_store.list_manager_preview_approval_event_records():
-                self.write_manager_preview_approval_event_record(event_record)
+            for manager_approval_event in (
+                filesystem_store.list_manager_preview_approval_event_records()
+            ):
+                self.write_manager_preview_approval_event_record(manager_approval_event)
                 counts["manager_preview_approval_events"] += 1
+        if hasattr(filesystem_store, "list_owner_acceptance_event_records"):
+            for owner_acceptance_event in filesystem_store.list_owner_acceptance_event_records():
+                self.write_owner_acceptance_event_record(owner_acceptance_event)
+                counts["owner_acceptance_events"] += 1
         if hasattr(filesystem_store, "list_preview_inventory_scan_records"):
             for scan_record in filesystem_store.list_preview_inventory_scan_records():
                 self.write_preview_inventory_scan_record(scan_record)
