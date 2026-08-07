@@ -7,6 +7,7 @@ import type {
   GitHubHumanIdentityResponse,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
+  OwnerAcceptanceQueueResponse,
   ProductActionAvailability,
   ProductActivityReadModel,
   ProductEnvironmentConfigStatus,
@@ -2756,6 +2757,142 @@ function runtimeIdentity(
     deployed_at: OBSERVED_AT,
     preview_id: "",
     preview_generation_id: "",
+  };
+}
+
+export function ownerAcceptanceForFixture(
+  fixture: DataFixtureMode,
+): OwnerAcceptanceQueueResponse {
+  assertEngineeringFixtureAvailable(fixture);
+  const pendingBinding = {
+    action: "deploy",
+    binding_sha256: "a".repeat(64),
+    change_impact_policy_digest: "b".repeat(64),
+    change_impact_policy_record_id: "policy-001",
+    change_impact_policy_revision: 1,
+    environment: "production",
+    head_sha: "a".repeat(40),
+    owner_policy_digest: "c".repeat(64),
+    owner_policy_record_id: "owner-policy-001",
+    owner_policy_revision: 1,
+    owner_requirement_digest: "d".repeat(64),
+    owner_requirement_record_id: "owner-req-001",
+    owner_requirement_revision: 1,
+    preview: null,
+    product: "example-site",
+    pull_request_number: 308,
+    repository: "example/control-plane",
+    repository_id: "1001",
+    repository_owner_id: "2001",
+    schema_version: 1,
+    system: "web",
+    tree_sha: "b".repeat(40),
+  };
+  const pendingDecision = {
+    authoritative: false as const,
+    binding: pendingBinding,
+    current_event: null,
+    enforcement_effect: "none" as const,
+    evaluated_at: OBSERVED_AT,
+    mode: "shadow" as const,
+    products: [
+      {
+        action: "deploy",
+        binding: pendingBinding,
+        current_event: null,
+        environment: "production",
+        product: "example-site",
+        reason_code: "acceptance_missing" as const,
+        schema_version: 1,
+        status: "pending" as const,
+        system: "web",
+      },
+    ],
+    reason_code: "acceptance_missing" as const,
+    schema_version: 1,
+    status: "pending" as const,
+  };
+  const acceptedBinding = {
+    ...pendingBinding,
+    binding_sha256: "e".repeat(64),
+    pull_request_number: 302,
+    head_sha: "f".repeat(40),
+  };
+  const acceptedDecision = {
+    ...pendingDecision,
+    binding: acceptedBinding,
+    evaluated_at: OBSERVED_AT,
+    products: [
+      {
+        ...pendingDecision.products[0],
+        binding: acceptedBinding,
+        reason_code: "acceptance_valid" as const,
+        status: "accepted" as const,
+      },
+    ],
+    reason_code: "acceptance_valid" as const,
+    status: "accepted" as const,
+  };
+  if (fixture === "empty") {
+    return {
+      authoritative: false,
+      enforcement_effect: "none",
+      entries: [],
+      entry_count: 0,
+      generated_at: OBSERVED_AT,
+      mode: "shadow",
+      status: "ok",
+      trace_id: "fixture-owner-acceptance-empty",
+    };
+  }
+  const entries =
+    fixture === "missing"
+      ? [
+          {
+            authoritative: false as const,
+            enforcement_effect: "none" as const,
+            engineering_review_decision: null,
+            mode: "shadow" as const,
+            next_action: "Owner acceptance required",
+            owner_acceptance_decision: pendingDecision,
+            pull_request_number: 308,
+            repository: "example/control-plane",
+            schema_version: 1,
+          },
+        ]
+      : [
+          {
+            authoritative: false as const,
+            enforcement_effect: "none" as const,
+            engineering_review_decision: null,
+            mode: "shadow" as const,
+            next_action: "Owner acceptance required",
+            owner_acceptance_decision: pendingDecision,
+            pull_request_number: 308,
+            repository: "example/control-plane",
+            schema_version: 1,
+          },
+          {
+            authoritative: false as const,
+            enforcement_effect: "none" as const,
+            engineering_review_decision: null,
+            mode: "shadow" as const,
+            next_action: "Owner acceptance is current",
+            owner_acceptance_decision: acceptedDecision,
+            pull_request_number: 302,
+            repository: "example/control-plane",
+            schema_version: 1,
+          },
+        ];
+  return {
+    authoritative: false,
+    enforcement_effect: "none",
+    entries,
+    entry_count: entries.length,
+    generated_at: OBSERVED_AT,
+    mode: "shadow",
+    status: "ok",
+    trace_id: "fixture-owner-acceptance",
   };
 }
 

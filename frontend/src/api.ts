@@ -12,8 +12,10 @@ import type {
   DryRunProductPromotionData,
   DryRunProductPromotionResponse,
   EveryCodeSummaryResponse,
+  ListOwnerAcceptanceQueueData,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
+  OwnerAcceptanceQueueResponse,
   ProductActivityResponse,
   ProductEnvironmentConfigStatusResponse,
   ProductEnvironmentIncidentResponse,
@@ -481,5 +483,21 @@ export function dispatchProductPromotionWorkflow(
     options.signal,
     generatedIdempotencyKey(request.headers),
     options.onDispatch,
+  );
+}
+
+export function readOwnerAcceptanceQueue(
+  query: ListOwnerAcceptanceQueueData["query"] = {},
+  signal?: AbortSignal,
+): Promise<OwnerAcceptanceQueueResponse> {
+  const params = new URLSearchParams();
+  if (query.repository) params.set("repository", query.repository);
+  if (query.status) params.set("status", query.status);
+  const qs = params.toString();
+  return requestJson<OwnerAcceptanceQueueResponse>(
+    `/v1/owner-acceptance/queue${qs ? `?${qs}` : ""}`,
+    "GET",
+    undefined,
+    signal,
   );
 }

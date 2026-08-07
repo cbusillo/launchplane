@@ -137,11 +137,62 @@ Migration `f3a5c7e9b1d4` creates the empty table and indexes only. It performs
 no backfill from GitHub comments, manager-preview approvals, technical waivers,
 or tenant-admission evidence.
 
+## Acceptance Queue
+
+`GET /v1/owner-acceptance/queue` returns a read-only queue of Owner acceptance
+candidates. Queue candidates are assembled **server-side** from two sources:
+
+1. The latest engineering review decision record per (repository, PR) from the
+   server-owned engineering review decision ledger.
+2. The (repository, PR) subjects present in the Owner acceptance event history.
+
+The union of both sources is bounded to at most 50 entries, deterministically
+sorted newest-first by the latest engineering review decision evaluated-at or
+acceptance event occurred-at timestamp. For each candidate, `evaluate_owner_acceptance`
+is called server-side using the same repository evidence provider as the
+evaluation route.
+
+The browser supplies only optional filter query parameters (`repository`,
+`status`) applied after server-side evaluation. It cannot supply candidate
+targets, head SHAs, binding digests, or any evidence input. No mutation route
+is exposed through this endpoint.
+
+Each queue entry carries:
+
+- `repository`, `pull_request_number` — the PR identity.
+- `mode: shadow`, `authoritative: false`, `enforcement_effect: none` — explicit
+  governance framing on every row.
+- `engineering_review_decision` — the latest server-recorded engineering review
+  decision record for this PR, or `null` if the candidate came from event history
+  only.
+- `owner_acceptance_decision` — the current evaluated Owner acceptance decision,
+  including per-product decisions with exact bindings and current events.
+- `next_action` — a human-readable next-action string derived from the current
+  decision status.
+
+The route uses the existing read authorization action. No Owner mutation
+controls are exposed.
+
+## Engineering Ops Workbench
+
+`/ui/engineering/owner-acceptance` is a read-only engineering evidence surface
+following the existing engineering-resource pattern. It displays queue entries
+from `GET /v1/owner-acceptance/queue` with:
+
+- loading, error, denied, and empty states via `EngineeringResourceGate`;
+- a boundary note explaining shadow-mode, the 50-entry limit, and the
+  server-side candidate assembly;
+- optional client-side filters by status and repository;
+- per-entry engineering review decision evidence and per-product acceptance
+  bindings with recorded/current framing;
+- a passive note that no Owner mutation controls are exposed.
+
+No write or mutation controls appear on this surface.
+
 ## Out Of Scope
 
 - production authorization and promotion consumers
 - GitHub status projection
-- frontend Owner workbench
 - tenant-admission cutover
 - manager/delegate cleanup
 - break-glass acceptance

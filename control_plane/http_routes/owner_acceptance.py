@@ -11,6 +11,7 @@ from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
     OWNER_ACCEPTANCE_READ_ACTION,
     OwnerAcceptanceDecision,
+    OwnerAcceptanceDecisionStatus,
     OwnerAcceptanceEventRecord,
 )
 from control_plane.http_routes.support import (
@@ -27,12 +28,17 @@ from control_plane.owner_acceptance import (
     record_owner_acceptance_event,
     require_owner_acceptance_event_store,
 )
+from control_plane.owner_acceptance_queue import (
+    OwnerAcceptanceQueueEntry,
+    build_owner_acceptance_queue,
+)
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity, LaunchplaneIdentity
 
 
 OWNER_ACCEPTANCE_EVALUATION_ROUTE = "/v1/owner-acceptance/evaluation"
 OWNER_ACCEPTANCE_EVENTS_ROUTE = "/v1/owner-acceptance/events"
 OWNER_ACCEPTANCE_EVENT_ROUTE = "/v1/owner-acceptance/events/{event_id}"
+OWNER_ACCEPTANCE_QUEUE_ROUTE = "/v1/owner-acceptance/queue"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +91,19 @@ class OwnerAcceptanceEventReadResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     record: OwnerAcceptanceEventRecord
+
+
+class OwnerAcceptanceQueueResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    mode: Literal["shadow"] = "shadow"
+    authoritative: Literal[False] = False
+    enforcement_effect: Literal["none"] = "none"
+    generated_at: str
+    entry_count: int
+    entries: tuple[OwnerAcceptanceQueueEntry, ...]
 
 
 def register_owner_acceptance_routes(
@@ -273,6 +292,54 @@ def register_owner_acceptance_routes(
             ) from error
         return OwnerAcceptanceEventReadResponse(trace_id=trace_id, record=record)
 
+    def read_queue(
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        repository: Annotated[str, Query(max_length=256)] = "",
+        status: Annotated[str, Query(max_length=64)] = "",
+    ) -> OwnerAcceptanceQueueResponse:
+        trace_id = common.next_trace_id()
+        if not common.authorization_allows(
+            identity=identity,
+            action=OWNER_ACCEPTANCE_READ_ACTION,
+            product="launchplane",
+            context="owner-acceptance",
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot read Owner acceptance queue.",
+            )
+        try:
+            entries = build_owner_acceptance_queue(
+                store=record_store,
+                repository_evidence_provider=dependencies.repository_evidence_provider,
+            )
+        except TypeError as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        normalized_repository = repository.strip().lower()
+        normalized_status = status.strip().lower()
+        filtered = tuple(
+            entry
+            for entry in entries
+            if (not normalized_repository or entry.repository == normalized_repository)
+            and (not normalized_status or entry.owner_acceptance_decision.status == normalized_status)
+        )
+        from control_plane.owner_acceptance_queue import _now_utc
+        return OwnerAcceptanceQueueResponse(
+            trace_id=trace_id,
+            generated_at=_now_utc(),
+            entry_count=len(filtered),
+            entries=filtered,
+        )
+
     errors = {
         400: {"model": common.error_response_model},
         401: {"model": common.error_response_model},
@@ -307,5 +374,14 @@ def register_owner_acceptance_routes(
         response_model=OwnerAcceptanceEventReadResponse,
         tags=["owner-acceptance"],
         operation_id="read_owner_acceptance_event",
+        responses=errors,
+    )
+    app.add_api_route(
+        OWNER_ACCEPTANCE_QUEUE_ROUTE,
+        read_queue,
+        methods=["GET"],
+        response_model=OwnerAcceptanceQueueResponse,
+        tags=["owner-acceptance"],
+        operation_id="list_owner_acceptance_queue",
         responses=errors,
     )
