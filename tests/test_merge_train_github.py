@@ -535,7 +535,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                {"state": "success"},
+                _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
             )
         )
@@ -549,7 +549,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         self.assertEqual(
             [request.path for request in transport.requests],
             [
-                "/repos/example/merge-train-repo/commits/candidate-sha/status",
+                "/repos/example/merge-train-repo/commits/candidate-sha/status?per_page=100&page=1",
                 "/repos/example/merge-train-repo/commits/candidate-sha/check-runs?per_page=100&page=1",
             ],
         )
@@ -560,7 +560,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                {"state": "pending"},
+                _combined_status(state="pending"),
                 {"check_runs": [_check_run("queued", None)]},
             )
         )
@@ -578,13 +578,13 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         baseline_transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                {"state": "success"},
+                _combined_status(),
                 {"check_runs": [{"name": "ci-gate", **_check_run("completed", "success")}]},
             )
         )
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
-                {"state": "success"},
+                _combined_status(),
                 {
                     "check_runs": [
                         {"name": "ci-gate", **_check_run("completed", "success")},
@@ -598,6 +598,42 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         },
                     ]
                 },
+            )
+        )
+
+        observed_candidate = GitHubMergeTrainClient(
+            transport=transport
+        ).observe_batch_candidate_checks(candidate=candidate)
+        baseline_candidate = GitHubMergeTrainClient(
+            transport=baseline_transport
+        ).observe_batch_candidate_checks(candidate=candidate)
+
+        self.assertEqual(observed_candidate, baseline_candidate)
+
+    def test_observe_batch_candidate_checks_excludes_legacy_launchplane_status(self) -> None:
+        candidate = _batch_candidate().model_copy(
+            update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+        )
+        baseline_transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _combined_status(),
+                {"check_runs": [_check_run("completed", "success")]},
+            )
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {
+                    "state": "failure",
+                    "total_count": 2,
+                    "statuses": [
+                        {"context": "ci-status", "state": "success"},
+                        {
+                            "context": "launchplane/engineering-review-shadow",
+                            "state": "failure",
+                        },
+                    ],
+                },
+                {"check_runs": [_check_run("completed", "success")]},
             )
         )
 
@@ -1206,11 +1242,11 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 ],
                 _github_pull_request(42, mergeable=True),
                 {"permission": "admin"},
-                {"state": "success"},
+                _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
                 _github_pull_request(43, base_ref="feature-root", head_ref="feature-child"),
                 {"permission": "admin"},
-                {"state": "success"},
+                _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
             )
         )
@@ -1247,11 +1283,11 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 "/repos/cbusillo/sellyouroutboard/pulls?state=open&sort=created&direction=asc&per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/pulls/42",
                 "/repos/cbusillo/sellyouroutboard/collaborators/cbusillo/permission",
-                "/repos/cbusillo/sellyouroutboard/commits/head-42/status",
+                "/repos/cbusillo/sellyouroutboard/commits/head-42/status?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-42/check-runs?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/pulls/43",
                 "/repos/cbusillo/sellyouroutboard/collaborators/cbusillo/permission",
-                "/repos/cbusillo/sellyouroutboard/commits/head-43/status",
+                "/repos/cbusillo/sellyouroutboard/commits/head-43/status?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-43/check-runs?per_page=100&page=1",
             ],
         )
@@ -1266,7 +1302,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 [_github_pull_request(15, author_association="CONTRIBUTOR")],
                 _github_pull_request(15, author_association="CONTRIBUTOR"),
                 MergeTrainGitHubError("permission not found", status_code=404),
-                {"state": "success"},
+                _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
             )
         )
@@ -1284,7 +1320,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 [_github_pull_request(16)],
                 _github_pull_request(16),
                 {"permission": "admin"},
-                {"state": "success"},
+                _combined_status(),
                 {
                     "total_count": 101,
                     "check_runs": [_check_run("completed", "success") for _ in range(100)],
@@ -1306,6 +1342,48 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             ],
         )
 
+    def test_snapshot_reader_paginates_commit_statuses_before_computing_status(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(),
+                [_github_pull_request(17)],
+                _github_pull_request(17),
+                {"permission": "admin"},
+                {
+                    "state": "pending",
+                    "total_count": 101,
+                    "statuses": [
+                        {"context": f"ci-status-{index}", "state": "success"}
+                        for index in range(100)
+                    ],
+                },
+                {
+                    "state": "failure",
+                    "total_count": 101,
+                    "statuses": [
+                        {
+                            "context": "late-failing-status",
+                            "state": "failure",
+                        }
+                    ],
+                },
+                {"check_runs": [_check_run("completed", "success")]},
+            )
+        )
+
+        snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+
+        self.assertEqual(snapshot.pull_requests[0].required_checks_status, "fail")
+        self.assertEqual(
+            [request.path for request in transport.requests if "/status?" in request.path],
+            [
+                "/repos/cbusillo/sellyouroutboard/commits/head-17/status?per_page=100&page=1",
+                "/repos/cbusillo/sellyouroutboard/commits/head-17/status?per_page=100&page=2",
+            ],
+        )
+
     def test_snapshot_reader_paginates_pull_requests(self) -> None:
         first_page = [_github_pull_request(number) for number in range(1, 101)]
         second_page = [_github_pull_request(101)]
@@ -1315,7 +1393,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 [
                     _github_pull_request(number),
                     {"permission": "admin"},
-                    {"state": "success"},
+                    _combined_status(),
                     {"check_runs": [_check_run("completed", "success")]},
                 ]
             )
@@ -1335,7 +1413,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _github_branch(),
                 [_github_pull_request(12, author_association="OWNER")],
                 _github_pull_request(12, author_association="OWNER"),
-                {"state": "success"},
+                _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
             )
         )
@@ -1354,7 +1432,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 [_github_pull_request(13)],
                 _github_pull_request(13, mergeable=None, mergeable_state="behind"),
                 {"permission": "admin"},
-                {"state": "success"},
+                _combined_status(),
                 {"check_runs": [_check_run("queued", None)]},
             )
         )
@@ -1376,7 +1454,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 [_github_pull_request(14)],
                 _github_pull_request(14),
                 {"permission": "admin"},
-                {"state": "pending", "total_count": 0},
+                _combined_status(statuses=()),
                 {"check_runs": [_check_run("completed", "success")]},
             )
         )
@@ -1468,6 +1546,23 @@ def _landing_pull_request(
 
 def _github_branch(*, sha: str = "base-main-current") -> dict[str, object]:
     return {"commit": {"sha": sha}}
+
+
+def _combined_status(
+    *,
+    state: str = "success",
+    statuses: tuple[dict[str, object], ...] | None = None,
+) -> dict[str, object]:
+    resolved_statuses = (
+        statuses
+        if statuses is not None
+        else ({"context": "ci-status", "state": state},)
+    )
+    return {
+        "state": state if resolved_statuses else "pending",
+        "total_count": len(resolved_statuses),
+        "statuses": list(resolved_statuses),
+    }
 
 
 def _check_run(status: str, conclusion: str | None) -> dict[str, object]:

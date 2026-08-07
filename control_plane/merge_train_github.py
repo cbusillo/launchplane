@@ -1094,9 +1094,39 @@ def _base_branch_sha(
 
 
 def _combined_status_state(payload: dict[str, object]) -> MergeTrainCheckStatus:
-    if payload.get("total_count") == 0:
+    raw_statuses = payload.get("statuses")
+    if not isinstance(raw_statuses, list):
+        raise MergeTrainGitHubError("GitHub combined status response must include statuses.")
+    statuses: list[MergeTrainCheckStatus] = []
+    seen_contexts: set[str] = set()
+    for item in raw_statuses:
+        status = _json_object(item, "GitHub commit status")
+        context = _required_text(
+            status.get("context"), "GitHub commit status requires context."
+        )
+        normalized_context = context.casefold()
+        if (
+            is_launchplane_projected_check(context)
+            or normalized_context in seen_contexts
+        ):
+            continue
+        seen_contexts.add(normalized_context)
+        statuses.append(_commit_status_state(status))
+    if not statuses:
         return "unknown"
-    state = str(payload.get("state") or "").strip().lower()
+    if any(status == "fail" for status in statuses):
+        return "fail"
+    if any(status == "pending" for status in statuses):
+        return "pending"
+    if all(status == "pass" for status in statuses):
+        return "pass"
+    return "unknown"
+
+
+def _commit_status_state(payload: dict[str, object]) -> MergeTrainCheckStatus:
+    state = _required_text(
+        payload.get("state"), "GitHub commit status requires state."
+    ).lower()
     if state == "success":
         return "pass"
     if state in {"failure", "error"}:
@@ -1129,11 +1159,10 @@ def _required_checks_status(
     repository_path: str,
     encoded_head_sha: str,
 ) -> MergeTrainCheckStatus:
-    status_payload = _json_object(
-        transport.request(
-            method="GET", path=f"/repos/{repository_path}/commits/{encoded_head_sha}/status"
-        ),
-        "GitHub combined status response",
+    status_payload = _list_commit_statuses(
+        transport=transport,
+        repository_path=repository_path,
+        encoded_head_sha=encoded_head_sha,
     )
     check_runs_payload = _list_check_runs(
         transport=transport,
@@ -1143,6 +1172,46 @@ def _required_checks_status(
     return _combine_check_statuses(
         _combined_status_state(status_payload), _check_runs_status(check_runs_payload)
     )
+
+
+def _list_commit_statuses(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    encoded_head_sha: str,
+) -> dict[str, object]:
+    statuses: list[object] = []
+    total_count: int | None = None
+    page = 1
+    while True:
+        payload = _json_object(
+            transport.request(
+                method="GET",
+                path=(
+                    f"/repos/{repository_path}/commits/{encoded_head_sha}/status"
+                    f"?per_page=100&page={page}"
+                ),
+            ),
+            "GitHub combined status response",
+        )
+        raw_statuses = payload.get("statuses")
+        if not isinstance(raw_statuses, list):
+            raise MergeTrainGitHubError(
+                "GitHub combined status response must include statuses."
+            )
+        raw_total_count = payload.get("total_count")
+        if isinstance(raw_total_count, int):
+            total_count = raw_total_count
+        statuses.extend(raw_statuses)
+        if len(raw_statuses) < 100 or (
+            total_count is not None and len(statuses) >= total_count
+        ):
+            break
+        page += 1
+    return {
+        "total_count": total_count if total_count is not None else len(statuses),
+        "statuses": statuses,
+    }
 
 
 def _list_check_runs(
