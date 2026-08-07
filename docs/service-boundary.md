@@ -3506,6 +3506,35 @@ existing service route may use it as an authorization verdict in this slice.
 
 See `docs/product-owner-policy.md` for routes and persisted record contracts.
 
+## Owner Acceptance Shadow API
+
+`GET /v1/owner-acceptance/evaluation` accepts only `repository` and
+`pull_request_number` query parameters. Launchplane derives repository
+identity, head, tree, change-impact policy provenance, affected
+product/system/action/environment, and current Owner policy plus requirement
+provenance from service-owned providers and records. The pure read cannot
+consume a request body and does not expand the cookie-capable mutation route
+inventory. Engineering-only changes return `not_required` and write no event.
+Incomplete change-impact or Owner authority evidence fails closed.
+
+`POST /v1/owner-acceptance/events` uses the browser mutation identity path and
+requires a browser-authenticated GitHub human plus a bounded `Idempotency-Key`.
+The service then verifies that
+the immutable GitHub user ID is a current Owner for the affected exact scope
+before writing `accepted`, `changes_requested`, or `revoked`. Agents, workers,
+GitHub Actions, local operators, and other bearer identities cannot satisfy this
+route. Caller-owned head, tree, policy, Owner, or membership evidence is
+rejected by the bounded request contract. `GET
+/v1/owner-acceptance/events/{event_id}` reads the persisted append-only event
+through the same Owner-acceptance read authority.
+
+The ledger is append-only and shadow-only. Changed bound evidence or changed
+Owner policy/requirement/membership makes prior acceptance stale for the new
+binding. GitHub projection, frontend workbench, tenant-admission consumers,
+multi-product aggregation, verified preview/runtime binding, production
+authorization, and legacy manager cleanup remain out of scope. See
+`docs/owner-acceptance.md` for the full record and migration boundary.
+
 ## Change Impact Shadow API
 
 `POST /v1/change-impact/evaluation` accepts only a repository/pull-request

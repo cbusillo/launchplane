@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "f4a6c8e0b2d4"
+EXPECTED_ALEMBIC_HEAD_REVISION = "f3a5c7e9b1d4"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -189,6 +189,21 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_manager_preview_approval_events",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_events",
+        "owner_github_id",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_events",
+        "pr_number",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_events",
         "payload",
         ("jsonb",),
     ),
@@ -578,6 +593,28 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         ("approval_id", "occurred_at"),
     ),
     CriticalIndex(
+        "launchplane_owner_acceptance_events",
+        "launchplane_owner_acceptance_events_subject_idx",
+        (
+            "repository_id",
+            "pr_number",
+            "product",
+            "system",
+            "owner_action",
+            "occurred_at",
+        ),
+    ),
+    CriticalIndex(
+        "launchplane_owner_acceptance_events",
+        "launchplane_owner_acceptance_events_binding_idx",
+        ("binding_sha256", "occurred_at"),
+    ),
+    CriticalIndex(
+        "launchplane_owner_acceptance_events",
+        "launchplane_owner_acceptance_events_acceptance_idx",
+        ("acceptance_id", "occurred_at"),
+    ),
+    CriticalIndex(
         "launchplane_tenant_repository_classifications",
         "launchplane_tenant_repo_class_revision_uidx",
         ("repository_id", "classification_revision"),
@@ -751,6 +788,10 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     ),
     CriticalPrimaryKey(
         "launchplane_manager_preview_approval_events",
+        ("event_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_owner_acceptance_events",
         ("event_id",),
     ),
     CriticalPrimaryKey(

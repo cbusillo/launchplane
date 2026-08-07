@@ -252,6 +252,28 @@ The PostgreSQL tables are `launchplane_product_owner_policies`,
 `launchplane_product_owner_routing`. Migration `c1d2e3f4a5b6` creates these
 tables without inserting or inferring any owner data.
 
+## Owner Acceptance Event Records
+
+`OwnerAcceptanceEventRecord` is the append-only shadow ledger for exact-change
+Owner acceptance. Human-authored events are `accepted`, `changes_requested`, and
+`revoked`; `superseded` and `invalidated` are system-only. Human events require
+a browser-authenticated GitHub human who is a current Owner in the bound product
+Owner policy. Agents, workers, GitHub Actions, and local operator bearer
+identities cannot author or impersonate Owner events.
+
+Each event binding includes exact numeric GitHub repository identity, PR, head,
+tree, active change-impact policy provenance, product/system/action/environment,
+and active Owner policy plus requirement provenance. Changed head, tree, policy,
+requirement, or membership stales earlier acceptance for the new exact binding.
+Multi-product aggregation and verified preview/runtime binding remain deferred
+and fail closed rather than accepting partial or caller-owned evidence.
+
+Filesystem rehearsal records live under `launchplane_owner_acceptance_events/`.
+PostgreSQL stores the ledger in `launchplane_owner_acceptance_events` with an
+event-id primary key and subject, binding, and acceptance indexes. Migration
+`f3a5c7e9b1d4` creates the empty table and indexes without backfilling from
+GitHub comments, manager-preview approvals, or tenant admission evidence.
+
 ## Change Impact Policy Records
 
 `ChangeImpactPolicyRecord` stores repository-scoped component/path impact rules

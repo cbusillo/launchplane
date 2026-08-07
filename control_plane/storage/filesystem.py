@@ -46,6 +46,11 @@ from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalEventRecord,
     ManagerPreviewApprovalEventWriteStatus,
 )
+from control_plane.contracts.owner_acceptance import (
+    OwnerAcceptanceEventRecord,
+    OwnerAcceptanceEventWriteStatus,
+    owner_acceptance_event_replay_digest,
+)
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.merge_train_controller_state import (
@@ -148,6 +153,7 @@ from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
+from control_plane.owner_acceptance import OwnerAcceptanceEventConflictError
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.runtime_environment_record import (
@@ -2470,6 +2476,72 @@ class FilesystemRecordStore:
             and (pr_number is None or record.binding.pr_number == pr_number)
             and (not preview_id or record.binding.preview_id == preview_id)
             and (not action or record.action == action)
+        ]
+        records.sort(key=lambda record: (record.occurred_at, record.event_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_owner_acceptance_event_record(
+        self, record: OwnerAcceptanceEventRecord
+    ) -> OwnerAcceptanceEventWriteStatus:
+        record_type = "launchplane_owner_acceptance_events"
+        with self._product_authority_bundle_lock():
+            record_path = self._record_path(record_type, record.event_id)
+            if record_path.exists():
+                existing = self._read_model_locked(
+                    OwnerAcceptanceEventRecord,
+                    record_type,
+                    record.event_id,
+                )
+                if owner_acceptance_event_replay_digest(
+                    existing
+                ) != owner_acceptance_event_replay_digest(record):
+                    raise OwnerAcceptanceEventConflictError(
+                        "Owner acceptance event replay changed the persisted payload."
+                    )
+                return "replayed"
+            self._write_model_locked(record_type, record.event_id, record)
+            return "written"
+
+    def read_owner_acceptance_event_record(
+        self,
+        event_id: str,
+    ) -> OwnerAcceptanceEventRecord:
+        return self._read_model(
+            OwnerAcceptanceEventRecord,
+            "launchplane_owner_acceptance_events",
+            event_id,
+        )
+
+    def list_owner_acceptance_event_records(
+        self,
+        *,
+        repository_id: str = "",
+        repository: str = "",
+        pull_request_number: int | None = None,
+        product: str = "",
+        system: str = "",
+        action: str = "",
+        acceptance_action: str = "",
+        limit: int | None = None,
+    ) -> tuple[OwnerAcceptanceEventRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                OwnerAcceptanceEventRecord,
+                "launchplane_owner_acceptance_events",
+            )
+            if (not repository_id or record.binding.repository_id == repository_id.strip())
+            and (not repository or record.binding.repository == repository.lower())
+            and (
+                pull_request_number is None
+                or record.binding.pull_request_number == pull_request_number
+            )
+            and (not product or record.binding.product == product.strip())
+            and (not system or record.binding.system == system.strip())
+            and (not action or record.binding.action == action.strip())
+            and (not acceptance_action or record.action == acceptance_action.strip())
         ]
         records.sort(key=lambda record: (record.occurred_at, record.event_id), reverse=True)
         if limit is not None:

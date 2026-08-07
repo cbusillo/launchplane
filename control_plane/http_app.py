@@ -84,10 +84,13 @@ from control_plane.http_routes import (
     ChangeImpactWriteRouteDependencies,
     CHANGE_IMPACT_EVALUATION_ROUTE,
     CHANGE_IMPACT_POLICY_APPLY_ROUTE,
+    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+    OWNER_ACCEPTANCE_EVENTS_ROUTE,
     PRODUCT_OWNER_POLICY_APPLY_ROUTE,
     PRODUCT_OWNER_REQUIREMENT_APPLY_ROUTE,
     PRODUCT_OWNER_ROUTING_APPLY_ROUTE,
     ProductOwnerWriteRouteDependencies,
+    OwnerAcceptanceRouteDependencies,
     ProductReadRouteDependencies,
     PromotionEvidenceRequest as PromotionEvidenceRequest,
     ReadRouteDependencies,
@@ -117,6 +120,7 @@ from control_plane.http_routes import (
     register_inventory_operation_read_routes,
     register_managed_secret_read_routes,
     register_merge_train_read_routes,
+    register_owner_acceptance_routes,
     register_operation_status_read_routes,
     register_preview_notification_attempt_read_routes,
     register_preview_readiness_read_routes,
@@ -761,6 +765,7 @@ _TENANT_ADMISSION_CONTROLLER_RUN_ONCE_MAX_BODY_BYTES = 64 * 1024
 _TENANT_ADMISSION_STATUS_RECONCILE_MAX_BODY_BYTES = 64 * 1024
 _TRUSTED_MAINTENANCE_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_OWNER_POLICY_MAX_BODY_BYTES = 64 * 1024
+_OWNER_ACCEPTANCE_MAX_BODY_BYTES = 16 * 1024
 _CHANGE_IMPACT_EVALUATION_MAX_BODY_BYTES = 16 * 1024
 _CHANGE_IMPACT_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
@@ -851,6 +856,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     CHANGE_IMPACT_EVALUATION_ROUTE: (
         "Change impact evaluation",
         _CHANGE_IMPACT_EVALUATION_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    OWNER_ACCEPTANCE_EVENTS_ROUTE: (
+        "Owner acceptance event",
+        _OWNER_ACCEPTANCE_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -19977,6 +19988,16 @@ def create_launchplane_fastapi_app(
         dependencies=ChangeImpactReadRouteDependencies(
             common=read_route_dependencies,
             read_evaluation_identity=read_bearer_identity,
+            repository_evidence_provider=(
+                resolved_change_impact_repository_evidence_provider
+            ),
+        ),
+    )
+    register_owner_acceptance_routes(
+        app,
+        dependencies=OwnerAcceptanceRouteDependencies(
+            common=read_route_dependencies,
+            read_browser_mutation_identity=read_browser_mutation_identity,
             repository_evidence_provider=(
                 resolved_change_impact_repository_evidence_provider
             ),

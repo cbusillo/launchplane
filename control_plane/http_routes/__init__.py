@@ -77,6 +77,13 @@ from control_plane.http_routes.product_owner import (
     register_product_owner_read_routes,
     register_product_owner_write_routes,
 )
+from control_plane.http_routes.owner_acceptance import (
+    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+    OWNER_ACCEPTANCE_EVENT_ROUTE,
+    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+    OwnerAcceptanceRouteDependencies,
+    register_owner_acceptance_routes,
+)
 from control_plane.http_routes.runner_host_hygiene import (
     register_runner_host_hygiene_read_routes,
 )
@@ -128,6 +135,10 @@ __all__ = (
     "ProductReadRouteDependencies",
     "ChangeImpactWriteRouteDependencies",
     "ProductOwnerWriteRouteDependencies",
+    "OWNER_ACCEPTANCE_EVALUATION_ROUTE",
+    "OWNER_ACCEPTANCE_EVENT_ROUTE",
+    "OWNER_ACCEPTANCE_EVENTS_ROUTE",
+    "OwnerAcceptanceRouteDependencies",
     "PromotionEvidenceRequest",
     "PRODUCT_OWNER_POLICY_APPLY_ROUTE",
     "PRODUCT_OWNER_POLICY_READ_ROUTE",
@@ -178,6 +189,7 @@ __all__ = (
     "register_preview_readiness_read_routes",
     "register_product_owner_read_routes",
     "register_product_owner_write_routes",
+    "register_owner_acceptance_routes",
     "register_preview_record_read_routes",
     "register_product_config_status_read_routes",
     "register_product_context_audit_read_routes",

@@ -38,6 +38,11 @@ from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalBinding,
     ManagerPreviewApprovalEventRecord,
 )
+from control_plane.contracts.owner_acceptance import (
+    OwnerAcceptanceAuthorization,
+    OwnerAcceptanceBinding,
+    OwnerAcceptanceEventRecord,
+)
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
@@ -85,6 +90,7 @@ from control_plane.contracts.repository_human_admission import (
     TenantTechnicalHumanWaiverEventRecord,
 )
 from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
+from control_plane.owner_acceptance import OwnerAcceptanceEventConflictError
 from control_plane.repository_human_admission import (
     RepositoryHumanRolePolicyConflictError,
     TenantTechnicalHumanWaiverApplyEnvelope,
@@ -836,6 +842,50 @@ def _manager_preview_approval_event() -> ManagerPreviewApprovalEventRecord:
     )
 
 
+def _owner_acceptance_event() -> OwnerAcceptanceEventRecord:
+    occurred_at = "2026-08-07T12:00:00Z"
+    binding = OwnerAcceptanceBinding(
+        repository_id="1001",
+        repository_owner_id="2001",
+        repository="example/example-site",
+        pull_request_number=17,
+        head_sha="1" * 40,
+        tree_sha="2" * 40,
+        change_impact_policy_record_id="change-impact-policy-1001-r1",
+        change_impact_policy_revision=1,
+        change_impact_policy_digest="a" * 64,
+        product="example-site",
+        system="web",
+        action="pull_request.owner_acceptance",
+        environment="pull_request",
+        owner_policy_record_id="product-owner-policy-example-site-r1",
+        owner_policy_revision=1,
+        owner_policy_digest="b" * 64,
+        owner_requirement_record_id="product-owner-requirement-example-site-r1",
+        owner_requirement_revision=1,
+        owner_requirement_digest="c" * 64,
+    )
+    return OwnerAcceptanceEventRecord(
+        binding=binding,
+        action="accepted",
+        occurred_at=occurred_at,
+        source_event_kind="browser_api",
+        source_event_id="acceptance-101",
+        authorization=OwnerAcceptanceAuthorization(
+            owner_identity_id="owner-identity-github-example",
+            owner_github_id=101,
+            owner_login="owner",
+            owner_policy_record_id=binding.owner_policy_record_id,
+            owner_policy_revision=binding.owner_policy_revision,
+            owner_policy_digest=binding.owner_policy_digest,
+            owner_requirement_record_id=binding.owner_requirement_record_id,
+            owner_requirement_revision=binding.owner_requirement_revision,
+            owner_requirement_digest=binding.owner_requirement_digest,
+            authorized_at=occurred_at,
+        ),
+    )
+
+
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_repository_human_admission_schema_has_postgres_types_and_partial_index(
         self,
@@ -890,6 +940,35 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             )
             with self.assertRaises(ManagerPreviewApprovalEventConflictError):
                 store.write_manager_preview_approval_event_record(conflicting)
+
+    def test_owner_acceptance_events_persist_append_only(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            event = _owner_acceptance_event()
+
+            self.assertEqual(store.write_owner_acceptance_event_record(event), "written")
+            replay_payload = event.model_dump(mode="json")
+            replay_payload["occurred_at"] = "2026-08-07T12:01:00Z"
+            replay_payload["authorization"]["authorized_at"] = "2026-08-07T12:01:00Z"
+            replay = OwnerAcceptanceEventRecord.model_validate(replay_payload)
+            self.assertEqual(store.write_owner_acceptance_event_record(replay), "replayed")
+            self.assertEqual(store.read_owner_acceptance_event_record(event.event_id), event)
+            self.assertEqual(
+                store.list_owner_acceptance_event_records(
+                    repository_id="1001",
+                    repository="example/example-site",
+                    pull_request_number=17,
+                    product="example-site",
+                    system="web",
+                    action="pull_request.owner_acceptance",
+                ),
+                (event,),
+            )
+
+            conflicting = OwnerAcceptanceEventRecord.model_validate(
+                {**event.model_dump(mode="json"), "reason": "Conflicting replay."}
+            )
+            with self.assertRaises(OwnerAcceptanceEventConflictError):
+                store.write_owner_acceptance_event_record(conflicting)
 
     def test_full_release_upgrades_compatibility_floor_before_store_startup(self) -> None:
         with _isolated_postgres_database() as database_url:
