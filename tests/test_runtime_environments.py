@@ -2175,6 +2175,94 @@ ODOO_DB_PASSWORD = "file-secret"
             finally:
                 store.close()
 
+    def test_product_config_context_secret_uses_instance_safety_target(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            input_file = control_plane_root / "product-config.json"
+            _write_runtime_key_safety_policy(
+                database_url=database_url,
+                binding_key="GITHUB_TOKEN",
+                context_name="launchplane",
+                instance_name="prod",
+            )
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product": "launchplane",
+                        "context": "launchplane",
+                        "instance": "prod",
+                        "runtime_env": {
+                            "scope": "instance",
+                            "env": {"GITHUB_API_URL": "https://api.github.com"},
+                        },
+                        "secrets": [
+                            {
+                                "scope": "context",
+                                "name": "GITHUB_TOKEN",
+                                "binding_key": "GITHUB_TOKEN",
+                                "value": "github-token-value",
+                                "description": "Launchplane GitHub evidence token.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    "LAUNCHPLANE_SECRET_KEYS_JSON": json.dumps(
+                        {
+                            "active_key_id": "test-key",
+                            "keys": {"test-key": Fernet.generate_key().decode()},
+                        }
+                    ),
+                },
+                clear=True,
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "product-config",
+                        "apply",
+                        "--input-file",
+                        str(input_file),
+                        "--actor",
+                        "operator@example.com",
+                        "--source-label",
+                        "issue-2018-test",
+                        "--apply",
+                        "--allow-direct-db-mutation",
+                    ],
+                )
+                context_values = (
+                    control_plane_runtime_environments.resolve_runtime_context_values(
+                        control_plane_root=control_plane_root,
+                        context_name="launchplane",
+                    )
+                )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertNotIn("github-token-value", result.output)
+            self.assertEqual(context_values["GITHUB_TOKEN"], "github-token-value")
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                secret_record = next(
+                    record
+                    for record in store.list_secret_records()
+                    if record.name == "GITHUB_TOKEN"
+                )
+                self.assertEqual(secret_record.scope, "context")
+                self.assertEqual(secret_record.context, "launchplane")
+                self.assertEqual(secret_record.instance, "")
+            finally:
+                store.close()
+
     def test_product_config_apply_requires_direct_db_acknowledgement(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)

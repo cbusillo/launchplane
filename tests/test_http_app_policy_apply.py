@@ -1794,6 +1794,77 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(secret_records[0].name, "SMTP_PASSWORD")
         self.assertEqual(secret_binding.binding_key, "SMTP_PASSWORD")
 
+    async def test_product_config_apply_writes_context_secret_for_instance_safety_target(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(
+                database_url=database_url,
+                context_name="launchplane",
+                instance_name="prod",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="GITHUB_TOKEN",
+                        secret_class="prod_only",
+                        allowed_contexts=("launchplane",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(
+                    action="product_config.apply",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: app_store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "mode": "apply",
+                "product": "launchplane",
+                "context": "launchplane",
+                "instance": "prod",
+                "source_label": "issue-2018-test",
+                "runtime_env": {
+                    "scope": "instance",
+                    "env": {"GITHUB_API_URL": "https://api.github.com"},
+                },
+                "secrets": [
+                    {
+                        "scope": "context",
+                        "name": "GITHUB_TOKEN",
+                        "binding_key": "GITHUB_TOKEN",
+                        "value": "github-token-value",
+                        "description": "Launchplane GitHub evidence token.",
+                    }
+                ],
+            }
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                response = await _post_product_config_apply(
+                    app,
+                    request_payload,
+                    idempotency_key="context-secret-instance-safety-target",
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                secret_record = app_store.list_secret_records()[0]
+            app_store.close()
+
+        self.assertEqual(response.json()["result"]["runtime_key_safety"]["status"], "pass")
+        self.assertNotIn("github-token-value", response.text)
+        self.assertEqual(secret_record.scope, "context")
+        self.assertEqual(secret_record.context, "launchplane")
+        self.assertEqual(secret_record.instance, "")
+
     async def test_product_config_apply_reports_live_target_runtime_next_action(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
