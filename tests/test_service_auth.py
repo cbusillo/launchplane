@@ -286,10 +286,12 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
     def test_action_safety_classifies_privileged_action_families(self) -> None:
         cases = {
             "authz_diagnostic.evaluate": "read",
+            "owner_acceptance.read": "read",
             "product_environment.read": "read",
             "work_graph.rank": "read",
             "preview_pr_feedback_notification_attempt.read": "read",
             "preview_pr_feedback.write": "safe_write",
+            "owner_acceptance_event.write": "safe_write",
             "every_code_work_request.rerun": "safe_write",
             "product_config.apply": "mutation",
             "product_config.apply.secret": "secret_backed",
@@ -310,6 +312,7 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
         allowed_actions = (
             "product_environment.read",
             "work_graph.rank",
+            "owner_acceptance_event.write",
             "preview_pr_feedback.write",
         )
         denied_actions = (

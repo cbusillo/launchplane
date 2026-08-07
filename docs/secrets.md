@@ -77,6 +77,13 @@ title: Secrets
   generated preview caller rules in it. Product rules are planned from typed
   runtime input and persisted in the DB-backed `operator.generic-web-preview`
   managed set.
+- The protected `LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` secret
+  contains the complete `operator.owner-acceptance` GitHub-human desired set.
+  Bind every rule to immutable numeric GitHub user IDs and grant only the
+  `read_only` role, `launchplane` product, `owner-acceptance` context,
+  `owner_acceptance.read`, and `owner_acceptance_event.write`. Keep product
+  Owner membership in the independently managed Owner policy; this secret
+  grants workbench access but cannot satisfy Owner authority.
 
 ## DB-Backed Secret Resolution
 

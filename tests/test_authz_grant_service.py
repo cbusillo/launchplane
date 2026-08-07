@@ -561,6 +561,70 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 }
             )
 
+    def test_owner_acceptance_managed_set_enforces_minimum_human_boundary(self) -> None:
+        valid_rule = {
+            "managed_set_id": "operator.owner-acceptance",
+            "managed_rule_id": "owner.current",
+            "github_ids": [1001],
+            "roles": ["read_only"],
+            "products": ["launchplane"],
+            "contexts": ["owner-acceptance"],
+            "actions": ["owner_acceptance.read", "owner_acceptance_event.write"],
+        }
+        request_payload = {
+            "schema_version": 2,
+            "product": "launchplane",
+            "mode": "dry_run",
+            "managed_set_id": "operator.owner-acceptance",
+            "desired_policy": {
+                "schema_version": 2,
+                "github_humans": [valid_rule],
+            },
+        }
+
+        AuthzManagedPolicyReconcileEnvelope.model_validate(request_payload)
+
+        invalid_rules = (
+            ({**valid_rule, "github_ids": [], "logins": ["owner"]}, "immutable GitHub IDs"),
+            ({**valid_rule, "roles": ["admin"]}, "read_only role"),
+            ({**valid_rule, "products": ["other"]}, "exact Launchplane workbench scope"),
+            (
+                {**valid_rule, "actions": [*valid_rule["actions"], "product_config.apply"]},
+                "only the read and event-write actions",
+            ),
+        )
+        for invalid_rule, message in invalid_rules:
+            with self.subTest(message=message), self.assertRaisesRegex(ValidationError, message):
+                AuthzManagedPolicyReconcileEnvelope.model_validate(
+                    {
+                        **request_payload,
+                        "desired_policy": {
+                            "schema_version": 2,
+                            "github_humans": [invalid_rule],
+                        },
+                    }
+                )
+
+        with self.assertRaisesRegex(ValidationError, "only GitHub human rules"):
+            AuthzManagedPolicyReconcileEnvelope.model_validate(
+                {
+                    **request_payload,
+                    "desired_policy": {
+                        "schema_version": 2,
+                        "github_actions": [
+                            {
+                                "managed_set_id": "operator.owner-acceptance",
+                                "managed_rule_id": "worker.invalid",
+                                "repository": "cbusillo/launchplane",
+                                "repository_id": "1001",
+                                "repository_owner_id": "2001",
+                                "actions": ["owner_acceptance.read"],
+                            }
+                        ],
+                    },
+                }
+            )
+
     def test_managed_reconcile_requires_explicit_migration_and_adoption(self) -> None:
         current_record = _active_record()
         desired_policy = {

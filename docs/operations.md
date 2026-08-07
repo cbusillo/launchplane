@@ -432,8 +432,15 @@ policy-admin worker rules for the standalone authz wrapper and must declare the
 `operator.authz-policy-reconcile` managed-set identity;
 `LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` owns the generic
 GitHub-human manager preview approval writer set and must declare the exact
-`operator.manager-preview-approval` managed-set identity. Generic-web preview
-caller grants are no longer sourced from a per-product repository secret. The
+`operator.manager-preview-approval` managed-set identity;
+`LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` owns only the dedicated
+GitHub-human Owner Acceptance workbench grants and must declare the exact
+`operator.owner-acceptance` managed-set identity. Bind its rules to immutable
+numeric GitHub user IDs with the minimum `read_only` role and only
+`owner_acceptance.read` plus `owner_acceptance_event.write` for product
+`launchplane` and context `owner-acceptance`. Product Owner membership remains
+a separate server-side requirement for event writes. Generic-web preview caller
+grants are no longer sourced from a per-product repository secret. The
 typed product-onboarding planner derives repository identity, caller workflow
 refs, immutable Launchplane worker refs, products, contexts, events, and actions
 and submits the complete `operator.generic-web-preview` desired set through the
