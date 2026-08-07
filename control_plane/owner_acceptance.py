@@ -21,9 +21,14 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceDecisionStatus,
     OwnerAcceptanceEventRecord,
     OwnerAcceptanceEventWriteStatus,
+    OwnerAcceptancePreviewBinding,
     OwnerAcceptanceReasonCode,
     OwnerAcceptanceSourceEventKind,
+    owner_acceptance_runtime_identity_binding,
 )
+from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_owner import (
     ProductOwnerActionContext,
     ProductOwnerActorIdentity,
@@ -34,6 +39,9 @@ from control_plane.product_owner_service import (
     require_product_owner_requirement_read_store,
 )
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
+from control_plane.preview_serving_evidence import (
+    verify_serving_preview,
+)
 
 
 class OwnerAcceptanceEventConflictError(RuntimeError):
@@ -75,6 +83,21 @@ class OwnerAcceptanceEventStore(Protocol):
         self,
         event_id: str,
     ) -> OwnerAcceptanceEventRecord: ...
+
+
+class OwnerAcceptancePreviewReadStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewRecord, ...]: ...
+
+    def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord: ...
 
 
 class OwnerAcceptanceWriteResult(NamedTuple):
@@ -125,28 +148,78 @@ def evaluate_owner_acceptance(
             reason_code="multi_product_unsupported",
             evaluated_at=normalized_evaluated_at,
         )
-    binding = _binding_from_impact(
-        impact=impact,
-        product_index=0,
-        store=store,
-        actor=None,
-        evaluated_at=normalized_evaluated_at,
-    )
+    try:
+        binding = _binding_from_impact(
+            impact=impact,
+            product_index=0,
+            store=store,
+            actor=None,
+            evaluated_at=normalized_evaluated_at,
+        )
+    except OwnerAcceptanceEvaluationUnavailableError:
+        affected_product = impact.affected_products[0]
+        preview_events = tuple(
+            event
+            for event in require_owner_acceptance_event_store(
+                store
+            ).list_owner_acceptance_event_records(
+                repository_id=impact.target.repository_id,
+                pull_request_number=impact.target.pull_request_number,
+                product=affected_product.product,
+                system=affected_product.system,
+                action=affected_product.owner_action,
+            )
+            if event.binding.preview is not None and event.occurred_at <= normalized_evaluated_at
+        )
+        if preview_events:
+            current_event = max(
+                preview_events,
+                key=lambda event: (event.occurred_at, event.event_id),
+            )
+            return _decision(
+                status="stale",
+                reason_code="preview_evidence_stale",
+                binding=current_event.binding,
+                event=current_event,
+                evaluated_at=normalized_evaluated_at,
+            )
+        return _decision(
+            status="unavailable",
+            reason_code="preview_evidence_unavailable",
+            evaluated_at=normalized_evaluated_at,
+        )
     if binding is None:
         return _decision(
             status="unavailable",
             reason_code="owner_authority_unavailable",
             evaluated_at=normalized_evaluated_at,
         )
+    events = require_owner_acceptance_event_store(store).list_owner_acceptance_event_records(
+        repository_id=binding.repository_id,
+        pull_request_number=binding.pull_request_number,
+        product=binding.product,
+        system=binding.system,
+        action=binding.action,
+    )
+    effective_preview_events = tuple(
+        event
+        for event in events
+        if event.binding.preview is not None and event.occurred_at <= normalized_evaluated_at
+    )
+    if binding.preview is None and effective_preview_events:
+        return _decision(
+            status="stale",
+            reason_code="preview_evidence_stale",
+            binding=binding,
+            event=max(
+                effective_preview_events,
+                key=lambda event: (event.occurred_at, event.event_id),
+            ),
+            evaluated_at=normalized_evaluated_at,
+        )
     return evaluate_owner_acceptance_for_binding(
         binding=binding,
-        events=require_owner_acceptance_event_store(store).list_owner_acceptance_event_records(
-            repository_id=binding.repository_id,
-            pull_request_number=binding.pull_request_number,
-            product=binding.product,
-            system=binding.system,
-            action=binding.action,
-        ),
+        events=events,
         evaluated_at=normalized_evaluated_at,
     )
 
@@ -229,6 +302,17 @@ def record_owner_acceptance_event(
         authorization=authorization,
     )
     event_store = require_owner_acceptance_event_store(store)
+    prior_events = event_store.list_owner_acceptance_event_records(
+        repository_id=binding.repository_id,
+        pull_request_number=binding.pull_request_number,
+        product=binding.product,
+        system=binding.system,
+        action=binding.action,
+    )
+    if binding.preview is None and any(event.binding.preview is not None for event in prior_events):
+        raise OwnerAcceptanceEvaluationUnavailableError(
+            "Preview-bound Owner acceptance cannot downgrade to an exact-change-only binding."
+        )
     write_status = event_store.write_owner_acceptance_event_record(record)
     if write_status == "replayed":
         record = event_store.read_owner_acceptance_event_record(record.event_id)
@@ -349,6 +433,17 @@ def require_owner_acceptance_event_store(store: object) -> OwnerAcceptanceEventS
     return cast(OwnerAcceptanceEventStore, store)
 
 
+def require_owner_acceptance_preview_read_store(store: object) -> OwnerAcceptancePreviewReadStore:
+    for method_name in (
+        "read_product_profile_record",
+        "list_preview_records",
+        "read_preview_generation_record",
+    ):
+        if not callable(getattr(store, method_name, None)):
+            raise TypeError("Owner acceptance preview evidence storage is unavailable.")
+    return cast(OwnerAcceptancePreviewReadStore, store)
+
+
 def _evaluate_change_impact_for_target(
     *,
     store: object,
@@ -460,6 +555,13 @@ def _binding_from_impact(
         or not authority.requirement_digest
     ):
         return None
+    preview = _resolve_owner_acceptance_preview_binding(
+        store=store,
+        product=context.product,
+        repository=impact.target.repository,
+        pull_request_number=impact.target.pull_request_number,
+        head_sha=impact.target.head_sha,
+    )
     binding = OwnerAcceptanceBinding(
         repository_id=impact.target.repository_id,
         repository_owner_id=impact.target.repository_owner_id,
@@ -480,6 +582,7 @@ def _binding_from_impact(
         owner_requirement_record_id=authority.requirement_record_id,
         owner_requirement_revision=authority.requirement_revision,
         owner_requirement_digest=authority.requirement_digest,
+        preview=preview,
     )
     if (
         expected_binding_sha256
@@ -504,6 +607,80 @@ def _binding_from_impact(
         if actor_authority.decision != "authorized":
             raise OwnerAcceptanceAuthorizationError("Caller is not a current product Owner.")
     return binding
+
+
+def _resolve_owner_acceptance_preview_binding(
+    *,
+    store: object,
+    product: str,
+    repository: str,
+    pull_request_number: int,
+    head_sha: str,
+) -> OwnerAcceptancePreviewBinding | None:
+    preview_store = require_owner_acceptance_preview_read_store(store)
+    try:
+        profile = preview_store.read_product_profile_record(product)
+    except (FileNotFoundError, LookupError):
+        return None
+    except ValueError as error:
+        raise OwnerAcceptanceEvaluationUnavailableError(
+            "Owner acceptance product profile is unavailable or invalid."
+        ) from error
+    if not profile.preview.enabled:
+        return None
+    if profile.repository.strip().casefold() != repository.strip().casefold():
+        raise OwnerAcceptanceEvaluationUnavailableError(
+            "Preview product profile does not match the exact-change repository."
+        )
+    repository_name = repository.split("/", 1)[-1].casefold()
+    previews = tuple(
+        preview
+        for preview in preview_store.list_preview_records(
+            context_name=profile.preview.context,
+            anchor_pr_number=pull_request_number,
+        )
+        if preview.anchor_repo.strip().casefold() in {repository.casefold(), repository_name}
+        and preview.state == "active"
+    )
+    if not previews:
+        raise OwnerAcceptanceEvaluationUnavailableError(
+            "Owner acceptance requires an active serving preview for this product."
+        )
+    if len(previews) != 1:
+        raise OwnerAcceptanceEvaluationUnavailableError(
+            "Owner acceptance requires exactly one unambiguous serving preview."
+        )
+    preview = previews[0]
+    if not preview.serving_generation_id.strip():
+        raise OwnerAcceptanceEvaluationUnavailableError(
+            "Owner acceptance preview does not have a serving generation."
+        )
+    try:
+        generation = preview_store.read_preview_generation_record(preview.serving_generation_id)
+        evidence = verify_serving_preview(
+            product=product,
+            preview=preview,
+            generation=generation,
+            require_runtime_generation_id=True,
+        )
+        if evidence.head_sha.strip().lower() != head_sha.strip().lower():
+            raise OwnerAcceptanceEvaluationUnavailableError(
+                "Owner acceptance preview does not serve the current pull request head."
+            )
+        return OwnerAcceptancePreviewBinding(
+            context=evidence.context,
+            preview_id=evidence.preview_id,
+            serving_generation_id=evidence.serving_generation_id,
+            artifact_id=evidence.artifact_id,
+            artifact_image_digest=evidence.artifact_image_digest,
+            manifest_fingerprint=evidence.manifest_fingerprint,
+            preview_url=evidence.preview_url,
+            runtime_identity=owner_acceptance_runtime_identity_binding(evidence.runtime_identity),
+        )
+    except (FileNotFoundError, LookupError, ValueError) as error:
+        raise OwnerAcceptanceEvaluationUnavailableError(
+            "Owner acceptance preview evidence is unavailable or invalid."
+        ) from error
 
 
 def _decision(

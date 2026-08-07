@@ -263,16 +263,23 @@ identities cannot author or impersonate Owner events.
 
 Each event binding includes exact numeric GitHub repository identity, PR, head,
 tree, active change-impact policy provenance, product/system/action/environment,
-and active Owner policy plus requirement provenance. Changed head, tree, policy,
-requirement, or membership stales earlier acceptance for the new exact binding.
-Multi-product aggregation and verified preview/runtime binding remain deferred
-and fail closed rather than accepting partial or caller-owned evidence.
+and active Owner policy plus requirement provenance. When an enabled product
+preview has one active serving record, the binding also embeds preview and
+generation IDs, immutable artifact image digest, manifest fingerprint,
+canonical URL, and an explicit verified-runtime identity projection. Changed
+head, tree, policy, requirement, membership, preview generation, artifact,
+manifest, URL, or runtime identity stales earlier acceptance for the new exact
+binding. Multi-product aggregation remains deferred and fails closed rather
+than accepting partial evidence.
 
 Filesystem rehearsal records live under `launchplane_owner_acceptance_events/`.
 PostgreSQL stores the ledger in `launchplane_owner_acceptance_events` with an
 event-id primary key and subject, binding, and acceptance indexes. Migration
 `f3a5c7e9b1d4` creates the empty table and indexes without backfilling from
 GitHub comments, manager-preview approvals, or tenant admission evidence.
+Optional preview evidence lives inside the existing JSONB payload, so this
+additive slice requires no new schema migration. Non-preview payloads omit the
+field and preserve the original #2022 binding and replay digests.
 
 ## Change Impact Policy Records
 

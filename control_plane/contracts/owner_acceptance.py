@@ -5,8 +5,15 @@ import hashlib
 import json
 import re
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from control_plane.contracts.artifact_dependency_provenance import (
+    normalize_artifact_sha256_digest,
+)
+from control_plane.contracts.deploy_reference import docker_image_digest
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 
 OWNER_ACCEPTANCE_READ_ACTION = "owner_acceptance.read"
 OWNER_ACCEPTANCE_EVENT_WRITE_ACTION = "owner_acceptance_event.write"
@@ -39,6 +46,8 @@ OwnerAcceptanceReasonCode = Literal[
     "multi_product_unsupported",
     "owner_authority_unavailable",
     "owner_authority_denied",
+    "preview_evidence_unavailable",
+    "preview_evidence_stale",
 ]
 OwnerAcceptanceEventWriteStatus = Literal["written", "replayed"]
 OwnerAcceptanceSourceEventKind = Literal["browser_api", "system"]
@@ -97,6 +106,14 @@ def _normalize_timestamp(value: str, field_name: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+def _normalize_http_url(value: str, field_name: str) -> str:
+    normalized = _required_token(value, field_name)
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{field_name} must be an absolute HTTP(S) URL")
+    return normalized
+
+
 def _canonical_sha256(payload: object) -> str:
     encoded = json.dumps(
         payload,
@@ -105,6 +122,135 @@ def _canonical_sha256(payload: object) -> str:
         ensure_ascii=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+class OwnerAcceptanceRuntimeIdentityBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    instance: str
+    environment_kind: str
+    deployment_record_id: str
+    artifact_id: str
+    source_git_ref: str
+    image_reference: str
+    release_tuple_id: str = ""
+    preview_id: str
+    preview_generation_id: str
+    runtime_identity_sha256: str = ""
+
+    @model_validator(mode="after")
+    def _validate_runtime_identity(self) -> "OwnerAcceptanceRuntimeIdentityBinding":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Owner acceptance runtime identity schema version.")
+        for field_name in (
+            "product",
+            "context",
+            "instance",
+            "environment_kind",
+            "deployment_record_id",
+            "artifact_id",
+            "preview_id",
+            "preview_generation_id",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _required_token(str(getattr(self, field_name)), field_name),
+            )
+        object.__setattr__(
+            self,
+            "source_git_ref",
+            _normalize_git_sha(self.source_git_ref, "source_git_ref"),
+        )
+        object.__setattr__(
+            self,
+            "image_reference",
+            _required_token(self.image_reference, "image_reference"),
+        )
+        object.__setattr__(self, "release_tuple_id", self.release_tuple_id.strip())
+        computed_digest = owner_acceptance_runtime_identity_sha256(self)
+        if self.runtime_identity_sha256:
+            normalized_digest = _normalize_sha256(
+                self.runtime_identity_sha256,
+                "runtime_identity_sha256",
+            )
+            if normalized_digest != computed_digest:
+                raise ValueError("Owner acceptance runtime identity digest does not match payload")
+            object.__setattr__(self, "runtime_identity_sha256", normalized_digest)
+        else:
+            object.__setattr__(self, "runtime_identity_sha256", computed_digest)
+        return self
+
+
+class OwnerAcceptancePreviewBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    context: str
+    preview_id: str
+    serving_generation_id: str
+    artifact_id: str
+    artifact_image_digest: str
+    manifest_fingerprint: str
+    preview_url: str
+    runtime_identity: OwnerAcceptanceRuntimeIdentityBinding
+
+    @model_validator(mode="after")
+    def _validate_preview(self) -> "OwnerAcceptancePreviewBinding":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Owner acceptance preview binding schema version.")
+        for field_name in (
+            "context",
+            "preview_id",
+            "serving_generation_id",
+            "artifact_id",
+            "manifest_fingerprint",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _required_token(str(getattr(self, field_name)), field_name),
+            )
+        object.__setattr__(
+            self,
+            "artifact_image_digest",
+            _required_token(self.artifact_image_digest, "artifact_image_digest").lower(),
+        )
+        object.__setattr__(
+            self,
+            "preview_url",
+            _normalize_http_url(self.preview_url, "preview_url"),
+        )
+        runtime = self.runtime_identity
+        mismatches = []
+        if runtime.context.casefold() != self.context.casefold():
+            mismatches.append("context")
+        if runtime.artifact_id.casefold() != self.artifact_id.casefold():
+            mismatches.append("artifact_id")
+        if runtime.preview_id != self.preview_id:
+            mismatches.append("preview_id")
+        if runtime.preview_generation_id != self.serving_generation_id:
+            mismatches.append("preview_generation_id")
+        if runtime.environment_kind.casefold() != "preview":
+            mismatches.append("environment_kind")
+        image_digest = docker_image_digest(runtime.image_reference)
+        if not image_digest or normalize_artifact_sha256_digest(
+            image_digest,
+            label="Owner acceptance preview runtime image digest",
+        ) != normalize_artifact_sha256_digest(
+            self.artifact_image_digest,
+            label="Owner acceptance preview artifact image digest",
+        ):
+            mismatches.append("artifact_image_digest")
+        if mismatches:
+            raise ValueError(
+                "Owner acceptance preview runtime identity mismatched fields: "
+                + ", ".join(mismatches)
+            )
+        return self
 
 
 class OwnerAcceptanceBinding(BaseModel):
@@ -130,6 +276,7 @@ class OwnerAcceptanceBinding(BaseModel):
     owner_requirement_record_id: str
     owner_requirement_revision: int = Field(ge=1)
     owner_requirement_digest: str
+    preview: OwnerAcceptancePreviewBinding | None = None
     binding_sha256: str = ""
 
     @model_validator(mode="after")
@@ -169,6 +316,16 @@ class OwnerAcceptanceBinding(BaseModel):
                 field_name,
                 _normalize_sha256(str(getattr(self, field_name)), field_name),
             )
+        if self.preview is not None:
+            mismatches = []
+            if self.preview.runtime_identity.product.casefold() != self.product.casefold():
+                mismatches.append("product")
+            if self.preview.runtime_identity.source_git_ref != self.head_sha:
+                mismatches.append("head_sha")
+            if mismatches:
+                raise ValueError(
+                    "Owner acceptance preview binding mismatched fields: " + ", ".join(mismatches)
+                )
         computed_binding = owner_acceptance_binding_sha256(self)
         if self.binding_sha256:
             normalized_binding = _normalize_sha256(self.binding_sha256, "binding_sha256")
@@ -358,6 +515,44 @@ def owner_acceptance_binding_sha256(binding: OwnerAcceptanceBinding) -> str:
             exclude={"binding_sha256"},
             exclude_none=True,
         )
+    )
+
+
+def owner_acceptance_runtime_identity_sha256(
+    identity: OwnerAcceptanceRuntimeIdentityBinding | RuntimeIdentity,
+) -> str:
+    payload = {
+        "schema_version": 1,
+        "product": identity.product,
+        "context": identity.context,
+        "instance": identity.instance,
+        "environment_kind": identity.environment_kind,
+        "deployment_record_id": identity.deployment_record_id,
+        "artifact_id": identity.artifact_id,
+        "source_git_ref": identity.source_git_ref,
+        "image_reference": identity.image_reference,
+        "release_tuple_id": identity.release_tuple_id,
+        "preview_id": identity.preview_id,
+        "preview_generation_id": identity.preview_generation_id,
+    }
+    return _canonical_sha256(payload)
+
+
+def owner_acceptance_runtime_identity_binding(
+    identity: RuntimeIdentity,
+) -> OwnerAcceptanceRuntimeIdentityBinding:
+    return OwnerAcceptanceRuntimeIdentityBinding(
+        product=identity.product,
+        context=identity.context,
+        instance=identity.instance,
+        environment_kind=identity.environment_kind,
+        deployment_record_id=identity.deployment_record_id,
+        artifact_id=identity.artifact_id,
+        source_git_ref=identity.source_git_ref,
+        image_reference=identity.image_reference,
+        release_tuple_id=identity.release_tuple_id,
+        preview_id=identity.preview_id,
+        preview_generation_id=identity.preview_generation_id,
     )
 
 

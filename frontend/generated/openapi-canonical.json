@@ -11438,6 +11438,16 @@
             "title": "Owner Requirement Revision",
             "type": "integer"
           },
+          "preview": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OwnerAcceptancePreviewBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "product": {
             "title": "Product",
             "type": "string"
@@ -11555,7 +11565,9 @@
               "change_impact_stale",
               "multi_product_unsupported",
               "owner_authority_unavailable",
-              "owner_authority_denied"
+              "owner_authority_denied",
+              "preview_evidence_unavailable",
+              "preview_evidence_stale"
             ],
             "title": "Reason Code",
             "type": "string"
@@ -11790,6 +11802,135 @@
           "decision"
         ],
         "title": "OwnerAcceptanceEventResponse",
+        "type": "object"
+      },
+      "OwnerAcceptancePreviewBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "artifact_image_digest": {
+            "title": "Artifact Image Digest",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "manifest_fingerprint": {
+            "title": "Manifest Fingerprint",
+            "type": "string"
+          },
+          "preview_id": {
+            "title": "Preview Id",
+            "type": "string"
+          },
+          "preview_url": {
+            "title": "Preview Url",
+            "type": "string"
+          },
+          "runtime_identity": {
+            "$ref": "#/components/schemas/OwnerAcceptanceRuntimeIdentityBinding"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "serving_generation_id": {
+            "title": "Serving Generation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "preview_id",
+          "serving_generation_id",
+          "artifact_id",
+          "artifact_image_digest",
+          "manifest_fingerprint",
+          "preview_url",
+          "runtime_identity"
+        ],
+        "title": "OwnerAcceptancePreviewBinding",
+        "type": "object"
+      },
+      "OwnerAcceptanceRuntimeIdentityBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "deployment_record_id": {
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "environment_kind": {
+            "title": "Environment Kind",
+            "type": "string"
+          },
+          "image_reference": {
+            "title": "Image Reference",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "preview_generation_id": {
+            "title": "Preview Generation Id",
+            "type": "string"
+          },
+          "preview_id": {
+            "title": "Preview Id",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "release_tuple_id": {
+            "default": "",
+            "title": "Release Tuple Id",
+            "type": "string"
+          },
+          "runtime_identity_sha256": {
+            "default": "",
+            "title": "Runtime Identity Sha256",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_git_ref": {
+            "title": "Source Git Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "environment_kind",
+          "deployment_record_id",
+          "artifact_id",
+          "source_git_ref",
+          "image_reference",
+          "preview_id",
+          "preview_generation_id"
+        ],
+        "title": "OwnerAcceptanceRuntimeIdentityBinding",
         "type": "object"
       },
       "PostDeployUpdateEvidence": {
