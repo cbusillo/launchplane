@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -334,12 +335,15 @@ class ChangeImpactEvaluationTests(unittest.TestCase):
             )
 
     def test_dry_run_rejects_future_effective_policy(self) -> None:
+        future_effective_at = (
+            datetime.now(timezone.utc) + timedelta(days=1)
+        ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(Path(directory))
             with self.assertRaises(ChangeImpactPolicySequenceError):
                 apply_change_impact_policy(
                     store=store,
-                    record=_policy(effective_at="2026-08-07T00:00:00Z"),
+                    record=_policy(effective_at=future_effective_at),
                     mode="dry_run",
                 )
 
