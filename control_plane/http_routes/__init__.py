@@ -81,6 +81,7 @@ from control_plane.http_routes.owner_acceptance import (
     OWNER_ACCEPTANCE_EVALUATION_ROUTE,
     OWNER_ACCEPTANCE_EVENT_ROUTE,
     OWNER_ACCEPTANCE_EVENTS_ROUTE,
+    OWNER_ACCEPTANCE_PROJECT_ROUTE,
     OwnerAcceptanceRouteDependencies,
     register_owner_acceptance_routes,
 )
@@ -138,6 +139,7 @@ __all__ = (
     "OWNER_ACCEPTANCE_EVALUATION_ROUTE",
     "OWNER_ACCEPTANCE_EVENT_ROUTE",
     "OWNER_ACCEPTANCE_EVENTS_ROUTE",
+    "OWNER_ACCEPTANCE_PROJECT_ROUTE",
     "OwnerAcceptanceRouteDependencies",
     "PromotionEvidenceRequest",
     "PRODUCT_OWNER_POLICY_APPLY_ROUTE",

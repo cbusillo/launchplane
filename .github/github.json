@@ -27,6 +27,7 @@
     "secrets": "docs/secrets.md",
     "githubActionsSecurity": "docs/github-actions-security.md",
     "dependencyHealthContract": "docs/dependency-health-contract.md",
+    "advisoryGovernanceChecks": "docs/advisory-governance-checks.md",
     "publicReadiness": "docs/public-readiness.md",
     "style": ["docs/style/python.md", "docs/style/testing.md"],
     "policies": ["docs/policies/coding-standards.md"]

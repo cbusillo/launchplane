@@ -18,7 +18,6 @@ from control_plane.contracts.engineering_review_decision import (
 )
 from control_plane.engineering_review_decision_projection import (
     EngineeringReviewDecisionProjectionError,
-    GitHubApiRequest,
     project_engineering_review_decision,
 )
 from control_plane.engineering_review_decision_service import (
@@ -27,6 +26,11 @@ from control_plane.engineering_review_decision_service import (
     require_engineering_review_decision_store,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.github_app_identity import (
+    GitHubAppIdentityError,
+    GitHubAppInstallationToken,
+    revoke_installation_token,
+)
 from control_plane.service_auth import LaunchplaneIdentity
 
 
@@ -54,8 +58,8 @@ class EngineeringReviewDecisionRouteDependencies:
     http_error: Callable[..., Exception]
     error_response_model: type[BaseModel]
     repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider
-    github_token: Callable[[], str]
-    github_api: GitHubApiRequest
+    github_app_token: Callable[[str, str], GitHubAppInstallationToken]
+    github_api: Callable[..., object]
 
 
 def register_engineering_review_decision_routes(
@@ -80,9 +84,7 @@ def register_engineering_review_decision_routes(
 
     async def evaluate(
         request: EngineeringReviewDecisionRequest,
-        identity: Annotated[
-            LaunchplaneIdentity, Depends(write_dependencies.read_write_identity)
-        ],
+        identity: Annotated[LaunchplaneIdentity, Depends(write_dependencies.read_write_identity)],
         record_store: Annotated[object, Depends(write_dependencies.get_record_store)],
     ) -> EngineeringReviewDecisionResponse:
         trace_id = write_dependencies.next_trace_id()
@@ -91,9 +93,7 @@ def register_engineering_review_decision_routes(
             decision, created = evaluate_engineering_review_decision(
                 store=require_engineering_review_decision_store(record_store),
                 request=request,
-                repository_evidence_provider=(
-                    write_dependencies.repository_evidence_provider
-                ),
+                repository_evidence_provider=(write_dependencies.repository_evidence_provider),
             )
         except FileNotFoundError as error:
             raise write_dependencies.http_error(
@@ -153,18 +153,14 @@ def register_engineering_review_decision_routes(
 
     async def project(
         request: EngineeringReviewDecisionProjectionRequest,
-        identity: Annotated[
-            LaunchplaneIdentity, Depends(write_dependencies.read_write_identity)
-        ],
+        identity: Annotated[LaunchplaneIdentity, Depends(write_dependencies.read_write_identity)],
         record_store: Annotated[object, Depends(write_dependencies.get_record_store)],
     ) -> EngineeringReviewDecisionProjectionResponse:
         trace_id = write_dependencies.next_trace_id()
         authorize(identity, ENGINEERING_REVIEW_DECISION_PROJECT_ACTION, trace_id)
         try:
             decision_store = require_engineering_review_decision_store(record_store)
-            decision = decision_store.read_engineering_review_decision_record(
-                request.decision_id
-            )
+            decision = decision_store.read_engineering_review_decision_record(request.decision_id)
             latest = decision_store.list_engineering_review_decision_records(
                 repository=decision.target.repository,
                 pull_request_number=decision.target.pull_request_number,
@@ -186,16 +182,21 @@ def register_engineering_review_decision_routes(
                 raise EngineeringReviewDecisionProjectionError(
                     "Engineering review projection target is stale."
                 )
-            token = write_dependencies.github_token().strip()
-            if not token:
-                raise EngineeringReviewDecisionProjectionError(
-                    "Engineering review projection token is unavailable."
-                )
-            result = project_engineering_review_decision(
-                record=decision,
-                token=token,
-                api_request=write_dependencies.github_api,
+            installation_token = write_dependencies.github_app_token(
+                decision.target.repository,
+                decision.target.repository_id,
             )
+            try:
+                result = project_engineering_review_decision(
+                    record=decision,
+                    installation_token=installation_token,
+                    api_request=write_dependencies.github_api,
+                )
+            finally:
+                revoke_installation_token(
+                    installation_token=installation_token,
+                    api_request=write_dependencies.github_api,
+                )
         except FileNotFoundError as error:
             raise write_dependencies.http_error(
                 status_code=404,
@@ -203,7 +204,7 @@ def register_engineering_review_decision_routes(
                 code="not_found",
                 message=str(error),
             ) from error
-        except EngineeringReviewDecisionProjectionError as error:
+        except (EngineeringReviewDecisionProjectionError, GitHubAppIdentityError) as error:
             raise write_dependencies.http_error(
                 status_code=503,
                 trace_id=trace_id,

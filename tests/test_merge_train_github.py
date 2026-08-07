@@ -572,6 +572,44 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         self.assertEqual(observed_candidate.status, "ready_for_checks")
         self.assertEqual(observed_candidate.required_checks_status, "pending")
 
+    def test_observe_batch_candidate_checks_excludes_launchplane_advisory_runs(self) -> None:
+        candidate = _batch_candidate().model_copy(
+            update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+        )
+        baseline_transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"state": "success"},
+                {"check_runs": [{"name": "ci-gate", **_check_run("completed", "success")}]},
+            )
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"state": "success"},
+                {
+                    "check_runs": [
+                        {"name": "ci-gate", **_check_run("completed", "success")},
+                        {
+                            "name": "launchplane/engineering-review",
+                            **_check_run("queued", None),
+                        },
+                        {
+                            "name": "launchplane/owner-acceptance",
+                            **_check_run("completed", "failure"),
+                        },
+                    ]
+                },
+            )
+        )
+
+        observed_candidate = GitHubMergeTrainClient(
+            transport=transport
+        ).observe_batch_candidate_checks(candidate=candidate)
+        baseline_candidate = GitHubMergeTrainClient(
+            transport=baseline_transport
+        ).observe_batch_candidate_checks(candidate=candidate)
+
+        self.assertEqual(observed_candidate, baseline_candidate)
+
     def test_land_batch_candidate_merges_original_prs_in_order(self) -> None:
         landing_plan = _landing_plan()
         checkpoints: list[tuple[str, int, int]] = []

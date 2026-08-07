@@ -207,10 +207,22 @@ same idempotency key, and `409 owner_acceptance_binding_changed` refreshes the
 Current evaluation without auto-resubmitting. Every receipt remains shadow,
 non-authoritative, and has no merge or production enforcement effect.
 
+## Advisory GitHub Projection
+
+`POST /v1/owner-acceptance/project` projects the current aggregate decision as
+the stable `launchplane/owner-acceptance` GitHub App check run. The caller
+supplies only repository and pull-request reference. Launchplane derives every
+product decision and exact binding, rechecks the current target before the
+provider write, and uses the decision digest as the check-run `external_id`.
+
+The completed check conclusion is always `neutral`; the output lists the
+aggregate state plus each affected product and binding. The check remains
+shadow-only, is excluded from Launchplane merge/admission technical inputs, and
+cannot become Owner authority.
+
 ## Out Of Scope
 
 - production authorization and promotion consumers
-- GitHub status projection
 - tenant-admission cutover
 - manager/delegate cleanup
 - break-glass acceptance

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, Callable, cast
 import unittest
 
 from fastapi import FastAPI, HTTPException
@@ -12,9 +12,11 @@ from control_plane.http_routes.owner_acceptance import (
     OWNER_ACCEPTANCE_EVALUATION_ROUTE,
     OWNER_ACCEPTANCE_EVENT_ROUTE,
     OWNER_ACCEPTANCE_EVENTS_ROUTE,
+    OWNER_ACCEPTANCE_PROJECT_ROUTE,
     OwnerAcceptanceRouteDependencies,
     register_owner_acceptance_routes,
 )
+from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.service_auth import (
     GitHubHumanIdentity,
@@ -27,6 +29,7 @@ from tests.test_owner_acceptance import (
     REPOSITORY,
     SECOND_PRODUCT,
     _EvidenceProvider,
+    REPOSITORY_ID,
     _human,
     _repository_evidence,
     _store,
@@ -44,6 +47,8 @@ def _app(
     identity: LaunchplaneIdentity | None = None,
     browser_identity: LaunchplaneIdentity | None = None,
     repository_evidence_provider: _EvidenceProvider | None = None,
+    github_app_token: Callable[[str, str], GitHubAppInstallationToken] | None = None,
+    github_api: Callable[..., object] | None = None,
 ) -> FastAPI:
     resolved_identity = identity or _human()
     resolved_browser_identity = browser_identity or resolved_identity
@@ -60,16 +65,118 @@ def _app(
         cast(ApiRouteRegistrar, app),
         dependencies=OwnerAcceptanceRouteDependencies(
             common=common,
+            read_write_identity=lambda: resolved_identity,
             read_browser_mutation_identity=lambda: resolved_browser_identity,
             repository_evidence_provider=(
                 repository_evidence_provider or _EvidenceProvider(_repository_evidence())
             ),
+            github_app_token=github_app_token,
+            **({"github_api": github_api} if github_api is not None else {}),
         ),
     )
     return app
 
 
 class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_projects_current_owner_decision_as_neutral_github_app_check(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            calls: list[dict[str, Any]] = []
+
+            def github_api(**kwargs):  # type: ignore[no-untyped-def]
+                calls.append(kwargs)
+                if kwargs.get("method") == "DELETE":
+                    return None
+                if kwargs.get("method") == "POST":
+                    body = kwargs["body"]
+                    return {
+                        "id": 91,
+                        "name": body["name"],
+                        "head_sha": body["head_sha"],
+                        "status": body["status"],
+                        "conclusion": body["conclusion"],
+                        "external_id": body["external_id"],
+                        "details_url": body["details_url"],
+                        "output": body["output"],
+                        "app": {"id": 42},
+                    }
+                return {"check_runs": []}
+
+            app = _app(
+                store=store,
+                github_app_token=lambda _repository, _repository_id: GitHubAppInstallationToken(
+                    token="installation-token",
+                    app_id=42,
+                    installation_id=77,
+                    repository_id=int(REPOSITORY_ID),
+                    repository=REPOSITORY,
+                    expires_at="2026-08-07T15:00:00Z",
+                ),
+                github_api=github_api,
+            )
+
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    OWNER_ACCEPTANCE_PROJECT_ROUTE,
+                    json={
+                        "target": {
+                            "repository": REPOSITORY,
+                            "pull_request_number": 2022,
+                        }
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["decision"]["status"], "pending")
+        self.assertEqual(payload["result"]["name"], "launchplane/owner-acceptance")
+        self.assertEqual(payload["result"]["conclusion"], "neutral")
+        self.assertEqual(calls[-2]["body"]["conclusion"], "neutral")
+        self.assertEqual(calls[-1]["method"], "DELETE")
+
+    async def test_projection_rejects_head_drift_before_github_write(self) -> None:
+        class _DriftingProvider(_EvidenceProvider):
+            def __init__(self) -> None:
+                super().__init__(_repository_evidence())
+                self.calls = 0
+
+            def resolve(self, target):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                if self.calls >= 3:
+                    return _repository_evidence(head="c" * 40)
+                return super().resolve(target)
+
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            github_calls: list[dict[str, Any]] = []
+            app = _app(
+                store=store,
+                repository_evidence_provider=_DriftingProvider(),
+                github_app_token=lambda _repository, _repository_id: GitHubAppInstallationToken(
+                    token="installation-token",
+                    app_id=42,
+                    installation_id=77,
+                    repository_id=int(REPOSITORY_ID),
+                    repository=REPOSITORY,
+                    expires_at="2026-08-07T15:00:00Z",
+                ),
+                github_api=lambda **kwargs: github_calls.append(kwargs),
+            )
+
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    OWNER_ACCEPTANCE_PROJECT_ROUTE,
+                    json={
+                        "target": {
+                            "repository": REPOSITORY,
+                            "pull_request_number": 2022,
+                        }
+                    },
+                )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(github_calls, [])
+
     async def test_evaluate_and_human_event_use_server_derived_binding(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))

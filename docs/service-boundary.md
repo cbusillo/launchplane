@@ -3176,6 +3176,17 @@ files, repository names, branches, titles, labels, or commit text. Preview
 refresh, verification, destroy, and cleanup remain independent from admission,
 projection delivery, and merge-controller results.
 
+`POST /v1/engineering-review-decisions/project` and
+`POST /v1/owner-acceptance/project` write the stable
+`launchplane/engineering-review` and `launchplane/owner-acceptance` check runs
+through a dedicated least-privilege GitHub App. Launchplane verifies exact App,
+installation, repository, and permission identity, mints a one-repository
+Checks-write token, rechecks current server-owned evidence, and uses the exact
+decision digest as `external_id`. Replays avoid duplicate writes and same-head
+binding changes update only the App-owned run. Both checks complete `neutral`,
+remain shadow/non-authoritative, and are excluded from merge-train and tenant-
+admission technical inputs.
+
 The CM tenant preview workflow uses tenant-product scope for both artifact
 publish input/evidence and preview lifecycle requests. Artifact publish still
 uses Odoo driver routes, but source-ref build metadata resolves through the

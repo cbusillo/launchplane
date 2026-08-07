@@ -7,12 +7,18 @@ from fastapi import Depends, Header, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
-from control_plane.contracts.change_impact import ChangeImpactTargetReference
+from control_plane.contracts.change_impact import ChangeImpactTarget, ChangeImpactTargetReference
+from control_plane.contracts.advisory_check_projection import AdvisoryCheckProjectionResult
 from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
+    OWNER_ACCEPTANCE_PROJECT_ACTION,
     OWNER_ACCEPTANCE_READ_ACTION,
     OwnerAcceptanceDecision,
     OwnerAcceptanceEventRecord,
+)
+from control_plane.github_app_identity import (
+    GitHubAppInstallationToken,
+    revoke_installation_token,
 )
 from control_plane.http_routes.support import (
     ApiRouteRegistrar,
@@ -32,13 +38,16 @@ from control_plane.owner_acceptance_queue import (
     OwnerAcceptanceQueueEntry,
     build_owner_acceptance_queue,
 )
+from control_plane.owner_acceptance_projection import project_owner_acceptance_decision
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity, LaunchplaneIdentity
+from control_plane.workflows.launchplane import github_api_request
 
 
 OWNER_ACCEPTANCE_EVALUATION_ROUTE = "/v1/owner-acceptance/evaluation"
 OWNER_ACCEPTANCE_EVENTS_ROUTE = "/v1/owner-acceptance/events"
 OWNER_ACCEPTANCE_EVENT_ROUTE = "/v1/owner-acceptance/events/{event_id}"
 OWNER_ACCEPTANCE_QUEUE_ROUTE = "/v1/owner-acceptance/queue"
+OWNER_ACCEPTANCE_PROJECT_ROUTE = "/v1/owner-acceptance/project"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +55,9 @@ class OwnerAcceptanceRouteDependencies:
     common: ReadRouteDependencies
     read_browser_mutation_identity: Callable[..., LaunchplaneIdentity]
     repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider
+    read_write_identity: Callable[..., LaunchplaneIdentity] | None = None
+    github_app_token: Callable[[str, str], GitHubAppInstallationToken] | None = None
+    github_api: Callable[..., object] = github_api_request
 
 
 class OwnerAcceptanceEventEnvelope(BaseModel):
@@ -110,12 +122,56 @@ class OwnerAcceptanceQueueResponse(BaseModel):
     entries: tuple[OwnerAcceptanceQueueEntry, ...]
 
 
+class OwnerAcceptanceProjectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    target: ChangeImpactTargetReference
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "OwnerAcceptanceProjectionRequest":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Owner acceptance projection schema version.")
+        return self
+
+
+class OwnerAcceptanceProjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    decision: OwnerAcceptanceDecision
+    result: AdvisoryCheckProjectionResult
+
+
+def _validate_projection_target(
+    decision: OwnerAcceptanceDecision,
+    target: ChangeImpactTarget,
+) -> None:
+    bindings = tuple(
+        product.binding for product in decision.products if product.binding is not None
+    )
+    if decision.binding is not None:
+        bindings = (decision.binding, *bindings)
+    for binding in bindings:
+        if (
+            binding.repository.casefold() != target.repository.casefold()
+            or binding.repository_id != target.repository_id
+            or binding.repository_owner_id != target.repository_owner_id
+            or binding.pull_request_number != target.pull_request_number
+            or binding.head_sha != target.head_sha
+            or binding.tree_sha != target.tree_sha
+        ):
+            raise ValueError("Owner acceptance projection target changed during evaluation.")
+
+
 def register_owner_acceptance_routes(
     app: ApiRouteRegistrar,
     *,
     dependencies: OwnerAcceptanceRouteDependencies,
 ) -> None:
     common = dependencies.common
+    projection_identity = dependencies.read_write_identity or common.read_identity
 
     def evaluate(
         repository: Annotated[
@@ -330,9 +386,7 @@ def register_owner_acceptance_routes(
                 message=str(error),
             ) from error
         generated_at = (
-            datetime.now(timezone.utc)
-            .isoformat(timespec="microseconds")
-            .replace("+00:00", "Z")
+            datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
         )
         return OwnerAcceptanceQueueResponse(
             trace_id=trace_id,
@@ -343,6 +397,67 @@ def register_owner_acceptance_routes(
             has_more=result.has_more,
             entry_count=len(result.entries),
             entries=result.entries,
+        )
+
+    async def project(
+        request: OwnerAcceptanceProjectionRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(projection_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> OwnerAcceptanceProjectionResponse:
+        trace_id = common.next_trace_id()
+        if not common.authorization_allows(
+            identity=identity,
+            action=OWNER_ACCEPTANCE_PROJECT_ACTION,
+            product="launchplane",
+            context="owner-acceptance",
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot project Owner acceptance decisions.",
+            )
+        try:
+            if dependencies.github_app_token is None:
+                raise ValueError("Owner acceptance projection identity is unavailable.")
+            initial_evidence = dependencies.repository_evidence_provider.resolve(request.target)
+            decision = evaluate_owner_acceptance(
+                store=record_store,
+                target=request.target,
+                repository_evidence_provider=dependencies.repository_evidence_provider,
+            )
+            evidence = dependencies.repository_evidence_provider.resolve(request.target)
+            if initial_evidence.target != evidence.target:
+                raise ValueError("Owner acceptance projection target changed during evaluation.")
+            _validate_projection_target(decision, evidence.target)
+            installation_token = dependencies.github_app_token(
+                evidence.target.repository,
+                evidence.target.repository_id,
+            )
+            try:
+                result = project_owner_acceptance_decision(
+                    decision=decision,
+                    target=evidence.target,
+                    installation_token=installation_token,
+                    api_request=dependencies.github_api,
+                )
+            finally:
+                revoke_installation_token(
+                    installation_token=installation_token,
+                    api_request=dependencies.github_api,
+                )
+        except (OwnerAcceptanceEvaluationUnavailableError, TypeError, ValueError) as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="owner_acceptance_projection_unavailable",
+                message=str(error),
+            ) from error
+        return OwnerAcceptanceProjectionResponse(
+            trace_id=trace_id,
+            decision=decision,
+            result=result,
         )
 
     errors = {
@@ -361,6 +476,17 @@ def register_owner_acceptance_routes(
         tags=["owner-acceptance"],
         operation_id="evaluate_owner_acceptance",
         responses=errors,
+    )
+    app.add_api_route(
+        OWNER_ACCEPTANCE_PROJECT_ROUTE,
+        project,
+        methods=["POST"],
+        response_model=OwnerAcceptanceProjectionResponse,
+        operation_id="project_owner_acceptance_decision",
+        tags=["owner-acceptance"],
+        responses={
+            status: {"model": common.error_response_model} for status in (400, 401, 403, 503)
+        },
     )
     app.add_api_route(
         OWNER_ACCEPTANCE_EVENTS_ROUTE,

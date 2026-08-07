@@ -61,6 +61,72 @@
         "title": "AcceptedEvidenceResponse",
         "type": "object"
       },
+      "AdvisoryCheckProjectionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "minimum": 1.0,
+            "title": "App Id",
+            "type": "integer"
+          },
+          "check_run_id": {
+            "minimum": 1.0,
+            "title": "Check Run Id",
+            "type": "integer"
+          },
+          "conclusion": {
+            "const": "neutral",
+            "default": "neutral",
+            "title": "Conclusion",
+            "type": "string"
+          },
+          "external_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "External Id",
+            "type": "string"
+          },
+          "head_sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "installation_id": {
+            "minimum": 1.0,
+            "title": "Installation Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "projected",
+              "updated",
+              "replayed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "name",
+          "head_sha",
+          "external_id",
+          "app_id",
+          "installation_id",
+          "check_run_id"
+        ],
+        "title": "AdvisoryCheckProjectionResult",
+        "type": "object"
+      },
       "AgentContextEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -4141,15 +4207,41 @@
       "EngineeringReviewDecisionProjectionResult": {
         "additionalProperties": false,
         "properties": {
+          "app_id": {
+            "minimum": 1.0,
+            "title": "App Id",
+            "type": "integer"
+          },
+          "check_run_id": {
+            "minimum": 1.0,
+            "title": "Check Run Id",
+            "type": "integer"
+          },
+          "conclusion": {
+            "const": "neutral",
+            "default": "neutral",
+            "title": "Conclusion",
+            "type": "string"
+          },
           "context": {
-            "const": "launchplane/engineering-review-shadow",
-            "default": "launchplane/engineering-review-shadow",
+            "const": "launchplane/engineering-review",
+            "default": "launchplane/engineering-review",
             "title": "Context",
+            "type": "string"
+          },
+          "external_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "External Id",
             "type": "string"
           },
           "head_sha": {
             "title": "Head Sha",
             "type": "string"
+          },
+          "installation_id": {
+            "minimum": 1.0,
+            "title": "Installation Id",
+            "type": "integer"
           },
           "schema_version": {
             "default": 1,
@@ -4170,6 +4262,7 @@
           "status": {
             "enum": [
               "projected",
+              "updated",
               "replayed"
             ],
             "title": "Status",
@@ -4179,7 +4272,11 @@
         "required": [
           "status",
           "state",
-          "head_sha"
+          "head_sha",
+          "external_id",
+          "app_id",
+          "installation_id",
+          "check_run_id"
         ],
         "title": "EngineeringReviewDecisionProjectionResult",
         "type": "object"
@@ -11953,6 +12050,53 @@
           "reason_code"
         ],
         "title": "OwnerAcceptanceProductDecision",
+        "type": "object"
+      },
+      "OwnerAcceptanceProjectionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "target": {
+            "$ref": "#/components/schemas/ChangeImpactTargetReference"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "title": "OwnerAcceptanceProjectionRequest",
+        "type": "object"
+      },
+      "OwnerAcceptanceProjectionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/OwnerAcceptanceDecision"
+          },
+          "result": {
+            "$ref": "#/components/schemas/AdvisoryCheckProjectionResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "decision",
+          "result"
+        ],
+        "title": "OwnerAcceptanceProjectionResponse",
         "type": "object"
       },
       "OwnerAcceptanceQueueEntry": {
@@ -26971,7 +27115,10 @@
           "excluded_contexts": {
             "default": [
               "manager-preview-approval",
-              "tenant-admission"
+              "tenant-admission",
+              "launchplane/engineering-review",
+              "launchplane/owner-acceptance",
+              "launchplane/engineering-review-shadow"
             ],
             "items": {
               "type": "string"
@@ -52365,6 +52512,99 @@
           }
         },
         "summary": "Read Event",
+        "tags": [
+          "owner-acceptance"
+        ]
+      }
+    },
+    "/v1/owner-acceptance/project": {
+      "post": {
+        "operationId": "project_owner_acceptance_decision",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerAcceptanceProjectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerAcceptanceProjectionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Project",
         "tags": [
           "owner-acceptance"
         ]

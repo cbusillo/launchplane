@@ -51,6 +51,7 @@ OwnerAcceptanceReasonCode = Literal[
 ]
 OwnerAcceptanceEventWriteStatus = Literal["written", "replayed"]
 OwnerAcceptanceSourceEventKind = Literal["browser_api", "system"]
+OWNER_ACCEPTANCE_PROJECT_ACTION = "owner_acceptance.project"
 
 OWNER_ACCEPTANCE_STATUS_PRECEDENCE: tuple[OwnerAcceptanceDecisionStatus, ...] = (
     "unavailable",
