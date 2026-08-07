@@ -52,6 +52,16 @@ OwnerAcceptanceReasonCode = Literal[
 OwnerAcceptanceEventWriteStatus = Literal["written", "replayed"]
 OwnerAcceptanceSourceEventKind = Literal["browser_api", "system"]
 
+OWNER_ACCEPTANCE_STATUS_PRECEDENCE: tuple[OwnerAcceptanceDecisionStatus, ...] = (
+    "unavailable",
+    "stale",
+    "revoked",
+    "changes_requested",
+    "pending",
+    "accepted",
+    "not_required",
+)
+
 _GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _REPOSITORY_PATTERN = re.compile(r"^[^/\s]+/[^/\s]+$")
@@ -483,6 +493,46 @@ class OwnerAcceptanceEventRecord(BaseModel):
         return self
 
 
+class OwnerAcceptanceProductDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    system: str
+    action: str
+    environment: str
+    status: OwnerAcceptanceDecisionStatus
+    reason_code: OwnerAcceptanceReasonCode
+    binding: OwnerAcceptanceBinding | None = None
+    current_event: OwnerAcceptanceEventRecord | None = None
+
+    @model_validator(mode="after")
+    def _validate_product_decision(self) -> "OwnerAcceptanceProductDecision":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Owner acceptance product decision schema version.")
+        for field_name in ("product", "system", "action", "environment"):
+            object.__setattr__(
+                self,
+                field_name,
+                _required_token(str(getattr(self, field_name)), field_name),
+            )
+        if self.binding is not None:
+            for field_name in ("product", "system", "action", "environment"):
+                if getattr(self.binding, field_name) != getattr(self, field_name):
+                    raise ValueError(
+                        f"Owner acceptance product decision {field_name} does not match binding"
+                    )
+        if self.current_event is not None:
+            if self.binding is None:
+                raise ValueError("Owner acceptance product decision event requires a binding")
+            for field_name in ("product", "system", "action", "environment"):
+                if getattr(self.current_event.binding, field_name) != getattr(self, field_name):
+                    raise ValueError(
+                        f"Owner acceptance product decision event {field_name} does not match subject"
+                    )
+        return self
+
+
 class OwnerAcceptanceDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -494,6 +544,7 @@ class OwnerAcceptanceDecision(BaseModel):
     reason_code: OwnerAcceptanceReasonCode
     binding: OwnerAcceptanceBinding | None = None
     current_event: OwnerAcceptanceEventRecord | None = None
+    products: tuple[OwnerAcceptanceProductDecision, ...] = ()
     evaluated_at: str
 
     @model_validator(mode="after")

@@ -844,7 +844,7 @@ def _manager_preview_approval_event() -> ManagerPreviewApprovalEventRecord:
     )
 
 
-def _owner_acceptance_event() -> OwnerAcceptanceEventRecord:
+def _owner_acceptance_event(*, product: str = "example-site") -> OwnerAcceptanceEventRecord:
     occurred_at = "2026-08-07T12:00:00Z"
     binding = OwnerAcceptanceBinding(
         repository_id="1001",
@@ -856,36 +856,36 @@ def _owner_acceptance_event() -> OwnerAcceptanceEventRecord:
         change_impact_policy_record_id="change-impact-policy-1001-r1",
         change_impact_policy_revision=1,
         change_impact_policy_digest="a" * 64,
-        product="example-site",
+        product=product,
         system="web",
         action="pull_request.owner_acceptance",
         environment="pull_request",
-        owner_policy_record_id="product-owner-policy-example-site-r1",
+        owner_policy_record_id=f"product-owner-policy-{product}-r1",
         owner_policy_revision=1,
         owner_policy_digest="b" * 64,
-        owner_requirement_record_id="product-owner-requirement-example-site-r1",
+        owner_requirement_record_id=f"product-owner-requirement-{product}-r1",
         owner_requirement_revision=1,
         owner_requirement_digest="c" * 64,
         preview=OwnerAcceptancePreviewBinding(
-            context="example-site-preview",
-            preview_id="preview-example-site-pr-17",
-            serving_generation_id="preview-example-site-pr-17-generation-0001",
-            artifact_id="artifact-example-site-pr-17",
+            context=f"{product}-preview",
+            preview_id=f"preview-{product}-pr-17",
+            serving_generation_id=f"preview-{product}-pr-17-generation-0001",
+            artifact_id=f"artifact-{product}-pr-17",
             artifact_image_digest=f"sha256:{'d' * 64}",
-            manifest_fingerprint="manifest-example-site-pr-17",
-            preview_url="https://pr-17.example.test",
+            manifest_fingerprint=f"manifest-{product}-pr-17",
+            preview_url=f"https://pr-17.{product}.example.test",
             runtime_identity=owner_acceptance_runtime_identity_binding(
                 RuntimeIdentity(
-                    product="example-site",
-                    context="example-site-preview",
+                    product=product,
+                    context=f"{product}-preview",
                     instance="preview-pr-17",
                     environment_kind="preview",
-                    deployment_record_id="deployment-example-site-pr-17",
-                    artifact_id="artifact-example-site-pr-17",
+                    deployment_record_id=f"deployment-{product}-pr-17",
+                    artifact_id=f"artifact-{product}-pr-17",
                     source_git_ref="1" * 40,
-                    image_reference=f"ghcr.io/example/example-site@sha256:{'d' * 64}",
-                    preview_id="preview-example-site-pr-17",
-                    preview_generation_id="preview-example-site-pr-17-generation-0001",
+                    image_reference=f"ghcr.io/example/{product}@sha256:{'d' * 64}",
+                    preview_id=f"preview-{product}-pr-17",
+                    preview_generation_id=f"preview-{product}-pr-17-generation-0001",
                 )
             ),
         ),
@@ -895,9 +895,9 @@ def _owner_acceptance_event() -> OwnerAcceptanceEventRecord:
         action="accepted",
         occurred_at=occurred_at,
         source_event_kind="browser_api",
-        source_event_id="acceptance-101",
+        source_event_id=f"acceptance-{product}-101",
         authorization=OwnerAcceptanceAuthorization(
-            owner_identity_id="owner-identity-github-example",
+            owner_identity_id=f"owner-identity-github-{product}",
             owner_github_id=101,
             owner_login="owner",
             owner_policy_record_id=binding.owner_policy_record_id,
@@ -969,8 +969,10 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_owner_acceptance_events_persist_append_only(self) -> None:
         with _store_for_fresh_head_database() as store:
             event = _owner_acceptance_event()
+            second_event = _owner_acceptance_event(product="example-admin")
 
             self.assertEqual(store.write_owner_acceptance_event_record(event), "written")
+            self.assertEqual(store.write_owner_acceptance_event_record(second_event), "written")
             replay_payload = event.model_dump(mode="json")
             replay_payload["occurred_at"] = "2026-08-07T12:01:00Z"
             replay_payload["authorization"]["authorized_at"] = "2026-08-07T12:01:00Z"
@@ -987,6 +989,15 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     action="pull_request.owner_acceptance",
                 ),
                 (event,),
+            )
+            all_product_events = store.list_owner_acceptance_event_records(
+                repository_id="1001",
+                pull_request_number=17,
+            )
+            self.assertEqual(len(all_product_events), 2)
+            self.assertEqual(
+                {record.binding.product for record in all_product_events},
+                {"example-site", "example-admin"},
             )
 
             conflicting = OwnerAcceptanceEventRecord.model_validate(

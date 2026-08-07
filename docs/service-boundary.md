@@ -3532,9 +3532,10 @@ teardown.
 requires a browser-authenticated GitHub human plus a bounded `Idempotency-Key`.
 It also requires the `expected_binding_sha256` returned by evaluation. The
 digest is a compare-only precondition: Launchplane re-resolves all evidence and
-returns a conflict without writing when the exact binding changed. The service
-then verifies that
-the immutable GitHub user ID is a current Owner for the affected exact scope
+returns a conflict without writing when the exact binding changed. For
+multi-product changes, that digest selects exactly one current server-derived
+product binding; callers cannot name or inject a product. The service then
+verifies that the immutable GitHub user ID is a current Owner for the affected exact scope
 before writing `accepted`, `changes_requested`, or `revoked`. Agents, workers,
 GitHub Actions, local operators, and other bearer identities cannot satisfy this
 route. Caller-owned head, tree, policy, Owner, or membership evidence is
@@ -3544,9 +3545,10 @@ through the same Owner-acceptance read authority.
 
 The ledger is append-only and shadow-only. Changed bound evidence or changed
 Owner policy/requirement/membership makes prior acceptance stale for the new
-binding. GitHub projection, frontend workbench, tenant-admission consumers,
-multi-product aggregation, verified preview/runtime binding, production
-authorization, and legacy manager cleanup remain out of scope. See
+binding. Evaluation returns one decision per affected product and is accepted
+only when all are current; dropped products stop governing without a read-side
+write. GitHub projection, frontend workbench, tenant-admission consumers,
+production authorization, and legacy manager cleanup remain out of scope. See
 `docs/owner-acceptance.md` for the full record and migration boundary.
 
 ## Change Impact Shadow API

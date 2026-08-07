@@ -55,17 +55,18 @@ def _grant(subject_id: str) -> ProductOwnerGrant:
 
 def _policy(
     *,
+    product: str = PRODUCT,
     revision: int = 1,
     subjects: tuple[str, ...] = ("1001", "1002"),
     supersedes_record_id: str | None = None,
 ) -> ProductOwnerPolicyRecord:
     return ProductOwnerPolicyRecord(
         record_id=build_product_owner_policy_record_id(
-            product=PRODUCT,
+            product=product,
             system=SYSTEM,
             policy_revision=revision,
         ),
-        product=PRODUCT,
+        product=product,
         system=SYSTEM,
         policy_revision=revision,
         owners=tuple(_grant(subject) for subject in subjects),
@@ -106,6 +107,40 @@ def _context() -> ProductOwnerActionContext:
 
 
 class ProductOwnerPolicyTests(unittest.TestCase):
+    def test_filesystem_storage_keeps_product_revision_streams_independent(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            second_product = "product-beta"
+
+            self.assertEqual(store.write_product_owner_policy_record(_policy()), "written")
+            self.assertEqual(
+                store.write_product_owner_policy_record(_policy(product=second_product)),
+                "written",
+            )
+            self.assertEqual(
+                store.write_product_owner_requirement_record(_requirement()),
+                "written",
+            )
+            self.assertEqual(
+                store.write_product_owner_requirement_record(_requirement(product=second_product)),
+                "written",
+            )
+
+            self.assertEqual(
+                {
+                    record.product
+                    for record in store.list_product_owner_policy_records(status="active")
+                },
+                {PRODUCT, second_product},
+            )
+            self.assertEqual(
+                {
+                    record.product
+                    for record in store.list_product_owner_requirement_records(status="active")
+                },
+                {PRODUCT, second_product},
+            )
+
     def test_policy_requires_human_immutable_identity_and_quorum_one(self) -> None:
         policy = _policy()
         self.assertEqual(policy.quorum, 1)

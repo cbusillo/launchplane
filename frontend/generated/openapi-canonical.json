@@ -11553,6 +11553,14 @@
             "title": "Mode",
             "type": "string"
           },
+          "products": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OwnerAcceptanceProductDecision"
+            },
+            "title": "Products",
+            "type": "array"
+          },
           "reason_code": {
             "enum": [
               "engineering_only",
@@ -11856,6 +11864,95 @@
           "runtime_identity"
         ],
         "title": "OwnerAcceptancePreviewBinding",
+        "type": "object"
+      },
+      "OwnerAcceptanceProductDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "binding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OwnerAcceptanceBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_event": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OwnerAcceptanceEventRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason_code": {
+            "enum": [
+              "engineering_only",
+              "acceptance_missing",
+              "acceptance_valid",
+              "changes_requested",
+              "acceptance_revoked",
+              "acceptance_stale",
+              "change_impact_unavailable",
+              "change_impact_stale",
+              "multi_product_unsupported",
+              "owner_authority_unavailable",
+              "owner_authority_denied",
+              "preview_evidence_unavailable",
+              "preview_evidence_stale"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "not_required",
+              "pending",
+              "accepted",
+              "changes_requested",
+              "revoked",
+              "stale",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "system": {
+            "title": "System",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "system",
+          "action",
+          "environment",
+          "status",
+          "reason_code"
+        ],
+        "title": "OwnerAcceptanceProductDecision",
         "type": "object"
       },
       "OwnerAcceptanceRuntimeIdentityBinding": {

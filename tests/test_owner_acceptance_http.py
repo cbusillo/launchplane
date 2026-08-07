@@ -23,7 +23,9 @@ from control_plane.service_auth import (
 )
 from tests.support.http import lifespan_client
 from tests.test_owner_acceptance import (
+    PRODUCT,
     REPOSITORY,
+    SECOND_PRODUCT,
     _EvidenceProvider,
     _human,
     _repository_evidence,
@@ -136,6 +138,75 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(read.status_code, 200, read.text)
                 self.assertEqual(read.json()["record"], payload["record"])
+
+    async def test_multi_product_flow_uses_digest_selection_without_product_input(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory), shared_dependency_evidence=True)
+            provider = _EvidenceProvider(_repository_evidence(path="src/shared/app.py"))
+            app = _app(store=store, repository_evidence_provider=provider)
+            target: dict[str, str | int] = {
+                "repository": REPOSITORY,
+                "pull_request_number": 2022,
+            }
+
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(OWNER_ACCEPTANCE_EVALUATION_ROUTE, params=target)
+                self.assertEqual(evaluated.status_code, 200, evaluated.text)
+                decision = evaluated.json()["decision"]
+                self.assertEqual(
+                    [product["product"] for product in decision["products"]],
+                    [PRODUCT, SECOND_PRODUCT],
+                )
+                bindings = {
+                    product["product"]: product["binding"]["binding_sha256"]
+                    for product in decision["products"]
+                }
+
+                injected = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": bindings[SECOND_PRODUCT],
+                        "product": SECOND_PRODUCT,
+                    },
+                    headers={"Idempotency-Key": "accept-multi-product"},
+                )
+                self.assertEqual(injected.status_code, 422, injected.text)
+                self.assertEqual(store.list_owner_acceptance_event_records(), ())
+
+                accepted_second = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": bindings[SECOND_PRODUCT],
+                    },
+                    headers={"Idempotency-Key": "accept-multi-product"},
+                )
+                self.assertEqual(accepted_second.status_code, 202, accepted_second.text)
+                second_payload = accepted_second.json()
+                self.assertEqual(second_payload["record"]["binding"]["product"], SECOND_PRODUCT)
+                self.assertEqual(second_payload["decision"]["status"], "pending")
+
+                accepted_first = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": bindings[PRODUCT],
+                    },
+                    headers={"Idempotency-Key": "accept-multi-product"},
+                )
+                self.assertEqual(accepted_first.status_code, 202, accepted_first.text)
+                first_payload = accepted_first.json()
+                self.assertEqual(first_payload["record"]["binding"]["product"], PRODUCT)
+                self.assertEqual(first_payload["decision"]["status"], "accepted")
+                self.assertEqual(
+                    [product["status"] for product in first_payload["decision"]["products"]],
+                    ["accepted", "accepted"],
+                )
+                self.assertEqual(len(store.list_owner_acceptance_event_records()), 2)
 
     async def test_changes_requested_and_revoked_require_reasons_and_evaluate(self) -> None:
         target: dict[str, str | int] = {

@@ -5,8 +5,9 @@ title: Owner Acceptance
 ## Purpose
 
 Owner acceptance is a shadow-only exact-change ledger for product/system Owner
-review of pull requests. It does not authorize production, merge trains,
-tenant admission, promotion, GitHub required checks, or manager-preview flows.
+review of pull requests. Every affected product receives an independent binding
+and decision. It does not authorize production, merge trains, tenant admission,
+promotion, GitHub required checks, or manager-preview flows.
 
 Launchplane is the only authority. GitHub comments, reviews, checked-in files,
 workflow inputs, local operator bearer tokens, agents, and workers cannot create
@@ -56,8 +57,23 @@ runtime identity evaluates as `stale` for the new binding. An enabled preview
 with ambiguous, incomplete, non-serving, or failed verification evidence is
 `unavailable`. If a preview-bound acceptance already exists, preview teardown
 evaluates as `preview_evidence_stale` and cannot be replaced by a weaker
-exact-change-only acceptance. Multi-product changes also fail closed until
-evaluation can require and aggregate one acceptance per affected product.
+exact-change-only acceptance.
+
+For every successfully impact-resolved product change, the response includes a
+deterministic `products` entry for each affected product in change-impact order;
+single-product changes therefore contain one entry. Early engineering-only,
+stale-impact, and unavailable-impact results contain no product entries. Each
+entry carries its own status, reason, binding, and current event. The top-level
+status is the worst current product status using this precedence: `unavailable`, `stale`,
+`revoked`, `changes_requested`, `pending`, `accepted`, `not_required`. Ties use
+the existing product order. The singular top-level binding and event mirror
+that governing product for compatibility. Aggregate acceptance is therefore
+`accepted` only when every affected product is currently accepted.
+
+Products removed from later current change-impact evidence stop governing the
+read result; evaluation does not write synthetic ledger events. Products added
+by a later exact head or policy/evidence revision receive their own current
+binding, while changed evidence continues to stale prior bindings normally.
 
 ## Event Authoring
 
@@ -75,6 +91,18 @@ the current binding differs from the one the Owner reviewed. This prevents a
 force-push, policy revision, requirement revision, Owner-scope change, or
 serving-preview/runtime change between evaluation and event authoring from
 silently changing what the human accepts.
+
+For a multi-product change, `expected_binding_sha256` also selects exactly one
+of the current server-derived product bindings. The request still cannot name a
+product. A digest that matches no current affected-product binding returns the
+same conflict without writing. One request writes at most one product event;
+the response returns the recomputed aggregate decision so remaining product
+acceptances stay visible.
+
+The `Idempotency-Key` is scoped by the exact binding because the immutable event
+ID includes both values. Reusing one key for different product-binding digests
+creates distinct product events; replaying it for the same binding remains
+idempotent.
 
 Human actions are:
 
@@ -101,6 +129,10 @@ payload is a conflict. Optional preview evidence lives inside the existing JSONB
 payload; non-preview bindings omit the field and preserve the original binding,
 acceptance, event, and replay digests byte-for-byte.
 
+Multi-product aggregation uses the existing subject indexes and one PR-scoped
+event read followed by in-memory product grouping. It adds no table, column,
+index, backfill, or migration revision.
+
 Migration `f3a5c7e9b1d4` creates the empty table and indexes only. It performs
 no backfill from GitHub comments, manager-preview approvals, technical waivers,
 or tenant-admission evidence.
@@ -111,6 +143,5 @@ or tenant-admission evidence.
 - GitHub status projection
 - frontend Owner workbench
 - tenant-admission cutover
-- multi-product aggregation
 - manager/delegate cleanup
 - break-glass acceptance
