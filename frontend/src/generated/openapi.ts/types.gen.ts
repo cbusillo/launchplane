@@ -861,6 +861,121 @@ export type OdooWebsiteBootstrapRoute = {
     url: string;
 };
 
+export type OwnerAcceptanceAuthorization = {
+    authorized_at: string;
+    owner_github_id: number;
+    owner_identity_id: string;
+    owner_login: string;
+    owner_policy_digest: string;
+    owner_policy_record_id: string;
+    owner_policy_revision: number;
+    owner_requirement_digest: string;
+    owner_requirement_record_id: string;
+    owner_requirement_revision: number;
+    schema_version: number;
+};
+
+export type OwnerAcceptanceBinding = {
+    action: string;
+    binding_sha256: string;
+    change_impact_policy_digest: string;
+    change_impact_policy_record_id: string;
+    change_impact_policy_revision: number;
+    environment: string;
+    head_sha: string;
+    owner_policy_digest: string;
+    owner_policy_record_id: string;
+    owner_policy_revision: number;
+    owner_requirement_digest: string;
+    owner_requirement_record_id: string;
+    owner_requirement_revision: number;
+    preview: OwnerAcceptancePreviewBinding | null;
+    product: string;
+    pull_request_number: number;
+    repository: string;
+    repository_id: string;
+    repository_owner_id: string;
+    schema_version: number;
+    system: string;
+    tree_sha: string;
+};
+
+export type OwnerAcceptanceEventRecord = {
+    acceptance_id: string;
+    action: 'accepted' | 'changes_requested' | 'revoked' | 'superseded' | 'invalidated';
+    authorization: OwnerAcceptanceAuthorization | null;
+    binding: OwnerAcceptanceBinding;
+    event_id: string;
+    occurred_at: string;
+    reason: string;
+    schema_version: number;
+    source_event_id: string;
+    source_event_kind: 'browser_api' | 'system';
+};
+
+export type OwnerAcceptancePreviewBinding = {
+    artifact_id: string;
+    artifact_image_digest: string;
+    context: string;
+    manifest_fingerprint: string;
+    preview_id: string;
+    preview_url: string;
+    runtime_identity: OwnerAcceptanceRuntimeIdentityBinding;
+    schema_version: number;
+    serving_generation_id: string;
+};
+
+export type OwnerAcceptanceQueueEntry = {
+    action: string;
+    authoritative: false;
+    enforcement_effect: 'none';
+    environment: string;
+    latest_binding: OwnerAcceptanceBinding;
+    latest_event: OwnerAcceptanceEventRecord;
+    ledger_status: 'not_required' | 'pending' | 'accepted' | 'changes_requested' | 'revoked' | 'stale' | 'unavailable';
+    mode: 'shadow';
+    next_action: string;
+    occurred_at: string;
+    product: string;
+    pull_request_number: number;
+    repository: string;
+    repository_id: string;
+    schema_version: number;
+    system: string;
+    verification_required: true;
+};
+
+export type OwnerAcceptanceQueueResponse = {
+    authoritative: false;
+    candidate: number;
+    enforcement_effect: 'none';
+    entries: Array<OwnerAcceptanceQueueEntry>;
+    entry_count: number;
+    generated_at: string;
+    has_more: boolean;
+    mode: 'shadow';
+    status: 'ok';
+    total: number;
+    trace_id: string;
+    truncated: boolean;
+};
+
+export type OwnerAcceptanceRuntimeIdentityBinding = {
+    artifact_id: string;
+    context: string;
+    deployment_record_id: string;
+    environment_kind: string;
+    image_reference: string;
+    instance: string;
+    preview_generation_id: string;
+    preview_id: string;
+    product: string;
+    release_tuple_id: string;
+    runtime_identity_sha256: string;
+    schema_version: number;
+    source_git_ref: string;
+};
+
 export type PostDeployUpdateEvidence = {
     attempted: boolean;
     detail: string;
@@ -2646,6 +2761,37 @@ export type ListEveryCodeWorkRequestsResponses = {
 };
 
 export type ListEveryCodeWorkRequestsResponse = ListEveryCodeWorkRequestsResponses[keyof ListEveryCodeWorkRequestsResponses];
+
+export type ListOwnerAcceptanceQueueData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: {
+        repository?: string;
+        status?: string;
+    };
+    url: '/v1/owner-acceptance/queue';
+};
+
+export type ListOwnerAcceptanceQueueErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ListOwnerAcceptanceQueueError = ListOwnerAcceptanceQueueErrors[keyof ListOwnerAcceptanceQueueErrors];
+
+export type ListOwnerAcceptanceQueueResponses = {
+    200: OwnerAcceptanceQueueResponse;
+};
+
+export type ListOwnerAcceptanceQueueResponse = ListOwnerAcceptanceQueueResponses[keyof ListOwnerAcceptanceQueueResponses];
 
 export type ReadPreviewReadinessData = {
     body?: never;

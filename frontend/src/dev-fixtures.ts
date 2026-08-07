@@ -1,3 +1,4 @@
+import type { OwnerAcceptanceDecision } from "./api";
 import type {
   ApplyProductEnvironmentConfigData,
   DataProvenance,
@@ -7,6 +8,7 @@ import type {
   GitHubHumanIdentityResponse,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
+  OwnerAcceptanceQueueResponse,
   ProductActionAvailability,
   ProductActivityReadModel,
   ProductEnvironmentConfigStatus,
@@ -2756,6 +2758,236 @@ function runtimeIdentity(
     deployed_at: OBSERVED_AT,
     preview_id: "",
     preview_generation_id: "",
+  };
+}
+
+function _ownerAcceptanceBinding(overrides: {
+  pull_request_number: number;
+  binding_sha256: string;
+  head_sha: string;
+  product?: string;
+  system?: string;
+  action?: string;
+  environment?: string;
+}) {
+  return {
+    action: overrides.action ?? "deploy",
+    binding_sha256: overrides.binding_sha256,
+    change_impact_policy_digest: "b".repeat(64),
+    change_impact_policy_record_id: "policy-001",
+    change_impact_policy_revision: 1,
+    environment: overrides.environment ?? "production",
+    head_sha: overrides.head_sha,
+    owner_policy_digest: "c".repeat(64),
+    owner_policy_record_id: "owner-policy-001",
+    owner_policy_revision: 1,
+    owner_requirement_digest: "d".repeat(64),
+    owner_requirement_record_id: "owner-req-001",
+    owner_requirement_revision: 1,
+    preview: null,
+    product: overrides.product ?? "example-site",
+    pull_request_number: overrides.pull_request_number,
+    repository: "example/control-plane",
+    repository_id: "1001",
+    repository_owner_id: "2001",
+    schema_version: 1,
+    system: overrides.system ?? "web",
+    tree_sha: "b".repeat(40),
+  };
+}
+
+function _ownerAcceptanceEvent(
+  action: "accepted" | "changes_requested" | "revoked" | "superseded" | "invalidated",
+  binding: ReturnType<typeof _ownerAcceptanceBinding>,
+  overrides: { occurred_at?: string; event_id?: string; acceptance_id?: string } = {},
+) {
+  return {
+    schema_version: 1,
+    event_id: overrides.event_id ?? `owner-acceptance-event-fixture-${action}`,
+    acceptance_id: overrides.acceptance_id ?? `owner-acceptance-${binding.binding_sha256.slice(0, 32)}`,
+    binding,
+    action,
+    occurred_at: overrides.occurred_at ?? OBSERVED_AT,
+    source_event_kind: (["superseded", "invalidated"].includes(action) ? "system" : "browser_api") as
+      | "system"
+      | "browser_api",
+    source_event_id: `fixture-${action}`,
+    reason: action === "accepted" ? "" : `Fixture reason for ${action}`,
+    authorization:
+      action === "accepted" || action === "changes_requested" || action === "revoked"
+        ? {
+            schema_version: 1,
+            owner_identity_id: "fixture-owner-identity",
+            owner_github_id: 12345,
+            owner_login: "fixture-owner",
+            owner_policy_record_id: "owner-policy-001",
+            owner_policy_revision: 1,
+            owner_policy_digest: "c".repeat(64),
+            owner_requirement_record_id: "owner-req-001",
+            owner_requirement_revision: 1,
+            owner_requirement_digest: "d".repeat(64),
+            authorized_at: overrides.occurred_at ?? OBSERVED_AT,
+          }
+        : null,
+  };
+}
+
+function _ownerAcceptanceQueueEntry(
+  ledger_status: "accepted" | "changes_requested" | "revoked" | "stale" | "unavailable",
+  binding: ReturnType<typeof _ownerAcceptanceBinding>,
+  event: ReturnType<typeof _ownerAcceptanceEvent>,
+  next_action: string,
+) {
+  return {
+    schema_version: 1,
+    repository_id: binding.repository_id,
+    repository: binding.repository,
+    pull_request_number: binding.pull_request_number,
+    product: binding.product,
+    system: binding.system,
+    action: binding.action,
+    environment: binding.environment,
+    mode: "shadow" as const,
+    authoritative: false as const,
+    enforcement_effect: "none" as const,
+    verification_required: true as const,
+    ledger_status,
+    next_action,
+    latest_event: event,
+    latest_binding: binding,
+    occurred_at: event.occurred_at,
+  };
+}
+
+export function ownerAcceptanceForFixture(
+  fixture: DataFixtureMode,
+): OwnerAcceptanceQueueResponse {
+  assertEngineeringFixtureAvailable(fixture);
+
+  if (fixture === "empty") {
+    return {
+      authoritative: false,
+      candidate: 0,
+      enforcement_effect: "none",
+      entries: [],
+      entry_count: 0,
+      generated_at: OBSERVED_AT,
+      has_more: false,
+      mode: "shadow",
+      status: "ok",
+      total: 0,
+      trace_id: "fixture-owner-acceptance-empty",
+      truncated: false,
+    };
+  }
+
+  const acceptedBinding = _ownerAcceptanceBinding({
+    pull_request_number: 302,
+    binding_sha256: "e".repeat(64),
+    head_sha: "f".repeat(40),
+  });
+  const acceptedEvent = _ownerAcceptanceEvent("accepted", acceptedBinding, {
+    occurred_at: "2026-08-07T10:00:00.000000Z",
+    event_id: "owner-acceptance-event-fixture-accepted-e2",
+    acceptance_id: "owner-acceptance-" + "e".repeat(32),
+  });
+
+  const revokedBinding = _ownerAcceptanceBinding({
+    pull_request_number: 305,
+    binding_sha256: "7".repeat(64),
+    head_sha: "8".repeat(40),
+  });
+  const revokedEvent = _ownerAcceptanceEvent("revoked", revokedBinding, {
+    occurred_at: "2026-08-06T15:30:00.000000Z",
+    event_id: "owner-acceptance-event-fixture-revoked-r5",
+    acceptance_id: "owner-acceptance-" + "7".repeat(32),
+  });
+
+  const staleBinding = _ownerAcceptanceBinding({
+    pull_request_number: 299,
+    binding_sha256: "9".repeat(64),
+    head_sha: "a".repeat(40),
+    product: "example-worker",
+    system: "queue",
+  });
+  const supersededEvent = _ownerAcceptanceEvent("superseded", staleBinding, {
+    occurred_at: "2026-08-05T08:00:00.000000Z",
+    event_id: "owner-acceptance-event-fixture-superseded-s9",
+    acceptance_id: "owner-acceptance-" + "9".repeat(32),
+  });
+
+  const unavailableBinding = _ownerAcceptanceBinding({
+    pull_request_number: 295,
+    binding_sha256: "3".repeat(64),
+    head_sha: "4".repeat(40),
+    product: "example-api",
+    system: "rest",
+    action: "promote",
+    environment: "staging",
+  });
+  const invalidatedEvent = _ownerAcceptanceEvent("invalidated", unavailableBinding, {
+    occurred_at: "2026-08-04T12:00:00.000000Z",
+    event_id: "owner-acceptance-event-fixture-invalidated-i3",
+    acceptance_id: "owner-acceptance-" + "3".repeat(32),
+  });
+
+  const allEntries = [
+    _ownerAcceptanceQueueEntry("accepted", acceptedBinding, acceptedEvent, "Owner acceptance is current"),
+    _ownerAcceptanceQueueEntry("revoked", revokedBinding, revokedEvent, "Re-acceptance required after changes"),
+    _ownerAcceptanceQueueEntry("stale", staleBinding, supersededEvent, "Re-evaluation required; binding has changed"),
+    _ownerAcceptanceQueueEntry("unavailable", unavailableBinding, invalidatedEvent, "Evidence unavailable; retry after prerequisites are met"),
+  ];
+
+  const entries = fixture === "missing" ? allEntries.slice(0, 1) : allEntries;
+
+  return {
+    authoritative: false,
+    candidate: entries.length,
+    enforcement_effect: "none",
+    entries,
+    entry_count: entries.length,
+    generated_at: OBSERVED_AT,
+    has_more: false,
+    mode: "shadow",
+    status: "ok",
+    total: entries.length,
+    trace_id: "fixture-owner-acceptance",
+    truncated: false,
+  };
+}
+
+export function ownerAcceptanceEvaluationForFixture(
+  fixture: DataFixtureMode,
+): OwnerAcceptanceDecision {
+  assertEngineeringFixtureAvailable(fixture);
+  const binding = _ownerAcceptanceBinding({
+    pull_request_number: 308,
+    binding_sha256: "a".repeat(64),
+    head_sha: "a".repeat(40),
+  });
+  return {
+    schema_version: 1,
+    mode: "shadow",
+    authoritative: false,
+    enforcement_effect: "none",
+    status: "pending",
+    reason_code: "acceptance_missing",
+    binding,
+    current_event: null,
+    products: [
+      {
+        schema_version: 1,
+        product: binding.product,
+        system: binding.system,
+        action: binding.action,
+        environment: binding.environment,
+        status: "pending",
+        reason_code: "acceptance_missing",
+        binding,
+        current_event: null,
+      },
+    ],
+    evaluated_at: OBSERVED_AT,
   };
 }
 
