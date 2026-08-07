@@ -16,13 +16,13 @@ from control_plane.http_routes.owner_acceptance import (
     register_owner_acceptance_routes,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.owner_acceptance_queue import build_owner_acceptance_queue
 from control_plane.service_auth import LaunchplaneIdentity
 from tests.support.http import lifespan_client
 from tests.test_owner_acceptance import (
     PRODUCT,
     REPOSITORY,
     REPOSITORY_ID,
-    SECOND_PRODUCT,
     _EvidenceProvider,
     _human,
     _repository_evidence,
@@ -173,6 +173,46 @@ class OwnerAcceptanceQueueHttpTests(unittest.IsolatedAsyncioTestCase):
             entries = payload["entries"]
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["ledger_status"], "revoked", "Latest event wins")
+
+    async def test_queue_folds_complete_ledger_before_page_limit(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            provider = _EvidenceProvider(_repository_evidence())
+            app = _app(store=store, repository_evidence_provider=provider)
+
+            async with lifespan_client(app) as client:
+                await self._write_event(client, pull_request_number=2022)
+
+            base_event = store.list_owner_acceptance_event_records()[0]
+            events: list[OwnerAcceptanceEventRecord] = []
+            for index in range(501):
+                binding_payload = base_event.binding.model_dump(mode="json")
+                binding_payload.update(
+                    binding_sha256="",
+                    pull_request_number=index + 1,
+                )
+                event_payload = base_event.model_dump(mode="json")
+                event_payload.update(
+                    acceptance_id="",
+                    binding=binding_payload,
+                    event_id="",
+                    source_event_id=f"complete-ledger-{index:04d}",
+                )
+                events.append(OwnerAcceptanceEventRecord.model_validate(event_payload))
+
+            class CompleteLedgerStore:
+                def list_owner_acceptance_event_records(
+                    self,
+                ) -> tuple[OwnerAcceptanceEventRecord, ...]:
+                    return tuple(events)
+
+            result = build_owner_acceptance_queue(store=CompleteLedgerStore())
+
+            self.assertEqual(result.total, 501)
+            self.assertEqual(result.candidate, 501)
+            self.assertEqual(len(result.entries), 50)
+            self.assertIs(result.truncated, True)
+            self.assertIs(result.has_more, True)
 
     async def test_queue_browser_cannot_inject_targets(self) -> None:
         """Browser filters are optional; they do not introduce new queue candidates."""

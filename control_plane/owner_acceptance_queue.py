@@ -13,7 +13,6 @@ from control_plane.contracts.owner_acceptance import (
 )
 
 OWNER_ACCEPTANCE_QUEUE_LIMIT = 50
-_QUEUE_SCAN_LIMIT = 500
 
 
 class OwnerAcceptanceQueueReadStore(Protocol):
@@ -77,7 +76,7 @@ def build_owner_acceptance_queue(
 ) -> OwnerAcceptanceQueueBuildResult:
     queue_store = require_owner_acceptance_queue_read_store(store)
 
-    all_events = queue_store.list_owner_acceptance_event_records(limit=_QUEUE_SCAN_LIMIT)
+    all_events = queue_store.list_owner_acceptance_event_records()
 
     # Fold by full subject: (repository_id, pull_request_number, product, system, action, environment)
     # Latest event per subject by (occurred_at, event_id) — deterministic tie-break

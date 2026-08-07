@@ -770,7 +770,7 @@ test.describe("operator journeys", () => {
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=empty");
 
-    await expect(page.getByText("No recorded entries")).toBeVisible();
+    await expect(page.getByText("No recorded entries", { exact: true })).toBeVisible();
     await expect(page.getByText("No entries match the current filters")).toHaveCount(0);
     await assertDocumentBasics(page);
     diagnostics.assertClean();
@@ -805,6 +805,28 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
+  test("Owner acceptance repository filter retains focus until submitted", async ({ page }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/owner-acceptance?fixture=products");
+
+    const repositoryFilter = page.getByRole("searchbox", {
+      name: "Filter by repository substring",
+    });
+    await repositoryFilter.click();
+    await repositoryFilter.pressSequentially("unrelated/repository");
+    await expect(repositoryFilter).toBeFocused();
+    await expect(repositoryFilter).toHaveValue("unrelated/repository");
+    await repositoryFilter.press("Enter");
+
+    await expect(page.getByText("No recorded entries", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Matching filters").locator("..").getByText("0", { exact: true }),
+    ).toBeVisible();
+
+    diagnostics.assertClean();
+  });
+
   test("Owner acceptance filter by status reduces displayed entries", async ({ page }) => {
     const diagnostics = monitorBrowser(page);
 
@@ -818,6 +840,9 @@ test.describe("operator journeys", () => {
     await statusSelect.selectOption("revoked");
 
     await expect(page.getByText("Re-acceptance required after changes")).toBeVisible();
+    await expect(
+      page.getByText("Matching filters").locator("..").getByText("1", { exact: true }),
+    ).toBeVisible();
     // Clear filters button appears
     await expect(page.getByRole("button", { name: "Clear filters" })).toBeVisible();
 

@@ -5,7 +5,7 @@ import {
   ShieldOff,
   UserCheck,
 } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import {
   evaluateOwnerAcceptance,
@@ -50,6 +50,7 @@ export function EngineeringOwnerAcceptanceRoute({
 }) {
   const [statusFilter, setStatusFilter] = useState<OwnerAcceptanceStatusFilter>("all");
   const [repositoryFilter, setRepositoryFilter] = useState("");
+  const [repositoryDraft, setRepositoryDraft] = useState("");
 
   const loader = useCallback(
     async (
@@ -60,14 +61,34 @@ export function EngineeringOwnerAcceptanceRoute({
         const fixtures = await loadDevFixtures();
         fixtures.assertEngineeringRefreshAvailable(reason);
         await fixtures.waitForEngineeringFixture(signal);
-        return fixtures.ownerAcceptanceForFixture(fixtureMode);
+        const response = fixtures.ownerAcceptanceForFixture(fixtureMode);
+        const entries = filterOwnerAcceptanceEntries(
+          response.entries,
+          statusFilter,
+          repositoryFilter,
+        );
+        return {
+          ...response,
+          candidate: entries.length,
+          entries,
+          entry_count: entries.length,
+        };
       }
-      return readOwnerAcceptanceQueue({}, signal);
+      return readOwnerAcceptanceQueue(
+        {
+          repository: repositoryFilter.trim() || undefined,
+          status: statusFilter === "all" ? undefined : statusFilter,
+        },
+        signal,
+      );
     },
-    [fixtureMode],
+    [fixtureMode, repositoryFilter, statusFilter],
   );
 
-  const resource = useEngineeringResource(loader, `owner-acceptance:${fixtureMode}`);
+  const resource = useEngineeringResource(
+    loader,
+    `owner-acceptance:${fixtureMode}:${statusFilter}:${repositoryFilter}`,
+  );
 
   return (
     <EngineeringRouteFrame
@@ -103,8 +124,11 @@ export function EngineeringOwnerAcceptanceRoute({
         {(data) => (
           <OwnerAcceptanceContent
             data={data}
+            repositoryDraft={repositoryDraft}
             repositoryFilter={repositoryFilter}
             statusFilter={statusFilter}
+            onApplyRepositoryFilter={() => setRepositoryFilter(repositoryDraft.trim())}
+            onRepositoryDraft={setRepositoryDraft}
             onRepositoryFilter={setRepositoryFilter}
             onStatusFilter={setStatusFilter}
           />
@@ -236,22 +260,23 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
 
 function OwnerAcceptanceContent({
   data,
+  repositoryDraft,
   repositoryFilter,
   statusFilter,
+  onApplyRepositoryFilter,
+  onRepositoryDraft,
   onRepositoryFilter,
   onStatusFilter,
 }: {
   data: OwnerAcceptanceQueueResponse;
+  repositoryDraft: string;
   repositoryFilter: string;
   statusFilter: OwnerAcceptanceStatusFilter;
+  onApplyRepositoryFilter: () => void;
+  onRepositoryDraft: (v: string) => void;
   onRepositoryFilter: (v: string) => void;
   onStatusFilter: (v: OwnerAcceptanceStatusFilter) => void;
 }) {
-  const entries = useMemo(
-    () => filterOwnerAcceptanceEntries(data.entries, statusFilter, repositoryFilter),
-    [data.entries, statusFilter, repositoryFilter],
-  );
-
   const accepted = data.entries.filter((e) => e.ledger_status === "accepted").length;
   const actioned = data.entries.filter((e) =>
     ["changes_requested", "revoked"].includes(e.ledger_status),
@@ -272,16 +297,16 @@ function OwnerAcceptanceContent({
           <strong>{data.candidate}</strong>
         </div>
         <div className="engineering-metric" data-tone={accepted ? "pass" : "unknown"}>
-          <span>Accepted</span>
+          <span>Accepted shown</span>
           <strong>{accepted}</strong>
         </div>
         <div className="engineering-metric" data-tone={actioned ? "blocked" : "pass"}>
-          <span>Actioned</span>
+          <span>Actioned shown</span>
           <strong>{actioned}</strong>
         </div>
         {staleOrUnavailable ? (
           <div className="engineering-metric" data-tone="unknown">
-            <span>Stale / unavailable</span>
+            <span>Stale / unavailable shown</span>
             <strong>{staleOrUnavailable}</strong>
           </div>
         ) : null}
@@ -308,12 +333,23 @@ function OwnerAcceptanceContent({
         {data.truncated ? (
           <div>
             <span>Truncated</span>
-            <strong>yes — {data.candidate} candidates, {QUEUE_LIMIT} shown</strong>
+            <strong>
+              yes — {data.candidate} candidates, {QUEUE_LIMIT} shown; refine filters or use
+              exact lookup
+            </strong>
           </div>
         ) : null}
       </section>
 
-      <div className="engineering-filter-row" role="search" aria-label="Filter queue">
+      <form
+        className="engineering-filter-row"
+        role="search"
+        aria-label="Filter queue"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onApplyRepositoryFilter();
+        }}
+      >
         <label>
           <span>Status</span>
           <select
@@ -333,26 +369,30 @@ function OwnerAcceptanceContent({
           <input
             type="search"
             placeholder="partial owner/repo"
-            value={repositoryFilter}
-            onChange={(e) => onRepositoryFilter(e.target.value)}
+            value={repositoryDraft}
+            onChange={(e) => onRepositoryDraft(e.target.value)}
             aria-label="Filter by repository substring"
           />
         </label>
-        {(statusFilter !== "all" || repositoryFilter) ? (
+        <button className="button" type="submit">
+          Apply repository filter
+        </button>
+        {(statusFilter !== "all" || repositoryDraft || repositoryFilter) ? (
           <button
             className="button"
             type="button"
             onClick={() => {
               onStatusFilter("all");
+              onRepositoryDraft("");
               onRepositoryFilter("");
             }}
           >
             Clear filters
           </button>
         ) : null}
-      </div>
+      </form>
 
-      {!entries.length ? (
+      {!data.entries.length ? (
         <EngineeringEmpty
           detail={
             statusFilter !== "all" || repositoryFilter
@@ -364,7 +404,7 @@ function OwnerAcceptanceContent({
         />
       ) : (
         <ol className="engineering-owner-acceptance-list">
-          {entries.map((entry) => (
+          {data.entries.map((entry) => (
             <li key={`${entry.repository_id}:${entry.pull_request_number}:${entry.product}:${entry.system}:${entry.action}:${entry.environment}`}>
               <OwnerAcceptanceEntryCard entry={entry} />
             </li>
