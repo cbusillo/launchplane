@@ -134,6 +134,12 @@ registered product-driver extension. This keeps product-specific database,
 secret, migration, seed, and cleanup behavior inside Launchplane while the
 product workflow remains a thin reusable-workflow caller. Missing driver
 extensions fail closed instead of falling back to generic environment copying.
+Driver-owned application commands must invoke executables already present in the
+immutable image instead of relying on package-runner download or discovery
+behavior. Dokploy schedule failures remain failed refreshes. Launchplane attaches
+bounded redacted deployment output when the provider exposes it, and retries only
+typed transient failures that occur before schedule execution; deterministic
+remote exits and ambiguous post-trigger failures are not executed again.
 
 Preview comment updates that are not part of the lifecycle workflow use
 `cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@<launchplane-sha>`.
