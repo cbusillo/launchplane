@@ -5,13 +5,15 @@ import {
   ShieldOff,
   UserCheck,
 } from "lucide-react";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   evaluateOwnerAcceptance,
+  LaunchplaneApiError,
   readOwnerAcceptanceQueue,
-  type LaunchplaneApiError,
+  writeOwnerAcceptanceEvent,
   type OwnerAcceptanceDecision,
+  type OwnerAcceptanceEventMutationResponse,
   type OwnerAcceptanceProductDecision,
 } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
@@ -34,9 +36,18 @@ import {
 import { formatTime } from "./format";
 import { StatusIcon } from "./status-ui";
 import { safeExternalUrl } from "./url";
+import { useBrowserOperationController } from "./use-browser-operation";
+import {
+  ownerAcceptanceFailure,
+  ownerAcceptanceFailureCertainty,
+  ownerAcceptanceOperationScope,
+  ownerAcceptanceRequest,
+  type OwnerAcceptanceHumanAction,
+} from "./owner-acceptance-operation";
 
 import type {
   OwnerAcceptanceBinding,
+  OwnerAcceptanceEventEnvelope,
   OwnerAcceptanceQueueEntry,
   OwnerAcceptanceQueueResponse,
 } from "./generated/openapi.ts";
@@ -105,13 +116,14 @@ export function EngineeringOwnerAcceptanceRoute({
       title="Owner acceptance"
       view="owner-acceptance"
     >
-      <EngineeringBoundaryNote title="Shadow mode — read only">
+      <EngineeringBoundaryNote title="Shadow mode — recorded evidence and Current controls">
         All decisions are <code>mode: shadow</code>, <code>authoritative: false</code>,{" "}
         <code>enforcement_effect: none</code>. Showing at most {QUEUE_LIMIT} entries,
         newest-first. Queue entries are{" "}
         <strong>Recorded</strong> — derived from the persisted acceptance event ledger
         with no live GitHub calls. Use the Exact Lookup pane below for a{" "}
-        <strong>Current</strong> live evaluation of any repository and PR.
+        <strong>Current</strong> live evaluation and binding-scoped Owner actions. Recorded
+        queue rows remain read-only.
       </EngineeringBoundaryNote>
 
       <OwnerAcceptanceLookupPane fixtureMode={fixtureMode} />
@@ -142,6 +154,7 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
   const [repository, setRepository] = useState("");
   const [prNumber, setPrNumber] = useState("");
   const [decision, setDecision] = useState<OwnerAcceptanceDecision | null>(null);
+  const [driftMessage, setDriftMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -157,6 +170,7 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
 
     setLoading(true);
     setDecision(null);
+    setDriftMessage("");
     setError(null);
 
     try {
@@ -187,6 +201,29 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
       }
     }
   }, [repository, prNumber, fixtureMode]);
+
+  const refreshCurrentEvaluation = useCallback(async (reviewedBinding: OwnerAcceptanceBinding) => {
+    const repo = reviewedBinding.repository;
+    const pr = reviewedBinding.pull_request_number;
+    try {
+      const nextDecision = fixtureMode
+        ? fixtureMode === "missing"
+          ? fixtureDecisionWithBindingDigest(
+              (await loadDevFixtures()).ownerAcceptanceEvaluationForFixture(fixtureMode),
+              "b".repeat(64),
+            )
+          : (await loadDevFixtures()).ownerAcceptanceEvaluationForFixture(fixtureMode)
+        : (await evaluateOwnerAcceptance(repo, pr)).decision;
+      setDecision(nextDecision);
+      setDriftMessage(
+        "The reviewed binding changed. Current evidence was refreshed; review the new binding and explicitly submit again.",
+      );
+      setError(null);
+    } catch (err: unknown) {
+      const apiErr = err as LaunchplaneApiError;
+      setError(apiErr?.message || "Current Owner acceptance evidence could not be refreshed.");
+    }
+  }, [fixtureMode]);
 
   const isValid = repository.trim().includes("/") && parseInt(prNumber, 10) >= 1;
 
@@ -250,10 +287,186 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
             ) : null}
           </div>
           {decision.products && decision.products.length > 0 ? (
-            <OwnerAcceptanceProductList products={decision.products} />
+            <>
+              <OwnerAcceptanceProductList products={decision.products} />
+              {driftMessage ? (
+                <p className="engineering-owner-action-message" role="alert">
+                  {driftMessage}
+                </p>
+              ) : null}
+              <div className="engineering-owner-acceptance-actions">
+                {decision.products.map((product) =>
+                  product.binding ? (
+                    <OwnerAcceptanceActionPanel
+                      key={`${product.product}:${product.system}:${product.action}:${product.environment}`}
+                      binding={product.binding}
+                      decision={decision}
+                      fixtureMode={fixtureMode}
+                      onBindingChanged={refreshCurrentEvaluation}
+                      onDecision={(nextDecision) => {
+                        setDecision(nextDecision);
+                        setDriftMessage("");
+                      }}
+                    />
+                  ) : null,
+                )}
+              </div>
+            </>
           ) : null}
         </div>
       ) : null}
+    </section>
+  );
+}
+
+function fixtureDecisionWithBindingDigest(
+  decision: OwnerAcceptanceDecision,
+  bindingSha256: string,
+): OwnerAcceptanceDecision {
+  const products = decision.products.map((product) => ({
+    ...product,
+    binding: product.binding
+      ? { ...product.binding, binding_sha256: bindingSha256 }
+      : null,
+  }));
+  return {
+    ...decision,
+    binding: decision.binding
+      ? { ...decision.binding, binding_sha256: bindingSha256 }
+      : null,
+    products,
+  };
+}
+
+function OwnerAcceptanceActionPanel({
+  binding,
+  decision,
+  fixtureMode,
+  onBindingChanged,
+  onDecision,
+}: {
+  binding: OwnerAcceptanceBinding;
+  decision: OwnerAcceptanceDecision;
+  fixtureMode: DevFixtureMode;
+  onBindingChanged: (binding: OwnerAcceptanceBinding) => Promise<void>;
+  onDecision: (decision: OwnerAcceptanceDecision) => void;
+}) {
+  const [action, setAction] = useState<OwnerAcceptanceHumanAction>("accepted");
+  const [reason, setReason] = useState("");
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
+  const handledDriftFailureRef = useRef<object | null>(null);
+  const operation = useBrowserOperationController<
+    OwnerAcceptanceEventEnvelope,
+    OwnerAcceptanceEventMutationResponse
+  >({
+    scope: ownerAcceptanceOperationScope(binding),
+    execute: async (payload, options) => {
+      if (!fixtureMode) return writeOwnerAcceptanceEvent(payload, options);
+      options.onDispatch?.();
+      if (fixtureMode === "missing") {
+        throw new LaunchplaneApiError(
+          "The reviewed Owner acceptance binding changed.",
+          409,
+          "fixture-binding-changed",
+          "owner_acceptance_binding_changed",
+        );
+      }
+      const occurredAt = new Date().toISOString();
+      const record = {
+        schema_version: 1,
+        event_id: `fixture-${options.idempotencyKey}`,
+        acceptance_id: `fixture-${binding.binding_sha256.slice(0, 32)}`,
+        binding,
+        action: payload.action,
+        occurred_at: occurredAt,
+        source_event_kind: "browser_api" as const,
+        source_event_id: options.idempotencyKey,
+        reason: payload.reason ?? "",
+        authorization: null,
+      };
+      return {
+        status: "ok" as const,
+        trace_id: "fixture-owner-acceptance-write",
+        write_status: "written" as const,
+        record,
+        decision: {
+          ...decision,
+          status: payload.action === "accepted" ? "accepted" : payload.action,
+          products: decision.products.map((product) =>
+            product.binding?.binding_sha256 === binding.binding_sha256
+              ? {
+                  ...product,
+                  status: payload.action === "accepted" ? "accepted" : payload.action,
+                  current_event: record,
+                }
+              : product,
+          ),
+          current_event: record,
+        },
+        replayed: false,
+      } satisfies OwnerAcceptanceEventMutationResponse;
+    },
+    failureFor: ownerAcceptanceFailure,
+    failureCertainty: ownerAcceptanceFailureCertainty,
+  });
+
+  const failure = operation.state.failure;
+  useEffect(() => {
+    if (
+      failure?.code === "owner_acceptance_binding_changed" &&
+      handledDriftFailureRef.current !== failure
+    ) {
+      handledDriftFailureRef.current = failure;
+      void onBindingChanged(binding);
+    }
+  }, [binding, failure, onBindingChanged]);
+  useEffect(() => {
+    setAction("accepted");
+    setReason("");
+    setConfirmRevoke(false);
+  }, [binding.binding_sha256]);
+  const reasonRequired = action !== "accepted";
+  const busy = ["queued", "submitting"].includes(operation.state.phase);
+  const canSubmit =
+    (!reasonRequired || reason.trim().length > 0) &&
+    (action !== "revoked" || confirmRevoke) &&
+    !busy;
+
+  return (
+    <section className="engineering-owner-action-panel" aria-label={`Owner action for ${binding.product}`}>
+      <header>
+        <div><strong>{binding.product}</strong><span>{binding.system} · {binding.action} · {binding.environment}</span></div>
+        <code>{binding.binding_sha256.slice(0, 12)}</code>
+      </header>
+      <p>Act only on this Current binding. Launchplane revalidates the exact change and your Owner authority at write time.</p>
+      <label>
+        <span>Owner action</span>
+        <select value={action} disabled={operation.state.requiresIdempotencyContinuity} onChange={(event) => {
+          setAction(event.target.value as OwnerAcceptanceHumanAction);
+          setConfirmRevoke(false);
+        }}>
+          <option value="accepted">Accept</option>
+          <option value="changes_requested">Request changes</option>
+          <option value="revoked">Revoke</option>
+        </select>
+      </label>
+      {reasonRequired ? <label><span>Reason</span><textarea value={reason} maxLength={4000} disabled={operation.state.requiresIdempotencyContinuity} onChange={(event) => setReason(event.target.value)} /></label> : null}
+      {action === "revoked" ? <label className="engineering-owner-action-confirm"><input type="checkbox" checked={confirmRevoke} disabled={operation.state.requiresIdempotencyContinuity} onChange={(event) => setConfirmRevoke(event.target.checked)} /><span>I confirm this exact binding should be revoked.</span></label> : null}
+      <div className="engineering-owner-action-buttons">
+        <button className="button button-primary" type="button" disabled={!canSubmit} onClick={async () => {
+          const response = await operation.run(ownerAcceptanceRequest(binding, action, reason));
+          if (response) {
+            onDecision(response.decision);
+            setAction("accepted");
+            setReason("");
+            setConfirmRevoke(false);
+          }
+        }}>{busy ? "Submitting…" : "Submit Owner action"}</button>
+        {busy ? <button className="button" type="button" onClick={operation.cancel}>Cancel wait</button> : null}
+      </div>
+      {failure && failure.code !== "owner_acceptance_binding_changed" ? <p className="engineering-owner-action-message" role="alert">{failure.message}{failure.traceId ? <code>{failure.traceId}</code> : null}</p> : null}
+      {operation.state.receipt ? <p className="engineering-owner-action-message" data-tone="success">{operation.state.receipt.replayed ? "Owner action was already recorded (idempotent replay)." : "Owner action recorded in shadow mode."} No merge or production authority was granted.<code>{operation.state.receipt.traceId}</code></p> : null}
+      {operation.state.requiresIdempotencyContinuity ? <p className="engineering-owner-action-message" role="status">Outcome uncertain. Retry only this unchanged action; the idempotency key is preserved.</p> : null}
     </section>
   );
 }

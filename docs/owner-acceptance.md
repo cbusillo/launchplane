@@ -174,20 +174,21 @@ PR, including never-acted PRs.
 The browser supplies only optional filter query parameters (`repository`
 substring, `status` exact). It cannot supply candidate targets, head SHAs,
 binding digests, or any evidence input. Malformed event actions are not
-silently skipped — they fail the route. No mutation route is exposed.
+silently skipped — they fail the route. Queue rows never expose mutation
+controls.
 
 The route uses the existing read authorization action.
 
 ## Engineering Ops Workbench
 
-`/ui/engineering/owner-acceptance` is a read-only engineering evidence surface
-following the existing engineering-resource pattern. It displays queue entries
+`/ui/engineering/owner-acceptance` combines a read-only recorded ledger surface
+with exact Current-evaluation Owner controls. It displays queue entries
 from `GET /v1/owner-acceptance/queue` with:
 
 - loading, error, denied, and empty states via `EngineeringResourceGate`;
 - a boundary note explaining shadow-mode, the 50-entry limit, and the
   ledger-only derivation (no current GitHub evidence);
-- optional client-side filters by status (exact) and repository (substring);
+- server-side filters by status (exact) and repository (substring);
 - per-entry recorded binding and event provenance with `verification_required`
   framing — rows are labeled **Recorded**, not Current;
 - a passive note that no Owner mutation controls are exposed;
@@ -196,7 +197,15 @@ from `GET /v1/owner-acceptance/queue` with:
   never-acted PRs. Provider failures are scoped to this pane and do not
   affect the queue list state.
 
-No write or mutation controls appear on this surface.
+Mutation controls appear only after an exact Current evaluation and only for
+server-issued product bindings. The browser submits repository, PR, action,
+reason, and the exact `expected_binding_sha256`; it never builds authority or
+evidence. Launchplane re-evaluates the binding and the authenticated GitHub
+human's current Owner membership at write time. Request-changes and revoke
+require a reason, revoke requires explicit confirmation, replay preserves the
+same idempotency key, and `409 owner_acceptance_binding_changed` refreshes the
+Current evaluation without auto-resubmitting. Every receipt remains shadow,
+non-authoritative, and has no merge or production enforcement effect.
 
 ## Out Of Scope
 

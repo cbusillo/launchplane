@@ -751,7 +751,9 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByRole("link", { name: "Owner acceptance", exact: true }),
     ).toBeVisible();
-    await expect(page.getByText("Shadow mode — read only")).toBeVisible();
+    await expect(
+      page.getByText("Shadow mode — recorded evidence and Current controls"),
+    ).toBeVisible();
     // Entries are labeled Recorded, not Current
     await expect(page.getByText(/Recorded/).first()).toBeVisible();
     await expect(page.getByText("No Owner mutation controls exposed").first()).toBeVisible();
@@ -790,6 +792,67 @@ test.describe("operator journeys", () => {
       page.getByRole("spinbutton", { name: "Pull request number" }),
     ).toBeVisible();
     await assertDocumentBasics(page);
+    diagnostics.assertClean();
+  });
+
+  test("current Owner acceptance lookup records an exact shadow action", async ({ page }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/owner-acceptance?fixture=products");
+    await page.getByRole("textbox", { name: "Repository (owner/repo)" }).fill("example/site");
+    await page.getByRole("spinbutton", { name: "Pull request number" }).fill("308");
+    await page.getByRole("button", { name: "Look up" }).click();
+
+    const panel = page.getByRole("region", { name: /Owner action for/ });
+    await expect(panel).toBeVisible();
+    await expect(panel.getByText("Act only on this Current binding.")).toBeVisible();
+    await panel.getByRole("button", { name: "Submit Owner action" }).click();
+    await expect(panel.getByText(/recorded in shadow mode/i)).toBeVisible();
+    await expect(panel.getByText(/No merge or production authority/i)).toBeVisible();
+    diagnostics.assertClean();
+  });
+
+  test("request changes and revoke require explicit human input", async ({ page }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/owner-acceptance?fixture=products");
+    await page.getByRole("textbox", { name: "Repository (owner/repo)" }).fill("example/site");
+    await page.getByRole("spinbutton", { name: "Pull request number" }).fill("308");
+    await page.getByRole("button", { name: "Look up" }).click();
+
+    const panel = page.getByRole("region", { name: /Owner action for/ });
+    const submit = panel.getByRole("button", { name: "Submit Owner action" });
+    await panel.getByRole("combobox").selectOption("changes_requested");
+    await expect(submit).toBeDisabled();
+    await panel.getByRole("textbox", { name: "Reason" }).fill("Please correct the product flow.");
+    await expect(submit).toBeEnabled();
+    await panel.getByRole("combobox").selectOption("revoked");
+    await expect(submit).toBeDisabled();
+    await panel.getByRole("checkbox").check();
+    await expect(submit).toBeEnabled();
+    diagnostics.assertClean();
+  });
+
+  test("binding drift refreshes Current evidence without auto-resubmitting", async ({ page }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/owner-acceptance?fixture=missing");
+    await page.getByRole("textbox", { name: "Repository (owner/repo)" }).fill("example/site");
+    await page.getByRole("spinbutton", { name: "Pull request number" }).fill("308");
+    await page.getByRole("button", { name: "Look up" }).click();
+    const panel = page.getByRole("region", { name: /Owner action for/ });
+    await panel.getByRole("combobox").selectOption("revoked");
+    await panel.getByRole("textbox", { name: "Reason" }).fill("Revoke the reviewed binding.");
+    await panel.getByRole("checkbox").check();
+    await panel.getByRole("button", { name: "Submit Owner action" }).click();
+
+    await expect(page.getByText(/reviewed binding changed/i)).toBeVisible();
+    await expect(page.getByText(/explicitly submit again/i)).toBeVisible();
+    const refreshedPanel = page.getByRole("region", { name: /Owner action for/ });
+    await expect(refreshedPanel.getByText("bbbbbbbbbbbb", { exact: true })).toBeVisible();
+    await expect(refreshedPanel.getByRole("combobox")).toHaveValue("accepted");
+    await expect(refreshedPanel.getByRole("checkbox")).toHaveCount(0);
+    await expect(refreshedPanel.getByRole("button", { name: "Submit Owner action" })).toBeEnabled();
     diagnostics.assertClean();
   });
 

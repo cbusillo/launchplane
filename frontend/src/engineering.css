@@ -1766,6 +1766,75 @@
   gap: 5px;
 }
 
+.engineering-owner-acceptance-actions {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.engineering-owner-action-panel {
+  display: grid;
+  gap: 0.8rem;
+  padding: 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 1rem;
+  background: var(--surface-raised);
+}
+
+.engineering-owner-action-panel > header,
+.engineering-owner-action-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.engineering-owner-action-panel > header > div,
+.engineering-owner-action-panel label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.engineering-owner-action-panel textarea {
+  min-height: 7rem;
+  resize: vertical;
+}
+
+.engineering-owner-action-confirm {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.engineering-owner-action-message {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.75rem;
+  border-radius: 0.75rem;
+  background: var(--surface-muted);
+}
+
+.engineering-owner-action-message[data-tone="success"] {
+  border: 1px solid var(--status-pass-border);
+}
+
+@media (max-width: 640px) {
+  .engineering-owner-action-panel select,
+  .engineering-owner-action-panel textarea {
+    min-height: 44px;
+  }
+
+  .engineering-owner-action-confirm input {
+    width: 24px;
+    height: 24px;
+  }
+
+  .engineering-owner-action-buttons .button {
+    width: 100%;
+    min-height: 44px;
+  }
+}
+
 .engineering-owner-acceptance-binding > span {
   color: var(--faint);
   font-size: 10px;

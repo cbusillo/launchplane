@@ -31,6 +31,7 @@ test("browser write routes are the generated UI write allowlist", () => {
     "/v1/products/{product}/environments/{environment}/promotion/dry-run",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch",
     "/v1/work-graph/rank",
+    "/v1/owner-acceptance/events",
   ]));
 });
 
