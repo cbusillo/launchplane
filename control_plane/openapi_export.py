@@ -182,6 +182,8 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation",
+    "/v1/owner-acceptance/evaluation": "evaluate_owner_acceptance",
+    "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",
 }
 
 
@@ -196,4 +198,5 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": (
         "dispatch_product_promotion_workflow"
     ),
+    "/v1/owner-acceptance/events": "write_owner_acceptance_event",
 }

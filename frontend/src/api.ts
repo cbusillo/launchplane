@@ -12,8 +12,14 @@ import type {
   DryRunProductPromotionData,
   DryRunProductPromotionResponse,
   EveryCodeSummaryResponse,
+  EvaluateOwnerAcceptanceResponse,
+  ListOwnerAcceptanceQueueData,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
+  OwnerAcceptanceQueueResponse,
+  OwnerAcceptanceDecision,
+  OwnerAcceptanceEventResponse,
+  OwnerAcceptanceProductDecision,
   ProductActivityResponse,
   ProductEnvironmentConfigStatusResponse,
   ProductEnvironmentIncidentResponse,
@@ -31,6 +37,7 @@ import type {
   WorkGraphIssueInboxResponse,
   WorkGraphSnapshot,
   WorkGraphSnapshotResponse,
+  WriteOwnerAcceptanceEventData,
 } from "./generated/openapi.ts";
 import type { BrowserOperationOptions } from "./browser-operation";
 import {
@@ -482,4 +489,61 @@ export function dispatchProductPromotionWorkflow(
     generatedIdempotencyKey(request.headers),
     options.onDispatch,
   );
+}
+
+export function readOwnerAcceptanceQueue(
+  query: ListOwnerAcceptanceQueueData["query"] = {},
+  signal?: AbortSignal,
+): Promise<OwnerAcceptanceQueueResponse> {
+  const params = new URLSearchParams();
+  if (query.repository) params.set("repository", query.repository);
+  if (query.status) params.set("status", query.status);
+  const qs = params.toString();
+  return requestJson<OwnerAcceptanceQueueResponse>(
+    `/v1/owner-acceptance/queue${qs ? `?${qs}` : ""}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export type { OwnerAcceptanceDecision, OwnerAcceptanceProductDecision };
+export type OwnerAcceptanceEventMutationResponse = OwnerAcceptanceEventResponse & {
+  replayed: boolean;
+};
+
+export function evaluateOwnerAcceptance(
+  repository: string,
+  pullRequestNumber: number,
+  signal?: AbortSignal,
+): Promise<EvaluateOwnerAcceptanceResponse> {
+  const params = new URLSearchParams({
+    repository,
+    pull_request_number: String(pullRequestNumber),
+  });
+  return requestJson<EvaluateOwnerAcceptanceResponse>(
+    `/v1/owner-acceptance/evaluation?${params.toString()}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function writeOwnerAcceptanceEvent(
+  payload: WriteOwnerAcceptanceEventData["body"],
+  options: BrowserOperationOptions,
+): Promise<OwnerAcceptanceEventMutationResponse> {
+  const request: WriteOwnerAcceptanceEventData = {
+    url: BROWSER_WRITE_ROUTES.ownerAcceptanceEvent,
+    body: payload,
+    headers: { "Idempotency-Key": options.idempotencyKey },
+  };
+  return requestGeneratedPost<OwnerAcceptanceEventResponse>(
+    request,
+    options.signal,
+    options.onDispatch,
+  ).then((response) => ({
+    ...response,
+    replayed: response.write_status === "replayed",
+  }));
 }

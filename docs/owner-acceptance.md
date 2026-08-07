@@ -137,11 +137,80 @@ Migration `f3a5c7e9b1d4` creates the empty table and indexes only. It performs
 no backfill from GitHub comments, manager-preview approvals, technical waivers,
 or tenant-admission evidence.
 
+## Acceptance Queue
+
+`GET /v1/owner-acceptance/queue` is a **ledger-only** endpoint. It derives
+candidates exclusively from `OwnerAcceptanceEventRecord` history with no
+repository evidence provider calls, no GitHub API calls, and no engineering
+review decision store dependency.
+
+**Folding:** Events are folded by their full subject key:
+`(repository_id, pull_request_number, product, system, action, environment)`.
+For each unique subject, the latest event is selected deterministically by
+`(occurred_at, event_id)`.
+
+**Ledger status:** Each entry carries a `ledger_status` and `next_action`
+derived from the latest recorded event action:
+- `accepted` → `accepted`
+- `changes_requested` → `changes_requested`
+- `revoked` → `revoked`
+- `superseded` → `stale`
+- `invalidated` → `unavailable`
+
+**Pagination counts:** The response exposes `total` (unique subjects in the
+scan), `candidate` (after optional filters), `truncated` / `has_more` (whether
+filters exceed the 50-entry limit), and `entry_count` (entries in this
+response).
+
+**Provenance:** Every entry includes `latest_event` (full persisted event
+record), `latest_binding` (the exact binding from that event), `occurred_at`,
+and `verification_required: true`.
+
+**Limitation:** The queue reflects what has been explicitly recorded in the
+ledger. PRs with no acceptance events do not appear. Use
+`GET /v1/owner-acceptance/evaluation` for a live current evaluation of any
+PR, including never-acted PRs.
+
+The browser supplies only optional filter query parameters (`repository`
+substring, `status` exact). It cannot supply candidate targets, head SHAs,
+binding digests, or any evidence input. Malformed event actions are not
+silently skipped — they fail the route. Queue rows never expose mutation
+controls.
+
+The route uses the existing read authorization action.
+
+## Engineering Ops Workbench
+
+`/ui/engineering/owner-acceptance` combines a read-only recorded ledger surface
+with exact Current-evaluation Owner controls. It displays queue entries
+from `GET /v1/owner-acceptance/queue` with:
+
+- loading, error, denied, and empty states via `EngineeringResourceGate`;
+- a boundary note explaining shadow-mode, the 50-entry limit, and the
+  ledger-only derivation (no current GitHub evidence);
+- server-side filters by status (exact) and repository (substring);
+- per-entry recorded binding and event provenance with `verification_required`
+  framing — rows are labeled **Recorded**, not Current;
+- a passive note that no Owner mutation controls are exposed;
+- an **Exact Lookup** pane that calls `GET /v1/owner-acceptance/evaluation`
+  for a current live decision of any repository and PR number, including
+  never-acted PRs. Provider failures are scoped to this pane and do not
+  affect the queue list state.
+
+Mutation controls appear only after an exact Current evaluation and only for
+server-issued product bindings. The browser submits repository, PR, action,
+reason, and the exact `expected_binding_sha256`; it never builds authority or
+evidence. Launchplane re-evaluates the binding and the authenticated GitHub
+human's current Owner membership at write time. Request-changes and revoke
+require a reason, revoke requires explicit confirmation, replay preserves the
+same idempotency key, and `409 owner_acceptance_binding_changed` refreshes the
+Current evaluation without auto-resubmitting. Every receipt remains shadow,
+non-authoritative, and has no merge or production enforcement effect.
+
 ## Out Of Scope
 
 - production authorization and promotion consumers
 - GitHub status projection
-- frontend Owner workbench
 - tenant-admission cutover
 - manager/delegate cleanup
 - break-glass acceptance

@@ -1657,3 +1657,291 @@
     transition: none;
   }
 }
+
+/* ── Owner acceptance queue ─────────────────────────────────────────── */
+
+.engineering-filter-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+.engineering-filter-row label {
+  display: grid;
+  min-width: 150px;
+  gap: 4px;
+}
+
+.engineering-filter-row label > span {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.engineering-filter-row select,
+.engineering-filter-row input[type="search"] {
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+  padding: 0 10px;
+}
+
+.engineering-owner-acceptance-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.engineering-owner-acceptance-item {
+  display: grid;
+  gap: 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 17px 18px;
+}
+
+.engineering-owner-acceptance-item > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.engineering-owner-acceptance-item > header h2 {
+  font-size: 15px;
+  font-weight: 660;
+  margin: 2px 0 0;
+}
+
+.engineering-owner-acceptance-products {
+  display: grid;
+  gap: 8px;
+}
+
+.engineering-owner-acceptance-products > span {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.engineering-owner-acceptance-products ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.engineering-owner-acceptance-products li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  padding: 9px 11px;
+}
+
+.engineering-owner-acceptance-products li > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.engineering-owner-acceptance-binding {
+  display: grid;
+  gap: 5px;
+}
+
+.engineering-owner-acceptance-actions {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.engineering-owner-action-panel {
+  display: grid;
+  gap: 0.8rem;
+  padding: 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 1rem;
+  background: var(--surface-raised);
+}
+
+.engineering-owner-action-panel > header,
+.engineering-owner-action-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.engineering-owner-action-panel > header > div,
+.engineering-owner-action-panel label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.engineering-owner-action-panel textarea {
+  min-height: 7rem;
+  resize: vertical;
+}
+
+.engineering-owner-action-confirm {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.engineering-owner-action-message {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.75rem;
+  border-radius: 0.75rem;
+  background: var(--surface-muted);
+}
+
+.engineering-owner-action-message[data-tone="success"] {
+  border: 1px solid var(--status-pass-border);
+}
+
+@media (max-width: 640px) {
+  .engineering-owner-action-panel select,
+  .engineering-owner-action-panel textarea {
+    min-height: 44px;
+  }
+
+  .engineering-owner-action-confirm input {
+    width: 24px;
+    height: 24px;
+  }
+
+  .engineering-owner-action-buttons .button {
+    width: 100%;
+    min-height: 44px;
+  }
+}
+
+.engineering-owner-acceptance-binding > span {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* ── Exact lookup pane ──────────────────────────────────────────────── */
+
+.engineering-owner-acceptance-lookup {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 16px 18px;
+}
+
+.engineering-owner-acceptance-lookup > header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--text-strong);
+  font-weight: 660;
+}
+
+.engineering-owner-acceptance-lookup > header > small {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.engineering-owner-acceptance-lookup-form {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.engineering-owner-acceptance-lookup-form label {
+  display: grid;
+  gap: 4px;
+}
+
+.engineering-owner-acceptance-lookup-form label > span {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.engineering-owner-acceptance-lookup-form input {
+  min-height: 34px;
+  min-width: 160px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+  padding: 0 10px;
+}
+
+.engineering-owner-acceptance-lookup-error {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--error, #c0392b);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 13px;
+  padding: 10px 12px;
+}
+
+.engineering-owner-acceptance-lookup-result {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--surface-raised);
+  padding: 12px 14px;
+}
+
+/* ── Responsive: owner acceptance ───────────────────────────────────── */
+
+@media (max-width: 760px) {
+  .engineering-filter-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .engineering-filter-row label {
+    width: 100%;
+  }
+
+  .engineering-owner-acceptance-item > header {
+    flex-direction: column;
+  }
+
+  .engineering-owner-acceptance-lookup-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .engineering-owner-acceptance-lookup-form input {
+    width: 100%;
+  }
+}

@@ -7,7 +7,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 import { formatTime } from "./format";
 import {
@@ -24,6 +24,7 @@ const ENGINEERING_VIEWS: Exclude<EngineeringView, "hub">[] = [
   "every-code",
   "merge-train",
   "tenant-admission",
+  "owner-acceptance",
 ];
 
 export function EngineeringRouteFrame({
@@ -41,9 +42,21 @@ export function EngineeringRouteFrame({
   title: string;
   view: EngineeringView;
 }) {
+  const navigationRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    navigationRef.current
+      ?.querySelector<HTMLElement>('[aria-current="page"]')
+      ?.scrollIntoView({ behavior: "instant", block: "nearest", inline: "center" });
+  }, [view]);
+
   return (
     <section className="engineering-route">
-      <nav className="engineering-route-nav" aria-label="Engineering Ops views">
+      <nav
+        className="engineering-route-nav"
+        aria-label="Engineering Ops views"
+        ref={navigationRef}
+      >
         <AppLink
           aria-current={view === "hub" ? "page" : undefined}
           data-active={view === "hub"}

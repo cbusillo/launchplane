@@ -3,6 +3,7 @@ import type {
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
   RankWorkGraphSnapshotData,
+  WriteOwnerAcceptanceEventData,
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
@@ -14,6 +15,8 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch" satisfies DispatchProductPromotionWorkflowData["url"],
   workGraphRank:
     "/v1/work-graph/rank" satisfies RankWorkGraphSnapshotData["url"],
+  ownerAcceptanceEvent:
+    "/v1/owner-acceptance/events" satisfies WriteOwnerAcceptanceEventData["url"],
 } as const;
 
 export type BrowserWriteRoute =

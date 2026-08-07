@@ -4,12 +4,14 @@ import {
   GitPullRequestArrow,
   Network,
   ShieldCheck,
+  UserCheck,
   Wrench,
 } from "lucide-react";
 
 import { EngineeringEveryCodeRoute } from "./EngineeringEveryCodeRoute";
 import { EngineeringIssueInboxRoute } from "./EngineeringIssueInboxRoute";
 import { EngineeringMergeTrainRoute } from "./EngineeringMergeTrainRoute";
+import { EngineeringOwnerAcceptanceRoute } from "./EngineeringOwnerAcceptanceRoute";
 import { EngineeringTenantAdmissionRoute } from "./EngineeringTenantAdmissionRoute";
 import { EngineeringRouteFrame } from "./EngineeringRouteUi";
 import { EngineeringWorkGraphRoute } from "./EngineeringWorkGraphRoute";
@@ -62,6 +64,14 @@ const ENGINEERING_SURFACES = [
     title: "Tenant admission",
     view: "tenant-admission" as const,
   },
+  {
+    detail:
+      "Review current Owner acceptance decisions for repository pull requests. Shadow mode — no mutations exposed.",
+    icon: UserCheck,
+    label: "Read only",
+    title: "Owner acceptance",
+    view: "owner-acceptance" as const,
+  },
 ];
 
 export function EngineeringOpsRoute({
@@ -85,6 +95,9 @@ export function EngineeringOpsRoute({
   }
   if (view === "tenant-admission") {
     return <EngineeringTenantAdmissionRoute fixtureMode={fixtureMode} />;
+  }
+  if (view === "owner-acceptance") {
+    return <EngineeringOwnerAcceptanceRoute fixtureMode={fixtureMode} />;
   }
   return <EngineeringOpsHub />;
 }
