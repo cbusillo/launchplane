@@ -8021,6 +8021,24 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    @contextmanager
+    def serialize_preview_refresh(self, *, preview_id: str) -> Iterator[None]:
+        normalized_preview_id = preview_id.strip()
+        if not normalized_preview_id:
+            raise ValueError("Preview refresh serialization requires preview_id.")
+        if self._engine.dialect.name != "postgresql":
+            yield
+            return
+        with self._session_factory() as session:
+            session.execute(
+                text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                {"lock_name": f"launchplane-preview-refresh:{normalized_preview_id}"},
+            )
+            try:
+                yield
+            finally:
+                session.commit()
+
     def write_preview_generation_evidence_records(
         self,
         *,
@@ -11489,8 +11507,7 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplaneEngineeringReviewDecisionRow.repository == repository)
         if pull_request_number is not None:
             filters.append(
-                LaunchplaneEngineeringReviewDecisionRow.pull_request_number
-                == pull_request_number
+                LaunchplaneEngineeringReviewDecisionRow.pull_request_number == pull_request_number
             )
         if head_sha:
             filters.append(LaunchplaneEngineeringReviewDecisionRow.head_sha == head_sha)
@@ -15005,7 +15022,9 @@ class PostgresRecordStore(HumanSessionStore):
                 self._read_payload(model_type=ChangeImpactPolicyRecord, payload=row.payload)
                 for row in rows
             )
-            same_id = tuple(existing for existing in records if existing.record_id == record.record_id)
+            same_id = tuple(
+                existing for existing in records if existing.record_id == record.record_id
+            )
             if same_id:
                 if len(same_id) != 1 or same_id[0].policy_digest != record.policy_digest:
                     raise ChangeImpactPolicyConflictError(
@@ -15095,7 +15114,9 @@ class PostgresRecordStore(HumanSessionStore):
         if repository_id:
             filters.append(LaunchplaneChangeImpactPolicyRow.repository_id == repository_id)
         if repository:
-            filters.append(LaunchplaneChangeImpactPolicyRow.repository == repository.strip().lower())
+            filters.append(
+                LaunchplaneChangeImpactPolicyRow.repository == repository.strip().lower()
+            )
         if status:
             filters.append(LaunchplaneChangeImpactPolicyRow.status == status)
         return self._list_models(
@@ -15407,9 +15428,9 @@ class PostgresRecordStore(HumanSessionStore):
             self.write_preview_generation_record(generation_record)
             counts["preview_generations"] += 1
         if hasattr(filesystem_store, "list_manager_preview_approval_event_records"):
-            for manager_approval_event in (
-                filesystem_store.list_manager_preview_approval_event_records()
-            ):
+            for (
+                manager_approval_event
+            ) in filesystem_store.list_manager_preview_approval_event_records():
                 self.write_manager_preview_approval_event_record(manager_approval_event)
                 counts["manager_preview_approval_events"] += 1
         if hasattr(filesystem_store, "list_owner_acceptance_event_records"):

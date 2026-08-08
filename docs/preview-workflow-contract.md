@@ -145,6 +145,13 @@ generic response records successful readiness and smoke evidence and persists th
 same exact runtime identity injected into the serving application. Later product
 verification may advance that generation from verifying to ready, but it must not
 replace or fabricate the serving artifact or source revision.
+Before driver-owned provisioning starts, Launchplane resolves the canonical
+preview record ID and next generation ID from the DB-backed preview history.
+DB-backed execution serializes refreshes by canonical preview ID, then injects
+both values into the expected runtime identity, requires the live health endpoint
+to echo them, and persists that observed identity on the same explicit generation.
+Product-local preview slugs are not substitutes for Launchplane's canonical
+preview and generation identities.
 
 Preview comment updates that are not part of the lifecycle workflow use
 `cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@<launchplane-sha>`.

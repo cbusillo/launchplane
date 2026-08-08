@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
-from typing import cast
+from typing import ContextManager, Protocol, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -35,9 +36,12 @@ from control_plane.drivers.generic_web_preview_dispatch import (
 )
 from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.launchplane_mutations import (
+    LaunchplanePreviewGenerationIdentity,
     LaunchplaneMutationStore,
     apply_launchplane_destroy_preview_if_present,
     apply_launchplane_generation_evidence,
+    resolve_launchplane_preview_id,
+    resolve_next_launchplane_preview_generation_identity,
 )
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.workflows.evidence_ingestion import (
@@ -74,6 +78,21 @@ VERIREEL_PREVIEW_REFRESH_ROUTE = "/v1/drivers/verireel/preview-refresh"
 VERIREEL_PREVIEW_INVENTORY_ROUTE = "/v1/drivers/verireel/preview-inventory"
 VERIREEL_PREVIEW_DESTROY_ROUTE = "/v1/drivers/verireel/preview-destroy"
 VERIREEL_PREVIEW_VERIFICATION_ROUTE = "/v1/drivers/verireel/preview-verification"
+
+
+class _PreviewRefreshSerializationStore(Protocol):
+    def serialize_preview_refresh(self, *, preview_id: str) -> ContextManager[None]: ...
+
+
+def _preview_refresh_serialization(
+    *, record_store: object, preview_id: str
+) -> ContextManager[None]:
+    serialize = getattr(record_store, "serialize_preview_refresh", None)
+    if not callable(serialize):
+        return nullcontext()
+    return cast(_PreviewRefreshSerializationStore, record_store).serialize_preview_refresh(
+        preview_id=preview_id
+    )
 
 
 class VeriReelRouteDependencyError(ValueError):
@@ -362,32 +381,47 @@ def apply_verireel_preview_refresh_result(
     record_store: object,
     request: VeriReelPreviewRefreshEnvelope,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    try:
-        driver_result = execute_verireel_preview_refresh(
-            control_plane_root=control_plane_root,
-            record_store=_runtime_key_safety_store_or_none(record_store),
-            request=request.refresh,
-        )
-    except VeriReelPreviewRefreshConfigError as error:
-        now = utc_now_timestamp()
-        error_message = (
-            str(error).strip() or "VeriReel preview refresh configuration is incomplete."
-        )
-        driver_result = VeriReelPreviewRefreshResult(
-            refresh_status="fail",
-            refresh_started_at=now,
-            refresh_finished_at=now,
-            application_name="",
-            application_id="",
-            preview_url=_verireel_preview_url_for_failed_records(request=request.refresh),
-            error_message=error_message,
-        )
-    records = apply_verireel_preview_refresh_records(
-        control_plane_root=control_plane_root,
-        record_store=record_store,
-        request=request.refresh,
-        driver_result=driver_result,
+    preview_id = resolve_launchplane_preview_id(
+        context=request.refresh.context,
+        anchor_repo=request.refresh.anchor_repo,
+        anchor_pr_number=request.refresh.anchor_pr_number,
     )
+    with _preview_refresh_serialization(record_store=record_store, preview_id=preview_id):
+        generation_identity = resolve_next_launchplane_preview_generation_identity(
+            record_store=cast(LaunchplaneMutationStore, record_store),
+            context=request.refresh.context,
+            anchor_repo=request.refresh.anchor_repo,
+            anchor_pr_number=request.refresh.anchor_pr_number,
+        )
+        try:
+            driver_result = execute_verireel_preview_refresh(
+                control_plane_root=control_plane_root,
+                record_store=_runtime_key_safety_store_or_none(record_store),
+                request=request.refresh,
+                preview_id=generation_identity.preview_id,
+                preview_generation_id=generation_identity.generation_id,
+            )
+        except VeriReelPreviewRefreshConfigError as error:
+            now = utc_now_timestamp()
+            error_message = (
+                str(error).strip() or "VeriReel preview refresh configuration is incomplete."
+            )
+            driver_result = VeriReelPreviewRefreshResult(
+                refresh_status="fail",
+                refresh_started_at=now,
+                refresh_finished_at=now,
+                application_name="",
+                application_id="",
+                preview_url=_verireel_preview_url_for_failed_records(request=request.refresh),
+                error_message=error_message,
+            )
+        records = apply_verireel_preview_refresh_records(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=request.refresh,
+            driver_result=driver_result,
+            generation_identity=generation_identity,
+        )
     return records, driver_result.model_dump(mode="json")
 
 
@@ -483,6 +517,7 @@ def apply_verireel_preview_refresh_records(
     record_store: object,
     request: VeriReelPreviewRefreshRequest,
     driver_result: VeriReelPreviewRefreshResult,
+    generation_identity: LaunchplanePreviewGenerationIdentity,
 ) -> dict[str, object]:
     requested_at = (
         driver_result.refresh_started_at.strip() or driver_result.refresh_finished_at.strip()
@@ -510,6 +545,8 @@ def apply_verireel_preview_refresh_records(
         anchor_pr_number=request.anchor_pr_number,
         anchor_pr_url=request.anchor_pr_url,
         anchor_head_sha=request.anchor_head_sha,
+        sequence=generation_identity.sequence,
+        generation_id=generation_identity.generation_id,
         state="verifying" if refresh_passed else "failed",
         requested_reason="external_preview_refresh",
         requested_at=requested_at,

@@ -62,6 +62,8 @@ def _expected_preview_slug(anchor_pr_number: int) -> str:
 def _build_preview_runtime_identity(
     *,
     request: "VeriReelPreviewRefreshRequest",
+    preview_id: str = "",
+    preview_generation_id: str = "",
     deployed_at: str = "",
 ) -> RuntimeIdentity:
     return RuntimeIdentity(
@@ -76,7 +78,8 @@ def _build_preview_runtime_identity(
         artifact_id=request.image_reference,
         source_git_ref=request.anchor_head_sha,
         image_reference=request.image_reference,
-        preview_id=request.preview_slug,
+        preview_id=preview_id.strip() or request.preview_slug,
+        preview_generation_id=preview_generation_id.strip(),
         deployed_at=deployed_at,
     )
 
@@ -1221,6 +1224,8 @@ def execute_verireel_preview_refresh(
     control_plane_root: Path,
     request: VeriReelPreviewRefreshRequest,
     record_store: RuntimeKeySafetyPolicyReadStore | None = None,
+    preview_id: str = "",
+    preview_generation_id: str = "",
 ) -> VeriReelPreviewRefreshResult:
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
@@ -1301,7 +1306,11 @@ def execute_verireel_preview_refresh(
             ),
             timeout_seconds=request.timeout_seconds,
         )
-        expected_runtime_identity = _build_preview_runtime_identity(request=request)
+        expected_runtime_identity = _build_preview_runtime_identity(
+            request=request,
+            preview_id=preview_id,
+            preview_generation_id=preview_generation_id,
+        )
         env_text = dokploy_api.render_dokploy_env_text_with_overrides(
             str(template_application.get("env") or ""),
             updates={

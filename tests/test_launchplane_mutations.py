@@ -15,6 +15,7 @@ from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview,
     apply_launchplane_destroy_preview_if_present,
     apply_launchplane_generation_evidence,
+    resolve_next_launchplane_preview_generation_identity,
     upsert_launchplane_preview_from_request,
 )
 
@@ -137,6 +138,44 @@ def _generation_request(**updates: object) -> PreviewGenerationMutationRequest:
 
 
 class LaunchplaneMutationTests(unittest.TestCase):
+    def test_next_preview_generation_identity_uses_canonical_record_ids(self) -> None:
+        store = _FakePreviewMutationStore()
+
+        first = resolve_next_launchplane_preview_generation_identity(
+            record_store=store,
+            context="site-testing",
+            anchor_repo="cbusillo/site",
+            anchor_pr_number=42,
+        )
+        apply_launchplane_generation_evidence(
+            control_plane_root_path=Path("/launchplane"),
+            record_store=store,
+            preview_request=_preview_request(),
+            generation_request=_generation_request(
+                sequence=first.sequence,
+                generation_id=first.generation_id,
+            ),
+        )
+        second = resolve_next_launchplane_preview_generation_identity(
+            record_store=store,
+            context="site-testing",
+            anchor_repo="cbusillo/site",
+            anchor_pr_number=42,
+        )
+
+        self.assertEqual(first.preview_id, "preview-site-testing-cbusillo-site-pr-42")
+        self.assertEqual(
+            first.generation_id,
+            "preview-site-testing-cbusillo-site-pr-42-generation-0001",
+        )
+        self.assertEqual(first.sequence, 1)
+        self.assertEqual(second.preview_id, first.preview_id)
+        self.assertEqual(
+            second.generation_id,
+            "preview-site-testing-cbusillo-site-pr-42-generation-0002",
+        )
+        self.assertEqual(second.sequence, 2)
+
     def test_upsert_preview_uses_structural_store_boundary(self) -> None:
         store = _FakePreviewMutationStore()
 

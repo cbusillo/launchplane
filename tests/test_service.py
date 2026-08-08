@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from click import ClickException, Command
 from click.testing import CliRunner
@@ -112,6 +112,7 @@ from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewInventoryItem,
     VeriReelPreviewInventoryResult,
     VeriReelPreviewRefreshConfigError,
+    VeriReelPreviewRefreshRequest,
     VeriReelPreviewRefreshResult,
     VeriReelPreviewRefreshTransportError,
 )
@@ -10041,7 +10042,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         artifact_id="ghcr.io/every/verireel-app:pr-123-sha-6b3c9d7",
                         source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
                         image_reference="ghcr.io/every/verireel-app:pr-123-sha-6b3c9d7",
-                        preview_id="pr-123",
+                        preview_id="preview-verireel-testing-verireel-pr-123",
+                        preview_generation_id=(
+                            "preview-verireel-testing-verireel-pr-123-generation-0001"
+                        ),
                     ),
                 ),
             ) as execute_mock:
@@ -10106,10 +10110,24 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "6b3c9d7e8f901234567890abcdef1234567890ab",
             )
             self.assertEqual(
+                generation.runtime_identity.preview_id,
+                "preview-verireel-testing-verireel-pr-123",
+            )
+            self.assertEqual(
+                generation.runtime_identity.preview_generation_id,
+                "preview-verireel-testing-verireel-pr-123-generation-0001",
+            )
+            self.assertEqual(
                 generation.resolved_manifest_fingerprint,
                 "verireel-preview-manifest-pr-123-6b3c9d7",
             )
-            execute_mock.assert_called_once()
+            execute_mock.assert_called_once_with(
+                control_plane_root=root,
+                record_store=ANY,
+                request=VeriReelPreviewRefreshRequest.model_validate(refresh_payload["refresh"]),
+                preview_id="preview-verireel-testing-verireel-pr-123",
+                preview_generation_id=("preview-verireel-testing-verireel-pr-123-generation-0001"),
+            )
 
     def test_verireel_preview_refresh_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

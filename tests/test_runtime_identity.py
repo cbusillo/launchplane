@@ -82,6 +82,31 @@ class RuntimeIdentityTests(unittest.TestCase):
         self.assertIn("artifact_id", detail)
         self.assertIn("source_git_ref", detail)
 
+    def test_compare_runtime_identity_reports_preview_binding_mismatches(self) -> None:
+        expected = RuntimeIdentity(
+            product="verireel",
+            context="verireel-testing",
+            instance="pr-310",
+            environment_kind="preview",
+            deployment_record_id="verireel-testing-pr-310",
+            artifact_id="artifact-a",
+            source_git_ref="abc123",
+            preview_id="preview-verireel-testing-verireel-pr-310",
+            preview_generation_id=("preview-verireel-testing-verireel-pr-310-generation-0007"),
+        )
+        observed = expected.model_copy(
+            update={
+                "preview_id": "pr-310",
+                "preview_generation_id": "",
+            }
+        )
+
+        status, detail = compare_runtime_identity(expected=expected, observed=observed)
+
+        self.assertEqual(status, "mismatch")
+        self.assertIn("preview_id", detail)
+        self.assertIn("preview_generation_id", detail)
+
     def test_health_payload_runtime_identity_status_marks_non_json_unverifiable(self) -> None:
         expected = RuntimeIdentity(
             product="sellyouroutboard",
