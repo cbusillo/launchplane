@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   evaluateOwnerAcceptance,
   LaunchplaneApiError,
+  readOwnerAcceptanceCurrentItems,
   readOwnerAcceptanceQueue,
   writeOwnerAcceptanceEvent,
   type OwnerAcceptanceDecision,
@@ -47,6 +48,8 @@ import {
 
 import type {
   OwnerAcceptanceBinding,
+  OwnerAcceptanceCurrentItem,
+  OwnerAcceptanceCurrentItemsResponse,
   OwnerAcceptanceEventEnvelope,
   OwnerAcceptanceQueueEntry,
   OwnerAcceptanceQueueResponse,
@@ -101,32 +104,71 @@ export function EngineeringOwnerAcceptanceRoute({
     `owner-acceptance:${fixtureMode}:${statusFilter}:${repositoryFilter}`,
   );
 
+  const currentLoader = useCallback(
+    async (
+      signal: AbortSignal,
+      reason: EngineeringLoadReason,
+    ): Promise<OwnerAcceptanceCurrentItemsResponse> => {
+      if (fixtureMode) {
+        const fixtures = await loadDevFixtures();
+        fixtures.assertEngineeringRefreshAvailable(reason);
+        await fixtures.waitForEngineeringFixture(signal);
+        return ownerAcceptanceCurrentItemsForFixture(
+          fixtureMode,
+          fixtures.ownerAcceptanceEvaluationForFixture(fixtureMode),
+        );
+      }
+      return readOwnerAcceptanceCurrentItems({ limit: 10 }, signal);
+    },
+    [fixtureMode],
+  );
+  const currentResource = useEngineeringResource(
+    currentLoader,
+    `owner-acceptance-current:${fixtureMode}`,
+  );
+
   return (
     <EngineeringRouteFrame
       actions={
         <EngineeringResourceControls
-          cancel={resource.cancel}
-          refresh={resource.refresh}
-          refreshLabel="Refresh queue"
-          state={resource.state}
+          cancel={() => {
+            currentResource.cancel();
+            resource.cancel();
+          }}
+          refresh={() => {
+            currentResource.refresh();
+            resource.refresh();
+          }}
+          refreshLabel="Refresh items"
+          state={currentResource.state}
         />
       }
-      description="Inspect recorded Owner acceptance history for repository pull requests. The queue is derived solely from the acceptance event ledger — no GitHub calls. Use the exact lookup below for a current live evaluation."
+      description="Review current pull requests that may need Owner attention, then inspect recorded acceptance history. Launchplane discovers current items automatically from active change-impact repositories."
       icon={UserCheck}
       title="Owner acceptance"
       view="owner-acceptance"
     >
-      <EngineeringBoundaryNote title="Shadow mode — recorded evidence and Current controls">
+      <EngineeringBoundaryNote title="Shadow mode — automatic Current items and recorded evidence">
         All decisions are <code>mode: shadow</code>, <code>authoritative: false</code>,{" "}
-        <code>enforcement_effect: none</code>. Showing at most {QUEUE_LIMIT} entries,
-        newest-first. Queue entries are{" "}
+        <code>enforcement_effect: none</code>. Current items come from open pull requests
+        in repositories with active change-impact policy records and are evaluated
+        server-side. Recorded entries are{" "}
         <strong>Recorded</strong> — derived from the persisted acceptance event ledger
-        with no live GitHub calls. Use the Exact Lookup pane below for a{" "}
-        <strong>Current</strong> live evaluation and binding-scoped Owner actions. Recorded
-        queue rows remain read-only.
+        with no live GitHub calls. Recorded queue rows remain read-only.
       </EngineeringBoundaryNote>
 
-      <OwnerAcceptanceLookupPane fixtureMode={fixtureMode} />
+      <EngineeringResourceGate
+        noun="Current Owner acceptance items"
+        refresh={currentResource.refresh}
+        state={currentResource.state}
+      >
+        {(data) => <OwnerAcceptanceCurrentItems data={data} fixtureMode={fixtureMode} />}
+      </EngineeringResourceGate>
+
+      <details className="engineering-owner-acceptance-lookup-fallback">
+        <summary>Exact lookup fallback</summary>
+        <OwnerAcceptanceLookupPane fixtureMode={fixtureMode} />
+      </details>
 
       <EngineeringResourceGate
         noun="Owner acceptance queue"
@@ -147,6 +189,186 @@ export function EngineeringOwnerAcceptanceRoute({
         )}
       </EngineeringResourceGate>
     </EngineeringRouteFrame>
+  );
+}
+
+function ownerAcceptanceCurrentItemsForFixture(
+  fixtureMode: Exclude<DevFixtureMode, "">,
+  decision: OwnerAcceptanceDecision,
+): OwnerAcceptanceCurrentItemsResponse {
+  const binding = decision.binding ?? decision.products.find((product) => product.binding)?.binding;
+  const items: OwnerAcceptanceCurrentItem[] =
+    fixtureMode === "empty" || !binding
+      ? []
+      : [
+          {
+            repository: binding.repository,
+            pull_request_number: binding.pull_request_number,
+            title: "Fixture pull request requiring current Owner review",
+            url: `https://github.com/${binding.repository}/pull/${binding.pull_request_number}`,
+            updated_at: decision.evaluated_at,
+            evaluation_status: "available",
+            decision,
+            error_code: "",
+          },
+        ];
+  return {
+    status: "ok",
+    trace_id: `fixture-owner-acceptance-current-${fixtureMode}`,
+    mode: "shadow",
+    authoritative: false,
+    enforcement_effect: "none",
+    derivation: "active_change_impact_open_pull_requests",
+    generated_at: decision.evaluated_at,
+    viewer_capabilities: {
+      event_write_authorized: fixtureMode !== "empty",
+    },
+    repository_count: fixtureMode === "empty" ? 0 : 1,
+    repository_failure_count: 0,
+    candidate_count: items.length,
+    evaluated_count: items.length,
+    unavailable_count: 0,
+    truncated: false,
+    items,
+    repository_failures: [],
+  };
+}
+
+function OwnerAcceptanceCurrentItems({
+  data,
+  fixtureMode,
+}: {
+  data: OwnerAcceptanceCurrentItemsResponse;
+  fixtureMode: DevFixtureMode;
+}) {
+  if (!data.items.length && !data.repository_failures.length) {
+    return (
+      <EngineeringEmpty
+        icon={UserCheck}
+        title="No current pull requests"
+        detail="Launchplane found no open pull requests in active change-impact repositories. Exact lookup remains available as a fallback."
+      />
+    );
+  }
+  return (
+    <section className="engineering-owner-current" aria-label="Current Owner acceptance items">
+      <header className="engineering-owner-current-header">
+        <div>
+          <span>Current items</span>
+          <strong>{data.candidate_count}</strong>
+        </div>
+        <p>
+          Automatically discovered from {data.repository_count} active change-impact {data.repository_count === 1 ? "repository" : "repositories"}.
+        </p>
+      </header>
+      {data.truncated ? (
+        <p className="engineering-owner-action-message" role="status">
+          The server work bound was reached. Refresh later or use exact lookup for a missing PR.
+        </p>
+      ) : null}
+      {data.repository_failures.map((failure) => (
+        <p className="engineering-owner-acceptance-lookup-error" role="alert" key={failure.repository}>
+          {failure.repository}: open pull requests could not be loaded.
+        </p>
+      ))}
+      <div className="engineering-owner-current-list">
+        {data.items.map((item) => (
+          <OwnerAcceptanceCurrentItemCard
+            eventWriteAuthorized={data.viewer_capabilities.event_write_authorized}
+            fixtureMode={fixtureMode}
+            item={item}
+            key={`${item.repository}:${item.pull_request_number}`}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OwnerAcceptanceCurrentItemCard({
+  eventWriteAuthorized,
+  fixtureMode,
+  item,
+}: {
+  eventWriteAuthorized: boolean;
+  fixtureMode: DevFixtureMode;
+  item: OwnerAcceptanceCurrentItem;
+}) {
+  const [decision, setDecision] = useState(item.decision);
+  const [driftMessage, setDriftMessage] = useState("");
+  const [error, setError] = useState("");
+  const pullRequestUrl = safeExternalUrl(item.url);
+  useEffect(() => {
+    setDecision(item.decision);
+    setDriftMessage("");
+    setError("");
+  }, [item.decision, item.error_code, item.evaluation_status]);
+  const refreshCurrentEvaluation = useCallback(async (binding: OwnerAcceptanceBinding) => {
+    try {
+      const evaluation = fixtureMode
+        ? null
+        : await evaluateOwnerAcceptance(binding.repository, binding.pull_request_number);
+      const nextDecision = fixtureMode
+        ? fixtureMode === "missing"
+          ? fixtureDecisionWithBindingDigest(
+              (await loadDevFixtures()).ownerAcceptanceEvaluationForFixture(fixtureMode),
+              "b".repeat(64),
+            )
+          : (await loadDevFixtures()).ownerAcceptanceEvaluationForFixture(fixtureMode)
+        : evaluation!.decision;
+      setDecision(nextDecision);
+      setDriftMessage(
+        "The reviewed binding changed. Current evidence was refreshed; review the new binding and explicitly submit again.",
+      );
+      setError("");
+    } catch (refreshError: unknown) {
+      const apiError = refreshError as LaunchplaneApiError;
+      setError(apiError?.message || "Current Owner acceptance evidence could not be refreshed.");
+    }
+  }, [fixtureMode]);
+
+  return (
+    <article className="engineering-owner-current-item">
+      <header>
+        <div>
+          <span>{item.repository} · PR #{item.pull_request_number}</span>
+          <h2>{item.title}</h2>
+          <small>updated {formatTime(item.updated_at)}</small>
+        </div>
+        {pullRequestUrl ? (
+          <a
+            aria-label={`Open ${item.repository} pull request #${item.pull_request_number} on GitHub`}
+            href={pullRequestUrl.toString()}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open PR <ExternalLink size={14} aria-hidden="true" />
+          </a>
+        ) : null}
+      </header>
+      {item.evaluation_status === "unavailable" || !decision ? (
+        <p className="engineering-owner-acceptance-lookup-error" role="alert">
+          Current evaluation is unavailable. Exact lookup may provide more specific evidence later.
+        </p>
+      ) : (
+        <OwnerAcceptanceDecisionDetails
+          decision={decision}
+          driftMessage={driftMessage}
+          eventWriteAuthorized={eventWriteAuthorized}
+          fixtureMode={fixtureMode}
+          onBindingChanged={refreshCurrentEvaluation}
+          onDecision={(nextDecision) => {
+            setDecision(nextDecision);
+            setDriftMessage("");
+          }}
+        />
+      )}
+      {error ? (
+        <p className="engineering-owner-acceptance-lookup-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </article>
   );
 }
 
@@ -288,50 +510,85 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
       ) : null}
       {decision ? (
         <div className="engineering-owner-acceptance-lookup-result" aria-label="Current evaluation result">
-          <div className="engineering-chip-row">
-            <span className="engineering-status-chip" data-status={ownerAcceptanceDecisionTone(decision.status)}>
-              <StatusIcon status={ownerAcceptanceDecisionTone(decision.status)} />
-              Current: {humanizeStatus(decision.status)}
-            </span>
-            <span>reason: {humanizeStatus(decision.reason_code)}</span>
-            {decision.evaluated_at ? (
-              <span>evaluated {formatTime(decision.evaluated_at)}</span>
-            ) : null}
-          </div>
-          {decision.products && decision.products.length > 0 ? (
-            <>
-              <OwnerAcceptanceProductList products={decision.products} />
-              {driftMessage ? (
-                <p className="engineering-owner-action-message" role="alert">
-                  {driftMessage}
-                </p>
-              ) : null}
-              {eventWriteAuthorized ? (
-                <div className="engineering-owner-acceptance-actions">
-                  {decision.products.map((product) =>
-                    product.binding ? (
-                      <OwnerAcceptanceActionPanel
-                        key={`${product.product}:${product.system}:${product.action}:${product.environment}`}
-                        binding={product.binding}
-                        decision={decision}
-                        fixtureMode={fixtureMode}
-                        onBindingChanged={refreshCurrentEvaluation}
-                        onDecision={(nextDecision) => {
-                          setDecision(nextDecision);
-                          setDriftMessage("");
-                        }}
-                      />
-                    ) : null,
-                  )}
-                </div>
-              ) : eventWriteAuthorized === false ? (
-                <OwnerAcceptanceReadOnlyNotice />
-              ) : null}
-            </>
-          ) : null}
+          <OwnerAcceptanceDecisionDetails
+            decision={decision}
+            driftMessage={driftMessage}
+            eventWriteAuthorized={eventWriteAuthorized === true}
+            fixtureMode={fixtureMode}
+            onBindingChanged={refreshCurrentEvaluation}
+            onDecision={(nextDecision) => {
+              setDecision(nextDecision);
+              setDriftMessage("");
+            }}
+            showReadOnlyNotice={eventWriteAuthorized === false}
+          />
         </div>
       ) : null}
     </section>
+  );
+}
+
+function OwnerAcceptanceDecisionDetails({
+  decision,
+  driftMessage,
+  eventWriteAuthorized,
+  fixtureMode,
+  onBindingChanged,
+  onDecision,
+  showReadOnlyNotice = true,
+}: {
+  decision: OwnerAcceptanceDecision;
+  driftMessage: string;
+  eventWriteAuthorized: boolean;
+  fixtureMode: DevFixtureMode;
+  onBindingChanged: (binding: OwnerAcceptanceBinding) => Promise<void>;
+  onDecision: (decision: OwnerAcceptanceDecision) => void;
+  showReadOnlyNotice?: boolean;
+}) {
+  return (
+    <>
+      <div className="engineering-chip-row">
+        <span
+          className="engineering-status-chip"
+          data-status={ownerAcceptanceDecisionTone(decision.status)}
+        >
+          <StatusIcon status={ownerAcceptanceDecisionTone(decision.status)} />
+          Current: {humanizeStatus(decision.status)}
+        </span>
+        <span>reason: {humanizeStatus(decision.reason_code)}</span>
+        {decision.evaluated_at ? (
+          <span>evaluated {formatTime(decision.evaluated_at)}</span>
+        ) : null}
+      </div>
+      {decision.products.length > 0 ? (
+        <>
+          <OwnerAcceptanceProductList products={decision.products} />
+          {driftMessage ? (
+            <p className="engineering-owner-action-message" role="alert">
+              {driftMessage}
+            </p>
+          ) : null}
+          {eventWriteAuthorized ? (
+            <div className="engineering-owner-acceptance-actions">
+              {decision.products.map((product) =>
+                product.binding ? (
+                  <OwnerAcceptanceActionPanel
+                    key={`${product.product}:${product.system}:${product.action}:${product.environment}`}
+                    binding={product.binding}
+                    decision={decision}
+                    fixtureMode={fixtureMode}
+                    onBindingChanged={onBindingChanged}
+                    onDecision={onDecision}
+                  />
+                ) : null,
+              )}
+            </div>
+          ) : showReadOnlyNotice ? (
+            <OwnerAcceptanceReadOnlyNotice />
+          ) : null}
+        </>
+      ) : null}
+    </>
   );
 }
 
@@ -534,7 +791,10 @@ function OwnerAcceptanceContent({
   ).length;
 
   return (
-    <div className="engineering-owner-acceptance">
+    <div
+      className="engineering-owner-acceptance"
+      aria-label="Recorded Owner acceptance history"
+    >
       <section className="engineering-metric-grid" aria-label="Recorded ledger summary">
         <div className="engineering-metric" data-tone="unknown">
           <span>Ledger subjects</span>

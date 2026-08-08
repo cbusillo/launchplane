@@ -76,6 +76,18 @@ class _GitHubApi:
                 merge_commit_sha=self.confirmed_merge_commit_sha,
                 updated_at=self.confirmed_updated_at,
             )
+        if (
+            path == "/repos/example/shared-addons/pulls?state=open&sort=updated&direction=desc"
+            "&per_page=20&page=1"
+        ):
+            return [
+                {
+                    "number": 2000,
+                    "title": "Current Owner acceptance candidate",
+                    "html_url": "https://github.com/example/shared-addons/pull/2000",
+                    "updated_at": UPDATED_AT,
+                }
+            ]
         if path == f"/repos/example/shared-addons/git/commits/{HEAD_SHA}":
             return {"tree": {"sha": TREE_SHA}}
         if path == "/repos/example/shared-addons/pulls/2000/files?per_page=100&page=1":
@@ -94,6 +106,23 @@ class _GitHubApi:
 
 
 class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
+    def test_lists_bounded_open_pull_requests(self) -> None:
+        github_api = _GitHubApi()
+        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+            control_plane_root=Path("."),
+            github_token=lambda **_: "server-token",
+            github_api=github_api,
+            token_context="launchplane",
+        )
+
+        pull_requests = provider.list_open_pull_requests(REPOSITORY, limit=20)
+
+        self.assertEqual(len(pull_requests), 1)
+        self.assertEqual(pull_requests[0].repository, REPOSITORY)
+        self.assertEqual(pull_requests[0].pull_request_number, 2000)
+        self.assertEqual(pull_requests[0].title, "Current Owner acceptance candidate")
+        self.assertEqual(github_api.last_token, "server-token")
+
     def test_resolves_repository_head_tree_and_complete_changed_paths(self) -> None:
         github_api = _GitHubApi()
         provider = GitHubChangeImpactRepositoryEvidenceProvider(
@@ -199,6 +228,36 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
                     pull_request_number=2000,
                 )
             )
+
+    def test_current_item_resolution_uses_smaller_file_page_bound(self) -> None:
+        class FullPagesGitHubApi(_GitHubApi):
+            def __call__(self, *, path: str, token: str) -> object:
+                if "/files?" in path:
+                    self.paths.append(path)
+                    return [
+                        {"filename": f"path-{index}.py", "status": "modified"}
+                        for index in range(100)
+                    ]
+                return super().__call__(path=path, token=token)
+
+        github_api = FullPagesGitHubApi()
+        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+            control_plane_root=Path("."),
+            github_token=lambda **_: "server-token",
+            github_api=github_api,
+            token_context="launchplane",
+            max_file_pages=30,
+        )
+
+        with self.assertRaises(ChangeImpactRepositoryEvidenceError):
+            provider.resolve_current_item(
+                ChangeImpactTargetReference(
+                    repository=REPOSITORY,
+                    pull_request_number=2000,
+                )
+            )
+
+        self.assertEqual(sum("/files?" in path for path in github_api.paths), 5)
 
 
 if __name__ == "__main__":

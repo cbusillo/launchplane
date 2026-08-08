@@ -1703,6 +1703,96 @@
   list-style: none;
 }
 
+.engineering-owner-current {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.engineering-owner-current-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 14px 16px;
+}
+
+.engineering-owner-current-header > div {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.engineering-owner-current-header span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.engineering-owner-current-header strong {
+  font-size: 22px;
+}
+
+.engineering-owner-current-header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.engineering-owner-current-list {
+  display: grid;
+  gap: 14px;
+}
+
+.engineering-owner-current-item {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 18px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.engineering-owner-current-item > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.engineering-owner-current-item > header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.engineering-owner-current-item > header span,
+.engineering-owner-current-item > header small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.engineering-owner-current-item > header h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 17px;
+}
+
+.engineering-owner-current-item > header a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--link);
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
 .engineering-owner-acceptance-item {
   display: grid;
   gap: 13px;
@@ -1869,12 +1959,30 @@
 
 /* ── Exact lookup pane ──────────────────────────────────────────────── */
 
-.engineering-owner-acceptance-lookup {
-  display: grid;
-  gap: 12px;
+.engineering-owner-acceptance-lookup-fallback {
   margin-bottom: 18px;
   border: 1px solid var(--border);
   border-radius: 10px;
+  background: var(--surface-muted);
+}
+
+.engineering-owner-acceptance-lookup-fallback > summary {
+  cursor: pointer;
+  padding: 12px 16px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.engineering-owner-acceptance-lookup-fallback[open] > summary {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.engineering-owner-acceptance-lookup {
+  display: grid;
+  gap: 12px;
+  border: 0;
+  border-radius: 0 0 10px 10px;
   background: var(--surface);
   padding: 16px 18px;
 }
@@ -1957,6 +2065,12 @@
   }
 
   .engineering-owner-acceptance-item > header {
+    flex-direction: column;
+  }
+
+  .engineering-owner-current-header,
+  .engineering-owner-current-item > header {
+    align-items: flex-start;
     flex-direction: column;
   }
 

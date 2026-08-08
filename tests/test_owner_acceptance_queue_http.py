@@ -7,8 +7,17 @@ import unittest
 
 from fastapi import FastAPI, HTTPException
 
+from control_plane.change_impact_github import (
+    ChangeImpactRepositoryEvidenceError,
+    GitHubOpenPullRequest,
+)
+from control_plane.contracts.change_impact import (
+    ChangeImpactRepositoryEvidence,
+    ChangeImpactTargetReference,
+)
 from control_plane.contracts.owner_acceptance import OwnerAcceptanceEventRecord
 from control_plane.http_routes.owner_acceptance import (
+    OWNER_ACCEPTANCE_CURRENT_ITEMS_ROUTE,
     OWNER_ACCEPTANCE_EVALUATION_ROUTE,
     OWNER_ACCEPTANCE_EVENTS_ROUTE,
     OWNER_ACCEPTANCE_QUEUE_ROUTE,
@@ -65,6 +74,91 @@ def _app(
 
 
 class OwnerAcceptanceQueueHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_current_items_require_read_authorization(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            app = _app(store=store, authorization_allows=False)
+            async with lifespan_client(app) as client:
+                response = await client.get(OWNER_ACCEPTANCE_CURRENT_ITEMS_ROUTE)
+
+            self.assertEqual(response.status_code, 403, response.text)
+
+    async def test_current_items_automatically_evaluate_open_pull_requests(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            app = _app(store=store)
+            async with lifespan_client(app) as client:
+                response = await client.get(OWNER_ACCEPTANCE_CURRENT_ITEMS_ROUTE)
+
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertEqual(payload["derivation"], "active_change_impact_open_pull_requests")
+            self.assertEqual(payload["repository_count"], 1)
+            self.assertEqual(payload["candidate_count"], 1)
+            self.assertEqual(payload["evaluated_count"], 1)
+            self.assertEqual(payload["unavailable_count"], 0)
+            self.assertEqual(payload["items"][0]["repository"], REPOSITORY)
+            self.assertEqual(payload["items"][0]["pull_request_number"], 2022)
+            self.assertEqual(payload["items"][0]["evaluation_status"], "available")
+            self.assertEqual(payload["items"][0]["decision"]["status"], "pending")
+            self.assertIs(
+                payload["viewer_capabilities"]["event_write_authorized"],
+                True,
+            )
+
+    async def test_current_items_show_repository_discovery_failures(self) -> None:
+        class _UnavailableProvider(_EvidenceProvider):
+            def list_open_pull_requests(
+                self,
+                _repository: str,
+                *,
+                limit: int,
+            ) -> tuple[GitHubOpenPullRequest, ...]:
+                raise ChangeImpactRepositoryEvidenceError("GitHub unavailable")
+
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            app = _app(
+                store=store,
+                repository_evidence_provider=_UnavailableProvider(_repository_evidence()),
+            )
+            async with lifespan_client(app) as client:
+                response = await client.get(OWNER_ACCEPTANCE_CURRENT_ITEMS_ROUTE)
+
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertEqual(payload["candidate_count"], 0)
+            self.assertEqual(payload["repository_failure_count"], 1)
+            self.assertEqual(payload["repository_failures"][0]["repository"], REPOSITORY)
+
+    async def test_current_items_show_per_pull_request_evaluation_failures(self) -> None:
+        class _UnavailableEvaluationProvider(_EvidenceProvider):
+            def resolve(
+                self,
+                _target: ChangeImpactTargetReference,
+            ) -> ChangeImpactRepositoryEvidence:
+                raise RuntimeError("exact evidence unavailable")
+
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            app = _app(
+                store=store,
+                repository_evidence_provider=_UnavailableEvaluationProvider(_repository_evidence()),
+            )
+            async with lifespan_client(app) as client:
+                response = await client.get(OWNER_ACCEPTANCE_CURRENT_ITEMS_ROUTE)
+
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertEqual(payload["candidate_count"], 1)
+            self.assertEqual(payload["evaluated_count"], 0)
+            self.assertEqual(payload["unavailable_count"], 1)
+            self.assertEqual(payload["items"][0]["evaluation_status"], "unavailable")
+            self.assertEqual(
+                payload["items"][0]["error_code"],
+                "owner_acceptance_evidence_unavailable",
+            )
+
     async def test_queue_requires_read_authorization(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))

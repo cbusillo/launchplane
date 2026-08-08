@@ -4,6 +4,8 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 from control_plane.contracts.change_impact import (
     ChangeImpactChangeKind,
     ChangeImpactChangedFileEvidence,
@@ -19,6 +21,26 @@ class ChangeImpactRepositoryEvidenceError(RuntimeError):
 
 class ChangeImpactRepositoryEvidenceStaleError(ChangeImpactRepositoryEvidenceError):
     """Raised when the pull request changes while evidence is being resolved."""
+
+
+class GitHubOpenPullRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    repository: str
+    pull_request_number: int = Field(ge=1)
+    title: str
+    url: str
+    updated_at: str
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "GitHubOpenPullRequest":
+        object.__setattr__(self, "repository", self.repository.strip().lower())
+        object.__setattr__(self, "title", self.title.strip())
+        object.__setattr__(self, "url", self.url.strip())
+        object.__setattr__(self, "updated_at", self.updated_at.strip())
+        if not self.title or not self.url or not self.updated_at:
+            raise ValueError("GitHub open pull request fields must be non-empty.")
+        return self
 
 
 class GitHubChangeImpactRepositoryEvidenceProvider:
@@ -41,19 +63,64 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
         if not self._token_context:
             raise ValueError("change-impact GitHub provider requires a token context")
 
+    def list_open_pull_requests(
+        self,
+        repository: str,
+        *,
+        limit: int,
+    ) -> tuple[GitHubOpenPullRequest, ...]:
+        if limit < 1 or limit > 100:
+            raise ValueError("change-impact GitHub open pull request limit must be 1 through 100")
+        try:
+            token = self._token()
+            repository_path = _repository_path(repository)
+            pull_requests = _list_payload(
+                self._github_api(
+                    path=(
+                        f"/repos/{repository_path}/pulls?state=open&sort=updated&direction=desc"
+                        f"&per_page={limit}&page=1"
+                    ),
+                    token=token,
+                ),
+                "GitHub open pull requests",
+            )
+            return tuple(
+                GitHubOpenPullRequest(
+                    repository=repository,
+                    pull_request_number=int(_positive_decimal(pull_request, "number")),
+                    title=_required_string(pull_request, "title"),
+                    url=_required_string(pull_request, "html_url"),
+                    updated_at=_required_string(pull_request, "updated_at"),
+                )
+                for pull_request in pull_requests
+            )
+        except ChangeImpactRepositoryEvidenceError:
+            raise
+        except Exception as error:
+            raise ChangeImpactRepositoryEvidenceError(
+                "Launchplane could not enumerate GitHub open pull requests."
+            ) from error
+
     def resolve(
         self,
         target: ChangeImpactTargetReference,
     ) -> ChangeImpactRepositoryEvidence:
+        return self._resolve(target, max_file_pages=self._max_file_pages)
+
+    def resolve_current_item(
+        self,
+        target: ChangeImpactTargetReference,
+    ) -> ChangeImpactRepositoryEvidence:
+        return self._resolve(target, max_file_pages=min(self._max_file_pages, 5))
+
+    def _resolve(
+        self,
+        target: ChangeImpactTargetReference,
+        *,
+        max_file_pages: int,
+    ) -> ChangeImpactRepositoryEvidence:
         try:
-            token = self._github_token(
-                control_plane_root=self._control_plane_root,
-                context_name=self._token_context,
-            ).strip()
-            if not token:
-                raise ChangeImpactRepositoryEvidenceError(
-                    "Launchplane GitHub repository evidence credentials are unavailable."
-                )
+            token = self._token()
             repository_path = _repository_path(target.repository)
             repository = _object_payload(
                 self._github_api(path=f"/repos/{repository_path}", token=token),
@@ -92,6 +159,7 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
                 repository_path=repository_path,
                 pull_request_number=target.pull_request_number,
                 token=token,
+                max_file_pages=max_file_pages,
             )
 
             confirmed_pull_request = _object_payload(
@@ -131,15 +199,27 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
                 "Launchplane could not resolve authoritative GitHub repository evidence."
             ) from error
 
+    def _token(self) -> str:
+        token = self._github_token(
+            control_plane_root=self._control_plane_root,
+            context_name=self._token_context,
+        ).strip()
+        if not token:
+            raise ChangeImpactRepositoryEvidenceError(
+                "Launchplane GitHub repository evidence credentials are unavailable."
+            )
+        return token
+
     def _changed_files(
         self,
         *,
         repository_path: str,
         pull_request_number: int,
         token: str,
+        max_file_pages: int,
     ) -> tuple[ChangeImpactChangedFileEvidence, ...]:
         evidence_by_path: dict[str, ChangeImpactChangedFileEvidence] = {}
-        for page in range(1, self._max_file_pages + 1):
+        for page in range(1, max_file_pages + 1):
             payload = self._github_api(
                 path=(
                     f"/repos/{repository_path}/pulls/{pull_request_number}/files"
@@ -250,7 +330,9 @@ def _pull_request_merge_commit_sha(pull_request: dict[str, object]) -> str:
             "GitHub pull request merge_commit_sha must be a string or null."
         )
     normalized = value.strip().lower()
-    if normalized and (len(normalized) != 40 or any(ch not in "0123456789abcdef" for ch in normalized)):
+    if normalized and (
+        len(normalized) != 40 or any(ch not in "0123456789abcdef" for ch in normalized)
+    ):
         raise ChangeImpactRepositoryEvidenceError(
             "GitHub pull request merge_commit_sha must be a Git SHA."
         )

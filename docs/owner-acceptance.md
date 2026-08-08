@@ -144,7 +144,26 @@ Migration `f3a5c7e9b1d4` creates the empty table and indexes only. It performs
 no backfill from GitHub comments, manager-preview approvals, technical waivers,
 or tenant-admission evidence.
 
-## Acceptance Queue
+## Current Items
+
+`GET /v1/owner-acceptance/current-items` is the automatic Current work source.
+Launchplane enumerates open pull requests server-side only for repositories with
+active change-impact policy records, then evaluates each candidate through the
+same exact evidence path as `GET /v1/owner-acceptance/evaluation`. The response
+declares `derivation: active_change_impact_open_pull_requests`, exposes bounded
+and truncation counts, includes per-PR unavailable states, and reports
+repository discovery failures instead of silently omitting them. The route is
+read-only and uses `owner_acceptance.read`; event controls still depend on the
+separate route-level event-write capability and current product Owner authority.
+
+The candidate feed is bounded to 10 active repositories and 20 returned pull
+requests per request. The default UI request asks for 10. Automatic evaluations
+also use a five-page changed-file evidence bound; larger PRs remain visible as
+unavailable and can use exact lookup's complete evidence bound. Exact lookup
+also remains available for a PR outside discovery bounds or when GitHub
+discovery is temporarily unavailable.
+
+## Recorded Queue
 
 `GET /v1/owner-acceptance/queue` is a **ledger-only** endpoint. It derives
 candidates exclusively from `OwnerAcceptanceEventRecord` history with no
@@ -175,10 +194,10 @@ response).
 record), `latest_binding` (the exact binding from that event), `occurred_at`,
 and `verification_required: true`.
 
-**Limitation:** The queue reflects what has been explicitly recorded in the
-ledger. PRs with no acceptance events do not appear. Use
-`GET /v1/owner-acceptance/evaluation` for a live current evaluation of any
-PR, including never-acted PRs.
+**Limitation:** The recorded queue reflects what has been explicitly recorded
+in the ledger. PRs with no acceptance events do not appear there; they are
+surfaced by the automatic Current-items route when they are open in an active
+change-impact repository. Use exact evaluation only as the bounded fallback.
 
 The browser supplies only optional filter query parameters (`repository`
 substring, `status` exact). It cannot supply candidate targets, head SHAs,
@@ -190,23 +209,24 @@ The route uses the existing read authorization action.
 
 ## Engineering Ops Workbench
 
-`/ui/engineering/owner-acceptance` combines a read-only recorded ledger surface
-with exact Current-evaluation Owner controls. It displays queue entries
-from `GET /v1/owner-acceptance/queue` with:
+`/ui/engineering/owner-acceptance` combines automatic Current items with a
+read-only recorded ledger surface. It loads
+`GET /v1/owner-acceptance/current-items` on page entry and renders current
+server-issued decisions and binding-scoped Owner controls directly on each PR.
+It also displays queue entries from `GET /v1/owner-acceptance/queue` with:
 
 - loading, error, denied, and empty states via `EngineeringResourceGate`;
-- a boundary note explaining shadow-mode, the 50-entry limit, and the
-  ledger-only derivation (no current GitHub evidence);
+- a boundary note explaining shadow mode, automatic Current discovery, and the
+  separate ledger-only recorded derivation;
 - server-side filters by status (exact) and repository (substring);
 - per-entry recorded binding and event provenance with `verification_required`
   framing — rows are labeled **Recorded**, not Current;
 - a passive note that no Owner mutation controls are exposed;
-- an **Exact Lookup** pane that calls `GET /v1/owner-acceptance/evaluation`
-  for a current live decision of any repository and PR number, including
-  never-acted PRs. Provider failures are scoped to this pane and do not
-  affect the queue list state.
+- a collapsed **Exact Lookup fallback** that calls
+  `GET /v1/owner-acceptance/evaluation` for a specific repository and PR when a
+  candidate is outside server bounds or discovery is unavailable.
 
-Mutation controls appear only after an exact Current evaluation and only for
+Mutation controls appear directly on automatic Current items and only for
 server-issued product bindings when
 `viewer_capabilities.event_write_authorized=true`. Read-authorized engineering
 viewers see the Current decision and binding evidence with an explicit read-only
@@ -216,7 +236,7 @@ evidence. Launchplane re-evaluates the binding and the authenticated GitHub
 human's current Owner membership at write time. Request-changes and revoke
 require a reason, revoke requires explicit confirmation, replay preserves the
 same idempotency key, and `409 owner_acceptance_binding_changed` refreshes the
-Current evaluation without auto-resubmitting. Every receipt remains shadow,
+Current item without auto-resubmitting. Every receipt remains shadow,
 non-authoritative, and has no merge or production enforcement effect.
 
 ## Advisory GitHub Projection

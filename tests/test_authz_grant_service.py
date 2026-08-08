@@ -592,6 +592,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                         {
                             **valid_rule,
                             "managed_rule_id": "viewer.current",
+                            "roles": ["read_only", "admin"],
                             "actions": ["owner_acceptance.read"],
                         }
                     ],
@@ -601,7 +602,19 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
 
         invalid_rules = (
             ({**valid_rule, "github_ids": [], "logins": ["owner"]}, "immutable GitHub IDs"),
-            ({**valid_rule, "roles": ["admin"]}, "read_only role"),
+            (
+                {**valid_rule, "roles": ["admin"]},
+                "Owner candidate rules require only the read_only role",
+            ),
+            (
+                {
+                    **valid_rule,
+                    "managed_rule_id": "viewer.invalid",
+                    "roles": ["read_only"],
+                    "actions": ["owner_acceptance.read"],
+                },
+                "viewer rules require admin and read_only roles",
+            ),
             ({**valid_rule, "products": ["other"]}, "exact Launchplane workbench scope"),
             (
                 {**valid_rule, "actions": [*valid_rule["actions"], "product_config.apply"]},

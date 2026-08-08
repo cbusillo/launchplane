@@ -906,6 +906,41 @@ export type OwnerAcceptanceBinding = {
     tree_sha: string;
 };
 
+export type OwnerAcceptanceCurrentItem = {
+    decision: OwnerAcceptanceDecision | null;
+    error_code: string;
+    evaluation_status: 'available' | 'unavailable';
+    pull_request_number: number;
+    repository: string;
+    title: string;
+    updated_at: string;
+    url: string;
+};
+
+export type OwnerAcceptanceCurrentItemsRepositoryFailure = {
+    error_code: 'open_pull_requests_unavailable';
+    repository: string;
+};
+
+export type OwnerAcceptanceCurrentItemsResponse = {
+    authoritative: false;
+    candidate_count: number;
+    derivation: 'active_change_impact_open_pull_requests';
+    enforcement_effect: 'none';
+    evaluated_count: number;
+    generated_at: string;
+    items: Array<OwnerAcceptanceCurrentItem>;
+    mode: 'shadow';
+    repository_count: number;
+    repository_failure_count: number;
+    repository_failures: Array<OwnerAcceptanceCurrentItemsRepositoryFailure>;
+    status: 'ok';
+    trace_id: string;
+    truncated: boolean;
+    unavailable_count: number;
+    viewer_capabilities: OwnerAcceptanceViewerCapabilities;
+};
+
 export type OwnerAcceptanceDecision = {
     authoritative: false;
     binding: OwnerAcceptanceBinding | null;
@@ -2820,6 +2855,36 @@ export type ListEveryCodeWorkRequestsResponses = {
 };
 
 export type ListEveryCodeWorkRequestsResponse = ListEveryCodeWorkRequestsResponses[keyof ListEveryCodeWorkRequestsResponses];
+
+export type ListOwnerAcceptanceCurrentItemsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: {
+        limit?: number;
+    };
+    url: '/v1/owner-acceptance/current-items';
+};
+
+export type ListOwnerAcceptanceCurrentItemsErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ListOwnerAcceptanceCurrentItemsError = ListOwnerAcceptanceCurrentItemsErrors[keyof ListOwnerAcceptanceCurrentItemsErrors];
+
+export type ListOwnerAcceptanceCurrentItemsResponses = {
+    200: OwnerAcceptanceCurrentItemsResponse;
+};
+
+export type ListOwnerAcceptanceCurrentItemsResponse = ListOwnerAcceptanceCurrentItemsResponses[keyof ListOwnerAcceptanceCurrentItemsResponses];
 
 export type EvaluateOwnerAcceptanceData = {
     body?: never;
