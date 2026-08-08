@@ -657,6 +657,91 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 }
             )
 
+    def test_product_owner_policy_admin_managed_set_enforces_minimum_operator_boundary(
+        self,
+    ) -> None:
+        valid_rule = {
+            "managed_set_id": "operator.product-owner-policy-admin",
+            "managed_rule_id": "verireel.policy-admin",
+            "subjects": ["operator-subject"],
+            "token_labels": ["operator-token"],
+            "products": ["verireel"],
+            "contexts": ["verireel"],
+            "actions": [
+                "product_owner_policy.read",
+                "product_owner_policy.write",
+                "product_owner_requirement.read",
+                "product_owner_requirement.write",
+            ],
+        }
+        request_payload = {
+            "schema_version": 2,
+            "product": "launchplane",
+            "mode": "dry_run",
+            "managed_set_id": "operator.product-owner-policy-admin",
+            "desired_policy": {
+                "schema_version": 2,
+                "local_operators": [valid_rule],
+            },
+        }
+
+        AuthzManagedPolicyReconcileEnvelope.model_validate(request_payload)
+
+        invalid_rules = (
+            ({**valid_rule, "subjects": ["operator-*"]}, "one exact operator subject"),
+            ({**valid_rule, "token_labels": ["operator-*"]}, "one exact operator subject"),
+            ({**valid_rule, "token_labels": []}, "one exact operator subject"),
+            ({**valid_rule, "products": ["*"]}, "one exact product and system scope"),
+            ({**valid_rule, "contexts": ["verireel", "other"]}, "one exact product"),
+            ({**valid_rule, "instances": ["*"]}, "can only declare instances"),
+            (
+                {
+                    **valid_rule,
+                    "actions": [*valid_rule["actions"], "product_owner_routing.write"],
+                },
+                "exactly the policy and requirement read/write actions",
+            ),
+            (
+                {
+                    **valid_rule,
+                    "actions": [*valid_rule["actions"], "authz_policy_grant.write"],
+                },
+                "exactly the policy and requirement read/write actions",
+            ),
+        )
+        for invalid_rule, message in invalid_rules:
+            with self.subTest(message=message), self.assertRaisesRegex(ValidationError, message):
+                AuthzManagedPolicyReconcileEnvelope.model_validate(
+                    {
+                        **request_payload,
+                        "desired_policy": {
+                            "schema_version": 2,
+                            "local_operators": [invalid_rule],
+                        },
+                    }
+                )
+
+        with self.assertRaisesRegex(ValidationError, "only local operator rules"):
+            AuthzManagedPolicyReconcileEnvelope.model_validate(
+                {
+                    **request_payload,
+                    "desired_policy": {
+                        "schema_version": 2,
+                        "local_admins": [
+                            {
+                                "managed_set_id": "operator.product-owner-policy-admin",
+                                "managed_rule_id": "admin.invalid",
+                                "subjects": ["admin-subject"],
+                                "token_labels": ["admin-token"],
+                                "products": ["verireel"],
+                                "contexts": ["verireel"],
+                                "actions": valid_rule["actions"],
+                            }
+                        ],
+                    },
+                }
+            )
+
     def test_managed_reconcile_requires_explicit_migration_and_adoption(self) -> None:
         current_record = _active_record()
         desired_policy = {

@@ -85,6 +85,13 @@ title: Secrets
   candidate rules may also contain `owner_acceptance_event.write`. Keep product
   Owner membership in the independently managed Owner policy; this secret grants
   workbench access but cannot satisfy Owner authority.
+- The protected
+  `LAUNCHPLANE_AUTHZ_PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_JSON` secret contains
+  the complete `operator.product-owner-policy-admin` local-operator desired set.
+  Every rule must bind one exact operator subject and token label to one exact
+  product/system scope and exactly the Product Owner policy and requirement
+  read/write actions. Product identities, repository identities, and Owner
+  memberships remain DB-backed runtime records and do not belong in this secret.
 
 ## DB-Backed Secret Resolution
 

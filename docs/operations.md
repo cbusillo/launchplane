@@ -442,7 +442,16 @@ numeric GitHub user IDs. Engineering viewer rules grant only
 viewer grant. Owner candidate rules use only `read_only` and may grant that read
 action plus `owner_acceptance_event.write`. Both shapes remain limited to
 product `launchplane` and context `owner-acceptance`. Product Owner membership
-remains a separate server-side requirement for event writes. Generic-web preview caller
+remains a separate server-side requirement for event writes.
+`LAUNCHPLANE_AUTHZ_PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_JSON` owns the
+dedicated local-operator policy administration boundary and must declare the
+exact `operator.product-owner-policy-admin` managed-set identity. Each rule
+binds one exact operator subject and token label to one exact product/system
+scope and exactly the Product Owner policy and requirement read/write actions.
+It cannot grant routing, deployment, production, secret, or unrelated policy
+authority. Use this set only to apply DB-backed Owner membership and requirement
+records through the deployed service with dry-run and compare-and-swap evidence.
+Generic-web preview caller
 grants are no longer sourced from a per-product repository secret. The
 typed product-onboarding planner derives repository identity, caller workflow
 refs, immutable Launchplane worker refs, products, contexts, events, and actions
