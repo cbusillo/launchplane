@@ -1,12 +1,15 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from fastapi import Depends, Header, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
+from control_plane.change_impact_service import (
+    ChangeImpactRepositoryEvidenceProvider,
+    require_change_impact_policy_read_store,
+)
 from control_plane.contracts.change_impact import ChangeImpactTarget, ChangeImpactTargetReference
 from control_plane.contracts.advisory_check_projection import AdvisoryCheckProjectionResult
 from control_plane.contracts.owner_acceptance import (
@@ -38,6 +41,12 @@ from control_plane.owner_acceptance_queue import (
     OwnerAcceptanceQueueEntry,
     build_owner_acceptance_queue,
 )
+from control_plane.owner_acceptance_current_items import (
+    OwnerAcceptanceCurrentItem,
+    OwnerAcceptanceCurrentItemsProvider,
+    OwnerAcceptanceCurrentItemsRepositoryFailure,
+    build_owner_acceptance_current_items,
+)
 from control_plane.owner_acceptance_projection import project_owner_acceptance_decision
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.workflows.launchplane import github_api_request
@@ -47,6 +56,7 @@ OWNER_ACCEPTANCE_EVALUATION_ROUTE = "/v1/owner-acceptance/evaluation"
 OWNER_ACCEPTANCE_EVENTS_ROUTE = "/v1/owner-acceptance/events"
 OWNER_ACCEPTANCE_EVENT_ROUTE = "/v1/owner-acceptance/events/{event_id}"
 OWNER_ACCEPTANCE_QUEUE_ROUTE = "/v1/owner-acceptance/queue"
+OWNER_ACCEPTANCE_CURRENT_ITEMS_ROUTE = "/v1/owner-acceptance/current-items"
 OWNER_ACCEPTANCE_PROJECT_ROUTE = "/v1/owner-acceptance/project"
 
 
@@ -134,6 +144,29 @@ class OwnerAcceptanceQueueResponse(BaseModel):
     has_more: bool
     entry_count: int
     entries: tuple[OwnerAcceptanceQueueEntry, ...]
+
+
+class OwnerAcceptanceCurrentItemsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    mode: Literal["shadow"] = "shadow"
+    authoritative: Literal[False] = False
+    enforcement_effect: Literal["none"] = "none"
+    derivation: Literal["active_change_impact_open_pull_requests"] = (
+        "active_change_impact_open_pull_requests"
+    )
+    generated_at: str
+    viewer_capabilities: OwnerAcceptanceViewerCapabilities
+    repository_count: int
+    repository_failure_count: int
+    candidate_count: int
+    evaluated_count: int
+    unavailable_count: int
+    truncated: bool
+    items: tuple[OwnerAcceptanceCurrentItem, ...]
+    repository_failures: tuple[OwnerAcceptanceCurrentItemsRepositoryFailure, ...]
 
 
 class OwnerAcceptanceProjectionRequest(BaseModel):
@@ -426,6 +459,74 @@ def register_owner_acceptance_routes(
             entries=result.entries,
         )
 
+    def read_current_items(
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        limit: Annotated[int, Query(ge=1, le=20)] = 10,
+    ) -> OwnerAcceptanceCurrentItemsResponse:
+        trace_id = common.next_trace_id()
+        if not common.authorization_allows(
+            identity=identity,
+            action=OWNER_ACCEPTANCE_READ_ACTION,
+            product="launchplane",
+            context="owner-acceptance",
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot read current Owner acceptance items.",
+            )
+        provider = dependencies.repository_evidence_provider
+        if not callable(getattr(provider, "list_open_pull_requests", None)) or not callable(
+            getattr(provider, "resolve_current_item", None)
+        ):
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="owner_acceptance_current_items_unavailable",
+                message="Current Owner acceptance item discovery is unavailable.",
+            )
+        try:
+            result = build_owner_acceptance_current_items(
+                store=require_change_impact_policy_read_store(record_store),
+                repository_evidence_provider=cast(OwnerAcceptanceCurrentItemsProvider, provider),
+                limit=limit,
+            )
+        except TypeError as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        generated_at = (
+            datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        )
+        event_write_authorized = common.authorization_allows(
+            identity=identity,
+            action=OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
+            product="launchplane",
+            context="owner-acceptance",
+            target=AuthorizationTarget(scope="context"),
+        )
+        return OwnerAcceptanceCurrentItemsResponse(
+            trace_id=trace_id,
+            generated_at=generated_at,
+            viewer_capabilities=OwnerAcceptanceViewerCapabilities(
+                event_write_authorized=event_write_authorized
+            ),
+            repository_count=result.repository_count,
+            repository_failure_count=result.repository_failure_count,
+            candidate_count=result.candidate_count,
+            evaluated_count=result.evaluated_count,
+            unavailable_count=result.unavailable_count,
+            truncated=result.truncated,
+            items=result.items,
+            repository_failures=result.repository_failures,
+        )
+
     async def project(
         request: OwnerAcceptanceProjectionRequest,
         identity: Annotated[LaunchplaneIdentity, Depends(projection_identity)],
@@ -502,6 +603,15 @@ def register_owner_acceptance_routes(
         response_model=OwnerAcceptanceEvaluationResponse,
         tags=["owner-acceptance"],
         operation_id="evaluate_owner_acceptance",
+        responses=errors,
+    )
+    app.add_api_route(
+        OWNER_ACCEPTANCE_CURRENT_ITEMS_ROUTE,
+        read_current_items,
+        methods=["GET"],
+        response_model=OwnerAcceptanceCurrentItemsResponse,
+        tags=["owner-acceptance"],
+        operation_id="list_owner_acceptance_current_items",
         responses=errors,
     )
     app.add_api_route(

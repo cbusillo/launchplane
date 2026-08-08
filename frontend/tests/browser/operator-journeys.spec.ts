@@ -752,16 +752,15 @@ test.describe("operator journeys", () => {
       page.getByRole("link", { name: "Owner acceptance", exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByText("Shadow mode — recorded evidence and Current controls"),
+      page.getByText("Shadow mode — automatic Current items and recorded evidence"),
     ).toBeVisible();
-    // Entries are labeled Recorded, not Current
-    await expect(page.getByText(/Recorded/).first()).toBeVisible();
-    await expect(page.getByText("No Owner mutation controls exposed").first()).toBeVisible();
+    const recordedHistory = page.getByLabel("Recorded Owner acceptance history");
+    await expect(recordedHistory.getByText(/Recorded/).first()).toBeVisible();
+    await expect(recordedHistory.getByText("No Owner mutation controls exposed").first()).toBeVisible();
     await expect(
-      page.getByRole("button", { name: /^(accept|request changes|revoke)$/i }),
+      recordedHistory.getByRole("button", { name: /^(accept|request changes|revoke)$/i }),
     ).toHaveCount(0);
-    // verification_required chip is present on all entries
-    await expect(page.getByText(/verification required/i).first()).toBeVisible();
+    await expect(recordedHistory.getByText(/verification required/i).first()).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "owner-acceptance-read-only");
     diagnostics.assertClean();
@@ -778,11 +777,25 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("Owner acceptance exact lookup pane is visible with look up button", async ({ page }) => {
+  test("Owner acceptance current items load without lookup", async ({ page }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
+    await expect(page.getByLabel("Current Owner acceptance items")).toBeVisible();
+    await expect(page.getByText("Fixture pull request requiring current Owner review")).toBeVisible();
+    await expect(page.getByRole("region", { name: /Owner action for/ })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Repository (owner/repo)" })).toHaveCount(0);
+    await assertDocumentBasics(page);
+    diagnostics.assertClean();
+  });
+
+  test("Owner acceptance exact lookup remains a collapsed fallback", async ({ page }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/owner-acceptance?fixture=products");
+
+    await page.getByText("Exact lookup fallback", { exact: true }).click();
     await expect(page.getByText("Exact lookup — Current evaluation")).toBeVisible();
     await expect(page.getByRole("button", { name: "Look up" })).toBeVisible();
     await expect(
@@ -801,6 +814,7 @@ test.describe("operator journeys", () => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=empty");
+    await page.getByText("Exact lookup fallback", { exact: true }).click();
     await page.getByRole("textbox", { name: "Repository (owner/repo)" }).fill("example/site");
     await page.getByRole("spinbutton", { name: "Pull request number" }).fill("308");
     await page.getByRole("button", { name: "Look up" }).click();
@@ -813,13 +827,10 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("current Owner acceptance lookup records an exact shadow action", async ({ page }) => {
+  test("current Owner acceptance item records an exact shadow action", async ({ page }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
-    await page.getByRole("textbox", { name: "Repository (owner/repo)" }).fill("example/site");
-    await page.getByRole("spinbutton", { name: "Pull request number" }).fill("308");
-    await page.getByRole("button", { name: "Look up" }).click();
 
     const panel = page.getByRole("region", { name: /Owner action for/ });
     await expect(panel).toBeVisible();
@@ -834,9 +845,6 @@ test.describe("operator journeys", () => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
-    await page.getByRole("textbox", { name: "Repository (owner/repo)" }).fill("example/site");
-    await page.getByRole("spinbutton", { name: "Pull request number" }).fill("308");
-    await page.getByRole("button", { name: "Look up" }).click();
 
     const panel = page.getByRole("region", { name: /Owner action for/ });
     const submit = panel.getByRole("button", { name: "Submit Owner action" });
@@ -855,9 +863,6 @@ test.describe("operator journeys", () => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=missing");
-    await page.getByRole("textbox", { name: "Repository (owner/repo)" }).fill("example/site");
-    await page.getByRole("spinbutton", { name: "Pull request number" }).fill("308");
-    await page.getByRole("button", { name: "Look up" }).click();
     const panel = page.getByRole("region", { name: /Owner action for/ });
     await panel.getByRole("combobox").selectOption("revoked");
     await panel.getByRole("textbox", { name: "Reason" }).fill("Revoke the reviewed binding.");
@@ -917,7 +922,7 @@ test.describe("operator journeys", () => {
     await expect(page.getByRole("listitem")).not.toHaveCount(0);
 
     // Filter to accepted — only accepted entries
-    const statusSelect = page.getByRole("combobox");
+    const statusSelect = page.getByRole("combobox", { name: "Status" });
     await statusSelect.selectOption("revoked");
 
     await expect(page.getByText("Re-acceptance required after changes")).toBeVisible();

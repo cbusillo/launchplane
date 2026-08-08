@@ -11605,6 +11605,184 @@
         "title": "OwnerAcceptanceBinding",
         "type": "object"
       },
+      "OwnerAcceptanceCurrentItem": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OwnerAcceptanceDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error_code": {
+            "default": "",
+            "title": "Error Code",
+            "type": "string"
+          },
+          "evaluation_status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Evaluation Status",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "minimum": 1.0,
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "pull_request_number",
+          "title",
+          "url",
+          "updated_at",
+          "evaluation_status"
+        ],
+        "title": "OwnerAcceptanceCurrentItem",
+        "type": "object"
+      },
+      "OwnerAcceptanceCurrentItemsRepositoryFailure": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "const": "open_pull_requests_unavailable",
+            "default": "open_pull_requests_unavailable",
+            "title": "Error Code",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository"
+        ],
+        "title": "OwnerAcceptanceCurrentItemsRepositoryFailure",
+        "type": "object"
+      },
+      "OwnerAcceptanceCurrentItemsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "authoritative": {
+            "const": false,
+            "default": false,
+            "title": "Authoritative",
+            "type": "boolean"
+          },
+          "candidate_count": {
+            "title": "Candidate Count",
+            "type": "integer"
+          },
+          "derivation": {
+            "const": "active_change_impact_open_pull_requests",
+            "default": "active_change_impact_open_pull_requests",
+            "title": "Derivation",
+            "type": "string"
+          },
+          "enforcement_effect": {
+            "const": "none",
+            "default": "none",
+            "title": "Enforcement Effect",
+            "type": "string"
+          },
+          "evaluated_count": {
+            "title": "Evaluated Count",
+            "type": "integer"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerAcceptanceCurrentItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "mode": {
+            "const": "shadow",
+            "default": "shadow",
+            "title": "Mode",
+            "type": "string"
+          },
+          "repository_count": {
+            "title": "Repository Count",
+            "type": "integer"
+          },
+          "repository_failure_count": {
+            "title": "Repository Failure Count",
+            "type": "integer"
+          },
+          "repository_failures": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerAcceptanceCurrentItemsRepositoryFailure"
+            },
+            "title": "Repository Failures",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "unavailable_count": {
+            "title": "Unavailable Count",
+            "type": "integer"
+          },
+          "viewer_capabilities": {
+            "$ref": "#/components/schemas/OwnerAcceptanceViewerCapabilities"
+          }
+        },
+        "required": [
+          "trace_id",
+          "generated_at",
+          "viewer_capabilities",
+          "repository_count",
+          "repository_failure_count",
+          "candidate_count",
+          "evaluated_count",
+          "unavailable_count",
+          "truncated",
+          "items",
+          "repository_failures"
+        ],
+        "title": "OwnerAcceptanceCurrentItemsResponse",
+        "type": "object"
+      },
       "OwnerAcceptanceDecision": {
         "additionalProperties": false,
         "properties": {
@@ -52177,6 +52355,121 @@
         "summary": "Import merge train policy records"
       }
     },
+    "/v1/owner-acceptance/current-items": {
+      "get": {
+        "operationId": "list_owner_acceptance_current_items",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "maximum": 20,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerAcceptanceCurrentItemsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Current Items",
+        "tags": [
+          "owner-acceptance"
+        ]
+      }
+    },
     "/v1/owner-acceptance/evaluation": {
       "get": {
         "operationId": "evaluate_owner_acceptance",
@@ -64746,6 +65039,7 @@
     "/v1/drivers": "read_driver_descriptors",
     "/v1/every-code/summary": "read_every_code_summary",
     "/v1/every-code/work-requests": "list_every_code_work_requests",
+    "/v1/owner-acceptance/current-items": "list_owner_acceptance_current_items",
     "/v1/owner-acceptance/evaluation": "evaluate_owner_acceptance",
     "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",
     "/v1/previews/readiness": "read_preview_readiness",

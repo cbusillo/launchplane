@@ -190,8 +190,17 @@ def _validate_owner_acceptance_managed_set(policy: LaunchplaneAuthzPolicy) -> No
             raise ValueError(
                 "Owner Acceptance managed authz rules require only immutable GitHub IDs."
             )
-        if rule.roles != ("read_only",):
-            raise ValueError("Owner Acceptance managed authz rules require the read_only role.")
+        actions = frozenset(rule.actions)
+        expected_roles = (
+            ("admin", "read_only")
+            if actions == _OWNER_ACCEPTANCE_READ_ONLY_ACTIONS
+            else ("read_only",)
+        )
+        if tuple(sorted(rule.roles)) != expected_roles:
+            raise ValueError(
+                "Owner Acceptance viewer rules require admin and read_only roles; "
+                "Owner candidate rules require only the read_only role."
+            )
         if rule.products != ("launchplane",) or rule.contexts != ("owner-acceptance",):
             raise ValueError(
                 "Owner Acceptance managed authz rules require the exact Launchplane workbench scope."
@@ -200,7 +209,7 @@ def _validate_owner_acceptance_managed_set(policy: LaunchplaneAuthzPolicy) -> No
             raise ValueError(
                 "Owner Acceptance managed authz rules cannot declare instance selectors."
             )
-        if frozenset(rule.actions) not in _OWNER_ACCEPTANCE_PERMITTED_ACTION_SETS:
+        if actions not in _OWNER_ACCEPTANCE_PERMITTED_ACTION_SETS:
             raise ValueError(
                 "Owner Acceptance managed authz rules require either the read action alone or "
                 "the read and event-write actions together."

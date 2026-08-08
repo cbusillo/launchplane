@@ -1810,6 +1810,54 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
             )
         )
 
+    def test_owner_acceptance_viewer_rule_matches_existing_admin_role(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_humans=(
+                GitHubHumanPolicyRule(
+                    managed_set_id="operator.primary",
+                    managed_rule_id="global.admin",
+                    github_ids=(123,),
+                    roles=("admin",),
+                    actions=("product_profile.read",),
+                ),
+                GitHubHumanPolicyRule(
+                    managed_set_id="operator.owner-acceptance",
+                    managed_rule_id="engineering.viewer",
+                    github_ids=(123,),
+                    roles=("admin", "read_only"),
+                    products=("launchplane",),
+                    contexts=("owner-acceptance",),
+                    actions=("owner_acceptance.read",),
+                ),
+            ),
+        )
+        role = policy.human_role_for(
+            github_id=123,
+            login="alice",
+            organizations=frozenset(),
+            teams=frozenset(),
+        )
+        identity = _human_identity(role=role)
+
+        self.assertEqual(role, "admin")
+        self.assertTrue(
+            policy.allows(
+                identity=identity,
+                action="owner_acceptance.read",
+                product="launchplane",
+                context="owner-acceptance",
+            )
+        )
+        self.assertFalse(
+            policy.allows(
+                identity=identity,
+                action="owner_acceptance_event.write",
+                product="launchplane",
+                context="owner-acceptance",
+            )
+        )
+
     def test_launchplane_policy_dispatches_by_identity_type(self) -> None:
         policy = LaunchplaneAuthzPolicy(
             github_actions=(

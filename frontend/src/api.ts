@@ -13,10 +13,12 @@ import type {
   DryRunProductPromotionResponse,
   EveryCodeSummaryResponse,
   EvaluateOwnerAcceptanceResponse,
+  ListOwnerAcceptanceCurrentItemsData,
   ListOwnerAcceptanceQueueData,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
   OwnerAcceptanceQueueResponse,
+  OwnerAcceptanceCurrentItemsResponse,
   OwnerAcceptanceDecision,
   OwnerAcceptanceEventResponse,
   OwnerAcceptanceProductDecision,
@@ -501,6 +503,21 @@ export function readOwnerAcceptanceQueue(
   const qs = params.toString();
   return requestJson<OwnerAcceptanceQueueResponse>(
     `/v1/owner-acceptance/queue${qs ? `?${qs}` : ""}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function readOwnerAcceptanceCurrentItems(
+  query: ListOwnerAcceptanceCurrentItemsData["query"] = {},
+  signal?: AbortSignal,
+): Promise<OwnerAcceptanceCurrentItemsResponse> {
+  const params = new URLSearchParams();
+  if (query.limit) params.set("limit", String(query.limit));
+  const qs = params.toString();
+  return requestJson<OwnerAcceptanceCurrentItemsResponse>(
+    `/v1/owner-acceptance/current-items${qs ? `?${qs}` : ""}`,
     "GET",
     undefined,
     signal,

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { readOwnerAcceptanceQueue, writeOwnerAcceptanceEvent } from "../src/api.ts";
+import {
+  readOwnerAcceptanceCurrentItems,
+  readOwnerAcceptanceQueue,
+  writeOwnerAcceptanceEvent,
+} from "../src/api.ts";
 
 const originalFetch = globalThis.fetch;
 
@@ -72,4 +76,21 @@ test("Owner acceptance queue sends repository and status filters to the server",
     calls[0].input,
     "/v1/owner-acceptance/queue?repository=example%2Ftenant+site&status=changes_requested",
   );
+});
+
+test("Owner acceptance current items request is server-owned and bounded", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    return new Response(
+      JSON.stringify({ status: "ok", trace_id: "trace-current", items: [] }),
+      { headers: { "Content-Type": "application/json" }, status: 200 },
+    );
+  };
+
+  await readOwnerAcceptanceCurrentItems({ limit: 10 });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(calls[0].input, "/v1/owner-acceptance/current-items?limit=10");
 });

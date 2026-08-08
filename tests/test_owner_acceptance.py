@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
+from control_plane.change_impact_github import GitHubOpenPullRequest
 from control_plane.contracts.change_impact import (
     ChangeImpactChangedFileEvidence,
     ChangeImpactComponentRule,
@@ -61,11 +62,41 @@ TREE_SHA = "b" * 40
 
 
 class _EvidenceProvider(ChangeImpactRepositoryEvidenceProvider):
-    def __init__(self, evidence: ChangeImpactRepositoryEvidence) -> None:
+    def __init__(
+        self,
+        evidence: ChangeImpactRepositoryEvidence,
+        open_pull_requests: tuple[GitHubOpenPullRequest, ...] | None = None,
+    ) -> None:
         self.evidence = evidence
+        self.open_pull_requests = open_pull_requests or (
+            GitHubOpenPullRequest(
+                repository=evidence.target.repository,
+                pull_request_number=evidence.target.pull_request_number,
+                title="Owner acceptance test pull request",
+                url=(
+                    f"https://github.com/{evidence.target.repository}/pull/"
+                    f"{evidence.target.pull_request_number}"
+                ),
+                updated_at="2026-08-07T12:00:00Z",
+            ),
+        )
 
     def resolve(self, _target: ChangeImpactTargetReference) -> ChangeImpactRepositoryEvidence:
         return self.evidence
+
+    def resolve_current_item(
+        self,
+        target: ChangeImpactTargetReference,
+    ) -> ChangeImpactRepositoryEvidence:
+        return self.resolve(target)
+
+    def list_open_pull_requests(
+        self,
+        _repository: str,
+        *,
+        limit: int,
+    ) -> tuple[GitHubOpenPullRequest, ...]:
+        return self.open_pull_requests[:limit]
 
 
 def _human(github_id: int = OWNER_GITHUB_ID) -> GitHubHumanIdentity:
