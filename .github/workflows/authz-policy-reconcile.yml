@@ -23,6 +23,7 @@ name: Manage Launchplane Authorization
           - generic-web-onboarding
           - manager-preview-approval
           - owner-acceptance
+          - product-owner-policy-admin
           - product-health-monitoring
           - odoo-route-binding
           - odoo-external-route-binding
@@ -98,6 +99,18 @@ jobs:
       related_issue: ${{ inputs.related_issue }}
     secrets:
       managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON }}
+
+  reconcile-product-owner-policy-admin:
+    if: ${{ inputs.managed_set == 'product-owner-policy-admin' }}
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
+    with:
+      mode: ${{ inputs.mode }}
+      expected_managed_set_id: operator.product-owner-policy-admin
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+      related_issue: ${{ inputs.related_issue }}
+    secrets:
+      managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_JSON }}
 
   reconcile-generic-web-onboarding:
     if: ${{ inputs.managed_set == 'generic-web-onboarding' }}

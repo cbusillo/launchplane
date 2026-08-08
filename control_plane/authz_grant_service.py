@@ -23,6 +23,12 @@ from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
     OWNER_ACCEPTANCE_READ_ACTION,
 )
+from control_plane.contracts.product_owner import (
+    PRODUCT_OWNER_POLICY_READ_ACTION,
+    PRODUCT_OWNER_POLICY_WRITE_ACTION,
+    PRODUCT_OWNER_REQUIREMENT_READ_ACTION,
+    PRODUCT_OWNER_REQUIREMENT_WRITE_ACTION,
+)
 from control_plane.service_auth import (
     AuthzInstanceSelectors,
     GitHubActionsIdentity,
@@ -174,6 +180,15 @@ _OWNER_ACCEPTANCE_PERMITTED_ACTION_SETS = (
     _OWNER_ACCEPTANCE_READ_ONLY_ACTIONS,
     _OWNER_ACCEPTANCE_ACTIONS,
 )
+_PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_ID = "operator.product-owner-policy-admin"
+_PRODUCT_OWNER_POLICY_ADMIN_ACTIONS = frozenset(
+    {
+        PRODUCT_OWNER_POLICY_READ_ACTION,
+        PRODUCT_OWNER_POLICY_WRITE_ACTION,
+        PRODUCT_OWNER_REQUIREMENT_READ_ACTION,
+        PRODUCT_OWNER_REQUIREMENT_WRITE_ACTION,
+    }
+)
 AuthzSchemaMigrationMode = Literal["reject", "migrate_v1_to_v2"]
 AuthzUnmanagedAdoptionMode = Literal["reject", "adopt_matching"]
 
@@ -213,6 +228,40 @@ def _validate_owner_acceptance_managed_set(policy: LaunchplaneAuthzPolicy) -> No
             raise ValueError(
                 "Owner Acceptance managed authz rules require either the read action alone or "
                 "the read and event-write actions together."
+            )
+
+
+def _validate_product_owner_policy_admin_managed_set(policy: LaunchplaneAuthzPolicy) -> None:
+    if any(
+        rules
+        for principal_type, rules in _authz_policy_rule_collections(policy)
+        if principal_type != "local_operators"
+    ):
+        raise ValueError(
+            "Product Owner policy administration managed authz may contain only local operator rules."
+        )
+    for rule in policy.local_operators:
+        if (
+            len(rule.subjects) != 1
+            or len(rule.token_labels) != 1
+            or any(_contains_selector_glob(value) for value in (*rule.subjects, *rule.token_labels))
+        ):
+            raise ValueError(
+                "Product Owner policy administration rules require one exact operator subject "
+                "and token label."
+            )
+        if (
+            len(rule.products) != 1
+            or len(rule.contexts) != 1
+            or any(_contains_selector_glob(value) for value in (*rule.products, *rule.contexts))
+        ):
+            raise ValueError(
+                "Product Owner policy administration rules require one exact product and system scope."
+            )
+        if frozenset(rule.actions) != _PRODUCT_OWNER_POLICY_ADMIN_ACTIONS:
+            raise ValueError(
+                "Product Owner policy administration rules require exactly the policy and "
+                "requirement read/write actions."
             )
 
 
@@ -259,6 +308,8 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
         self.desired_policy = _normalize_desired_authz_policy(self.desired_policy)
         if self.managed_set_id == _OWNER_ACCEPTANCE_MANAGED_SET_ID:
             _validate_owner_acceptance_managed_set(self.desired_policy)
+        if self.managed_set_id == _PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_ID:
+            _validate_product_owner_policy_admin_managed_set(self.desired_policy)
         for principal_type, rules in _authz_policy_rule_collections(self.desired_policy):
             for rule in rules:
                 if rule.managed_set_id != self.managed_set_id or not rule.managed_rule_id:
