@@ -169,6 +169,11 @@ _OWNER_ACCEPTANCE_MANAGED_SET_ID = "operator.owner-acceptance"
 _OWNER_ACCEPTANCE_ACTIONS = frozenset(
     {OWNER_ACCEPTANCE_READ_ACTION, OWNER_ACCEPTANCE_EVENT_WRITE_ACTION}
 )
+_OWNER_ACCEPTANCE_READ_ONLY_ACTIONS = frozenset({OWNER_ACCEPTANCE_READ_ACTION})
+_OWNER_ACCEPTANCE_PERMITTED_ACTION_SETS = (
+    _OWNER_ACCEPTANCE_READ_ONLY_ACTIONS,
+    _OWNER_ACCEPTANCE_ACTIONS,
+)
 AuthzSchemaMigrationMode = Literal["reject", "migrate_v1_to_v2"]
 AuthzUnmanagedAdoptionMode = Literal["reject", "adopt_matching"]
 
@@ -195,9 +200,10 @@ def _validate_owner_acceptance_managed_set(policy: LaunchplaneAuthzPolicy) -> No
             raise ValueError(
                 "Owner Acceptance managed authz rules cannot declare instance selectors."
             )
-        if frozenset(rule.actions) != _OWNER_ACCEPTANCE_ACTIONS:
+        if frozenset(rule.actions) not in _OWNER_ACCEPTANCE_PERMITTED_ACTION_SETS:
             raise ValueError(
-                "Owner Acceptance managed authz rules require only the read and event-write actions."
+                "Owner Acceptance managed authz rules require either the read action alone or "
+                "the read and event-write actions together."
             )
 
 

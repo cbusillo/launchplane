@@ -154,6 +154,7 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
   const [repository, setRepository] = useState("");
   const [prNumber, setPrNumber] = useState("");
   const [decision, setDecision] = useState<OwnerAcceptanceDecision | null>(null);
+  const [eventWriteAuthorized, setEventWriteAuthorized] = useState<boolean | null>(null);
   const [driftMessage, setDriftMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -170,6 +171,7 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
 
     setLoading(true);
     setDecision(null);
+    setEventWriteAuthorized(null);
     setDriftMessage("");
     setError(null);
 
@@ -179,11 +181,13 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
         const result = fixtures.ownerAcceptanceEvaluationForFixture(fixtureMode);
         if (!controller.signal.aborted) {
           setDecision(result);
+          setEventWriteAuthorized(fixtureMode !== "empty");
         }
       } else {
         const result = await evaluateOwnerAcceptance(repo, pr, controller.signal);
         if (!controller.signal.aborted) {
           setDecision(result.decision);
+          setEventWriteAuthorized(result.viewer_capabilities.event_write_authorized);
         }
       }
     } catch (err: unknown) {
@@ -206,6 +210,9 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
     const repo = reviewedBinding.repository;
     const pr = reviewedBinding.pull_request_number;
     try {
+      const evaluation = fixtureMode
+        ? null
+        : await evaluateOwnerAcceptance(repo, pr);
       const nextDecision = fixtureMode
         ? fixtureMode === "missing"
           ? fixtureDecisionWithBindingDigest(
@@ -213,8 +220,13 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
               "b".repeat(64),
             )
           : (await loadDevFixtures()).ownerAcceptanceEvaluationForFixture(fixtureMode)
-        : (await evaluateOwnerAcceptance(repo, pr)).decision;
+        : evaluation!.decision;
       setDecision(nextDecision);
+      setEventWriteAuthorized(
+        fixtureMode
+          ? fixtureMode !== "empty"
+          : evaluation!.viewer_capabilities.event_write_authorized,
+      );
       setDriftMessage(
         "The reviewed binding changed. Current evidence was refreshed; review the new binding and explicitly submit again.",
       );
@@ -294,27 +306,50 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
                   {driftMessage}
                 </p>
               ) : null}
-              <div className="engineering-owner-acceptance-actions">
-                {decision.products.map((product) =>
-                  product.binding ? (
-                    <OwnerAcceptanceActionPanel
-                      key={`${product.product}:${product.system}:${product.action}:${product.environment}`}
-                      binding={product.binding}
-                      decision={decision}
-                      fixtureMode={fixtureMode}
-                      onBindingChanged={refreshCurrentEvaluation}
-                      onDecision={(nextDecision) => {
-                        setDecision(nextDecision);
-                        setDriftMessage("");
-                      }}
-                    />
-                  ) : null,
-                )}
-              </div>
+              {eventWriteAuthorized ? (
+                <div className="engineering-owner-acceptance-actions">
+                  {decision.products.map((product) =>
+                    product.binding ? (
+                      <OwnerAcceptanceActionPanel
+                        key={`${product.product}:${product.system}:${product.action}:${product.environment}`}
+                        binding={product.binding}
+                        decision={decision}
+                        fixtureMode={fixtureMode}
+                        onBindingChanged={refreshCurrentEvaluation}
+                        onDecision={(nextDecision) => {
+                          setDecision(nextDecision);
+                          setDriftMessage("");
+                        }}
+                      />
+                    ) : null,
+                  )}
+                </div>
+              ) : eventWriteAuthorized === false ? (
+                <OwnerAcceptanceReadOnlyNotice />
+              ) : null}
             </>
           ) : null}
         </div>
       ) : null}
+    </section>
+  );
+}
+
+function OwnerAcceptanceReadOnlyNotice() {
+  return (
+    <section
+      className="engineering-owner-acceptance-read-only"
+      aria-label="Read-only Owner acceptance visibility"
+    >
+      <header>
+        <ShieldOff size={16} aria-hidden="true" />
+        <strong>Read-only engineering visibility</strong>
+      </header>
+      <p>
+        You can inspect the Current decision and exact server-issued bindings, but this
+        session is not authorized to submit Owner events. Launchplane rechecks both
+        event-write access and current product Owner authority for every submission.
+      </p>
     </section>
   );
 }
@@ -610,7 +645,7 @@ function OwnerAcceptanceContent({
           detail={
             statusFilter !== "all" || repositoryFilter
               ? "No recorded entries match the current filters."
-              : "No recorded Owner acceptance candidates. Entries appear when acceptance events exist in the ledger."
+              : "No recorded Owner acceptance events yet. Owners do not appear here until they submit an action; use Current evaluation above to inspect a never-acted PR."
           }
           icon={History}
           title="No recorded entries"

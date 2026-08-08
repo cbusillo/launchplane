@@ -1772,6 +1772,30 @@
   margin-top: 1rem;
 }
 
+.engineering-owner-acceptance-read-only {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.8rem;
+  background: var(--surface-muted);
+}
+
+.engineering-owner-acceptance-read-only > header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-strong);
+}
+
+.engineering-owner-acceptance-read-only > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
 .engineering-owner-action-panel {
   display: grid;
   gap: 0.8rem;

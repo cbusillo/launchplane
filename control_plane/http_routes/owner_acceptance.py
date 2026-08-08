@@ -79,12 +79,25 @@ class OwnerAcceptanceEventEnvelope(BaseModel):
         return self
 
 
+class OwnerAcceptanceViewerCapabilities(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_write_authorized: bool = Field(
+        description=(
+            "Whether the evaluated identity currently has route-level "
+            "owner_acceptance_event.write authorization. Browser session and current product "
+            "Owner authority are revalidated separately when an event is submitted."
+        )
+    )
+
+
 class OwnerAcceptanceEvaluationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok"] = "ok"
     trace_id: str
     decision: OwnerAcceptanceDecision
+    viewer_capabilities: OwnerAcceptanceViewerCapabilities
 
 
 class OwnerAcceptanceEventResponse(BaseModel):
@@ -113,6 +126,7 @@ class OwnerAcceptanceQueueResponse(BaseModel):
     mode: Literal["shadow"] = "shadow"
     authoritative: Literal[False] = False
     enforcement_effect: Literal["none"] = "none"
+    derivation: Literal["ledger_only"] = "ledger_only"
     generated_at: str
     total: int
     candidate: int
@@ -219,7 +233,20 @@ def register_owner_acceptance_routes(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        return OwnerAcceptanceEvaluationResponse(trace_id=trace_id, decision=decision)
+        event_write_authorized = common.authorization_allows(
+            identity=identity,
+            action=OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
+            product="launchplane",
+            context="owner-acceptance",
+            target=AuthorizationTarget(scope="context"),
+        )
+        return OwnerAcceptanceEvaluationResponse(
+            trace_id=trace_id,
+            decision=decision,
+            viewer_capabilities=OwnerAcceptanceViewerCapabilities(
+                event_write_authorized=event_write_authorized
+            ),
+        )
 
     def write_event(
         envelope: OwnerAcceptanceEventEnvelope,

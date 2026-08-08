@@ -923,6 +923,7 @@ export type OwnerAcceptanceEvaluationResponse = {
     decision: OwnerAcceptanceDecision;
     status: 'ok';
     trace_id: string;
+    viewer_capabilities: OwnerAcceptanceViewerCapabilities;
 };
 
 export type OwnerAcceptanceEventEnvelope = {
@@ -1001,6 +1002,7 @@ export type OwnerAcceptanceQueueEntry = {
 export type OwnerAcceptanceQueueResponse = {
     authoritative: false;
     candidate: number;
+    derivation: 'ledger_only';
     enforcement_effect: 'none';
     entries: Array<OwnerAcceptanceQueueEntry>;
     entry_count: number;
@@ -1027,6 +1029,10 @@ export type OwnerAcceptanceRuntimeIdentityBinding = {
     runtime_identity_sha256: string;
     schema_version: number;
     source_git_ref: string;
+};
+
+export type OwnerAcceptanceViewerCapabilities = {
+    event_write_authorized: boolean;
 };
 
 export type PostDeployUpdateEvidence = {

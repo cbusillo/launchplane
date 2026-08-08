@@ -2868,6 +2868,7 @@ export function ownerAcceptanceForFixture(
     return {
       authoritative: false,
       candidate: 0,
+      derivation: "ledger_only",
       enforcement_effect: "none",
       entries: [],
       entry_count: 0,
@@ -2943,6 +2944,7 @@ export function ownerAcceptanceForFixture(
   return {
     authoritative: false,
     candidate: entries.length,
+    derivation: "ledger_only",
     enforcement_effect: "none",
     entries,
     entry_count: entries.length,

@@ -583,6 +583,21 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         }
 
         AuthzManagedPolicyReconcileEnvelope.model_validate(request_payload)
+        AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                **request_payload,
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_humans": [
+                        {
+                            **valid_rule,
+                            "managed_rule_id": "viewer.current",
+                            "actions": ["owner_acceptance.read"],
+                        }
+                    ],
+                },
+            }
+        )
 
         invalid_rules = (
             ({**valid_rule, "github_ids": [], "logins": ["owner"]}, "immutable GitHub IDs"),
@@ -590,7 +605,11 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             ({**valid_rule, "products": ["other"]}, "exact Launchplane workbench scope"),
             (
                 {**valid_rule, "actions": [*valid_rule["actions"], "product_config.apply"]},
-                "only the read and event-write actions",
+                "read action alone or the read and event-write actions together",
+            ),
+            (
+                {**valid_rule, "actions": ["owner_acceptance_event.write"]},
+                "read action alone or the read and event-write actions together",
             ),
         )
         for invalid_rule, message in invalid_rules:
