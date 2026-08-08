@@ -3568,10 +3568,12 @@ production authorization, and legacy manager cleanup remain out of scope. See
 target reference plus optional non-authoritative metadata. Launchplane uses its
 managed GitHub credential to resolve immutable repository identity, current
 head/tree, and changed files; GitHub Actions callers must also match the OIDC
-repository IDs/name and workflow `sha`. Dependency and reviewer evidence is
-read only from Launchplane storage. Missing records, stale heads, incomplete
-provider evidence, and provider failures cannot fall back to caller input and
-therefore fail closed.
+repository IDs/name and workflow `sha`. The active DB-backed component policy
+may declare affected products directly. Additional dependency and reviewer
+evidence is read only from Launchplane storage, and reviewer product claims
+require trusted same-component dependency evidence. Missing extension records,
+stale heads, incomplete provider evidence, and provider failures cannot fall
+back to caller input and therefore fail closed.
 
 The response remains shadow-only with exact policy revision/digest and
 repository/PR/head/tree binding. See `docs/change-impact-policy.md` for the

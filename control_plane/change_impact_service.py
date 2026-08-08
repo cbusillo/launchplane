@@ -226,12 +226,11 @@ def evaluate_change_impact(
                 sensitive = True
 
     dependency_components = {
-        evidence.component for evidence in stored_evidence if evidence.kind == "dependency"
+        evidence.component
+        for evidence in stored_evidence
+        if evidence.kind == "dependency" and evidence.confidence == "known"
     }
     matched_components = {evidence.component for evidence in matched if evidence.component}
-    for component in matched_components - dependency_components:
-        if rules_by_component[component].affected_products:
-            unknown.append(f"missing trusted dependency evidence for component {component}")
 
     for evidence in stored_evidence:
         if evidence.confidence != "known":
@@ -246,6 +245,15 @@ def evaluate_change_impact(
             )
             continue
         rule = rules_by_component[evidence.component]
+        if (
+            evidence.kind == "reviewer"
+            and evidence.affected_products
+            and evidence.component not in dependency_components
+        ):
+            unknown.append(
+                f"reviewer evidence lacks trusted dependency evidence for {evidence.component}"
+            )
+            continue
         affected_products.update(evidence.affected_products)
         affected_products.update(rule.affected_products)
         matched.append(_stored_evidence_match(evidence=evidence, rule=rule))
@@ -333,11 +341,15 @@ def _validate_policy_append(
     expected_current_record_id: str,
     expected_current_policy_digest: str,
 ) -> bool:
-    matching = tuple(existing for existing in records if existing.repository_id == record.repository_id)
+    matching = tuple(
+        existing for existing in records if existing.repository_id == record.repository_id
+    )
     same_id = tuple(existing for existing in matching if existing.record_id == record.record_id)
     if same_id:
         if len(same_id) != 1 or same_id[0].policy_digest != record.policy_digest:
-            raise ChangeImpactPolicyConflictError("change-impact policy record id conflicts with history")
+            raise ChangeImpactPolicyConflictError(
+                "change-impact policy record id conflicts with history"
+            )
         if same_id[0].status != record.status:
             raise ChangeImpactPolicyConflictError(
                 "change-impact policy replay status conflicts with history"
@@ -345,10 +357,14 @@ def _validate_policy_append(
         return True
     current_records = tuple(existing for existing in matching if existing.status == "active")
     if len(current_records) > 1:
-        raise ChangeImpactPolicySequenceError("change-impact policy history has multiple active revisions")
+        raise ChangeImpactPolicySequenceError(
+            "change-impact policy history has multiple active revisions"
+        )
     current = current_records[0] if current_records else None
     if record.status != "active":
-        raise ChangeImpactPolicySequenceError("incoming change-impact policy revision must be active")
+        raise ChangeImpactPolicySequenceError(
+            "incoming change-impact policy revision must be active"
+        )
     if record.effective_at > _evaluation_timestamp(""):
         raise ChangeImpactPolicySequenceError(
             "incoming change-impact policy effective_at cannot be in the future"
@@ -357,7 +373,9 @@ def _validate_policy_append(
         if record.policy_revision != 1:
             raise ChangeImpactPolicySequenceError("initial change-impact policy revision must be 1")
         if expected_current_record_id.strip() or expected_current_policy_digest.strip():
-            raise ChangeImpactPolicyConflictError("initial change-impact policy expected tip must be absent")
+            raise ChangeImpactPolicyConflictError(
+                "initial change-impact policy expected tip must be absent"
+            )
         return False
     if (
         expected_current_record_id.strip() != current.record_id
@@ -367,7 +385,9 @@ def _validate_policy_append(
     if record.policy_revision != current.policy_revision + 1:
         raise ChangeImpactPolicySequenceError("next change-impact policy revision is not linear")
     if record.supersedes_record_id != current.record_id:
-        raise ChangeImpactPolicySequenceError("next change-impact policy must supersede current record")
+        raise ChangeImpactPolicySequenceError(
+            "next change-impact policy must supersede current record"
+        )
     if record.effective_at < current.effective_at:
         raise ChangeImpactPolicySequenceError(
             "next change-impact policy effective_at cannot precede current revision"
@@ -551,14 +571,24 @@ def _binding_matches_target(
 
 def _evaluation_timestamp(value: str) -> str:
     if not value.strip():
-        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
-            "+00:00",
-            "Z",
+        return (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace(
+                "+00:00",
+                "Z",
+            )
         )
     parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("evaluated_at must include a timezone")
-    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace(
-        "+00:00",
-        "Z",
+    return (
+        parsed.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace(
+            "+00:00",
+            "Z",
+        )
     )

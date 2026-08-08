@@ -298,10 +298,11 @@ They bind the exact repository, pull request number, head SHA, tree SHA, policy
 revision, and policy digest. Unknown paths, missing dependency evidence,
 ambiguous stored evidence, stale provider or OIDC head binding, provider
 failure, or invalid policy history fail closed to non-success output with the
-stricter two-review engineering requirement. Dependency and reviewer evidence
-is read only from exact-target Launchplane records; those record families remain
-future work under #2011 and #2001, so missing evidence cannot be replaced by a
-caller assertion.
+stricter two-review engineering requirement. The active component policy may
+declare affected products directly. Additional dependency and reviewer evidence
+is read only from exact-target Launchplane records, and reviewer product claims
+require trusted same-component dependency evidence; missing extension evidence
+cannot be replaced by a caller assertion.
 
 Filesystem rehearsal records live under `launchplane_change_impact_policies/`.
 PostgreSQL uses `launchplane_change_impact_policies` with one active policy per

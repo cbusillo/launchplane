@@ -38,20 +38,22 @@ Launchplane resolves evaluation evidence through two server-owned boundaries:
   the current pull-request head and tree, and the complete changed-file set. A
   second pull-request read rejects a head that changes during collection, and
   renamed files preserve both old and new paths for policy matching.
-- Launchplane storage is the only dependency or reviewer evidence source.
-  Stored reviewer evidence may add affected products but cannot downgrade a
-  deterministic sensitive match.
+- The active DB-backed component policy is authoritative for the affected
+  products it declares directly. Launchplane storage is the only source for
+  additional dependency or reviewer evidence. Stored reviewer evidence may add
+  affected products only when trusted dependency evidence exists for the same
+  matched component, and it cannot downgrade a deterministic sensitive match.
 
 GitHub Actions callers are additionally bound to the OIDC repository ID, owner
 ID, repository name, and workflow `sha`. A repository or head mismatch is a
 non-success result. Human and operator callers still receive current provider
 facts rather than caller assertions.
 
-Until the dependency and independent-review records tracked by #2011 and #2001
-exist, product-impacting components without stored dependency evidence return
-`unknown` with the sensitive/two-review fallback. Provider unavailability and
-incomplete pagination fail closed; no caller-controlled evidence fallback is
-available.
+Missing dependency records do not invalidate a product scope declared directly
+by the active component policy. They are required only when stored evidence is
+used to extend that declared scope. Reviewer-only product claims remain
+insufficient and return `unknown`. Provider unavailability and incomplete
+pagination fail closed; no caller-controlled evidence fallback is available.
 
 ## Output
 
