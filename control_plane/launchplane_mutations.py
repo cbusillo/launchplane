@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -20,6 +21,8 @@ from control_plane.workflows.launchplane import (
     build_preview_generation_record_from_request,
     build_preview_record_from_request,
     find_preview_record,
+    generate_preview_generation_id,
+    generate_preview_id,
 )
 
 
@@ -47,6 +50,55 @@ class _PreviewGenerationEvidenceWriteStore(Protocol):
         preview_record: PreviewRecord,
         generation_record: PreviewGenerationRecord,
     ) -> tuple[object, object]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchplanePreviewGenerationIdentity:
+    preview_id: str
+    generation_id: str
+    sequence: int
+
+
+def resolve_next_launchplane_preview_generation_identity(
+    *,
+    record_store: PreviewMutationRecordStore,
+    context: str,
+    anchor_repo: str,
+    anchor_pr_number: int,
+) -> LaunchplanePreviewGenerationIdentity:
+    preview = find_preview_record(
+        record_store=record_store,
+        context_name=context,
+        anchor_repo=anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+    )
+    preview_id = (
+        preview.preview_id
+        if preview is not None
+        else generate_preview_id(
+            context_name=context,
+            anchor_repo=anchor_repo,
+            anchor_pr_number=anchor_pr_number,
+        )
+    )
+    generations = record_store.list_preview_generation_records(preview_id=preview_id)
+    sequence = max((generation.sequence for generation in generations), default=0) + 1
+    return LaunchplanePreviewGenerationIdentity(
+        preview_id=preview_id,
+        generation_id=generate_preview_generation_id(
+            preview_id=preview_id,
+            sequence=sequence,
+        ),
+        sequence=sequence,
+    )
+
+
+def resolve_launchplane_preview_id(*, context: str, anchor_repo: str, anchor_pr_number: int) -> str:
+    return generate_preview_id(
+        context_name=context,
+        anchor_repo=anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+    )
 
 
 def control_plane_root() -> Path:

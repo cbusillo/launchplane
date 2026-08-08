@@ -129,6 +129,8 @@ def compare_runtime_identity(
         "deployment_record_id",
         "artifact_id",
         "source_git_ref",
+        "preview_id",
+        "preview_generation_id",
     ):
         expected_value = str(getattr(expected, field_name) or "")
         observed_value = str(getattr(observed, field_name) or "")

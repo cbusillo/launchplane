@@ -190,6 +190,19 @@ def _refresh_request() -> VeriReelPreviewRefreshRequest:
 
 
 class VeriReelPreviewDriverTests(unittest.TestCase):
+    def test_preview_runtime_identity_uses_launchplane_preview_binding(self) -> None:
+        identity = _build_preview_runtime_identity(
+            request=_refresh_request(),
+            preview_id="preview-verireel-testing-verireel-pr-71",
+            preview_generation_id=("preview-verireel-testing-verireel-pr-71-generation-0003"),
+        )
+
+        self.assertEqual(identity.preview_id, "preview-verireel-testing-verireel-pr-71")
+        self.assertEqual(
+            identity.preview_generation_id,
+            "preview-verireel-testing-verireel-pr-71-generation-0003",
+        )
+
     def test_ensure_application_uses_default_server_when_template_omits_server_id(self) -> None:
         requests: list[dict[str, object]] = []
 
