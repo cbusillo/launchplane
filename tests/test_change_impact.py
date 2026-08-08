@@ -125,16 +125,17 @@ def _stored_evidence(
 
 
 class ChangeImpactEvaluationTests(unittest.TestCase):
-    def test_routine_product_change_requires_stored_dependency_evidence(self) -> None:
+    def test_policy_declared_product_scope_is_authoritative_and_storage_can_extend_it(self) -> None:
         policy = _policy()
         without_storage = evaluate_change_impact(
             repository_evidence=_repository_evidence("src/runtime/app.py"),
             policies=(policy,),
             evaluated_at="2026-08-06T01:00:00Z",
         )
-        self.assertEqual(without_storage.status, "unknown")
-        self.assertEqual(without_storage.engineering_review_tier, "sensitive")
-        self.assertEqual(without_storage.required_engineering_review_count, 2)
+        self.assertEqual(without_storage.status, "success")
+        self.assertEqual(without_storage.engineering_review_tier, "routine")
+        self.assertEqual(without_storage.required_engineering_review_count, 1)
+        self.assertEqual(without_storage.owner_impact, "required")
 
         evaluation = evaluate_change_impact(
             repository_evidence=_repository_evidence("src/runtime/app.py"),
@@ -151,7 +152,9 @@ class ChangeImpactEvaluationTests(unittest.TestCase):
         self.assertEqual(evaluation.engineering_review_tier, "routine")
         self.assertEqual(evaluation.required_engineering_review_count, 1)
         self.assertEqual(evaluation.owner_impact, "required")
-        self.assertEqual(tuple(item.product for item in evaluation.affected_products), ("generic-web-a",))
+        self.assertEqual(
+            tuple(item.product for item in evaluation.affected_products), ("generic-web-a",)
+        )
         self.assertEqual(evaluation.policy_revision, policy.policy_revision)
         self.assertEqual(evaluation.policy_digest, policy.policy_digest)
 
@@ -215,7 +218,9 @@ class ChangeImpactEvaluationTests(unittest.TestCase):
         self.assertEqual(evaluation.status, "unknown")
         self.assertEqual(evaluation.engineering_review_tier, "sensitive")
         self.assertEqual(evaluation.required_engineering_review_count, 2)
-        self.assertIn("missing trusted dependency evidence", evaluation.unknown_evidence[0])
+        self.assertIn(
+            "reviewer evidence lacks trusted dependency evidence", evaluation.unknown_evidence[0]
+        )
 
     def test_unknown_path_and_ambiguous_storage_fail_closed(self) -> None:
         policy = _policy()
@@ -230,9 +235,7 @@ class ChangeImpactEvaluationTests(unittest.TestCase):
         ambiguous = evaluate_change_impact(
             repository_evidence=_repository_evidence("src/runtime/app.py"),
             policies=(policy,),
-            stored_evidence=(
-                _stored_evidence("generic-web-runtime", confidence="ambiguous"),
-            ),
+            stored_evidence=(_stored_evidence("generic-web-runtime", confidence="ambiguous"),),
             evaluated_at="2026-08-06T01:00:00Z",
         )
         self.assertEqual(ambiguous.status, "unknown")
@@ -336,8 +339,11 @@ class ChangeImpactEvaluationTests(unittest.TestCase):
 
     def test_dry_run_rejects_future_effective_policy(self) -> None:
         future_effective_at = (
-            datetime.now(timezone.utc) + timedelta(days=1)
-        ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            (datetime.now(timezone.utc) + timedelta(days=1))
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(Path(directory))
             with self.assertRaises(ChangeImpactPolicySequenceError):
