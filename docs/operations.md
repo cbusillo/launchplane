@@ -436,10 +436,11 @@ GitHub-human manager preview approval writer set and must declare the exact
 `LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` owns only the dedicated
 GitHub-human Owner Acceptance workbench grants and must declare the exact
 `operator.owner-acceptance` managed-set identity. Bind its rules to immutable
-numeric GitHub user IDs with the minimum `read_only` role and only
-`owner_acceptance.read` plus `owner_acceptance_event.write` for product
-`launchplane` and context `owner-acceptance`. Product Owner membership remains
-a separate server-side requirement for event writes. Generic-web preview caller
+numeric GitHub user IDs with the minimum `read_only` role. Engineering viewer
+rules may grant only `owner_acceptance.read`; Owner candidate rules may grant
+that read action plus `owner_acceptance_event.write`. Both shapes remain limited
+to product `launchplane` and context `owner-acceptance`. Product Owner membership
+remains a separate server-side requirement for event writes. Generic-web preview caller
 grants are no longer sourced from a per-product repository secret. The
 typed product-onboarding planner derives repository identity, caller workflow
 refs, immutable Launchplane worker refs, products, contexts, events, and actions

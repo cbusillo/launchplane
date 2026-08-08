@@ -85,6 +85,7 @@ class OwnerAcceptanceQueueHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["mode"], "shadow")
             self.assertIs(payload["authoritative"], False)
             self.assertEqual(payload["enforcement_effect"], "none")
+            self.assertEqual(payload["derivation"], "ledger_only")
             self.assertEqual(payload["total"], 0)
             self.assertEqual(payload["candidate"], 0)
             self.assertIs(payload["truncated"], False)
@@ -163,8 +164,12 @@ class OwnerAcceptanceQueueHttpTests(unittest.IsolatedAsyncioTestCase):
             app = _app(store=store, repository_evidence_provider=provider)
 
             async with lifespan_client(app) as client:
-                await self._write_event(client, pull_request_number=2022, action="accepted", idempotency_key="key-1")
-                await self._write_event(client, pull_request_number=2022, action="revoked", idempotency_key="key-2")
+                await self._write_event(
+                    client, pull_request_number=2022, action="accepted", idempotency_key="key-1"
+                )
+                await self._write_event(
+                    client, pull_request_number=2022, action="revoked", idempotency_key="key-2"
+                )
                 response = await client.get(OWNER_ACCEPTANCE_QUEUE_ROUTE)
 
             self.assertEqual(response.status_code, 200, response.text)
@@ -265,7 +270,9 @@ class OwnerAcceptanceQueueHttpTests(unittest.IsolatedAsyncioTestCase):
                 ).json()
                 # Non-matching substring should return empty
                 nomatch_payload = (
-                    await client.get(OWNER_ACCEPTANCE_QUEUE_ROUTE, params={"repository": "unrelated"})
+                    await client.get(
+                        OWNER_ACCEPTANCE_QUEUE_ROUTE, params={"repository": "unrelated"}
+                    )
                 ).json()
 
             self.assertEqual(match_payload["candidate"], 1)
@@ -326,17 +333,24 @@ class OwnerAcceptanceQueueHttpTests(unittest.IsolatedAsyncioTestCase):
             async with lifespan_client(app) as client:
                 # Two writes with different idempotency keys produce two events for the same subject
                 # because the evidence provider maps all targets to the same binding (PR 2022)
-                await self._write_event(client, pull_request_number=2022, action="accepted", idempotency_key="key-1")
-                await self._write_event(client, pull_request_number=2022, action="revoked", idempotency_key="key-2")
+                await self._write_event(
+                    client, pull_request_number=2022, action="accepted", idempotency_key="key-1"
+                )
+                await self._write_event(
+                    client, pull_request_number=2022, action="revoked", idempotency_key="key-2"
+                )
                 response = await client.get(OWNER_ACCEPTANCE_QUEUE_ROUTE)
 
             payload = response.json()
-            self.assertEqual(payload["total"], 1, "Two events for same subject → one unique subject")
+            self.assertEqual(
+                payload["total"], 1, "Two events for same subject → one unique subject"
+            )
             self.assertEqual(payload["entry_count"], 1)
 
     async def test_queue_no_erds_no_github_calls(self) -> None:
         """Queue is ledger-only: no ERD dependency, no repository evidence provider calls."""
         from unittest.mock import MagicMock
+
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
             mock_provider = MagicMock(spec=_EvidenceProvider)

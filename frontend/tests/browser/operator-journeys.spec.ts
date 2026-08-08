@@ -795,6 +795,24 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
+  test("engineering viewer sees Current evidence without Owner controls", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/owner-acceptance?fixture=empty");
+    await page.getByRole("textbox", { name: "Repository (owner/repo)" }).fill("example/site");
+    await page.getByRole("spinbutton", { name: "Pull request number" }).fill("308");
+    await page.getByRole("button", { name: "Look up" }).click();
+
+    await expect(page.getByLabel("Current evaluation result")).toBeVisible();
+    await expect(page.getByText("Read-only engineering visibility")).toBeVisible();
+    await expect(page.getByRole("region", { name: /Owner action for/ })).toHaveCount(0);
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "owner-acceptance-current-read-only");
+    diagnostics.assertClean();
+  });
+
   test("current Owner acceptance lookup records an exact shadow action", async ({ page }) => {
     const diagnostics = monitorBrowser(page);
 

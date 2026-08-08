@@ -48,6 +48,13 @@ Owner requirement, Owner membership, and prior events from server-owned
 providers and storage. The pure read remains outside the browser-mutation
 surface and cannot consume a request body.
 
+The response includes `viewer_capabilities.event_write_authorized`, a
+server-issued route-level capability for the evaluated identity. It allows the
+workbench to render explicit read-only engineering visibility instead of
+showing unusable Owner controls. The capability is advisory: browser-session
+requirements and current product Owner authority are revalidated independently
+when an event is submitted.
+
 Engineering-only changes return `not_required` and write no event. Product
 changes with incomplete change-impact evidence, unavailable Owner policy, or
 missing Owner requirement fail closed to `unavailable`. Once any event exists
@@ -143,6 +150,8 @@ or tenant-admission evidence.
 candidates exclusively from `OwnerAcceptanceEventRecord` history with no
 repository evidence provider calls, no GitHub API calls, and no engineering
 review decision store dependency.
+The response declares `derivation: ledger_only`; current Owners do not appear in
+the queue until an acceptance event exists for their exact subject.
 
 **Folding:** Events are folded by their full subject key:
 `(repository_id, pull_request_number, product, system, action, environment)`.
@@ -198,7 +207,10 @@ from `GET /v1/owner-acceptance/queue` with:
   affect the queue list state.
 
 Mutation controls appear only after an exact Current evaluation and only for
-server-issued product bindings. The browser submits repository, PR, action,
+server-issued product bindings when
+`viewer_capabilities.event_write_authorized=true`. Read-authorized engineering
+viewers see the Current decision and binding evidence with an explicit read-only
+notice instead. The browser submits repository, PR, action,
 reason, and the exact `expected_binding_sha256`; it never builds authority or
 evidence. Launchplane re-evaluates the binding and the authenticated GitHub
 human's current Owner membership at write time. Request-changes and revoke

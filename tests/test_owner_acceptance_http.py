@@ -8,6 +8,10 @@ import unittest
 from fastapi import FastAPI, HTTPException
 
 from control_plane.http_app import _BOUNDED_REQUEST_BODY_CONTRACTS
+from control_plane.contracts.owner_acceptance import (
+    OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
+    OWNER_ACCEPTANCE_READ_ACTION,
+)
 from control_plane.http_routes.owner_acceptance import (
     OWNER_ACCEPTANCE_EVALUATION_ROUTE,
     OWNER_ACCEPTANCE_EVENT_ROUTE,
@@ -47,6 +51,7 @@ def _app(
     identity: LaunchplaneIdentity | None = None,
     browser_identity: LaunchplaneIdentity | None = None,
     repository_evidence_provider: _EvidenceProvider | None = None,
+    authorization_allows: Callable[..., bool] | None = None,
     github_app_token: Callable[[str, str], GitHubAppInstallationToken] | None = None,
     github_api: Callable[..., object] | None = None,
 ) -> FastAPI:
@@ -56,7 +61,7 @@ def _app(
         read_identity=lambda: resolved_identity,
         get_record_store=lambda: store,
         next_trace_id=lambda: "trace-owner-acceptance",
-        authorization_allows=lambda **_: True,
+        authorization_allows=authorization_allows or (lambda **_: True),
         http_error=_http_error,
         error_response_model=dict,  # type: ignore[arg-type]
     )
@@ -193,6 +198,10 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(evaluated.status_code, 200, evaluated.text)
                 self.assertEqual(evaluated.json()["decision"]["status"], "pending")
+                self.assertIs(
+                    evaluated.json()["viewer_capabilities"]["event_write_authorized"],
+                    True,
+                )
                 expected_binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
 
                 injected = await client.post(
@@ -245,6 +254,29 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(read.status_code, 200, read.text)
                 self.assertEqual(read.json()["record"], payload["record"])
+
+    async def test_evaluation_reports_read_only_viewer_capability(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            checked_actions: list[object] = []
+
+            def authorization_allows(**kwargs: object) -> bool:
+                checked_actions.append(kwargs.get("action"))
+                return kwargs.get("action") == OWNER_ACCEPTANCE_READ_ACTION
+
+            app = _app(store=store, authorization_allows=authorization_allows)
+            async with lifespan_client(app) as client:
+                response = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["decision"]["status"], "pending")
+        self.assertIs(payload["viewer_capabilities"]["event_write_authorized"], False)
+        self.assertIn(OWNER_ACCEPTANCE_READ_ACTION, checked_actions)
+        self.assertIn(OWNER_ACCEPTANCE_EVENT_WRITE_ACTION, checked_actions)
 
     async def test_multi_product_flow_uses_digest_selection_without_product_input(self) -> None:
         with TemporaryDirectory() as directory:

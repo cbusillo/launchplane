@@ -8905,12 +8905,16 @@
           "trace_id": {
             "title": "Trace Id",
             "type": "string"
+          },
+          "viewer_capabilities": {
+            "$ref": "#/components/schemas/OwnerAcceptanceViewerCapabilities"
           }
         },
         "required": [
           "decision",
           "status",
-          "trace_id"
+          "trace_id",
+          "viewer_capabilities"
         ],
         "title": "OwnerAcceptanceEvaluationResponse",
         "type": "object"
@@ -9347,6 +9351,12 @@
             "title": "Candidate",
             "type": "integer"
           },
+          "derivation": {
+            "const": "ledger_only",
+            "default": "ledger_only",
+            "title": "Derivation",
+            "type": "string"
+          },
           "enforcement_effect": {
             "const": "none",
             "default": "none",
@@ -9400,6 +9410,7 @@
         "required": [
           "authoritative",
           "candidate",
+          "derivation",
           "enforcement_effect",
           "entries",
           "entry_count",
@@ -9490,6 +9501,21 @@
           "source_git_ref"
         ],
         "title": "OwnerAcceptanceRuntimeIdentityBinding",
+        "type": "object"
+      },
+      "OwnerAcceptanceViewerCapabilities": {
+        "additionalProperties": false,
+        "properties": {
+          "event_write_authorized": {
+            "description": "Whether the evaluated identity currently has route-level owner_acceptance_event.write authorization. Browser session and current product Owner authority are revalidated separately when an event is submitted.",
+            "title": "Event Write Authorized",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "event_write_authorized"
+        ],
+        "title": "OwnerAcceptanceViewerCapabilities",
         "type": "object"
       },
       "PostDeployUpdateEvidence": {
