@@ -51,6 +51,12 @@ OwnerAcceptanceReasonCode = Literal[
 ]
 OwnerAcceptanceEventWriteStatus = Literal["written", "replayed"]
 OwnerAcceptanceSourceEventKind = Literal["browser_api", "system"]
+OwnerAcceptanceViewerEligibilityReason = Literal[
+    "current_product_owner",
+    "not_current_product_owner",
+    "viewer_identity_unsupported",
+    "owner_authority_unavailable",
+]
 OWNER_ACCEPTANCE_PROJECT_ACTION = "owner_acceptance.project"
 
 OWNER_ACCEPTANCE_STATUS_PRECEDENCE: tuple[OwnerAcceptanceDecisionStatus, ...] = (
@@ -531,6 +537,40 @@ class OwnerAcceptanceProductDecision(BaseModel):
                     raise ValueError(
                         f"Owner acceptance product decision event {field_name} does not match subject"
                     )
+        return self
+
+
+class OwnerAcceptanceViewerBindingEligibility(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    binding_sha256: str
+    product: str
+    system: str
+    action: str
+    environment: str
+    can_submit_event: bool
+    reason_code: OwnerAcceptanceViewerEligibilityReason
+
+    @model_validator(mode="after")
+    def _validate_viewer_binding_eligibility(
+        self,
+    ) -> "OwnerAcceptanceViewerBindingEligibility":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Owner acceptance viewer eligibility schema version.")
+        object.__setattr__(
+            self,
+            "binding_sha256",
+            _normalize_sha256(self.binding_sha256, "binding_sha256"),
+        )
+        for field_name in ("product", "system", "action", "environment"):
+            object.__setattr__(
+                self,
+                field_name,
+                _required_token(str(getattr(self, field_name)), field_name),
+            )
+        if self.can_submit_event != (self.reason_code == "current_product_owner"):
+            raise ValueError("Owner acceptance viewer eligibility must match its reason code.")
         return self
 
 

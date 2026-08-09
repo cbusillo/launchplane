@@ -105,6 +105,14 @@ class OwnerAcceptanceQueueHttpTests(unittest.IsolatedAsyncioTestCase):
                 payload["viewer_capabilities"]["event_write_authorized"],
                 True,
             )
+            eligibility = payload["viewer_capabilities"]["bindings"]
+            self.assertEqual(len(eligibility), 1)
+            self.assertIs(eligibility[0]["can_submit_event"], True)
+            self.assertEqual(eligibility[0]["reason_code"], "current_product_owner")
+            self.assertEqual(
+                eligibility[0]["binding_sha256"],
+                payload["items"][0]["decision"]["binding"]["binding_sha256"],
+            )
 
     async def test_current_items_show_repository_discovery_failures(self) -> None:
         class _UnavailableProvider(_EvidenceProvider):

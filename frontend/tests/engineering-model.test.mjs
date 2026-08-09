@@ -9,6 +9,7 @@ import {
   mergeTrainStatusScopeKey,
   mergeTrainTargetSelection,
   mergeTrainTargetOptions,
+  ownerAcceptanceBindingEligibility,
   scalarEvidence,
   workGraphRankScopeKey,
 } from "../src/engineering-model.ts";
@@ -23,6 +24,40 @@ test("engineering write boundaries stay explicit and unsupported", () => {
   assert.match(ISSUE_RECONCILIATION_BROWSER_BOUNDARY, /GitHub Actions OIDC/);
   assert.match(ISSUE_RECONCILIATION_BROWSER_BOUNDARY, /absent from the generated browser write contract/);
   assert.match(MERGE_TRAIN_BROWSER_BOUNDARY, /never executes a worker route dynamically/);
+});
+
+test("Owner review eligibility fails closed on route or binding mismatch", () => {
+  const eligible = {
+    schema_version: 1,
+    binding_sha256: "a".repeat(64),
+    product: "example-product",
+    system: "website",
+    action: "pull_request.owner_acceptance",
+    environment: "pull_request",
+    can_submit_event: true,
+    reason_code: "current_product_owner",
+  };
+  assert.equal(
+    ownerAcceptanceBindingEligibility(
+      { event_write_authorized: true, bindings: [eligible] },
+      eligible.binding_sha256,
+    ),
+    eligible,
+  );
+  assert.equal(
+    ownerAcceptanceBindingEligibility(
+      { event_write_authorized: true, bindings: [eligible] },
+      "b".repeat(64),
+    ),
+    undefined,
+  );
+  assert.equal(
+    ownerAcceptanceBindingEligibility(
+      { event_write_authorized: false, bindings: [eligible] },
+      eligible.binding_sha256,
+    ),
+    undefined,
+  );
 });
 
 test("merge train targets come only from policy targets", () => {

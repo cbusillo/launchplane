@@ -12543,9 +12543,74 @@
         "title": "OwnerAcceptanceRuntimeIdentityBinding",
         "type": "object"
       },
+      "OwnerAcceptanceViewerBindingEligibility": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "binding_sha256": {
+            "title": "Binding Sha256",
+            "type": "string"
+          },
+          "can_submit_event": {
+            "title": "Can Submit Event",
+            "type": "boolean"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason_code": {
+            "enum": [
+              "current_product_owner",
+              "not_current_product_owner",
+              "viewer_identity_unsupported",
+              "owner_authority_unavailable"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "system": {
+            "title": "System",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_sha256",
+          "product",
+          "system",
+          "action",
+          "environment",
+          "can_submit_event",
+          "reason_code"
+        ],
+        "title": "OwnerAcceptanceViewerBindingEligibility",
+        "type": "object"
+      },
       "OwnerAcceptanceViewerCapabilities": {
         "additionalProperties": false,
         "properties": {
+          "bindings": {
+            "default": [],
+            "description": "Viewer-specific advisory eligibility for exact product bindings. Missing or ineligible bindings must not expose event controls. Event writes revalidate the exact binding and current product Owner authority independently.",
+            "items": {
+              "$ref": "#/components/schemas/OwnerAcceptanceViewerBindingEligibility"
+            },
+            "title": "Bindings",
+            "type": "array"
+          },
           "event_write_authorized": {
             "description": "Whether the evaluated identity currently has route-level owner_acceptance_event.write authorization. Browser session and current product Owner authority are revalidated separately when an event is submitted.",
             "title": "Event Write Authorized",

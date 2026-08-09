@@ -12,6 +12,7 @@ from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
     OWNER_ACCEPTANCE_READ_ACTION,
 )
+from control_plane.contracts.product_owner import ProductOwnerGrant, ProductOwnerIdentity
 from control_plane.http_routes.owner_acceptance import (
     OWNER_ACCEPTANCE_EVALUATION_ROUTE,
     OWNER_ACCEPTANCE_EVENT_ROUTE,
@@ -34,7 +35,9 @@ from tests.test_owner_acceptance import (
     SECOND_PRODUCT,
     _EvidenceProvider,
     REPOSITORY_ID,
+    SYSTEM,
     _human,
+    _owner_policy,
     _repository_evidence,
     _store,
     _write_preview_evidence,
@@ -202,7 +205,12 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                     evaluated.json()["viewer_capabilities"]["event_write_authorized"],
                     True,
                 )
+                eligibility = evaluated.json()["viewer_capabilities"]["bindings"]
+                self.assertEqual(len(eligibility), 1)
+                self.assertIs(eligibility[0]["can_submit_event"], True)
+                self.assertEqual(eligibility[0]["reason_code"], "current_product_owner")
                 expected_binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
+                self.assertEqual(eligibility[0]["binding_sha256"], expected_binding_sha256)
 
                 injected = await client.post(
                     OWNER_ACCEPTANCE_EVENTS_ROUTE,
@@ -275,8 +283,69 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["decision"]["status"], "pending")
         self.assertIs(payload["viewer_capabilities"]["event_write_authorized"], False)
+        self.assertEqual(payload["viewer_capabilities"]["bindings"], [])
         self.assertIn(OWNER_ACCEPTANCE_READ_ACTION, checked_actions)
         self.assertIn(OWNER_ACCEPTANCE_EVENT_WRITE_ACTION, checked_actions)
+
+    async def test_evaluation_reports_non_owner_before_write_and_write_still_denies(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            app = _app(store=store, identity=_human(999999))
+            target: dict[str, str | int] = {
+                "repository": REPOSITORY,
+                "pull_request_number": 2022,
+            }
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params=target,
+                )
+                self.assertEqual(evaluated.status_code, 200, evaluated.text)
+                payload = evaluated.json()
+                eligibility = payload["viewer_capabilities"]["bindings"]
+                self.assertEqual(len(eligibility), 1)
+                self.assertIs(eligibility[0]["can_submit_event"], False)
+                self.assertEqual(
+                    eligibility[0]["reason_code"],
+                    "not_current_product_owner",
+                )
+                binding_sha256 = payload["decision"]["binding"]["binding_sha256"]
+                self.assertEqual(eligibility[0]["binding_sha256"], binding_sha256)
+
+                denied = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": binding_sha256,
+                    },
+                    headers={"Idempotency-Key": "non-owner-denied"},
+                )
+
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(
+            denied.json()["detail"]["code"],
+            "owner_acceptance_authorization_denied",
+        )
+
+    async def test_evaluation_marks_non_human_viewer_unsupported(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            app = _app(
+                store=store,
+                identity=TerminalAgentIdentity(subject="agent", token_label="local"),
+            )
+            async with lifespan_client(app) as client:
+                response = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        eligibility = response.json()["viewer_capabilities"]["bindings"]
+        self.assertEqual(len(eligibility), 1)
+        self.assertIs(eligibility[0]["can_submit_event"], False)
+        self.assertEqual(eligibility[0]["reason_code"], "viewer_identity_unsupported")
 
     async def test_multi_product_flow_uses_digest_selection_without_product_input(self) -> None:
         with TemporaryDirectory() as directory:
@@ -292,10 +361,13 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 evaluated = await client.get(OWNER_ACCEPTANCE_EVALUATION_ROUTE, params=target)
                 self.assertEqual(evaluated.status_code, 200, evaluated.text)
                 decision = evaluated.json()["decision"]
+                eligibility = evaluated.json()["viewer_capabilities"]["bindings"]
                 self.assertEqual(
                     [product["product"] for product in decision["products"]],
                     [PRODUCT, SECOND_PRODUCT],
                 )
+                self.assertEqual(len(eligibility), 2)
+                self.assertTrue(all(entry["can_submit_event"] for entry in eligibility))
                 bindings = {
                     product["product"]: product["binding"]["binding_sha256"]
                     for product in decision["products"]
@@ -346,6 +418,57 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                     ["accepted", "accepted"],
                 )
                 self.assertEqual(len(store.list_owner_acceptance_event_records()), 2)
+
+    async def test_multi_product_eligibility_is_independent_per_binding(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory), shared_dependency_evidence=True)
+            current_second_policy = store.list_product_owner_policy_records(
+                product=SECOND_PRODUCT,
+                system=SYSTEM,
+            )[0]
+            store.write_product_owner_policy_record(
+                _owner_policy(
+                    product=SECOND_PRODUCT,
+                    revision=2,
+                    supersedes_record_id=current_second_policy.record_id,
+                    owners=(
+                        ProductOwnerGrant(
+                            identity=ProductOwnerIdentity(
+                                provider="github",
+                                provider_subject_id="999999",
+                            ),
+                            repository_ids=(REPOSITORY_ID,),
+                            environments=("pull_request",),
+                        ),
+                    ),
+                )
+            )
+            app = _app(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(
+                    _repository_evidence(path="src/shared/app.py")
+                ),
+            )
+            async with lifespan_client(app) as client:
+                response = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        eligibility = {
+            entry["product"]: entry for entry in response.json()["viewer_capabilities"]["bindings"]
+        }
+        self.assertIs(eligibility[PRODUCT]["can_submit_event"], True)
+        self.assertEqual(
+            eligibility[PRODUCT]["reason_code"],
+            "current_product_owner",
+        )
+        self.assertIs(eligibility[SECOND_PRODUCT]["can_submit_event"], False)
+        self.assertEqual(
+            eligibility[SECOND_PRODUCT]["reason_code"],
+            "not_current_product_owner",
+        )
 
     async def test_changes_requested_and_revoked_require_reasons_and_evaluate(self) -> None:
         target: dict[str, str | int] = {

@@ -844,6 +844,28 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
+  test("non-Owner sees exact review evidence without actionable controls", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/engineering/owner-acceptance?fixture=products&viewer=non-owner",
+    );
+
+    await expect(page.getByText("Not a current product Owner", { exact: true })).toBeVisible();
+    await expect(page.getByText(/only a current product Owner can record/i)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Record product review" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("region", { name: /Owner product review unavailable for/ }),
+    ).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "owner-product-review-non-owner");
+    diagnostics.assertClean();
+  });
+
   test("request changes and revoke require explicit human input", async ({ page }) => {
     const diagnostics = monitorBrowser(page);
 

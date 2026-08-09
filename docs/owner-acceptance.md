@@ -62,6 +62,14 @@ showing unusable Owner controls. The capability is advisory: browser-session
 requirements and current product Owner authority are revalidated independently
 when an event is submitted.
 
+When route-level event access is present, `viewer_capabilities.bindings`
+provides viewer-specific advisory eligibility keyed by each exact
+`binding_sha256`. It identifies only whether the current viewer may submit for
+that binding and a closed reason code; it never exposes the Owner roster. A
+missing, unsupported, stale, or unavailable eligibility entry fails closed in
+the browser. Viewer eligibility remains outside `OwnerAcceptanceDecision`, so
+decision and GitHub projection digests stay independent of who reads them.
+
 Engineering-only changes return `not_required` and write no event. Product
 changes with incomplete change-impact evidence, unavailable Owner policy, or
 missing Owner requirement fail closed to `unavailable`. Once any event exists
@@ -235,9 +243,12 @@ It also displays queue entries from `GET /v1/owner-acceptance/queue` with:
 
 Mutation controls appear directly on automatic Current items and only for
 server-issued product bindings when
-`viewer_capabilities.event_write_authorized=true`. Read-authorized engineering
-viewers see the Current decision and binding evidence with an explicit read-only
-notice instead. The browser submits repository, PR, action,
+`viewer_capabilities.event_write_authorized=true` and the matching exact-binding
+eligibility has `can_submit_event=true`. Route-authorized non-Owners still see
+the Current decision and binding evidence, but the action form is replaced with
+a natural read-only explanation that a current product Owner must record the
+review. Read-authorized viewers without route-level event access see the broader
+read-only notice instead. The browser submits repository, PR, action,
 reason, and the exact `expected_binding_sha256`; it never builds authority or
 evidence. Launchplane re-evaluates the binding and the authenticated GitHub
 human's current Owner membership at write time. Request-changes and revoke
