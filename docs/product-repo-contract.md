@@ -687,6 +687,10 @@ Launchplane appends that bounded primitive only to the request idempotency key;
 it does not enter the maintenance payload. Omitting the scope preserves the
 existing action/intent/user/application key for callers that require replay
 across workflow runs.
+Driver-owned maintenance commands must use executables shipped in the product
+runtime image and must not assume package-manager CLIs remain installed. The
+VeriReel driver therefore invokes the checked-in Prisma binary directly rather
+than relying on npm or `npx` in the hardened runtime stage.
 Product repos should pass an explicit `instance` only for a workflow whose
 operator input or job purpose genuinely selects a different lane.
 Production readiness wrappers may also accept expected runtime build identity
