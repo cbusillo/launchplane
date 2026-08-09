@@ -785,6 +785,24 @@ test.describe("operator journeys", () => {
     await expect(page.getByLabel("Current Owner product review items")).toBeVisible();
     await expect(page.getByText("Fixture pull request requiring current Owner review")).toBeVisible();
     await expect(page.getByRole("region", { name: /Owner product review for/ })).toBeVisible();
+    const currentItemVisuals = await page.locator(".engineering-owner-current-item").first().evaluate(
+      (element) => {
+        const itemStyle = getComputedStyle(element);
+        const listStyle = getComputedStyle(element.parentElement!);
+        return {
+          borderStyle: itemStyle.borderTopStyle,
+          borderWidth: itemStyle.borderTopWidth,
+          boxShadow: itemStyle.boxShadow,
+          rowGap: listStyle.rowGap,
+        };
+      },
+    );
+    expect(currentItemVisuals).toEqual({
+      borderStyle: "solid",
+      borderWidth: "1px",
+      boxShadow: "none",
+      rowGap: "16px",
+    });
     await expect(page.getByRole("textbox", { name: "Repository (owner/repo)" })).toHaveCount(0);
     await assertDocumentBasics(page);
     diagnostics.assertClean();

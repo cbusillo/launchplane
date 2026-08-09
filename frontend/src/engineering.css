@@ -1746,7 +1746,7 @@
 
 .engineering-owner-current-list {
   display: grid;
-  gap: 14px;
+  gap: 16px;
 }
 
 .engineering-owner-current-item {
@@ -1756,7 +1756,6 @@
   border-radius: 12px;
   background: var(--surface);
   padding: 18px;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 5%, transparent);
 }
 
 .engineering-owner-current-item > header {
