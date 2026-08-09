@@ -753,6 +753,7 @@ class DocsContractsTests(TestCase):
             app_maintenance_workflow,
         )
         self.assertIn("deployment or operation record id", product_repo_contract)
+        self.assertIn("checked-in Prisma binary directly", product_repo_contract)
         self.assertIn("post_deploy_status=result.post_deploy_status", app_maintenance_workflow)
         self.assertIn("override_status=result.override_status", app_maintenance_workflow)
         self.assertIn("applied_at=result.applied_at", app_maintenance_workflow)

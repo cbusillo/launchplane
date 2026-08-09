@@ -144,11 +144,11 @@ class VeriReelAppMaintenanceResult(BaseModel):
 
 
 def _migration_command() -> str:
-    return "npx prisma migrate deploy --config prisma.config.ts"
+    return "./node_modules/.bin/prisma migrate deploy --config prisma.config.ts"
 
 
 def _reset_testing_command() -> str:
-    return "node prisma/reset-testing-job.mjs && npx prisma migrate deploy --schema prisma/schema.prisma && node prisma/seed.mjs"
+    return "node prisma/reset-testing-job.mjs && ./node_modules/.bin/prisma migrate deploy --schema prisma/schema.prisma && node prisma/seed.mjs"
 
 
 def _uses_internal_smoke_maintenance_api(request: VeriReelAppMaintenanceRequest) -> bool:

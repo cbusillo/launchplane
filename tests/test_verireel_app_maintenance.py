@@ -39,7 +39,10 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
         schedule_name, command = _command_for_request(request)
 
         self.assertEqual(schedule_name, "ver-apply-prisma-migrations")
-        self.assertEqual(command, "npx prisma migrate deploy --config prisma.config.ts")
+        self.assertEqual(
+            command,
+            "./node_modules/.bin/prisma migrate deploy --config prisma.config.ts",
+        )
 
     def test_owner_admin_actions_no_longer_build_product_image_script_command(self) -> None:
         request = VeriReelAppMaintenanceRequest(
@@ -300,7 +303,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
         self.assertEqual(schedule_name, "ver-testing-reset")
         self.assertEqual(
             command,
-            "node prisma/reset-testing-job.mjs && npx prisma migrate deploy --schema prisma/schema.prisma && node prisma/seed.mjs",
+            "node prisma/reset-testing-job.mjs && ./node_modules/.bin/prisma migrate deploy --schema prisma/schema.prisma && node prisma/seed.mjs",
         )
 
     def test_preview_target_reads_secret_from_application_one_payload(self) -> None:
@@ -388,7 +391,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
             token="managed-token",
             application_id="app-123",
             schedule_name="ver-apply-prisma-migrations",
-            command="npx prisma migrate deploy --config prisma.config.ts",
+            command="./node_modules/.bin/prisma migrate deploy --config prisma.config.ts",
             timeout_seconds=300,
         )
         deploy_mock.assert_not_called()
