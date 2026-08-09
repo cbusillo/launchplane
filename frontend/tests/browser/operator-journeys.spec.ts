@@ -746,13 +746,13 @@ test.describe("operator journeys", () => {
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
     await expect(
-      page.getByRole("heading", { level: 1, name: "Owner acceptance" }),
+      page.getByRole("heading", { level: 1, name: "Owner product review" }),
     ).toBeFocused();
     await expect(
-      page.getByRole("link", { name: "Owner acceptance", exact: true }),
+      page.getByRole("link", { name: "Owner product review", exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByText("Shadow mode — automatic Current items and recorded evidence"),
+      page.getByText("Shadow mode — product review evidence only"),
     ).toBeVisible();
     const recordedHistory = page.getByLabel("Recorded Owner acceptance history");
     await expect(recordedHistory.getByText(/Recorded/).first()).toBeVisible();
@@ -782,9 +782,9 @@ test.describe("operator journeys", () => {
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
-    await expect(page.getByLabel("Current Owner acceptance items")).toBeVisible();
+    await expect(page.getByLabel("Current Owner product review items")).toBeVisible();
     await expect(page.getByText("Fixture pull request requiring current Owner review")).toBeVisible();
-    await expect(page.getByRole("region", { name: /Owner action for/ })).toBeVisible();
+    await expect(page.getByRole("region", { name: /Owner product review for/ })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Repository (owner/repo)" })).toHaveCount(0);
     await assertDocumentBasics(page);
     diagnostics.assertClean();
@@ -820,8 +820,8 @@ test.describe("operator journeys", () => {
     await page.getByRole("button", { name: "Look up" }).click();
 
     await expect(page.getByLabel("Current evaluation result")).toBeVisible();
-    await expect(page.getByText("Read-only engineering visibility")).toBeVisible();
-    await expect(page.getByRole("region", { name: /Owner action for/ })).toHaveCount(0);
+    await expect(page.getByText("Read-only product review visibility")).toBeVisible();
+    await expect(page.getByRole("region", { name: /Owner product review for/ })).toHaveCount(0);
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "owner-acceptance-current-read-only");
     diagnostics.assertClean();
@@ -832,10 +832,13 @@ test.describe("operator journeys", () => {
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
-    const panel = page.getByRole("region", { name: /Owner action for/ });
+    const panel = page.getByRole("region", { name: /Owner product review for/ });
     await expect(panel).toBeVisible();
-    await expect(panel.getByText("Act only on this Current binding.")).toBeVisible();
-    await panel.getByRole("button", { name: "Submit Owner action" }).click();
+    await expect(panel.getByText("Product review only.", { exact: true })).toBeVisible();
+    await expect(panel.getByText(/does not indicate that technical checks passed/i)).toBeVisible();
+    await expect(panel.getByText(/make the pull request merge-ready/i)).toBeVisible();
+    await expect(panel.getByText(/or authorize production/i)).toBeVisible();
+    await panel.getByRole("button", { name: "Record product review" }).click();
     await expect(panel.getByText(/recorded in shadow mode/i)).toBeVisible();
     await expect(panel.getByText(/No merge or production authority/i)).toBeVisible();
     diagnostics.assertClean();
@@ -846,8 +849,8 @@ test.describe("operator journeys", () => {
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
-    const panel = page.getByRole("region", { name: /Owner action for/ });
-    const submit = panel.getByRole("button", { name: "Submit Owner action" });
+    const panel = page.getByRole("region", { name: /Owner product review for/ });
+    const submit = panel.getByRole("button", { name: "Record product review" });
     await panel.getByRole("combobox").selectOption("changes_requested");
     await expect(submit).toBeDisabled();
     await panel.getByRole("textbox", { name: "Reason" }).fill("Please correct the product flow.");
@@ -863,19 +866,19 @@ test.describe("operator journeys", () => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=missing");
-    const panel = page.getByRole("region", { name: /Owner action for/ });
+    const panel = page.getByRole("region", { name: /Owner product review for/ });
     await panel.getByRole("combobox").selectOption("revoked");
     await panel.getByRole("textbox", { name: "Reason" }).fill("Revoke the reviewed binding.");
     await panel.getByRole("checkbox").check();
-    await panel.getByRole("button", { name: "Submit Owner action" }).click();
+    await panel.getByRole("button", { name: "Record product review" }).click();
 
     await expect(page.getByText(/reviewed binding changed/i)).toBeVisible();
     await expect(page.getByText(/explicitly submit again/i)).toBeVisible();
-    const refreshedPanel = page.getByRole("region", { name: /Owner action for/ });
+    const refreshedPanel = page.getByRole("region", { name: /Owner product review for/ });
     await expect(refreshedPanel.getByText("bbbbbbbbbbbb", { exact: true })).toBeVisible();
     await expect(refreshedPanel.getByRole("combobox")).toHaveValue("accepted");
     await expect(refreshedPanel.getByRole("checkbox")).toHaveCount(0);
-    await expect(refreshedPanel.getByRole("button", { name: "Submit Owner action" })).toBeEnabled();
+    await expect(refreshedPanel.getByRole("button", { name: "Record product review" })).toBeEnabled();
     diagnostics.assertClean();
   });
 
@@ -942,7 +945,7 @@ test.describe("operator journeys", () => {
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
     const activeLink = page.getByRole("link", {
-      name: "Owner acceptance",
+      name: "Owner product review",
       exact: true,
     });
     await expect(activeLink).toBeVisible();

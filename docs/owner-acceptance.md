@@ -9,6 +9,13 @@ review of pull requests. Every affected product receives an independent binding
 and decision. It does not authorize production, merge trains, tenant admission,
 promotion, GitHub required checks, or manager-preview flows.
 
+The persisted human action remains `accepted` because the event records the
+Owner's durable product judgment. The workbench presents that action as
+**Owner product review: accepted** and explicitly separates it from technical
+checks, engineering review, merge readiness, merge admission, and production
+authorization. A product review event never claims that any of those independent
+gates passed.
+
 Launchplane is the only authority. GitHub comments, reviews, checked-in files,
 workflow inputs, local operator bearer tokens, agents, and workers cannot create
 Owner acceptance or impersonate an Owner.
@@ -238,6 +245,11 @@ require a reason, revoke requires explicit confirmation, replay preserves the
 same idempotency key, and `409 owner_acceptance_binding_changed` refreshes the
 Current item without auto-resubmitting. Every receipt remains shadow,
 non-authoritative, and has no merge or production enforcement effect.
+Before submission, the UI labels the control as **Product review action** and
+states that recording it does not indicate technical checks passed, make the PR
+merge-ready, or authorize production. The stored API and ledger action remains
+`accepted`; the human-facing label clarifies its scope rather than introducing a
+second semantic state.
 
 ## Advisory GitHub Projection
 
