@@ -70,7 +70,7 @@ export function engineeringViewLabel(view: EngineeringView): string {
     return "Tenant admission";
   }
   if (view === "owner-acceptance") {
-    return "Owner acceptance";
+    return "Owner product review";
   }
   return "Engineering Ops";
 }

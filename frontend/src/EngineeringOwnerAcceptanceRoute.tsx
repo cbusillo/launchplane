@@ -143,22 +143,24 @@ export function EngineeringOwnerAcceptanceRoute({
           state={currentResource.state}
         />
       }
-      description="Review current pull requests that may need Owner attention, then inspect recorded acceptance history. Launchplane discovers current items automatically from active change-impact repositories."
+      description="Review the product behavior of current pull requests, then inspect recorded review history. Launchplane discovers current items automatically from active change-impact repositories."
       icon={UserCheck}
-      title="Owner acceptance"
+      title="Owner product review"
       view="owner-acceptance"
     >
-      <EngineeringBoundaryNote title="Shadow mode — automatic Current items and recorded evidence">
-        All decisions are <code>mode: shadow</code>, <code>authoritative: false</code>,{" "}
-        <code>enforcement_effect: none</code>. Current items come from open pull requests
-        in repositories with active change-impact policy records and are evaluated
-        server-side. Recorded entries are{" "}
+      <EngineeringBoundaryNote title="Shadow mode — product review evidence only">
+        Owner product review is separate from technical checks, engineering review, merge
+        readiness and admission, and production authorization. All decisions are{" "}
+        <code>mode: shadow</code>, <code>authoritative: false</code>,{" "}
+        <code>enforcement_effect: none</code>. Current items come from open pull requests in
+        repositories with active change-impact policy records and are evaluated server-side.
+        Recorded entries are{" "}
         <strong>Recorded</strong> — derived from the persisted acceptance event ledger
         with no live GitHub calls. Recorded queue rows remain read-only.
       </EngineeringBoundaryNote>
 
       <EngineeringResourceGate
-        noun="Current Owner acceptance items"
+        noun="Current Owner product review items"
         refresh={currentResource.refresh}
         state={currentResource.state}
       >
@@ -251,7 +253,7 @@ function OwnerAcceptanceCurrentItems({
     );
   }
   return (
-    <section className="engineering-owner-current" aria-label="Current Owner acceptance items">
+    <section className="engineering-owner-current" aria-label="Current Owner product review items">
       <header className="engineering-owner-current-header">
         <div>
           <span>Current items</span>
@@ -553,7 +555,7 @@ function OwnerAcceptanceDecisionDetails({
           data-status={ownerAcceptanceDecisionTone(decision.status)}
         >
           <StatusIcon status={ownerAcceptanceDecisionTone(decision.status)} />
-          Current: {humanizeStatus(decision.status)}
+          Owner product review: {humanizeStatus(decision.status)}
         </span>
         <span>reason: {humanizeStatus(decision.reason_code)}</span>
         {decision.evaluated_at ? (
@@ -596,16 +598,17 @@ function OwnerAcceptanceReadOnlyNotice() {
   return (
     <section
       className="engineering-owner-acceptance-read-only"
-      aria-label="Read-only Owner acceptance visibility"
+      aria-label="Read-only product review visibility"
     >
       <header>
         <ShieldOff size={16} aria-hidden="true" />
-        <strong>Read-only engineering visibility</strong>
+        <strong>Read-only product review visibility</strong>
       </header>
       <p>
-        You can inspect the Current decision and exact server-issued bindings, but this
-        session is not authorized to submit Owner events. Launchplane rechecks both
-        event-write access and current product Owner authority for every submission.
+        You can inspect the current product-review decision and exact server-issued
+        bindings, but this session is not authorized to submit Owner events. Launchplane
+        rechecks both event-write access and current product Owner authority for every
+        submission.
       </p>
     </section>
   );
@@ -725,21 +728,21 @@ function OwnerAcceptanceActionPanel({
     !busy;
 
   return (
-    <section className="engineering-owner-action-panel" aria-label={`Owner action for ${binding.product}`}>
+    <section className="engineering-owner-action-panel" aria-label={`Owner product review for ${binding.product}`}>
       <header>
         <div><strong>{binding.product}</strong><span>{binding.system} · {binding.action} · {binding.environment}</span></div>
         <code>{binding.binding_sha256.slice(0, 12)}</code>
       </header>
-      <p>Act only on this Current binding. Launchplane revalidates the exact change and your Owner authority at write time.</p>
+      <p><strong>Product review only.</strong> Record your judgment of this exact change. This does not indicate that technical checks passed, make the pull request merge-ready, or authorize production. Launchplane revalidates the exact change and your Owner authority at write time.</p>
       <label>
-        <span>Owner action</span>
+        <span>Product review action</span>
         <select value={action} disabled={operation.state.requiresIdempotencyContinuity} onChange={(event) => {
           setAction(event.target.value as OwnerAcceptanceHumanAction);
           setConfirmRevoke(false);
         }}>
-          <option value="accepted">Accept</option>
-          <option value="changes_requested">Request changes</option>
-          <option value="revoked">Revoke</option>
+          <option value="accepted">Accept product change</option>
+          <option value="changes_requested">Request product changes</option>
+          <option value="revoked">Revoke prior product acceptance</option>
         </select>
       </label>
       {reasonRequired ? <label><span>Reason</span><textarea value={reason} maxLength={4000} disabled={operation.state.requiresIdempotencyContinuity} onChange={(event) => setReason(event.target.value)} /></label> : null}
@@ -753,11 +756,11 @@ function OwnerAcceptanceActionPanel({
             setReason("");
             setConfirmRevoke(false);
           }
-        }}>{busy ? "Submitting…" : "Submit Owner action"}</button>
+        }}>{busy ? "Recording…" : "Record product review"}</button>
         {busy ? <button className="button" type="button" onClick={operation.cancel}>Cancel wait</button> : null}
       </div>
       {failure && failure.code !== "owner_acceptance_binding_changed" ? <p className="engineering-owner-action-message" role="alert">{failure.message}{failure.traceId ? <code>{failure.traceId}</code> : null}</p> : null}
-      {operation.state.receipt ? <p className="engineering-owner-action-message" data-tone="success">{operation.state.receipt.replayed ? "Owner action was already recorded (idempotent replay)." : "Owner action recorded in shadow mode."} No merge or production authority was granted.<code>{operation.state.receipt.traceId}</code></p> : null}
+      {operation.state.receipt ? <p className="engineering-owner-action-message" data-tone="success" role="status">{operation.state.receipt.replayed ? "Owner product review was already recorded (idempotent replay)." : "Owner product review recorded in shadow mode."} No merge or production authority was granted.<code>{operation.state.receipt.traceId}</code></p> : null}
       {operation.state.requiresIdempotencyContinuity ? <p className="engineering-owner-action-message" role="status">Outcome uncertain. Retry only this unchanged action; the idempotency key is preserved.</p> : null}
     </section>
   );
@@ -805,7 +808,7 @@ function OwnerAcceptanceContent({
           <strong>{data.candidate}</strong>
         </div>
         <div className="engineering-metric" data-tone={accepted ? "pass" : "unknown"}>
-          <span>Accepted shown</span>
+          <span>Product accepted shown</span>
           <strong>{accepted}</strong>
         </div>
         <div className="engineering-metric" data-tone={actioned ? "blocked" : "pass"}>
@@ -865,7 +868,7 @@ function OwnerAcceptanceContent({
             onChange={(e) => onStatusFilter(e.target.value as OwnerAcceptanceStatusFilter)}
           >
             <option value="all">All statuses</option>
-            <option value="accepted">Accepted</option>
+            <option value="accepted">Product accepted</option>
             <option value="changes_requested">Changes requested</option>
             <option value="revoked">Revoked</option>
             <option value="stale">Stale</option>
@@ -905,7 +908,7 @@ function OwnerAcceptanceContent({
           detail={
             statusFilter !== "all" || repositoryFilter
               ? "No recorded entries match the current filters."
-              : "No recorded Owner acceptance events yet. Owners do not appear here until they submit an action; use Current evaluation above to inspect a never-acted PR."
+              : "No recorded Owner product reviews yet. Owners do not appear here until they submit an action; use Current items or the exact lookup fallback to inspect a never-acted PR."
           }
           icon={History}
           title="No recorded entries"
@@ -942,7 +945,7 @@ function OwnerAcceptanceEntryCard({ entry }: { entry: OwnerAcceptanceQueueEntry 
         </div>
         <span className="engineering-status-chip" data-status={tone}>
           <StatusIcon status={tone} />
-          {humanizeStatus(entry.ledger_status)}
+          Owner product review: {humanizeStatus(entry.ledger_status)}
         </span>
       </header>
 

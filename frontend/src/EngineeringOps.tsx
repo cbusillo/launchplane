@@ -66,10 +66,10 @@ const ENGINEERING_SURFACES = [
   },
   {
     detail:
-      "Review current Owner acceptance decisions for repository pull requests. Shadow mode — no mutations exposed.",
+      "Review exact-change product judgments separately from technical, merge, and production readiness.",
     icon: UserCheck,
     label: "Read only",
-    title: "Owner acceptance",
+    title: "Owner product review",
     view: "owner-acceptance" as const,
   },
 ];
