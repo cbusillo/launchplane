@@ -1066,7 +1066,19 @@ export type OwnerAcceptanceRuntimeIdentityBinding = {
     source_git_ref: string;
 };
 
+export type OwnerAcceptanceViewerBindingEligibility = {
+    action: string;
+    binding_sha256: string;
+    can_submit_event: boolean;
+    environment: string;
+    product: string;
+    reason_code: 'current_product_owner' | 'not_current_product_owner' | 'viewer_identity_unsupported' | 'owner_authority_unavailable';
+    schema_version: number;
+    system: string;
+};
+
 export type OwnerAcceptanceViewerCapabilities = {
+    bindings: Array<OwnerAcceptanceViewerBindingEligibility>;
     event_write_authorized: boolean;
 };
 

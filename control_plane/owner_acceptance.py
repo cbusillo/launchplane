@@ -27,6 +27,8 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceProductDecision,
     OwnerAcceptanceReasonCode,
     OwnerAcceptanceSourceEventKind,
+    OwnerAcceptanceViewerBindingEligibility,
+    OwnerAcceptanceViewerEligibilityReason,
     owner_acceptance_runtime_identity_binding,
 )
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -35,6 +37,8 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_owner import (
     ProductOwnerActionContext,
     ProductOwnerActorIdentity,
+    ProductOwnerPolicyRecord,
+    ProductOwnerRequirementRecord,
 )
 from control_plane.product_owner_service import (
     evaluate_product_owner_shadow_authority,
@@ -107,6 +111,106 @@ class OwnerAcceptanceWriteResult(NamedTuple):
     status: OwnerAcceptanceEventWriteStatus
     record: OwnerAcceptanceEventRecord
     decision: OwnerAcceptanceDecision
+
+
+def evaluate_owner_acceptance_viewer_eligibility(
+    *,
+    store: object,
+    decisions: tuple[OwnerAcceptanceDecision, ...],
+    identity: LaunchplaneIdentity,
+) -> tuple[OwnerAcceptanceViewerBindingEligibility, ...]:
+    actor = (
+        ProductOwnerActorIdentity(
+            provider="github",
+            provider_subject_id=str(identity.github_id),
+        )
+        if isinstance(identity, GitHubHumanIdentity)
+        else None
+    )
+    policy_store = None
+    requirement_store = None
+    if actor is not None:
+        try:
+            policy_store = require_product_owner_policy_read_store(store)
+            requirement_store = require_product_owner_requirement_read_store(store)
+        except TypeError:
+            pass
+
+    policy_cache: dict[tuple[str, str], tuple[ProductOwnerPolicyRecord, ...]] = {}
+    requirement_cache: dict[tuple[str, str], tuple[ProductOwnerRequirementRecord, ...]] = {}
+    seen_bindings: set[str] = set()
+    eligibility: list[OwnerAcceptanceViewerBindingEligibility] = []
+    for decision in decisions:
+        bindings = tuple(
+            product.binding for product in decision.products if product.binding is not None
+        )
+        if decision.binding is not None:
+            bindings = (*bindings, decision.binding)
+        for binding in bindings:
+            if binding.binding_sha256 in seen_bindings:
+                continue
+            seen_bindings.add(binding.binding_sha256)
+            can_submit_event = False
+            reason_code: OwnerAcceptanceViewerEligibilityReason = "viewer_identity_unsupported"
+            if actor is not None and policy_store is not None and requirement_store is not None:
+                cache_key = (binding.product, binding.system)
+                try:
+                    if cache_key not in policy_cache:
+                        policy_cache[cache_key] = policy_store.list_product_owner_policy_records(
+                            product=binding.product,
+                            system=binding.system,
+                        )
+                    if cache_key not in requirement_cache:
+                        requirement_cache[cache_key] = (
+                            requirement_store.list_product_owner_requirement_records(
+                                product=binding.product,
+                                system=binding.system,
+                            )
+                        )
+                    policies = policy_cache[cache_key]
+                    requirements = requirement_cache[cache_key]
+                    authority = evaluate_product_owner_shadow_authority(
+                        context=ProductOwnerActionContext(
+                            product=binding.product,
+                            system=binding.system,
+                            repository_id=binding.repository_id,
+                            environment=binding.environment,
+                            action=binding.action,
+                        ),
+                        actor=actor,
+                        policies=policies,
+                        requirements=requirements,
+                        routings=(),
+                        claimed_policy_revision=binding.owner_policy_revision,
+                        claimed_policy_digest=binding.owner_policy_digest,
+                        claimed_requirement_revision=binding.owner_requirement_revision,
+                        claimed_requirement_digest=binding.owner_requirement_digest,
+                        evaluated_at=decision.evaluated_at,
+                    )
+                except (TypeError, ValueError):
+                    reason_code = "owner_authority_unavailable"
+                else:
+                    if authority.decision == "authorized":
+                        can_submit_event = True
+                        reason_code = "current_product_owner"
+                    elif authority.reason_code == "actor_not_current_owner":
+                        reason_code = "not_current_product_owner"
+                    else:
+                        reason_code = "owner_authority_unavailable"
+            elif actor is not None:
+                reason_code = "owner_authority_unavailable"
+            eligibility.append(
+                OwnerAcceptanceViewerBindingEligibility(
+                    binding_sha256=binding.binding_sha256,
+                    product=binding.product,
+                    system=binding.system,
+                    action=binding.action,
+                    environment=binding.environment,
+                    can_submit_event=can_submit_event,
+                    reason_code=reason_code,
+                )
+            )
+    return tuple(eligibility)
 
 
 def evaluate_owner_acceptance(

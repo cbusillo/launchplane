@@ -21,6 +21,7 @@ import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import {
   filterOwnerAcceptanceEntries,
   ownerAcceptanceDecisionTone,
+  ownerAcceptanceBindingEligibility,
   type OwnerAcceptanceStatusFilter,
 } from "./engineering-model";
 import {
@@ -53,6 +54,8 @@ import type {
   OwnerAcceptanceEventEnvelope,
   OwnerAcceptanceQueueEntry,
   OwnerAcceptanceQueueResponse,
+  OwnerAcceptanceViewerBindingEligibility,
+  OwnerAcceptanceViewerCapabilities,
 } from "./generated/openapi.ts";
 
 const QUEUE_LIMIT = 50;
@@ -222,9 +225,7 @@ function ownerAcceptanceCurrentItemsForFixture(
     enforcement_effect: "none",
     derivation: "active_change_impact_open_pull_requests",
     generated_at: decision.evaluated_at,
-    viewer_capabilities: {
-      event_write_authorized: fixtureMode !== "empty",
-    },
+    viewer_capabilities: ownerAcceptanceFixtureViewerCapabilities(decision, fixtureMode),
     repository_count: fixtureMode === "empty" ? 0 : 1,
     repository_failure_count: 0,
     candidate_count: items.length,
@@ -276,7 +277,7 @@ function OwnerAcceptanceCurrentItems({
       <div className="engineering-owner-current-list">
         {data.items.map((item) => (
           <OwnerAcceptanceCurrentItemCard
-            eventWriteAuthorized={data.viewer_capabilities.event_write_authorized}
+            viewerCapabilities={data.viewer_capabilities}
             fixtureMode={fixtureMode}
             item={item}
             key={`${item.repository}:${item.pull_request_number}`}
@@ -288,23 +289,26 @@ function OwnerAcceptanceCurrentItems({
 }
 
 function OwnerAcceptanceCurrentItemCard({
-  eventWriteAuthorized,
+  viewerCapabilities,
   fixtureMode,
   item,
 }: {
-  eventWriteAuthorized: boolean;
+  viewerCapabilities: OwnerAcceptanceViewerCapabilities;
   fixtureMode: DevFixtureMode;
   item: OwnerAcceptanceCurrentItem;
 }) {
   const [decision, setDecision] = useState(item.decision);
+  const [currentViewerCapabilities, setCurrentViewerCapabilities] =
+    useState(viewerCapabilities);
   const [driftMessage, setDriftMessage] = useState("");
   const [error, setError] = useState("");
   const pullRequestUrl = safeExternalUrl(item.url);
   useEffect(() => {
     setDecision(item.decision);
+    setCurrentViewerCapabilities(viewerCapabilities);
     setDriftMessage("");
     setError("");
-  }, [item.decision, item.error_code, item.evaluation_status]);
+  }, [item.decision, item.error_code, item.evaluation_status, viewerCapabilities]);
   const refreshCurrentEvaluation = useCallback(async (binding: OwnerAcceptanceBinding) => {
     try {
       const evaluation = fixtureMode
@@ -319,6 +323,11 @@ function OwnerAcceptanceCurrentItemCard({
           : (await loadDevFixtures()).ownerAcceptanceEvaluationForFixture(fixtureMode)
         : evaluation!.decision;
       setDecision(nextDecision);
+      setCurrentViewerCapabilities(
+        fixtureMode
+          ? ownerAcceptanceFixtureViewerCapabilities(nextDecision, fixtureMode)
+          : evaluation!.viewer_capabilities,
+      );
       setDriftMessage(
         "The reviewed binding changed. Current evidence was refreshed; review the new binding and explicitly submit again.",
       );
@@ -356,7 +365,7 @@ function OwnerAcceptanceCurrentItemCard({
         <OwnerAcceptanceDecisionDetails
           decision={decision}
           driftMessage={driftMessage}
-          eventWriteAuthorized={eventWriteAuthorized}
+          viewerCapabilities={currentViewerCapabilities}
           fixtureMode={fixtureMode}
           onBindingChanged={refreshCurrentEvaluation}
           onDecision={(nextDecision) => {
@@ -378,7 +387,8 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
   const [repository, setRepository] = useState("");
   const [prNumber, setPrNumber] = useState("");
   const [decision, setDecision] = useState<OwnerAcceptanceDecision | null>(null);
-  const [eventWriteAuthorized, setEventWriteAuthorized] = useState<boolean | null>(null);
+  const [viewerCapabilities, setViewerCapabilities] =
+    useState<OwnerAcceptanceViewerCapabilities | null>(null);
   const [driftMessage, setDriftMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -395,7 +405,7 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
 
     setLoading(true);
     setDecision(null);
-    setEventWriteAuthorized(null);
+    setViewerCapabilities(null);
     setDriftMessage("");
     setError(null);
 
@@ -405,13 +415,13 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
         const result = fixtures.ownerAcceptanceEvaluationForFixture(fixtureMode);
         if (!controller.signal.aborted) {
           setDecision(result);
-          setEventWriteAuthorized(fixtureMode !== "empty");
+          setViewerCapabilities(ownerAcceptanceFixtureViewerCapabilities(result, fixtureMode));
         }
       } else {
         const result = await evaluateOwnerAcceptance(repo, pr, controller.signal);
         if (!controller.signal.aborted) {
           setDecision(result.decision);
-          setEventWriteAuthorized(result.viewer_capabilities.event_write_authorized);
+          setViewerCapabilities(result.viewer_capabilities);
         }
       }
     } catch (err: unknown) {
@@ -446,10 +456,10 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
           : (await loadDevFixtures()).ownerAcceptanceEvaluationForFixture(fixtureMode)
         : evaluation!.decision;
       setDecision(nextDecision);
-      setEventWriteAuthorized(
+      setViewerCapabilities(
         fixtureMode
-          ? fixtureMode !== "empty"
-          : evaluation!.viewer_capabilities.event_write_authorized,
+          ? ownerAcceptanceFixtureViewerCapabilities(nextDecision, fixtureMode)
+          : evaluation!.viewer_capabilities,
       );
       setDriftMessage(
         "The reviewed binding changed. Current evidence was refreshed; review the new binding and explicitly submit again.",
@@ -515,14 +525,17 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
           <OwnerAcceptanceDecisionDetails
             decision={decision}
             driftMessage={driftMessage}
-            eventWriteAuthorized={eventWriteAuthorized === true}
+            viewerCapabilities={viewerCapabilities ?? {
+              event_write_authorized: false,
+              bindings: [],
+            }}
             fixtureMode={fixtureMode}
             onBindingChanged={refreshCurrentEvaluation}
             onDecision={(nextDecision) => {
               setDecision(nextDecision);
               setDriftMessage("");
             }}
-            showReadOnlyNotice={eventWriteAuthorized === false}
+            showReadOnlyNotice={viewerCapabilities?.event_write_authorized === false}
           />
         </div>
       ) : null}
@@ -533,7 +546,7 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
 function OwnerAcceptanceDecisionDetails({
   decision,
   driftMessage,
-  eventWriteAuthorized,
+  viewerCapabilities,
   fixtureMode,
   onBindingChanged,
   onDecision,
@@ -541,7 +554,7 @@ function OwnerAcceptanceDecisionDetails({
 }: {
   decision: OwnerAcceptanceDecision;
   driftMessage: string;
-  eventWriteAuthorized: boolean;
+  viewerCapabilities: OwnerAcceptanceViewerCapabilities;
   fixtureMode: DevFixtureMode;
   onBindingChanged: (binding: OwnerAcceptanceBinding) => Promise<void>;
   onDecision: (decision: OwnerAcceptanceDecision) => void;
@@ -570,10 +583,15 @@ function OwnerAcceptanceDecisionDetails({
               {driftMessage}
             </p>
           ) : null}
-          {eventWriteAuthorized ? (
+          {viewerCapabilities.event_write_authorized ? (
             <div className="engineering-owner-acceptance-actions">
-              {decision.products.map((product) =>
-                product.binding ? (
+              {decision.products.map((product) => {
+                if (!product.binding) return null;
+                const eligibility = ownerAcceptanceBindingEligibility(
+                  viewerCapabilities,
+                  product.binding.binding_sha256,
+                );
+                return eligibility?.can_submit_event ? (
                   <OwnerAcceptanceActionPanel
                     key={`${product.product}:${product.system}:${product.action}:${product.environment}`}
                     binding={product.binding}
@@ -582,8 +600,14 @@ function OwnerAcceptanceDecisionDetails({
                     onBindingChanged={onBindingChanged}
                     onDecision={onDecision}
                   />
-                ) : null,
-              )}
+                ) : (
+                  <OwnerAcceptanceIneligibleNotice
+                    binding={product.binding}
+                    eligibility={eligibility}
+                    key={`${product.product}:${product.system}:${product.action}:${product.environment}`}
+                  />
+                );
+              })}
             </div>
           ) : showReadOnlyNotice ? (
             <OwnerAcceptanceReadOnlyNotice />
@@ -591,6 +615,33 @@ function OwnerAcceptanceDecisionDetails({
         </>
       ) : null}
     </>
+  );
+}
+
+function OwnerAcceptanceIneligibleNotice({
+  binding,
+  eligibility,
+}: {
+  binding: OwnerAcceptanceBinding;
+  eligibility: OwnerAcceptanceViewerBindingEligibility | undefined;
+}) {
+  const notOwner = eligibility?.reason_code === "not_current_product_owner";
+  return (
+    <section
+      className="engineering-owner-acceptance-read-only"
+      aria-label={`Owner product review unavailable for ${binding.product}`}
+    >
+      <header>
+        <ShieldOff size={16} aria-hidden="true" />
+        <strong>{notOwner ? "Not a current product Owner" : "Owner eligibility unavailable"}</strong>
+      </header>
+      <p>
+        {notOwner
+          ? `You can inspect this exact ${binding.product} change, but only a current product Owner can record its product review.`
+          : `You can inspect this exact ${binding.product} change, but Launchplane could not verify that this session may record its product review.`}{" "}
+        Owner authority is revalidated for every submission.
+      </p>
+    </section>
   );
 }
 
@@ -630,6 +681,38 @@ function fixtureDecisionWithBindingDigest(
       ? { ...decision.binding, binding_sha256: bindingSha256 }
       : null,
     products,
+  };
+}
+
+function ownerAcceptanceFixtureViewerCapabilities(
+  decision: OwnerAcceptanceDecision,
+  fixtureMode: DevFixtureMode,
+): OwnerAcceptanceViewerCapabilities {
+  const eventWriteAuthorized = fixtureMode !== "empty";
+  const currentOwner =
+    new URLSearchParams(window.location.search).get("viewer") !== "non-owner";
+  return {
+    event_write_authorized: eventWriteAuthorized,
+    bindings: eventWriteAuthorized
+      ? decision.products.flatMap((product) =>
+          product.binding
+            ? [
+                {
+                  schema_version: 1,
+                  binding_sha256: product.binding.binding_sha256,
+                  product: product.product,
+                  system: product.system,
+                  action: product.action,
+                  environment: product.environment,
+                  can_submit_event: currentOwner,
+                  reason_code: currentOwner
+                    ? "current_product_owner"
+                    : "not_current_product_owner",
+                } satisfies OwnerAcceptanceViewerBindingEligibility,
+              ]
+            : [],
+        )
+      : [],
   };
 }
 

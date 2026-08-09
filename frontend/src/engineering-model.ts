@@ -3,6 +3,8 @@ import type {
   GitHubIssueInboxReadModel,
   MergeTrainControllerStatusReadModel,
   MergeTrainPolicyTarget,
+  OwnerAcceptanceViewerBindingEligibility,
+  OwnerAcceptanceViewerCapabilities,
   OwnerAcceptanceQueueEntry,
   WorkGraphQueueItem,
 } from "./generated/openapi.ts";
@@ -228,6 +230,18 @@ export function ownerAcceptanceDecisionTone(
   if (status === "stale") return "unknown";
   if (status === "unavailable") return "unknown";
   return "unknown";
+}
+
+export function ownerAcceptanceBindingEligibility(
+  capabilities: OwnerAcceptanceViewerCapabilities,
+  bindingSha256: string,
+): OwnerAcceptanceViewerBindingEligibility | undefined {
+  if (!capabilities.event_write_authorized) {
+    return undefined;
+  }
+  return capabilities.bindings.find(
+    (eligibility) => eligibility.binding_sha256 === bindingSha256,
+  );
 }
 
 export function filterOwnerAcceptanceEntries(

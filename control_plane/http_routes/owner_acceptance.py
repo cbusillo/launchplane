@@ -18,6 +18,7 @@ from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_READ_ACTION,
     OwnerAcceptanceDecision,
     OwnerAcceptanceEventRecord,
+    OwnerAcceptanceViewerBindingEligibility,
 )
 from control_plane.github_app_identity import (
     GitHubAppInstallationToken,
@@ -34,6 +35,7 @@ from control_plane.owner_acceptance import (
     OwnerAcceptanceEventConflictError,
     OwnerAcceptanceWriteResult,
     evaluate_owner_acceptance,
+    evaluate_owner_acceptance_viewer_eligibility,
     record_owner_acceptance_event,
     require_owner_acceptance_event_store,
 )
@@ -99,6 +101,27 @@ class OwnerAcceptanceViewerCapabilities(BaseModel):
             "Owner authority are revalidated separately when an event is submitted."
         )
     )
+    bindings: tuple[OwnerAcceptanceViewerBindingEligibility, ...] = Field(
+        default=(),
+        description=(
+            "Viewer-specific advisory eligibility for exact product bindings. Missing or "
+            "ineligible bindings must not expose event controls. Event writes revalidate "
+            "the exact binding and current product Owner authority independently."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_capabilities(self) -> "OwnerAcceptanceViewerCapabilities":
+        binding_digests = tuple(binding.binding_sha256 for binding in self.bindings)
+        if len(binding_digests) != len(set(binding_digests)):
+            raise ValueError("Owner acceptance viewer binding eligibility must be unique.")
+        if not self.event_write_authorized and any(
+            binding.can_submit_event for binding in self.bindings
+        ):
+            raise ValueError(
+                "Owner acceptance binding eligibility requires route-level event access."
+            )
+        return self
 
 
 class OwnerAcceptanceEvaluationResponse(BaseModel):
@@ -220,6 +243,33 @@ def register_owner_acceptance_routes(
     common = dependencies.common
     projection_identity = dependencies.read_write_identity or common.read_identity
 
+    def viewer_capabilities(
+        *,
+        identity: LaunchplaneIdentity,
+        record_store: object,
+        decisions: tuple[OwnerAcceptanceDecision, ...],
+    ) -> OwnerAcceptanceViewerCapabilities:
+        event_write_authorized = common.authorization_allows(
+            identity=identity,
+            action=OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
+            product="launchplane",
+            context="owner-acceptance",
+            target=AuthorizationTarget(scope="context"),
+        )
+        bindings = (
+            evaluate_owner_acceptance_viewer_eligibility(
+                store=record_store,
+                decisions=decisions,
+                identity=identity,
+            )
+            if event_write_authorized
+            else ()
+        )
+        return OwnerAcceptanceViewerCapabilities(
+            event_write_authorized=event_write_authorized,
+            bindings=bindings,
+        )
+
     def evaluate(
         repository: Annotated[
             str,
@@ -266,18 +316,13 @@ def register_owner_acceptance_routes(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        event_write_authorized = common.authorization_allows(
-            identity=identity,
-            action=OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
-            product="launchplane",
-            context="owner-acceptance",
-            target=AuthorizationTarget(scope="context"),
-        )
         return OwnerAcceptanceEvaluationResponse(
             trace_id=trace_id,
             decision=decision,
-            viewer_capabilities=OwnerAcceptanceViewerCapabilities(
-                event_write_authorized=event_write_authorized
+            viewer_capabilities=viewer_capabilities(
+                identity=identity,
+                record_store=record_store,
+                decisions=(decision,),
             ),
         )
 
@@ -504,18 +549,15 @@ def register_owner_acceptance_routes(
         generated_at = (
             datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
         )
-        event_write_authorized = common.authorization_allows(
-            identity=identity,
-            action=OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
-            product="launchplane",
-            context="owner-acceptance",
-            target=AuthorizationTarget(scope="context"),
-        )
         return OwnerAcceptanceCurrentItemsResponse(
             trace_id=trace_id,
             generated_at=generated_at,
-            viewer_capabilities=OwnerAcceptanceViewerCapabilities(
-                event_write_authorized=event_write_authorized
+            viewer_capabilities=viewer_capabilities(
+                identity=identity,
+                record_store=record_store,
+                decisions=tuple(
+                    item.decision for item in result.items if item.decision is not None
+                ),
             ),
             repository_count=result.repository_count,
             repository_failure_count=result.repository_failure_count,
