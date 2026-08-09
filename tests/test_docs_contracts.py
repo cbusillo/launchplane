@@ -743,6 +743,16 @@ class DocsContractsTests(TestCase):
         self.assertIn('route_path="/v1/drivers/verireel/app-maintenance"', app_maintenance_workflow)
         self.assertIn('route_path="/v1/drivers/odoo/app-maintenance"', app_maintenance_workflow)
         self.assertIn("maintenance.intent=${{ inputs.intent }}", app_maintenance_workflow)
+        self.assertIn("idempotency_scope:", app_maintenance_workflow)
+        self.assertIn(
+            "IDEMPOTENCY_SCOPE: ${{ inputs.idempotency_scope }}",
+            app_maintenance_workflow,
+        )
+        self.assertIn(
+            'idempotency_key="${idempotency_key}:${IDEMPOTENCY_SCOPE}"',
+            app_maintenance_workflow,
+        )
+        self.assertIn("deployment or operation record id", product_repo_contract)
         self.assertIn("post_deploy_status=result.post_deploy_status", app_maintenance_workflow)
         self.assertIn("override_status=result.override_status", app_maintenance_workflow)
         self.assertIn("applied_at=result.applied_at", app_maintenance_workflow)

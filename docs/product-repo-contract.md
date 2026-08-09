@@ -681,6 +681,12 @@ tested source git ref, and operation-level maintenance intent.
 The app-maintenance connector defaults to the VeriReel driver for compatibility,
 and callers can pass `driver: odoo` for the narrow Odoo post-deploy maintenance
 adapter backed by `/v1/drivers/odoo/app-maintenance`.
+Callers whose maintenance must run once for each new deployment may pass the
+Launchplane-issued deployment or operation record id as `idempotency_scope`.
+Launchplane appends that bounded primitive only to the request idempotency key;
+it does not enter the maintenance payload. Omitting the scope preserves the
+existing action/intent/user/application key for callers that require replay
+across workflow runs.
 Product repos should pass an explicit `instance` only for a workflow whose
 operator input or job purpose genuinely selects a different lane.
 Production readiness wrappers may also accept expected runtime build identity
