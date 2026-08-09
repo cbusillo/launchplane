@@ -47,6 +47,11 @@ name: Reusable Product Driver App Maintenance
         required: false
         default: ""
         type: string
+      idempotency_scope:
+        description: Optional deployment or operation id appended to the request key.
+        required: false
+        default: ""
+        type: string
       timeout-seconds:
         description: Maintenance action timeout in seconds.
         required: false
@@ -134,6 +139,7 @@ jobs:
           CONTEXT: ${{ inputs.context }}
           DRIVER: ${{ inputs.driver }}
           EMAIL: ${{ inputs.email }}
+          IDEMPOTENCY_SCOPE: ${{ inputs.idempotency_scope }}
           INSTANCE: ${{ inputs.instance }}
           INTENT: ${{ inputs.intent }}
           PREVIEW_SLUG: ${{ inputs.preview_slug }}
@@ -165,20 +171,27 @@ jobs:
             echo "timeout-seconds must be a positive integer." >&2
             exit 1
           fi
+          if [ -n "$IDEMPOTENCY_SCOPE" ] && ! [[ "$IDEMPOTENCY_SCOPE" =~ ^[A-Za-z0-9._-]{1,200}$ ]]; then
+            echo "idempotency_scope must use 1-200 letters, digits, dots, underscores, or hyphens." >&2
+            exit 1
+          fi
+          idempotency_key="$(printf '%s:%s:%s:%s:%s:%s:%s:%s:%s:%s' \
+            product-driver-app-maintenance \
+            "$DRIVER" \
+            "$PRODUCT" \
+            "$CONTEXT" \
+            "$INSTANCE" \
+            "$ACTION" \
+            "$INTENT" \
+            "$EMAIL" \
+            "$APPLICATION_NAME" \
+            "$PREVIEW_SLUG")"
+          if [ -n "$IDEMPOTENCY_SCOPE" ]; then
+            idempotency_key="${idempotency_key}:${IDEMPOTENCY_SCOPE}"
+          fi
           {
             echo "context=$CONTEXT"
-            printf '%s=%s:%s:%s:%s:%s:%s:%s:%s:%s:%s\n' \
-              idempotency_key \
-              product-driver-app-maintenance \
-              "$DRIVER" \
-              "$PRODUCT" \
-              "$CONTEXT" \
-              "$INSTANCE" \
-              "$ACTION" \
-              "$INTENT" \
-              "$EMAIL" \
-              "$APPLICATION_NAME" \
-              "$PREVIEW_SLUG"
+            echo "idempotency_key=$idempotency_key"
             echo "instance=$INSTANCE"
             echo "product=$PRODUCT"
             echo "route_path=$route_path"
