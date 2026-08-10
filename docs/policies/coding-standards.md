@@ -32,6 +32,10 @@ title: Coding Standards
 ## Dependency Updates
 
 - Group routine minor and patch updates when they share a validation surface.
+- Keep lint, type, and build tool updates outside routine dependency groups when
+  their version defaults can change enforced policy. Declare the intended
+  policy explicitly, and adopt broader rules through dedicated, green-baseline
+  migrations rather than incidental bot updates.
 - Keep semantic-version major updates independently reviewable. Where the
   package ecosystem supports cooldowns, delay newly released majors so they do
   not poison routine groups before adjacent tools declare compatibility.
