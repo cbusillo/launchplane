@@ -25,6 +25,7 @@ name: Manage Launchplane Authorization
           - owner-acceptance
           - product-owner-policy-admin
           - product-health-monitoring
+          - preview-feedback-remediation
           - odoo-route-binding
           - odoo-external-route-binding
           - odoo-testing-ingress-route
@@ -134,6 +135,18 @@ jobs:
       related_issue: ${{ inputs.related_issue }}
     secrets:
       managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON }}
+
+  reconcile-preview-feedback-remediation:
+    if: ${{ inputs.managed_set == 'preview-feedback-remediation' }}
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
+    with:
+      mode: ${{ inputs.mode }}
+      expected_managed_set_id: operator.preview-feedback-remediation
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+      related_issue: ${{ inputs.related_issue }}
+    secrets:
+      managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_PREVIEW_FEEDBACK_REMEDIATION_MANAGED_SET_JSON }}
 
   reconcile-odoo-route-binding:
     if: ${{ inputs.managed_set == 'odoo-route-binding' }}
