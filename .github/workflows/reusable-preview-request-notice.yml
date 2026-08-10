@@ -50,6 +50,9 @@ name: Reusable Preview Request Notice
       should_record:
         description: Whether the event required a feedback mutation.
         value: ${{ jobs.resolve.outputs.should_record }}
+      cleanup_outcome:
+        description: Typed cleanup outcome returned by Launchplane.
+        value: ${{ jobs.cleanup.outputs.destroy_outcome }}
 
 permissions:
   contents: read
@@ -214,6 +217,7 @@ jobs:
       anchor_pr_number: ${{ needs.resolve.outputs.anchor_pr_number }}
       anchor_pr_url: ${{ needs.resolve.outputs.anchor_pr_url }}
       cleanup_result: ${{ needs.cleanup.result }}
+      cleanup_outcome: ${{ needs.cleanup.outputs.destroy_outcome }}
       cleanup_failure_summary: >-
         ${{ needs.cleanup.outputs.error_message ||
           'Launchplane preview cleanup failed; see workflow run logs.' }}

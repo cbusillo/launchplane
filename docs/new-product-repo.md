@@ -138,8 +138,10 @@ cleanup job results into preview feedback status, call
 Keep product-owned smoke facts local, pass primitive job results and failure
 summaries to the reusable workflow, and let Launchplane derive the final
 `status` and `failure_summary` before it calls `reusable-preview-pr-feedback`.
-Do not copy Launchplane feedback route, payload, idempotency, marker, or delivery
-logic into the product repo.
+For generic-web cleanup, pass the lifecycle workflow's `destroy_outcome` output
+as `cleanup_outcome`; `no_preview_recorded` clears stale managed feedback while
+real and unknown failures remain fail-closed. Do not copy Launchplane feedback
+route, payload, idempotency, marker, or delivery logic into the product repo.
 
 For direct JSON calls to Launchplane service routes, use the reusable
 `cbusillo/launchplane/.github/actions/launchplane-request` action rather than

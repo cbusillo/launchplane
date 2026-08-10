@@ -167,9 +167,16 @@ feedback `status` and `failure_summary` should call
 `cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@<launchplane-sha>`.
 The reusable workflow maps refresh publish, provision, and product verification
 results to `ready` or `failed`, and maps cleanup results to `destroyed` or
-`cleanup_failed`, before delegating to the reusable preview feedback workflow. It
-does not accept route paths, payloads, markers, idempotency keys, feedback
-markdown, provider targets, or runtime facts from callers.
+`cleanup_failed`, before delegating to the reusable preview feedback workflow.
+A successful destroy that finds neither a provider resource nor a Launchplane
+preview record returns the typed `no_preview_recorded` outcome and maps to
+`cleared`, removing any stale managed comment instead of claiming cleanup
+failed. Skipped cleanup jobs and unknown typed outcomes remain fail-closed. The
+reusable workflow does not accept route paths, payloads, markers, idempotency
+keys, feedback markdown, provider targets, or runtime facts from callers.
+Because product callers pin reusable workflows while the service deploys
+independently, add any future destroy outcome to the reusable workflow allowlist
+and roll caller pins forward before the deployed service starts emitting it.
 
 ## Required Workflow Shape
 
@@ -195,12 +202,21 @@ directly from their own trusted notice workflows.
 After native generic-web provider teardown succeeds, the destroy route records
 the matching preview as `destroyed` and clears its active and serving generation
 links before returning success. A destroy for a preview that was never recorded
-is a successful no-op, while provider teardown failure leaves durable preview
-state unchanged. Driver-transport extensions retain ownership of their own
+is a successful no-op with `destroy_outcome=no_preview_recorded` when no provider
+resource evidence exists. Reusable feedback maps that outcome to `cleared`.
+Provider teardown failure leaves durable preview state unchanged, and managed
+failure comments claim that a preview may remain only when the feedback request
+contains preview URL or image evidence or Launchplane finds an active preview
+record with a canonical URL; otherwise the failure wording remains neutral about
+resource existence. Driver-transport extensions retain ownership of their own
 destroy transition. Because provider and record mutations cannot share a
 transaction, retrying destroy after a record-write failure is the supported
 convergence path; an already-absent provider application is treated as a
 successful teardown so that retry can repair the record.
+
+This typed cleanup outcome currently belongs to the generic-web lifecycle
+workflow. Odoo preview cleanup retains its existing result mapping until its
+driver route exposes an equivalent typed no-preview outcome.
 
 Manual `workflow_dispatch` may request `refresh` or `destroy` when a product repo
 needs an operator retry path. Manual refresh still follows the same build,

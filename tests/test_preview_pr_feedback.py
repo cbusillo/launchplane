@@ -1,13 +1,15 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.every_code_worker import every_code_worktree_branch
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.preview_pr_feedback import (
     DEFAULT_PREVIEW_FEEDBACK_MARKER,
+    _render_preview_pr_feedback_markdown,
     build_preview_pr_feedback_record,
 )
 
@@ -34,6 +36,79 @@ def _every_code_request(*, result_pr_url: str = "") -> EveryCodeWorkRequestRecor
 
 
 class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
+    def test_cleanup_failure_without_resource_evidence_does_not_claim_preview_exists(
+        self,
+    ) -> None:
+        markdown = _render_preview_pr_feedback_markdown(
+            marker=DEFAULT_PREVIEW_FEEDBACK_MARKER,
+            status="cleanup_failed",
+            anchor_pr_number=42,
+            preview_url="",
+            immutable_image_reference="",
+            refresh_image_reference="",
+            revision="",
+            run_url="https://github.com/every/verireel/actions/runs/1",
+            failure_summary="Cleanup request was not authorized.",
+        )
+
+        self.assertNotIn("may still exist", markdown)
+        self.assertIn("could not confirm cleanup", markdown)
+
+    def test_cleanup_failure_with_resource_evidence_warns_preview_may_exist(self) -> None:
+        markdown = _render_preview_pr_feedback_markdown(
+            marker=DEFAULT_PREVIEW_FEEDBACK_MARKER,
+            status="cleanup_failed",
+            anchor_pr_number=42,
+            preview_url="https://pr-42.preview.example.test",
+            immutable_image_reference="",
+            refresh_image_reference="",
+            revision="",
+            run_url="",
+            failure_summary="Provider teardown failed.",
+        )
+
+        self.assertIn("may still exist", markdown)
+
+    def test_cleanup_failure_uses_active_preview_record_as_resource_evidence(self) -> None:
+        preview_store = MagicMock()
+        preview_store.list_preview_records.return_value = (
+            PreviewRecord(
+                preview_id="preview-verireel-testing-verireel-pr-42",
+                context="verireel-testing",
+                anchor_repo="verireel",
+                anchor_pr_number=42,
+                anchor_pr_url="https://github.com/every/verireel/pull/42",
+                preview_label="preview",
+                canonical_url="https://pr-42.preview.example.test",
+                state="active",
+                created_at="2026-08-10T12:00:00Z",
+                updated_at="2026-08-10T12:00:00Z",
+                eligible_at="2026-08-10T12:00:00Z",
+            ),
+        )
+
+        with patch(
+            "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+            return_value="",
+        ):
+            record = build_preview_pr_feedback_record(
+                control_plane_root=Path("."),
+                product="verireel",
+                context="verireel-testing",
+                source="preview-fork-notice",
+                requested_at="2026-08-10T12:05:00Z",
+                repository="every/verireel",
+                anchor_repo="verireel",
+                anchor_pr_number=42,
+                anchor_pr_url="https://github.com/every/verireel/pull/42",
+                status="cleanup_failed",
+                failure_summary="Provider teardown failed.",
+                preview_record_store=preview_store,
+            )
+
+        self.assertIn("https://pr-42.preview.example.test", record.comment_markdown)
+        self.assertIn("may still exist", record.comment_markdown)
+
     def test_ready_feedback_notifies_issue_author_on_source_issue(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))

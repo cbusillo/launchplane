@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,6 +10,7 @@ from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.generic_web_preview_http import _destroy_result_with_record_outcome
 
 from pydantic import ValidationError
 
@@ -26,6 +29,46 @@ from tests.support.workflows import workflow_call_inputs
 
 CLI_MAIN = cast(Command, main)
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _run_preview_cleanup_status(
+    *,
+    cleanup_result: str,
+    cleanup_outcome: str,
+    cleanup_failure_summary: str = "",
+) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+    workflow = load_workflow(REPO_ROOT / ".github/workflows/reusable-preview-feedback-status.yml")
+    step = workflow.step_named("resolve", "Resolve preview feedback status")
+    assert step is not None
+    with TemporaryDirectory() as temporary_directory_name:
+        output_path = Path(temporary_directory_name) / "github-output"
+        result = subprocess.run(
+            ["bash", "-c", step.run],
+            check=False,
+            cwd=REPO_ROOT,
+            env={
+                **os.environ,
+                "CLEANUP_FAILURE_SUMMARY": cleanup_failure_summary,
+                "CLEANUP_OUTCOME": cleanup_outcome,
+                "CLEANUP_RESULT": cleanup_result,
+                "GITHUB_OUTPUT": str(output_path),
+                "MODE": "cleanup",
+                "PROVISION_FAILURE_SUMMARY": "",
+                "PROVISION_RESULT": "",
+                "PUBLISH_FAILURE_SUMMARY": "",
+                "PUBLISH_RESULT": "",
+                "VERIFICATION_FAILURE_SUMMARY": "",
+                "VERIFICATION_RESULT": "",
+            },
+            capture_output=True,
+            text=True,
+        )
+        outputs = {}
+        if output_path.exists():
+            for line in output_path.read_text(encoding="utf-8").splitlines():
+                name, value = line.split("=", 1)
+                outputs[name] = value
+    return result, outputs
 
 
 def _event(**overrides: object) -> PreviewWorkflowEvent:
@@ -217,10 +260,15 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertIn("provision_result", workflow_inputs)
         self.assertIn("verification_result", workflow_inputs)
         self.assertIn("cleanup_result", workflow_inputs)
+        self.assertIn("cleanup_outcome", workflow_inputs)
         self.assertIn("status='ready'", workflow)
         self.assertIn("status='failed'", workflow)
         self.assertIn("status='destroyed'", workflow)
         self.assertIn("status='cleanup_failed'", workflow)
+        self.assertIn("status='cleared'", workflow)
+        self.assertIn("no_preview_recorded", workflow)
+        self.assertIn("cleanup_outcome\" = 'failed'", workflow)
+        self.assertIn("Unknown Launchplane cleanup outcome; failing closed.", workflow)
         self.assertIn("mode must be refresh or cleanup", workflow)
         self.assertIn("result must be a GitHub Actions terminal result", workflow)
         self.assertIn("success|failure|cancelled|skipped)", workflow)
@@ -238,6 +286,59 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("route-path", workflow_inputs)
         self.assertNotIn("feedback_markdown", workflow_inputs)
         self.assertNotIn("provider_target", workflow_inputs)
+
+    def test_reusable_preview_feedback_status_executes_cleanup_outcome_matrix(self) -> None:
+        cases = (
+            ("success", "no_preview_recorded", "cleared"),
+            ("success", "destroyed", "destroyed"),
+            ("success", "", "destroyed"),
+            ("failure", "no_preview_recorded", "cleanup_failed"),
+            ("skipped", "", "cleanup_failed"),
+            ("cancelled", "destroyed", "cleanup_failed"),
+            ("success", "failed", "cleanup_failed"),
+            ("success", "future_outcome", "cleanup_failed"),
+        )
+
+        for cleanup_result, cleanup_outcome, expected_status in cases:
+            with self.subTest(
+                cleanup_result=cleanup_result,
+                cleanup_outcome=cleanup_outcome,
+            ):
+                result, outputs = _run_preview_cleanup_status(
+                    cleanup_result=cleanup_result,
+                    cleanup_outcome=cleanup_outcome,
+                    cleanup_failure_summary="provider teardown failed",
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(outputs["status"], expected_status)
+                if expected_status == "cleanup_failed":
+                    self.assertEqual(outputs["failure_summary"], "provider teardown failed")
+
+    def test_reusable_preview_feedback_status_accepts_backend_destroy_outcomes(
+        self,
+    ) -> None:
+        backend_outcomes = {
+            _destroy_result_with_record_outcome(
+                records={"transition": "destroyed"},
+                result={"destroy_status": "pass", "application_id": "app"},
+            )["destroy_outcome"],
+            _destroy_result_with_record_outcome(
+                records={"transition": "destroyed_missing_preview"},
+                result={"destroy_status": "pass", "application_id": ""},
+            )["destroy_outcome"],
+            _destroy_result_with_record_outcome(
+                records={"transition": "destroy_failed"},
+                result={"destroy_status": "fail", "application_id": "app"},
+            )["destroy_outcome"],
+        }
+        workflow = (REPO_ROOT / ".github/workflows/reusable-preview-feedback-status.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(backend_outcomes, {"destroyed", "no_preview_recorded", "failed"})
+        for outcome in backend_outcomes:
+            self.assertIn(str(outcome), workflow)
 
     def test_reusable_preview_request_notice_owns_notice_decision(self) -> None:
         workflow_path = REPO_ROOT / ".github/workflows/reusable-preview-request-notice.yml"
@@ -267,6 +368,7 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertIn("status: ${{ needs.resolve.outputs.status }}", workflow)
         self.assertIn("operation: destroy", workflow)
         self.assertIn("mode: cleanup", workflow)
+        self.assertIn("cleanup_outcome: ${{ needs.cleanup.outputs.destroy_outcome }}", workflow)
         self.assertIn("const shouldCleanup =", workflow)
         self.assertIn("executionTrust === 'same_repo'", workflow)
         self.assertIn("failure_summary: ${{ needs.resolve.outputs.failure_summary }}", workflow)
@@ -338,6 +440,8 @@ class PreviewWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("PRODUCT CONTEXT ANCHOR_PR_NUMBER", workflow_text)
         self.assertNotIn("refresh.preview_slug=", workflow_text)
         self.assertNotIn("destroy.preview_slug=", workflow_text)
+        self.assertIn("destroy_outcome=result.destroy_outcome", workflow_text)
+        self.assertIn("destroy_outcome: ${{ steps.lp.outputs.destroy_outcome }}", workflow_text)
 
     def test_reusable_generic_web_preview_lifecycle_feedback_maps_record_status(
         self,
