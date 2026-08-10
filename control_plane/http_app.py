@@ -571,6 +571,10 @@ from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackRecord,
     PreviewPrFeedbackStatus,
 )
+from control_plane.contracts.preview_pr_feedback_remediation import (
+    PreviewPrFeedbackRemediationRecord,
+    PreviewPrFeedbackRemediationRequest,
+)
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
@@ -700,6 +704,16 @@ from control_plane.workflows.preview_pr_feedback import (
     EveryCodeWorkRequestReadStore,
     PreviewPrFeedbackPreviewReadStore,
     build_preview_pr_feedback_record,
+)
+from control_plane.preview_pr_feedback_remediation import (
+    PreviewPrFeedbackRemediationStore,
+    PreviewPrFeedbackRemediationApplyError,
+    apply_remediation,
+    bind_preview_pr_feedback_target,
+    build_remediation_record,
+    matching_dry_run,
+    observe_managed_preview_pr_feedback,
+    resolve_remediation_token,
 )
 from control_plane.workflows.launchplane_self_deploy import execute_launchplane_self_deploy
 from control_plane.workflows.ship import utc_now_timestamp
@@ -908,6 +922,7 @@ _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
     "/v1/previews/pr-feedback/notification-policies/apply"
 )
 _PREVIEW_PR_FEEDBACK_ROUTE = "/v1/previews/pr-feedback"
+_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE = "/v1/previews/pr-feedback/remediation"
 _PREVIEW_DESIRED_STATE_ROUTE = "/v1/previews/desired-state"
 _PREVIEW_LIFECYCLE_PLAN_ROUTE = "/v1/previews/lifecycle-plan"
 _PREVIEW_LIFECYCLE_CLEANUP_ROUTE = "/v1/previews/lifecycle-cleanup"
@@ -2314,6 +2329,25 @@ class _PreviewPrFeedbackWriteStore(Protocol):
     ) -> object: ...
 
 
+class _PreviewPrFeedbackRemediationWriteStore(
+    _PreviewPrFeedbackWriteStore,
+    PreviewPrFeedbackRemediationStore,
+    Protocol,
+):
+    def write_preview_pr_feedback_remediation_record(
+        self,
+        record: PreviewPrFeedbackRemediationRecord,
+    ) -> object: ...
+
+    def write_preview_pr_feedback_remediation_bundle(
+        self,
+        *,
+        remediation_record: PreviewPrFeedbackRemediationRecord,
+        feedback_record: PreviewPrFeedbackRecord,
+        idempotency_record: LaunchplaneIdempotencyRecord,
+    ) -> object: ...
+
+
 class _PreviewLifecyclePlanApplyStore(Protocol):
     def list_preview_inventory_scan_records(
         self,
@@ -2881,6 +2915,29 @@ def require_preview_pr_feedback_write_store(
             "write_preview_pr_feedback_record"
         )
     return cast(_PreviewPrFeedbackWriteStore, record_store)
+
+
+def require_preview_pr_feedback_remediation_write_store(
+    record_store: object,
+) -> _PreviewPrFeedbackRemediationWriteStore:
+    required_methods = (
+        "read_product_profile_record",
+        "list_preview_pr_feedback_remediation_records",
+        "write_preview_pr_feedback_record",
+        "write_preview_pr_feedback_remediation_record",
+        "write_preview_pr_feedback_remediation_bundle",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        raise TypeError(
+            "Launchplane record store does not support preview PR feedback remediation "
+            f"writes: {', '.join(missing_methods)}"
+        )
+    return cast(_PreviewPrFeedbackRemediationWriteStore, record_store)
 
 
 def supports_every_code_work_requests(record_store: object) -> bool:
@@ -16261,6 +16318,198 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def remediate_preview_pr_feedback(
+        request: Request,
+        remediation_request: PreviewPrFeedbackRemediationRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Preview PR feedback remediation requires a local operator identity.",
+            )
+        action = (
+            "preview_pr_feedback_remediation.plan"
+            if remediation_request.mode == "dry-run"
+            else "preview_pr_feedback_remediation.apply"
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=remediation_request.product,
+            context=remediation_request.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity is not authorized for preview PR feedback remediation.",
+            )
+        if not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Preview PR feedback remediation requires Idempotency-Key.",
+            )
+        try:
+            remediation_store = require_preview_pr_feedback_remediation_write_store(record_store)
+            target = bind_preview_pr_feedback_target(
+                record_store=remediation_store,
+                request=remediation_request,
+            )
+            token = resolve_remediation_token(
+                control_plane_root=resolved_control_plane_root,
+                context=remediation_request.context,
+            )
+            observation = observe_managed_preview_pr_feedback(
+                target=target,
+                token=token,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="product_profile_not_found",
+                message=str(error),
+            ) from error
+        except (TypeError, ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="preview_pr_feedback_remediation_observation_failed",
+                message=str(error),
+            ) from error
+
+        actor = launchplane_identity_actor(identity)
+        requested_at = utc_now_timestamp()
+        if remediation_request.mode == "dry-run":
+            remediation_record = build_remediation_record(
+                request=remediation_request,
+                target=target,
+                actor=actor,
+                trace_id=trace_id,
+                idempotency_key=idempotency_key.strip(),
+                requested_at=requested_at,
+                observation=observation,
+            )
+            remediation_store.write_preview_pr_feedback_remediation_record(remediation_record)
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={"preview_pr_feedback_remediation_id": remediation_record.remediation_id},
+                result=remediation_record.model_dump(mode="json"),
+            )
+
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        dry_run_record = matching_dry_run(
+            record_store=remediation_store,
+            actor=actor,
+            idempotency_key=normalized_key,
+            continuity_sha256=remediation_request.continuity_sha256,
+        )
+        if dry_run_record is None:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="matching_dry_run_required",
+                message="Preview PR feedback remediation apply requires a prior matching dry-run.",
+            )
+        if (dry_run_record.observation.state == "absent" and observation.state != "absent") or (
+            dry_run_record.observation.state == "present"
+            and observation.state == "present"
+            and dry_run_record.observation.digest_sha256 != observation.digest_sha256
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="preview_pr_feedback_remediation_observation_changed",
+                message="Managed preview feedback changed after the reviewed dry-run.",
+            )
+        try:
+            outcome, mutation_evidence, feedback_record = apply_remediation(
+                request=remediation_request,
+                target=target,
+                token=token,
+                observation=observation,
+                requested_at=requested_at,
+            )
+        except PreviewPrFeedbackRemediationApplyError as error:
+            failed_record = build_remediation_record(
+                request=remediation_request,
+                target=target,
+                actor=actor,
+                trace_id=trace_id,
+                idempotency_key=normalized_key,
+                requested_at=requested_at,
+                observation=observation,
+                outcome="failed",
+                mutation_evidence=error.mutation_evidence,
+            )
+            failed_record.mutation_evidence.error_message = str(error)
+            remediation_store.write_preview_pr_feedback_remediation_record(failed_record)
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="preview_pr_feedback_remediation_apply_failed",
+                message=str(error),
+            ) from error
+        remediation_record = build_remediation_record(
+            request=remediation_request,
+            target=target,
+            actor=actor,
+            trace_id=trace_id,
+            idempotency_key=normalized_key,
+            requested_at=requested_at,
+            observation=observation,
+            outcome=outcome,
+            mutation_evidence=mutation_evidence,
+            companion_feedback_id=feedback_record.feedback_id,
+        )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "preview_pr_feedback_remediation_id": remediation_record.remediation_id,
+                "preview_pr_feedback_id": feedback_record.feedback_id,
+            },
+            result=remediation_record.model_dump(mode="json"),
+        )
+        idempotency_record = LaunchplaneIdempotencyRecord(
+            record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
+            scope=idempotency_scope(identity),
+            route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint=payload_fingerprint,
+            response_status_code=202,
+            response_trace_id=trace_id,
+            recorded_at=requested_at,
+            response_payload=response.model_dump(mode="json", exclude_none=True),
+        )
+        remediation_store.write_preview_pr_feedback_remediation_bundle(
+            remediation_record=remediation_record,
+            feedback_record=feedback_record,
+            idempotency_record=idempotency_record,
+        )
+        return response
+
     async def apply_preview_pr_feedback(
         request: Request,
         feedback_request: PreviewPrFeedbackEnvelope,
@@ -18475,6 +18724,24 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="apply_preview_pr_feedback_notification_policy",
         summary="Apply preview PR feedback notification policy",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
+        remediate_preview_pr_feedback,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="remediate_preview_pr_feedback",
+        summary="Remediate managed preview PR feedback",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

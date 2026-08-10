@@ -388,10 +388,20 @@ cleanup scope so the store is always closed.
     `preview_pr_feedback.write` or matching lifecycle authorization,
     preview PR feedback write-capable storage, optional `Idempotency-Key` replay/conflict
     handling, and preview PR feedback notification delivery attempts)
+  - `POST /v1/previews/pr-feedback/remediation` (local-operator/admin bearer
+    identities only, distinct plan/apply authorization, exact product/context/
+    repository/PR binding, durable dry-run evidence, reviewed-state continuity,
+    idempotent apply, and Launchplane-owned marker plus author verification)
   - `POST /v1/previews/pr-feedback/notification-policies/apply` (native FastAPI
     for bearer-token callers, DB-backed storage, explicit product/context scope,
     local-operator reason enforcement, and optional `Idempotency-Key`
     replay/conflict handling)
+
+No GitHub Actions identity is authorized through the remediation route. An
+apply requires the same `Idempotency-Key` as its matching dry-run, an exact
+confirmation phrase, a non-empty reason and related issue, and an unchanged
+managed-comment observation. If the managed comment is already absent, apply
+records `already_absent` without claiming a GitHub mutation.
 - work graph chooser route:
   - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`

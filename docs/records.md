@@ -1210,6 +1210,15 @@ failures remain inspectable even when no Every Code session starts.
 
 ## Preview PR Feedback Notification Records
 
+Preview PR feedback remediation records are stored under
+`launchplane_preview_pr_feedback_remediations`. Each record binds the operator,
+reason, related issue, product/context/repository/PR, idempotency key, reviewed
+request digest, bounded managed-comment observation, planned action, outcome,
+and mutation evidence. Dry-runs are durable. Successful applies also write a
+companion preview PR feedback record so existing lifecycle projections reflect
+the reconciled terminal state. `already_absent` explicitly records that no
+GitHub write occurred.
+
 Preview PR feedback notification policy records are DB-backed Launchplane
 records under `launchplane_preview_pr_feedback_notification_policies`. They
 select enabled destinations for skipped or failed `/v1/previews/pr-feedback`

@@ -2393,6 +2393,22 @@ context's managed-secret-backed `GITHUB_TOKEN` in Launchplane runtime records;
 do not add repo-local defaults or service-host env fallbacks for product GitHub
 tokens.
 
+### Preview Feedback Remediation
+
+Use `POST /v1/previews/pr-feedback/remediation` only when a historical preview
+workflow identity cannot be replayed under current authorization. Submit one
+product/repository/PR per request. Run `dry-run` first with a stable
+`Idempotency-Key`, inspect the observed marker ownership and planned action,
+then submit `apply` with the same key and the request contract's exact
+confirmation phrase. Stop if the product profile, PR URL, token actor, marker
+owner, or observation differs. An absent comment is reconciled as
+`already_absent` with `mutated=false`; it is not rewritten as a deletion.
+
+The route uses the context-scoped preview `GITHUB_TOKEN`, accepts only local
+operator/admin identities with `preview_pr_feedback_remediation.plan` or
+`.apply`, and never grants this mutation to preview workflow OIDC identities.
+Attach the remediation and companion feedback record ids to the governing issue.
+
 ### VeriReel Preview Evidence Handoff
 
 VeriReel already computes the route, PR slug, image tags, and workflow run URL

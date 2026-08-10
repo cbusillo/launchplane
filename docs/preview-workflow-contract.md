@@ -462,6 +462,12 @@ workflows should not render fallback PR comments themselves; missing runtime
 GitHub credentials and GitHub API failures are Launchplane-owned operator
 signals.
 
+Historical runs keep the caller identity from the workflow revision they ran.
+Launchplane intentionally continues to deny retired or renamed caller refs;
+operators must not widen managed authorization to make an obsolete run replay.
+When a stale Launchplane-owned feedback comment remains, use the audited
+operator remediation route to dry-run and reconcile that exact PR instead.
+
 Product repos should call the reusable preview feedback workflow instead of
 assembling `/v1/previews/pr-feedback` payloads, markers, or idempotency keys in
 repo-local scripts.

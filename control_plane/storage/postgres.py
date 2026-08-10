@@ -164,6 +164,9 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationPolicyRecord,
 )
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
+from control_plane.contracts.preview_pr_feedback_remediation import (
+    PreviewPrFeedbackRemediationRecord,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.private_health_endpoint_record import (
@@ -1536,6 +1539,36 @@ class LaunchplanePreviewPrFeedbackRow(Base):
     requested_at: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     delivery_status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePreviewPrFeedbackRemediationRow(Base):
+    __tablename__ = "launchplane_preview_pr_feedback_remediations"
+    __table_args__ = (
+        Index(
+            "launchplane_preview_pr_feedback_remediations_target_idx",
+            "repository",
+            "pull_request_number",
+            desc("requested_at"),
+        ),
+        Index(
+            "launchplane_preview_pr_feedback_remediations_idempotency_idx",
+            "actor",
+            "idempotency_key",
+            desc("requested_at"),
+        ),
+    )
+
+    remediation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    pull_request_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    requested_at: Mapped[str] = mapped_column(String, nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    outcome: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -12267,6 +12300,92 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def write_preview_pr_feedback_remediation_record(
+        self, record: PreviewPrFeedbackRemediationRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePreviewPrFeedbackRemediationRow(
+                remediation_id=record.remediation_id,
+                product=record.product,
+                context=record.context,
+                repository=record.repository,
+                pull_request_number=record.pull_request_number,
+                actor=record.actor,
+                idempotency_key=record.idempotency_key,
+                requested_at=record.requested_at,
+                mode=record.mode,
+                outcome=record.outcome,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_preview_pr_feedback_remediation_records(
+        self,
+        *,
+        actor: str = "",
+        idempotency_key: str = "",
+        mode: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackRemediationRecord, ...]:
+        filters: list[object] = []
+        if actor:
+            filters.append(LaunchplanePreviewPrFeedbackRemediationRow.actor == actor)
+        if idempotency_key:
+            filters.append(
+                LaunchplanePreviewPrFeedbackRemediationRow.idempotency_key == idempotency_key
+            )
+        if mode:
+            filters.append(LaunchplanePreviewPrFeedbackRemediationRow.mode == mode)
+        return self._list_models(
+            model_type=PreviewPrFeedbackRemediationRecord,
+            orm_model=LaunchplanePreviewPrFeedbackRemediationRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePreviewPrFeedbackRemediationRow.requested_at.desc(),
+                LaunchplanePreviewPrFeedbackRemediationRow.remediation_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_preview_pr_feedback_remediation_bundle(
+        self,
+        *,
+        remediation_record: PreviewPrFeedbackRemediationRecord,
+        feedback_record: PreviewPrFeedbackRecord,
+        idempotency_record: LaunchplaneIdempotencyRecord,
+    ) -> None:
+        with self._session_factory() as session:
+            session.merge(
+                LaunchplanePreviewPrFeedbackRemediationRow(
+                    remediation_id=remediation_record.remediation_id,
+                    product=remediation_record.product,
+                    context=remediation_record.context,
+                    repository=remediation_record.repository,
+                    pull_request_number=remediation_record.pull_request_number,
+                    actor=remediation_record.actor,
+                    idempotency_key=remediation_record.idempotency_key,
+                    requested_at=remediation_record.requested_at,
+                    mode=remediation_record.mode,
+                    outcome=remediation_record.outcome,
+                    payload=self._payload_dict(remediation_record),
+                )
+            )
+            session.merge(
+                LaunchplanePreviewPrFeedbackRow(
+                    feedback_id=feedback_record.feedback_id,
+                    product=feedback_record.product,
+                    context=feedback_record.context,
+                    anchor_repo=feedback_record.anchor_repo,
+                    anchor_pr_number=feedback_record.anchor_pr_number,
+                    requested_at=feedback_record.requested_at,
+                    status=feedback_record.status,
+                    delivery_status=feedback_record.delivery_status,
+                    payload=self._payload_dict(feedback_record),
+                )
+            )
+            session.merge(self._idempotency_row(idempotency_record))
+            session.commit()
 
     def write_preview_pr_feedback_notification_policy_record(
         self, record: PreviewPrFeedbackNotificationPolicyRecord
