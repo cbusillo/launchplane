@@ -1406,10 +1406,13 @@ Planning authority is read-only and distinct: the plan job uses
 full-SHA reusable-workflow refs so policy-admin grants never depend on a mutable
 branch identity.
 
-Use `Generic Web Preview Authorization` for reviewed `expand`, `contract`, and
-`retire` operations after onboarding. It derives the same conventional caller
-paths and immutable repository identity, submits no hand-authored policy JSON,
-and applies only through the protected managed reconcile contract.
+Use `Generic Web Preview Authorization` for reviewed `onboard`, `expand`,
+`contract`, and `retire` operations. `onboard` bootstraps the managed preview
+rules for an existing product that has no current `operator.generic-web-preview`
+rules; it rejects a different existing managed rule set. The workflow derives
+the same conventional caller paths and immutable repository identity, submits no
+hand-authored policy JSON, and applies only through the protected managed
+reconcile contract.
 
 For products previously owned by the retired per-product generic-preview
 secret, run `expand` at the new Launchplane SHA, repin the product callers, then

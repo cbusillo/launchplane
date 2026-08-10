@@ -58,7 +58,10 @@ title: Secrets
   The workflow passes the key only to the commit-pinned official token action,
   uses the short-lived token only for repository metadata lookup, and does not
   persist the token or private key in plan/apply artifacts. Do not use a PAT or
-  the Launchplane service GitHub App as a fallback.
+  the Launchplane service GitHub App as a fallback. Do not wait for a failed
+  authorization run to discover a missing installation.
+  Before dispatch, operators should verify this selected-repository installation
+  instead of waiting for repository metadata token minting to fail.
 - Advisory engineering and Owner check-run projection uses its own dedicated
   GitHub App. Store its numeric id as the DB-backed Launchplane service-context
   runtime value `LAUNCHPLANE_ADVISORY_GITHUB_APP_ID` and its private key as the
