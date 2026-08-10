@@ -3,7 +3,8 @@ version: 2
 
 updates:
   - package-ecosystem: github-actions
-    # Inline release-tag provenance comments keep full-SHA action pin updates reviewable.
+    # Inline release-tag provenance comments keep full-SHA action pin updates
+    # reviewable.
     directory: "/"
     open-pull-requests-limit: 5
     schedule:
@@ -30,9 +31,24 @@ updates:
       - dependencies
       - python:uv
     groups:
+      ruff-version-updates:
+        patterns:
+          - ruff
+        update-types:
+          - minor
+          - patch
+      mypy-version-updates:
+        patterns:
+          - mypy
+        update-types:
+          - minor
+          - patch
       routine-version-updates:
         patterns:
           - "*"
+        exclude-patterns:
+          - ruff
+          - mypy
         update-types:
           - minor
           - patch
