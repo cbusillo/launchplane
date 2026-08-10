@@ -50,6 +50,11 @@ name: Reusable Preview Feedback Status
         required: false
         default: ""
         type: string
+      cleanup_outcome:
+        description: Typed Launchplane cleanup outcome for cleanup mode.
+        required: false
+        default: ""
+        type: string
       publish_failure_summary:
         description: Optional product-owned publish failure summary.
         required: false
@@ -141,6 +146,7 @@ jobs:
         id: status
         env:
           CLEANUP_FAILURE_SUMMARY: ${{ inputs.cleanup_failure_summary }}
+          CLEANUP_OUTCOME: ${{ inputs.cleanup_outcome }}
           CLEANUP_RESULT: ${{ inputs.cleanup_result }}
           MODE: ${{ inputs.mode }}
           PROVISION_FAILURE_SUMMARY: ${{ inputs.provision_failure_summary }}
@@ -216,8 +222,25 @@ jobs:
               ;;
             cleanup)
               cleanup_result="$(normalize_result "$CLEANUP_RESULT")"
+              cleanup_outcome="$(normalize_result "$CLEANUP_OUTCOME")"
               require_result "cleanup" "$cleanup_result"
-              if [ "$cleanup_result" = 'success' ]; then
+              unknown_cleanup_outcome='false'
+              case "$cleanup_outcome" in
+                ''|destroyed|no_preview_recorded|failed)
+                  ;;
+                *)
+                  echo "Unknown Launchplane cleanup outcome; failing closed." >&2
+                  unknown_cleanup_outcome='true'
+                  ;;
+              esac
+              if [ "$unknown_cleanup_outcome" = 'true' ] ||
+                [ "$cleanup_outcome" = 'failed' ]; then
+                status='cleanup_failed'
+                failure_summary="$(first_summary "$CLEANUP_FAILURE_SUMMARY" 'Preview cleanup failed.')"
+              elif [ "$cleanup_result" = 'success' ] &&
+                [ "$cleanup_outcome" = 'no_preview_recorded' ]; then
+                status='cleared'
+              elif [ "$cleanup_result" = 'success' ]; then
                 status='destroyed'
               else
                 status='cleanup_failed'

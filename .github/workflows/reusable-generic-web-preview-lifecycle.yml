@@ -89,6 +89,9 @@ name: Reusable Generic Web Preview Lifecycle
       destroy_status:
         description: Generic-web preview destroy status.
         value: ${{ jobs.destroy.outputs.destroy_status }}
+      destroy_outcome:
+        description: Typed destroy outcome, including a successful no-preview no-op.
+        value: ${{ jobs.destroy.outputs.destroy_outcome }}
       feedback_status:
         description: Preview feedback status.
         value: ${{ jobs.unsupported-notice.outputs.feedback_status }}
@@ -292,6 +295,7 @@ jobs:
     if: ${{ needs.resolve.outputs.operation == 'destroy' }}
     needs: resolve
     outputs:
+      destroy_outcome: ${{ steps.lp.outputs.destroy_outcome }}
       destroy_status: ${{ steps.lp.outputs.destroy_status }}
       error_message: ${{ steps.lp.outputs.error_message }}
       preview_slug: ${{ steps.lp.outputs.preview_slug }}
@@ -326,12 +330,14 @@ jobs:
             trace_id=trace_id,
             preview_slug=result.preview_slug,
             destroy_status=result.destroy_status,
+            destroy_outcome=result.destroy_outcome,
             error_message=result.error_message
 
       - name: Report destroy result
         run: |
           echo "preview_slug=${{ steps.lp.outputs.preview_slug }}"
           echo "destroy_status=${{ steps.lp.outputs.destroy_status }}"
+          echo "destroy_outcome=${{ steps.lp.outputs.destroy_outcome }}"
 
   unsupported-notice:
     if: ${{ needs.resolve.outputs.operation == 'unsupported_notice' }}

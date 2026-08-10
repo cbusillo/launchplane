@@ -822,10 +822,17 @@ def _render_preview_pr_feedback_markdown(
             ]
         )
     elif status == "cleanup_failed":
+        has_resource_evidence = bool(
+            preview_url or immutable_image_reference or refresh_image_reference
+        )
         lines.extend(
             [
                 "",
-                "The preview may still exist. Check the Launchplane cleanup record before retrying.",
+                (
+                    "The preview may still exist. Check the Launchplane cleanup record before retrying."
+                    if has_resource_evidence
+                    else "Launchplane could not confirm cleanup for this preview lifecycle. Check the workflow run and cleanup record before retrying."
+                ),
             ]
         )
     elif status == "unsupported":
@@ -909,7 +916,7 @@ def build_preview_pr_feedback_record(
     preview_record_store: PreviewPrFeedbackPreviewReadStore | None = None,
 ) -> PreviewPrFeedbackRecord:
     resolved_preview_url = preview_url.strip()
-    if status == "ready" and not resolved_preview_url:
+    if status in {"ready", "cleanup_failed"} and not resolved_preview_url:
         resolved_preview_url = _preview_url_from_latest_record(
             record_store=preview_record_store,
             context=context,

@@ -30,6 +30,7 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     GenericWebPreviewVerificationRequest,
 )
 from control_plane.generic_web_promotion_http import GenericWebProdPromotionResponse
+from control_plane.generic_web_preview_http import _destroy_result_with_record_outcome
 from control_plane.http_app import LaunchplaneAuthzPolicyRuntime, idempotency_request_fingerprint
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -98,6 +99,37 @@ def _generic_web_deploy_result(
 
 
 class GenericWebHttpTests(unittest.TestCase):
+    def test_generic_web_preview_destroy_preserves_real_failure_outcome(self) -> None:
+        result = _destroy_result_with_record_outcome(
+            records={"transition": "destroy_failed"},
+            result={
+                "destroy_status": "fail",
+                "application_id": "app-preview",
+                "domain_ids": [],
+                "error_message": "provider teardown failed",
+            },
+        )
+
+        self.assertEqual(result["destroy_outcome"], "failed")
+        self.assertEqual(result["error_message"], "provider teardown failed")
+
+    def test_generic_web_preview_destroy_with_provider_evidence_is_not_noop(self) -> None:
+        for result_overrides in (
+            {"application_id": "app-preview", "domain_ids": []},
+            {"application_id": "", "domain_ids": ["domain-preview"]},
+        ):
+            with self.subTest(result_overrides=result_overrides):
+                result = _destroy_result_with_record_outcome(
+                    records={"transition": "destroyed_missing_preview"},
+                    result={
+                        "destroy_status": "pass",
+                        "error_message": "",
+                        **result_overrides,
+                    },
+                )
+
+                self.assertEqual(result["destroy_outcome"], "destroyed")
+
     def test_generic_web_preview_refresh_uses_current_runtime_authz_policy(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -5121,6 +5153,7 @@ class GenericWebHttpTests(unittest.TestCase):
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["destroy_status"], "pass")
+        self.assertEqual(payload["result"]["destroy_outcome"], "destroyed")
         self.assertEqual(payload["result"]["application_id"], "app-preview")
         self.assertEqual(payload["records"]["transition"], "destroyed")
         self.assertEqual(preview.state, "destroyed")
@@ -5195,7 +5228,7 @@ class GenericWebHttpTests(unittest.TestCase):
                     context="sellyouroutboard-testing",
                     preview_slug="pr-42",
                     application_name="sellyouroutboard-pr-42",
-                    application_id="app-preview",
+                    application_id="",
                 ),
             ) as destroy:
                 first_status_code, first_payload = _invoke_app(
@@ -5218,6 +5251,7 @@ class GenericWebHttpTests(unittest.TestCase):
         self.assertEqual(first_payload["result"], second_payload["result"])
         self.assertTrue(second_payload["replayed"])
         self.assertEqual(first_payload["records"]["transition"], "destroyed_missing_preview")
+        self.assertEqual(first_payload["result"]["destroy_outcome"], "no_preview_recorded")
         destroy.assert_called_once()
 
     def test_generic_web_stable_verification_route_accepts_odoo_base_driver_profile(

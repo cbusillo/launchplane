@@ -165,11 +165,47 @@ class GenericWebPreviewExtensionTests(unittest.TestCase):
         self.assertEqual(result["product"], "verireel")
         self.assertEqual(result["context"], "verireel-testing")
         self.assertEqual(result["preview_slug"], "pr-42")
+        self.assertEqual(result["destroy_outcome"], "destroyed")
         delegated = apply_destroy.call_args.kwargs["request"].destroy
         self.assertEqual(delegated.context, "verireel-testing")
         self.assertEqual(delegated.anchor_repo, "verireel")
         self.assertEqual(delegated.preview_slug, "pr-42")
         self.assertEqual(delegated.destroy_reason, "pull_request_closed")
+
+    @patch(
+        "control_plane.drivers.generic_web_preview_extensions.apply_verireel_preview_destroy_result"
+    )
+    def test_verireel_destroy_without_resource_or_record_returns_noop(
+        self, apply_destroy: MagicMock
+    ) -> None:
+        apply_destroy.return_value = (
+            {"transition": "destroyed_missing_preview"},
+            {
+                "destroy_status": "pass",
+                "destroy_started_at": "2026-07-12T03:00:00Z",
+                "destroy_finished_at": "2026-07-12T03:01:00Z",
+                "application_name": "ver-preview-pr-42",
+                "application_id": "",
+                "preview_url": "",
+                "error_message": "",
+            },
+        )
+
+        _, result = apply_generic_web_preview_destroy_result(
+            control_plane_root=Path("."),
+            record_store=object(),
+            request=GenericWebPreviewDestroyEnvelope(
+                product="verireel",
+                destroy=GenericWebPreviewDestroyRequest(
+                    product="verireel",
+                    anchor_pr_number=42,
+                    destroy_reason="pull_request_closed",
+                ),
+            ),
+            profile=_driver_profile(),
+        )
+
+        self.assertEqual(result["destroy_outcome"], "no_preview_recorded")
 
     def test_unknown_driver_owned_transport_fails_closed(self) -> None:
         with self.assertRaisesRegex(

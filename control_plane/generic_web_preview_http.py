@@ -209,6 +209,25 @@ def apply_generic_web_preview_refresh_result(
     return records, driver_result.model_dump(mode="json")
 
 
+def _destroy_result_with_record_outcome(
+    *,
+    records: dict[str, object],
+    result: dict[str, object],
+) -> dict[str, object]:
+    normalized_result = dict(result)
+    if normalized_result.get("destroy_status") != "pass":
+        normalized_result["destroy_outcome"] = "failed"
+    elif (
+        records.get("transition") == "destroyed_missing_preview"
+        and not str(normalized_result.get("application_id") or "").strip()
+        and not normalized_result.get("domain_ids")
+    ):
+        normalized_result["destroy_outcome"] = "no_preview_recorded"
+    else:
+        normalized_result["destroy_outcome"] = "destroyed"
+    return normalized_result
+
+
 def apply_generic_web_preview_destroy_result(
     *,
     control_plane_root: Path,
@@ -223,7 +242,8 @@ def apply_generic_web_preview_destroy_result(
         profile=profile,
     )
     if driver_extension_result is not None:
-        return driver_extension_result
+        records, result = driver_extension_result
+        return records, _destroy_result_with_record_outcome(records=records, result=result)
 
     anchor_pr_number = _generic_web_preview_destroy_anchor_pr_number(
         request=request.destroy,
@@ -245,7 +265,8 @@ def apply_generic_web_preview_destroy_result(
         anchor_repo=anchor_repo,
         anchor_pr_number=anchor_pr_number,
     )
-    return records, driver_result.model_dump(mode="json")
+    result = driver_result.model_dump(mode="json")
+    return records, _destroy_result_with_record_outcome(records=records, result=result)
 
 
 def should_store_generic_web_preview_idempotency(result: dict[str, object]) -> bool:

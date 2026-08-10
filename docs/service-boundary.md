@@ -2226,6 +2226,11 @@ FastAPI. Inventory scans stateless Dokploy preview applications by the preview
 application-name prefix in the DB-backed product profile. Destroy deletes
 matching preview applications and treats an already-missing preview application
 as clean so PR-close cleanup remains idempotent when no preview was ever created.
+The destroy response includes a typed `destroy_outcome`: `destroyed` for a real
+provider or record teardown, `no_preview_recorded` only when neither provider
+resource evidence nor a Launchplane preview record exists, and `failed` for any
+non-passing destroy result. Reusable preview feedback maps the successful
+no-preview outcome to `cleared`; unknown outcomes remain fail-closed.
 The route keeps the legacy preview-destroy idempotency fingerprint that ignores
 `destroy_reason` so reason-only retry metadata does not conflict with the
 original teardown request. Lifecycle cleanup can dispatch to

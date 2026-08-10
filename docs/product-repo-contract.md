@@ -631,10 +631,13 @@ Product workflows that still compose local publish, provision, verification, or
 cleanup job results into preview PR feedback status should call
 `cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@<launchplane-sha>`.
 That wrapper accepts primitive GitHub Actions job results and optional failure
-summaries, derives the canonical `ready`, `failed`, `destroyed`, or
-`cleanup_failed` status, and delegates delivery to the reusable Launchplane PR
-feedback workflow. Product repos should not copy status selection, feedback
-route payloads, feedback markers, or idempotency-key logic.
+summaries, derives the canonical `ready`, `failed`, `destroyed`,
+`cleanup_failed`, or `cleared` status, and delegates delivery to the reusable
+Launchplane PR feedback workflow. Generic-web cleanup callers pass the lifecycle
+workflow's `destroy_outcome` output as the feedback wrapper's `cleanup_outcome`
+input so a successful no-preview no-op clears stale managed feedback. Product
+repos should not copy status selection, feedback route payloads, feedback
+markers, or idempotency-key logic.
 
 Product workflows that smoke a generic-web preview after refresh should call
 `cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@<launchplane-sha>`.
