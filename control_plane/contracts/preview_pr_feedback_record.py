@@ -42,6 +42,11 @@ class PreviewPrFeedbackRecord(BaseModel):
     comment_id: int = 0
     comment_url: str = ""
     error_message: str = ""
+    remediates_feedback_id: str = ""
+    remediation_reason: str = ""
+    remediation_issue_reference: str = ""
+    remediation_plan_sha256: str = ""
+    remediation_actor: str = ""
 
     @model_validator(mode="after")
     def _validate_record(self) -> "PreviewPrFeedbackRecord":
@@ -65,6 +70,26 @@ class PreviewPrFeedbackRecord(BaseModel):
             raise ValueError("preview PR feedback requires marker")
         if not self.comment_markdown.strip():
             raise ValueError("preview PR feedback requires comment_markdown")
+        remediation_values = (
+            self.remediates_feedback_id,
+            self.remediation_reason,
+            self.remediation_issue_reference,
+            self.remediation_plan_sha256,
+            self.remediation_actor,
+        )
+        if any(value.strip() for value in remediation_values):
+            if not all(value.strip() for value in remediation_values):
+                raise ValueError("preview PR feedback remediation audit fields must be complete")
+            if self.status not in {"cleared", "destroyed"}:
+                raise ValueError("preview PR feedback remediation requires a terminal status")
+            digest = self.remediation_plan_sha256.strip().lower()
+            if len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                raise ValueError(
+                    "preview PR feedback remediation_plan_sha256 must be a SHA-256 digest"
+                )
+            self.remediation_plan_sha256 = digest
         return self
 
 

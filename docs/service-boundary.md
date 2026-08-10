@@ -388,6 +388,12 @@ cleanup scope so the store is always closed.
     `preview_pr_feedback.write` or matching lifecycle authorization,
     preview PR feedback write-capable storage, optional `Idempotency-Key` replay/conflict
     handling, and preview PR feedback notification delivery attempts)
+  - `POST /v1/previews/pr-feedback/remediation` (native FastAPI for exact
+    product/repository/PR managed-comment remediation, dedicated
+    `preview_pr_feedback.remediate` authorization, dry-run plan digests,
+    current comment/record ownership checks, apply-time compare-and-recheck,
+    required operator reason and exact issue URL, terminal `cleared` or
+    `destroyed` outcomes, and required apply idempotency replay)
   - `POST /v1/previews/pr-feedback/notification-policies/apply` (native FastAPI
     for bearer-token callers, DB-backed storage, explicit product/context scope,
     local-operator reason enforcement, and optional `Idempotency-Key`

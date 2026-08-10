@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 import re
 from typing import Protocol
@@ -15,6 +17,10 @@ from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackRecord,
     PreviewPrFeedbackStatus,
     build_preview_pr_feedback_id,
+)
+from control_plane.contracts.preview_pr_feedback_remediation import (
+    PreviewPrFeedbackRemediationPlan,
+    PreviewPrFeedbackTerminalStatus,
 )
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.every_code_worker import every_code_worktree_branch
@@ -81,6 +87,15 @@ class PreviewPrFeedbackPreviewReadStore(Protocol):
         anchor_pr_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[PreviewRecord, ...]: ...
+
+
+class PreviewPrFeedbackRemediationStore(Protocol):
+    def list_preview_pr_feedback_records(
+        self,
+        *,
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackRecord, ...]: ...
 
 
 def _comment_url(payload: dict[str, object]) -> str:
@@ -893,6 +908,139 @@ def _find_preview_pr_feedback_comment(
     return None
 
 
+def _preview_pr_feedback_comment_body_sha256(comment: dict[str, object]) -> str:
+    body = comment.get("body")
+    if not isinstance(body, str) or not body.strip():
+        raise click.ClickException("Managed preview feedback comment has no body.")
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _preview_pr_feedback_remediation_plan_sha256(payload: dict[str, object]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def build_preview_pr_feedback_remediation_plan(
+    *,
+    control_plane_root: Path,
+    record_store: PreviewPrFeedbackRemediationStore,
+    product: str,
+    context: str,
+    repository: str,
+    anchor_pr_number: int,
+    desired_status: PreviewPrFeedbackTerminalStatus,
+    reason: str,
+    issue_reference: str,
+) -> PreviewPrFeedbackRemediationPlan:
+    normalized_repository = repository.strip()
+    repository_parts = normalized_repository.split("/", maxsplit=1)
+    if len(repository_parts) != 2 or not all(repository_parts):
+        raise click.ClickException("Preview feedback remediation repository must use owner/name.")
+    owner, repo = repository_parts
+    anchor_pr_url = f"https://github.com/{normalized_repository}/pull/{anchor_pr_number}"
+    current_feedback = next(
+        (
+            record
+            for record in record_store.list_preview_pr_feedback_records(
+                context_name=context,
+                limit=None,
+            )
+            if record.product == product
+            and record.repository.casefold() == normalized_repository.casefold()
+            and record.anchor_repo.casefold() == repo.casefold()
+            and record.anchor_pr_number == anchor_pr_number
+            and record.anchor_pr_url == anchor_pr_url
+            and record.marker == DEFAULT_PREVIEW_FEEDBACK_MARKER
+            and record.delivery_status == "delivered"
+            and record.delivery_action in {"created_comment", "updated_comment"}
+            and record.comment_id > 0
+            and bool(record.comment_url.strip())
+        ),
+        None,
+    )
+    if current_feedback is None:
+        raise click.ClickException(
+            "Launchplane has no delivered managed preview feedback ownership record for this PR."
+        )
+
+    github_token = resolve_launchplane_github_token(
+        control_plane_root=control_plane_root,
+        context_name=context,
+    )
+    if not github_token:
+        raise click.ClickException(
+            "Launchplane runtime records do not expose GITHUB_TOKEN for this context."
+        )
+    current_comment = _find_preview_pr_feedback_comment(
+        owner=owner,
+        repo=repo,
+        issue_number=anchor_pr_number,
+        token=github_token,
+        marker=DEFAULT_PREVIEW_FEEDBACK_MARKER,
+    )
+    if current_comment is None:
+        raise click.ClickException("The managed preview feedback comment no longer exists.")
+    current_comment_id = current_comment.get("id")
+    if not isinstance(current_comment_id, int) or current_comment_id != current_feedback.comment_id:
+        raise click.ClickException(
+            "The current managed preview feedback comment does not match Launchplane ownership evidence."
+        )
+    current_comment_url = _comment_url(current_comment)
+    if not current_comment_url:
+        raise click.ClickException("The managed preview feedback comment has no GitHub URL.")
+    if current_feedback.comment_url != current_comment_url:
+        raise click.ClickException(
+            "The current managed preview feedback comment URL does not match Launchplane evidence."
+        )
+    current_comment_body_sha256 = _preview_pr_feedback_comment_body_sha256(current_comment)
+    recorded_comment_body_sha256 = hashlib.sha256(
+        current_feedback.comment_markdown.encode("utf-8")
+    ).hexdigest()
+    if current_comment_body_sha256 != recorded_comment_body_sha256:
+        raise click.ClickException(
+            "The current managed preview feedback comment body does not match Launchplane evidence."
+        )
+
+    plan_payload: dict[str, object] = {
+        "schema_version": 1,
+        "product": product,
+        "context": context,
+        "repository": normalized_repository,
+        "anchor_pr_number": anchor_pr_number,
+        "anchor_pr_url": anchor_pr_url,
+        "desired_status": desired_status,
+        "reason": reason.strip(),
+        "issue_reference": issue_reference.strip(),
+        "current_feedback_id": current_feedback.feedback_id,
+        "current_feedback_status": current_feedback.status,
+        "current_comment_id": current_comment_id,
+        "current_comment_url": current_comment_url,
+        "current_comment_body_sha256": current_comment_body_sha256,
+        "planned_delivery_action": (
+            "delete_comment" if desired_status == "cleared" else "update_comment"
+        ),
+    }
+    return PreviewPrFeedbackRemediationPlan(
+        product=product,
+        context=context,
+        repository=normalized_repository,
+        anchor_pr_number=anchor_pr_number,
+        anchor_pr_url=anchor_pr_url,
+        desired_status=desired_status,
+        reason=reason.strip(),
+        issue_reference=issue_reference.strip(),
+        current_feedback_id=current_feedback.feedback_id,
+        current_feedback_status=current_feedback.status,
+        current_comment_id=current_comment_id,
+        current_comment_url=current_comment_url,
+        current_comment_body_sha256=str(plan_payload["current_comment_body_sha256"]),
+        planned_delivery_action=(
+            "delete_comment" if desired_status == "cleared" else "update_comment"
+        ),
+        plan_sha256=_preview_pr_feedback_remediation_plan_sha256(plan_payload),
+    )
+
+
 def build_preview_pr_feedback_record(
     *,
     control_plane_root: Path,
@@ -912,6 +1060,14 @@ def build_preview_pr_feedback_record(
     revision: str = "",
     run_url: str = "",
     failure_summary: str = "",
+    expected_existing_comment_id: int = 0,
+    expected_existing_comment_body_sha256: str = "",
+    remediates_feedback_id: str = "",
+    remediation_reason: str = "",
+    remediation_issue_reference: str = "",
+    remediation_plan_sha256: str = "",
+    remediation_actor: str = "",
+    feedback_id: str = "",
     every_code_record_store: EveryCodeWorkRequestReadStore | None = None,
     preview_record_store: PreviewPrFeedbackPreviewReadStore | None = None,
 ) -> PreviewPrFeedbackRecord:
@@ -962,6 +1118,23 @@ def build_preview_pr_feedback_record(
                 token=github_token,
                 marker=marker,
             )
+            if expected_existing_comment_id:
+                if existing_comment is None:
+                    raise click.ClickException(
+                        "Expected managed preview feedback comment no longer exists."
+                    )
+                existing_comment_id = existing_comment.get("id")
+                if existing_comment_id != expected_existing_comment_id:
+                    raise click.ClickException(
+                        "Managed preview feedback comment changed after remediation planning."
+                    )
+                if expected_existing_comment_body_sha256 and (
+                    _preview_pr_feedback_comment_body_sha256(existing_comment)
+                    != expected_existing_comment_body_sha256
+                ):
+                    raise click.ClickException(
+                        "Managed preview feedback comment body changed after remediation planning."
+                    )
             if existing_comment is not None:
                 existing_comment_id = existing_comment.get("id")
                 if not isinstance(existing_comment_id, int):
@@ -1023,10 +1196,13 @@ def build_preview_pr_feedback_record(
             error_message = str(exc)
 
     return PreviewPrFeedbackRecord(
-        feedback_id=build_preview_pr_feedback_id(
-            context_name=context,
-            anchor_pr_number=anchor_pr_number,
-            requested_at=requested_at,
+        feedback_id=(
+            feedback_id.strip()
+            or build_preview_pr_feedback_id(
+                context_name=context,
+                anchor_pr_number=anchor_pr_number,
+                requested_at=requested_at,
+            )
         ),
         product=product,
         context=context,
@@ -1050,4 +1226,9 @@ def build_preview_pr_feedback_record(
         comment_id=comment_id,
         comment_url=comment_url,
         error_message=error_message,
+        remediates_feedback_id=remediates_feedback_id,
+        remediation_reason=remediation_reason,
+        remediation_issue_reference=remediation_issue_reference,
+        remediation_plan_sha256=remediation_plan_sha256,
+        remediation_actor=remediation_actor,
     )

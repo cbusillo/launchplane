@@ -1208,6 +1208,25 @@ reports a request as `blocked`, Launchplane writes the terminal work request
 first and then records each notification attempt so bot-auth or Discord delivery
 failures remain inspectable even when no Every Code session starts.
 
+## Preview PR Feedback Records
+
+Preview PR feedback records under `launchplane_preview_pr_feedback` are the
+durable evidence behind Launchplane's managed marker comment. Each record stores
+the exact product/context/repository/PR target, rendered markdown, delivery
+status/action, and GitHub comment id/URL. A remediation apply writes a new
+terminal `cleared` or `destroyed` feedback record and also stores the prior
+feedback id, operator reason, exact authorizing issue URL, reviewed plan digest,
+and authenticated actor. The generic idempotency record retains the exact apply
+request and response for replay; the remediation fields keep the GitHub effect
+auditable from the feedback history itself.
+
+Remediation is allowed only while the current GitHub marker comment still
+matches the latest delivered Launchplane ownership record. Missing comments,
+changed comment ids or bodies, repository/profile mismatch, stale plan digests,
+or missing context-scoped GitHub credentials fail closed without writing a new
+feedback record. Product workflows cannot supply markers, comment ids, or raw
+comment markdown to this operator path.
+
 ## Preview PR Feedback Notification Records
 
 Preview PR feedback notification policy records are DB-backed Launchplane

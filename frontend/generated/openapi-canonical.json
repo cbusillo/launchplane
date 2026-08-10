@@ -13857,6 +13857,80 @@
         "title": "PreviewPrFeedbackNotificationPolicyRecord",
         "type": "object"
       },
+      "PreviewPrFeedbackRemediationEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor_pr_number": {
+            "minimum": 1.0,
+            "title": "Anchor Pr Number",
+            "type": "integer"
+          },
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
+          "desired_status": {
+            "enum": [
+              "cleared",
+              "destroyed"
+            ],
+            "title": "Desired Status",
+            "type": "string"
+          },
+          "expected_plan_sha256": {
+            "default": "",
+            "title": "Expected Plan Sha256",
+            "type": "string"
+          },
+          "issue_reference": {
+            "title": "Issue Reference",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry_run",
+            "enum": [
+              "dry_run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_url": {
+            "title": "Source Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "repository",
+          "anchor_pr_number",
+          "desired_status",
+          "reason",
+          "issue_reference",
+          "source_url"
+        ],
+        "title": "PreviewPrFeedbackRemediationEnvelope",
+        "type": "object"
+      },
       "PreviewPullRequestSummary": {
         "additionalProperties": false,
         "properties": {
@@ -53876,6 +53950,116 @@
           }
         },
         "summary": "Apply preview PR feedback notification policy"
+      }
+    },
+    "/v1/previews/pr-feedback/remediation": {
+      "post": {
+        "operationId": "remediate_preview_pr_feedback",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewPrFeedbackRemediationEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan or apply exact managed preview PR feedback remediation"
       }
     },
     "/v1/previews/readiness": {

@@ -462,6 +462,16 @@ workflows should not render fallback PR comments themselves; missing runtime
 GitHub credentials and GitHub API failures are Launchplane-owned operator
 signals.
 
+The lifecycle feedback route is not a historical repair escape hatch. When an
+old workflow identity can no longer replay under current authorization, an
+operator uses `POST /v1/previews/pr-feedback/remediation` through the protected
+`Preview Feedback Remediation` workflow. The route accepts only `cleared`
+(delete the owned marker comment) or `destroyed` (replace it with terminal
+retired feedback), derives context and PR URL from stored product/repository
+authority, and requires current comment ownership evidence, a reason, an exact
+GitHub issue URL, a reviewed dry-run digest, and apply idempotency. It never
+accepts caller-supplied markers, comment ids, or markdown.
+
 Product repos should call the reusable preview feedback workflow instead of
 assembling `/v1/previews/pr-feedback` payloads, markers, or idempotency keys in
 repo-local scripts.

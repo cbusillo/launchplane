@@ -1,0 +1,291 @@
+---
+# yamllint disable rule:line-length rule:comments
+name: Preview Feedback Remediation
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Plan only or apply the reviewed exact-comment remediation.
+        required: true
+        default: dry_run
+        type: choice
+        options:
+          - dry_run
+          - apply
+      product:
+        description: Product key owning the preview context.
+        required: true
+        type: string
+      repository:
+        description: Exact product repository in owner/name form.
+        required: true
+        type: string
+      pull_request_number:
+        description: >-
+          Exact pull request number owning the managed feedback comment.
+        required: true
+        type: number
+      desired_status:
+        description: >-
+          Delete the managed comment or replace it with terminal destroyed feedback.
+        required: true
+        type: choice
+        options:
+          - cleared
+          - destroyed
+      reason:
+        description: Single-line operator reason for remediation.
+        required: true
+        type: string
+      issue_reference:
+        description: Exact GitHub issue URL authorizing the remediation.
+        required: true
+        type: string
+      confirmation:
+        description: Type APPLY PREVIEW FEEDBACK REMEDIATION when mode=apply.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: >-
+    preview-feedback-remediation-${{ inputs.repository }}-${{
+    inputs.pull_request_number }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      plan_sha256: ${{ steps.plan.outputs.plan_sha256 }}
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      MODE: ${{ inputs.mode }}
+      PRODUCT: ${{ inputs.product }}
+      REPOSITORY: ${{ inputs.repository }}
+      PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+      DESIRED_STATUS: ${{ inputs.desired_status }}
+      REASON: ${{ inputs.reason }}
+      ISSUE_REFERENCE: ${{ inputs.issue_reference }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      SOURCE_URL: >-
+        https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Validate preview feedback remediation inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+
+          def required_line(name: str, maximum: int = 300) -> str:
+              value = os.environ[name].strip()
+              if not value:
+                  raise SystemExit(f"{name.lower()} is required.")
+              invalid_character = any(
+                  ord(char) < 32 or ord(char) == 127 for char in value
+              )
+              if len(value) > maximum or invalid_character:
+                  raise SystemExit(f"{name.lower()} must be one printable line.")
+              return value
+
+          mode = required_line("MODE")
+          if mode not in {"dry_run", "apply"}:
+              raise SystemExit("mode must be dry_run or apply.")
+          product = required_line("PRODUCT", 63)
+          if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", product) is None:
+              raise SystemExit(
+                  "product must use lowercase letters, numbers, and hyphens."
+              )
+          repository = required_line("REPOSITORY")
+          repository_pattern = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+          if re.fullmatch(repository_pattern, repository) is None:
+              raise SystemExit("repository must use owner/name form.")
+          pull_request_number = required_line("PULL_REQUEST_NUMBER", 20)
+          if (
+              not pull_request_number.isdecimal()
+              or int(pull_request_number) < 1
+          ):
+              raise SystemExit("pull_request_number must be a positive integer.")
+          desired_status = required_line("DESIRED_STATUS")
+          if desired_status not in {"cleared", "destroyed"}:
+              raise SystemExit("desired_status must be cleared or destroyed.")
+          required_line("REASON")
+          issue_reference = required_line("ISSUE_REFERENCE")
+          if re.fullmatch(
+              r"https://github\.com/[A-Za-z0-9_.-]+/"
+              r"[A-Za-z0-9_.-]+/issues/[1-9][0-9]*",
+              issue_reference,
+          ) is None:
+              raise SystemExit(
+                  "issue_reference must be an exact GitHub issue URL."
+              )
+          confirmation = os.environ["CONFIRMATION"].strip()
+          if (
+              mode == "apply"
+              and confirmation != "APPLY PREVIEW FEEDBACK REMEDIATION"
+          ):
+              raise SystemExit("apply requires exact confirmation text.")
+          if mode == "dry_run" and confirmation:
+              raise SystemExit("dry_run rejects confirmation text.")
+          PY
+
+      - name: Render preview feedback remediation dry-run request
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg repository "$REPOSITORY" \
+            --argjson anchor_pr_number "$PULL_REQUEST_NUMBER" \
+            --arg desired_status "$DESIRED_STATUS" \
+            --arg reason "$REASON" \
+            --arg issue_reference "$ISSUE_REFERENCE" \
+            --arg source_url "$SOURCE_URL" \
+            '{schema_version:1, mode:"dry_run", product:$product,
+              repository:$repository, anchor_pr_number:$anchor_pr_number,
+              desired_status:$desired_status, reason:$reason,
+              issue_reference:$issue_reference, source_url:$source_url}' \
+            > preview-feedback-remediation-dry-run.json
+
+      - name: Plan preview feedback remediation
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@7c7493f840fb6dc032d26f30fc546ae9553ebd37 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/previews/pr-feedback/remediation
+          payload-file: preview-feedback-remediation-dry-run.json
+          expected-status: "202"
+          fail-result-paths: ""
+          response-output-file: preview-feedback-remediation-plan.json
+
+      - name: Record preview feedback remediation plan
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          plan_sha256="$(jq -r '.result.remediation.plan_sha256 // empty' preview-feedback-remediation-plan.json)"
+          if ! [[ "$plan_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Preview feedback remediation did not return a valid plan digest." >&2
+            exit 1
+          fi
+          echo "plan_sha256=$plan_sha256" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Preview feedback remediation plan"
+            echo
+            echo "- Product: $PRODUCT"
+            echo "- Repository: $REPOSITORY"
+            echo "- Pull request: #$PULL_REQUEST_NUMBER"
+            echo "- Desired status: $DESIRED_STATUS"
+            managed_comment_url="$(
+              jq -r '.result.remediation.current_comment_url' \
+                preview-feedback-remediation-plan.json
+            )"
+            echo "- Managed comment: $managed_comment_url"
+            echo "- Plan: \`$plan_sha256\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload preview feedback remediation plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: preview-feedback-remediation-plan
+          path: |
+            preview-feedback-remediation-dry-run.json
+            preview-feedback-remediation-plan.json
+          if-no-files-found: error
+          retention-days: 14
+
+  apply:
+    if: ${{ inputs.mode == 'apply' }}
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: launchplane-authz-admin
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      PRODUCT: ${{ inputs.product }}
+      REPOSITORY: ${{ inputs.repository }}
+      PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+      DESIRED_STATUS: ${{ inputs.desired_status }}
+      REASON: ${{ inputs.reason }}
+      ISSUE_REFERENCE: ${{ inputs.issue_reference }}
+      SOURCE_URL: >-
+        https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      PLAN_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
+    steps:
+      - name: Render preview feedback remediation apply request
+        id: request
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg repository "$REPOSITORY" \
+            --argjson anchor_pr_number "$PULL_REQUEST_NUMBER" \
+            --arg desired_status "$DESIRED_STATUS" \
+            --arg reason "$REASON" \
+            --arg issue_reference "$ISSUE_REFERENCE" \
+            --arg source_url "$SOURCE_URL" \
+            --arg expected_plan_sha256 "$PLAN_SHA256" \
+            '{schema_version:1, mode:"apply", product:$product,
+              repository:$repository, anchor_pr_number:$anchor_pr_number,
+              desired_status:$desired_status, reason:$reason,
+              issue_reference:$issue_reference, source_url:$source_url,
+              expected_plan_sha256:$expected_plan_sha256}' \
+            > preview-feedback-remediation-apply.json
+          plan_token="$(
+            printf '%s' "$PLAN_SHA256" | shasum -a 256 | awk '{print $1}'
+          )"
+          idempotency_key="preview-feedback-remediation:$plan_token"
+          echo "idempotency_key=$idempotency_key" >> "$GITHUB_OUTPUT"
+
+      - name: Apply preview feedback remediation
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@7c7493f840fb6dc032d26f30fc546ae9553ebd37 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
+          route-path: /v1/previews/pr-feedback/remediation
+          payload-file: preview-feedback-remediation-apply.json
+          idempotency-key: ${{ steps.request.outputs.idempotency_key }}
+          expected-status: "202"
+          fail-result-paths: result.feedback.delivery_status
+          fail-result-statuses: failed
+          response-output-file: preview-feedback-remediation-result.json
+
+      - name: Summarize preview feedback remediation
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Preview feedback remediation applied"
+            echo
+            echo "- Product: $PRODUCT"
+            echo "- Repository: $REPOSITORY"
+            echo "- Pull request: #$PULL_REQUEST_NUMBER"
+            echo "- Desired status: $DESIRED_STATUS"
+            delivery_action="$(
+              jq -r '.result.feedback.delivery_action' \
+                preview-feedback-remediation-result.json
+            )"
+            feedback_record_id="$(
+              jq -r '.records.preview_pr_feedback_id' \
+                preview-feedback-remediation-result.json
+            )"
+            echo "- Delivery action: $delivery_action"
+            echo "- Feedback record: \`$feedback_record_id\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload preview feedback remediation result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: preview-feedback-remediation-result
+          path: |
+            preview-feedback-remediation-apply.json
+            preview-feedback-remediation-result.json
+          if-no-files-found: error
+          retention-days: 14

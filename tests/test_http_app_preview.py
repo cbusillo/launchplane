@@ -17,10 +17,11 @@ from control_plane.contracts.preview_lifecycle_plan_record import (
 from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationDestination,
 )
+from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_preview import (
@@ -1068,6 +1069,384 @@ class FastApiPreviewPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
             route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/AcceptedEvidenceResponse",
         )
+
+
+class FastApiPreviewPrFeedbackRemediationTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _identity() -> GitHubActionsIdentity:
+        return _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref=(
+                "cbusillo/launchplane/.github/workflows/"
+                "preview-feedback-remediation.yml@refs/heads/main"
+            ),
+            event_name="workflow_dispatch",
+            environment="launchplane-authz-admin",
+        )
+
+    @staticmethod
+    def _policy(*, action: str = "preview_pr_feedback.remediate") -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/"
+                            "preview-feedback-remediation.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "environments": ["launchplane-authz-admin"],
+                        "products": ["verireel"],
+                        "contexts": ["verireel-testing"],
+                        "actions": [action],
+                    }
+                ]
+            }
+        )
+
+    @staticmethod
+    def _payload(
+        *,
+        mode: str = "dry_run",
+        expected_plan_sha256: str = "",
+        repository: str = "cbusillo/verireel",
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "mode": mode,
+            "product": "verireel",
+            "repository": repository,
+            "anchor_pr_number": 311,
+            "desired_status": "cleared",
+            "reason": "Historical workflow replay cannot use the current authorized identity.",
+            "issue_reference": "https://github.com/cbusillo/launchplane/issues/2076",
+            "source_url": "https://github.com/cbusillo/launchplane/actions/runs/123",
+        }
+        if expected_plan_sha256:
+            payload["expected_plan_sha256"] = expected_plan_sha256
+        return payload
+
+    @staticmethod
+    def _owned_feedback_record() -> PreviewPrFeedbackRecord:
+        return PreviewPrFeedbackRecord(
+            feedback_id="preview-pr-feedback-verireel-testing-pr-311-20260810T203011Z",
+            product="verireel",
+            context="verireel-testing",
+            source="https://github.com/cbusillo/verireel/actions/runs/31334963079",
+            requested_at="2026-08-10T20:30:11Z",
+            repository="cbusillo/verireel",
+            anchor_repo="verireel",
+            anchor_pr_number=311,
+            anchor_pr_url="https://github.com/cbusillo/verireel/pull/311",
+            status="cleanup_failed",
+            marker="<!-- launchplane-preview-control -->",
+            comment_markdown="<!-- launchplane-preview-control -->\nCleanup failed.",
+            run_url="https://github.com/cbusillo/verireel/actions/runs/31334963079",
+            delivery_status="delivered",
+            delivery_action="updated_comment",
+            comment_id=5233752829,
+            comment_url=("https://github.com/cbusillo/verireel/pull/311#issuecomment-5233752829"),
+        )
+
+    @staticmethod
+    def _current_comment(
+        *,
+        comment_id: int = 5233752829,
+        body: str = "<!-- launchplane-preview-control -->\nCleanup failed.",
+    ) -> dict[str, object]:
+        return {
+            "id": comment_id,
+            "html_url": ("https://github.com/cbusillo/verireel/pull/311#issuecomment-5233752829"),
+            "body": body,
+        }
+
+    async def _app_and_store(
+        self, root: Path, *, action: str = "preview_pr_feedback.remediate"
+    ) -> tuple[FastAPI, FilesystemRecordStore]:
+        store = FilesystemRecordStore(state_dir=root / "state")
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(_product_profile_payload("verireel"))
+        )
+        store.write_preview_pr_feedback_record(self._owned_feedback_record())
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(self._identity()),
+            authz_policy=self._policy(action=action),
+            control_plane_root_path=root,
+            record_store_factory=lambda: store,
+        )
+        return app, store
+
+    async def test_remediation_dry_run_plans_exact_owned_comment(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app, store = await self._app_and_store(root)
+            with (
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ),
+                patch(
+                    "control_plane.workflows.preview_pr_feedback."
+                    "find_github_issue_comment_by_marker",
+                    return_value=self._current_comment(),
+                ),
+            ):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/remediation",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload=self._payload(),
+                )
+
+            records = store.list_preview_pr_feedback_records(context_name="verireel-testing")
+
+        self.assertEqual(response.status_code, 202)
+        remediation = response.json()["result"]["remediation"]
+        self.assertEqual(remediation["current_comment_id"], 5233752829)
+        self.assertEqual(remediation["current_feedback_status"], "cleanup_failed")
+        self.assertEqual(remediation["planned_delivery_action"], "delete_comment")
+        self.assertRegex(remediation["plan_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(len(records), 1)
+
+    async def test_remediation_apply_clears_comment_and_replays(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app, store = await self._app_and_store(root)
+            with (
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ),
+                patch(
+                    "control_plane.workflows.preview_pr_feedback."
+                    "find_github_issue_comment_by_marker",
+                    return_value=self._current_comment(),
+                ),
+            ):
+                dry_run = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/remediation",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload=self._payload(),
+                )
+            plan_sha256 = dry_run.json()["result"]["remediation"]["plan_sha256"]
+            apply_payload = self._payload(
+                mode="apply",
+                expected_plan_sha256=plan_sha256,
+            )
+            with (
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ),
+                patch(
+                    "control_plane.workflows.preview_pr_feedback."
+                    "find_github_issue_comment_by_marker",
+                    side_effect=[self._current_comment(), self._current_comment()],
+                ),
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.delete_github_issue_comment"
+                ) as delete_comment,
+            ):
+                applied = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/remediation",
+                    payload=apply_payload,
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "preview-feedback-remediation-311",
+                    },
+                )
+            replayed = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/pr-feedback/remediation",
+                payload=apply_payload,
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "preview-feedback-remediation-311",
+                },
+            )
+            records = store.list_preview_pr_feedback_records(context_name="verireel-testing")
+
+        self.assertEqual(applied.status_code, 202)
+        feedback = applied.json()["result"]["feedback"]
+        self.assertEqual(feedback["status"], "cleared")
+        self.assertEqual(feedback["delivery_action"], "deleted_comment")
+        self.assertEqual(feedback["remediates_feedback_id"], records[1].feedback_id)
+        self.assertEqual(
+            feedback["remediation_issue_reference"],
+            "https://github.com/cbusillo/launchplane/issues/2076",
+        )
+        delete_comment.assert_called_once()
+        self.assertEqual(replayed.status_code, 202)
+        self.assertTrue(replayed.json()["replayed"])
+        self.assertEqual(len(records), 2)
+
+    async def test_remediation_apply_requires_idempotency_key(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app, _store = await self._app_and_store(root)
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/pr-feedback/remediation",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=self._payload(
+                    mode="apply",
+                    expected_plan_sha256="0" * 64,
+                ),
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_required")
+
+    async def test_remediation_apply_rejects_stale_plan(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app, _store = await self._app_and_store(root)
+            with (
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ),
+                patch(
+                    "control_plane.workflows.preview_pr_feedback."
+                    "find_github_issue_comment_by_marker",
+                    return_value=self._current_comment(),
+                ),
+            ):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/remediation",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "preview-feedback-remediation-stale",
+                    },
+                    payload=self._payload(
+                        mode="apply",
+                        expected_plan_sha256="0" * 64,
+                    ),
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "preview_pr_feedback_remediation_stale",
+        )
+
+    async def test_remediation_rejects_comment_without_matching_ownership(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app, _store = await self._app_and_store(root)
+            with (
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ),
+                patch(
+                    "control_plane.workflows.preview_pr_feedback."
+                    "find_github_issue_comment_by_marker",
+                    return_value=self._current_comment(comment_id=999),
+                ),
+            ):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/remediation",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload=self._payload(),
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "preview_pr_feedback_remediation_blocked",
+        )
+
+    async def test_remediation_rejects_changed_managed_comment_body(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app, _store = await self._app_and_store(root)
+            with (
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ),
+                patch(
+                    "control_plane.workflows.preview_pr_feedback."
+                    "find_github_issue_comment_by_marker",
+                    return_value=self._current_comment(
+                        body="<!-- launchplane-preview-control -->\nChanged outside Launchplane."
+                    ),
+                ),
+            ):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/remediation",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload=self._payload(),
+                )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "preview_pr_feedback_remediation_blocked",
+        )
+
+    async def test_remediation_rejects_repository_outside_product_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app, _store = await self._app_and_store(root)
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/pr-feedback/remediation",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=self._payload(repository="cbusillo/other-repo"),
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_remediation_requires_dedicated_authorization(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app, _store = await self._app_and_store(
+                root,
+                action="preview_pr_feedback.write",
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/previews/pr-feedback/remediation",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=self._payload(),
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_openapi_includes_preview_pr_feedback_remediation_route(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/previews/pr-feedback/remediation"]["post"]
+        self.assertEqual(route["operationId"], "remediate_preview_pr_feedback")
 
 
 class FastApiPreviewReadTests(unittest.IsolatedAsyncioTestCase):

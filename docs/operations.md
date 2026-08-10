@@ -2379,6 +2379,25 @@ preview publish/provision/verify outcomes are known, then replace it with ready
 or failed feedback after the actual result. Product repos remain thin adapters
 for labels, artifact build facts, and product-specific health/config hints.
 
+Historical feedback that cannot be corrected by replaying its original GitHub
+workflow must use the protected `Preview Feedback Remediation` workflow. Do not
+delete or edit the GitHub comment directly. Dispatch `mode=dry_run` first with
+the exact product, repository, pull request, desired terminal status (`cleared`
+or `destroyed`), operator reason, and authorizing GitHub issue URL. Launchplane
+derives the preview context from the product profile, requires the repository to
+match that profile, and plans only when the current marker comment id, URL, and
+body still match the latest delivered Launchplane feedback record.
+
+For apply, dispatch the same inputs with `mode=apply` and the exact confirmation
+`APPLY PREVIEW FEEDBACK REMEDIATION`. The workflow reruns the dry-run, passes its
+plan digest into the protected `launchplane-authz-admin` apply job, and derives a
+stable idempotency key from that digest. The service rechecks comment ownership
+before deleting or replacing it, persists a terminal feedback record with the
+remediated record id, reason, issue reference, plan digest, and authenticated
+actor, then stores the replayable response. The workflow identity needs an exact
+DB-backed `preview_pr_feedback.remediate` grant for the target product/context;
+do not broaden it to `preview_pr_feedback.write` or arbitrary GitHub mutation.
+
 Preview PR feedback delivery failures are operator-visible when a preview PR
 feedback notification policy is configured. Missing context-scoped runtime
 GitHub credentials record `delivery_status="skipped"` on the feedback record and
