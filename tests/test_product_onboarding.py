@@ -2376,9 +2376,11 @@ class ProductOnboardingTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("Generic Web Preview Authorization", workflow_text)
-        for operation in ("expand", "contract", "retire"):
+        for operation in ("onboard", "expand", "contract", "retire"):
             self.assertIn(f"- {operation}", workflow_text)
-        self.assertNotIn("- onboard", workflow_text)
+        self.assertIn(
+            "operation must be onboard, expand, contract, or retire.", workflow_text
+        )
         self.assertIn("actions/create-github-app-token@", workflow_text)
         self.assertIn("permission-contents: read", workflow_text)
         self.assertIn(

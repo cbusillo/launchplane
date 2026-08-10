@@ -2021,8 +2021,8 @@ manifest support for non-conventional products. Manifests must use neutral
 `provider_targets`; obsolete `dokploy_targets` input is rejected. Product
 records are never loaded from checked-in catalogs or product repos.
 The manual `Generic Web Preview Authorization` workflow is the operator surface
-for reviewed expand/contract rotations and product-rule retirement through this
-same planner and writer contract.
+for reviewed onboarding, expand/contract rotations, and product-rule retirement
+through this same planner and writer contract.
 
 Product context audit, cutover, and legacy cleanup routes expose copied or
 deleted runtime identity records under neutral `provider_targets` and

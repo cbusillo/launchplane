@@ -13,10 +13,11 @@ name: Generic Web Preview Authorization
           - dry_run
           - apply
       operation:
-        description: Rotate or retire one product's managed preview rules.
+        description: Bootstrap, rotate, or retire one product's managed preview rules.
         required: true
         type: choice
         options:
+          - onboard
           - expand
           - contract
           - retire
@@ -112,8 +113,8 @@ jobs:
           if mode not in {"dry_run", "apply"}:
               raise SystemExit("mode must be dry_run or apply.")
           operation = required("OPERATION")
-          if operation not in {"expand", "contract", "retire"}:
-              raise SystemExit("operation must be expand, contract, or retire.")
+          if operation not in {"onboard", "expand", "contract", "retire"}:
+              raise SystemExit("operation must be onboard, expand, contract, or retire.")
           if mode == "apply" and os.environ["CONFIRMATION"].strip() != "APPLY GENERIC WEB PREVIEW AUTHORIZATION":
               raise SystemExit("apply requires exact confirmation text.")
           if mode == "dry_run" and os.environ["CONFIRMATION"].strip():
