@@ -10,20 +10,20 @@ requires-python = ">=3.13"
 dependencies = [
     "Authlib>=1.7.2",
     "click>=8.4.2",
-    "fastapi>=0.139.2",
+    "fastapi>=0.141.1",
     "pydantic>=2.13.4",
     "psycopg[binary]>=3.3.4",
     "pyjwt[crypto]>=2.13.0",
     "requests>=2.34.2",
     "sqlalchemy>=2.0.51",
-    "uvicorn>=0.51.0",
-    "alembic>=1.18.5",
+    "uvicorn>=0.52.1",
+    "alembic>=1.19.1",
 ]
 
 [project.optional-dependencies]
 dev = [
     "asgi-lifespan>=2.1.0",
-    "httpx2>=2.7.0",
+    "httpx2>=2.10.0",
     "mypy>=2.3.0",
     "ruff>=0.15.22",
 ]
