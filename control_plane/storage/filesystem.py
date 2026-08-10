@@ -1253,7 +1253,9 @@ class FilesystemRecordStore:
                 )
                 if existing.repository_id == record.repository_id
             )
-            same_id = tuple(existing for existing in records if existing.record_id == record.record_id)
+            same_id = tuple(
+                existing for existing in records if existing.record_id == record.record_id
+            )
             if same_id:
                 if len(same_id) != 1 or same_id[0].policy_digest != record.policy_digest:
                     raise ChangeImpactPolicyConflictError(

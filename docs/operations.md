@@ -467,6 +467,8 @@ must declare `operator.generic-web-onboarding` and must not contain product
 repository, product context, target, domain, or per-product preview rules;
 `LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON` owns the generic
 Product Health Monitoring wrapper's exact immutable worker grant;
+`LAUNCHPLANE_AUTHZ_PREVIEW_FEEDBACK_REMEDIATION_MANAGED_SET_JSON` owns the
+protected preview-feedback remediation workflow's exact plan/apply grant;
 `LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
 Odoo stable managed route-binding set; and
 `LAUNCHPLANE_AUTHZ_ODOO_EXTERNAL_ROUTE_BINDING_MANAGED_SET_JSON` owns the
