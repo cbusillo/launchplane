@@ -115,6 +115,9 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationPolicyRecord,
 )
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
+from control_plane.contracts.preview_pr_feedback_remediation import (
+    PreviewPrFeedbackRemediationRecord,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.repository_human_admission import (
@@ -1253,7 +1256,9 @@ class FilesystemRecordStore:
                 )
                 if existing.repository_id == record.repository_id
             )
-            same_id = tuple(existing for existing in records if existing.record_id == record.record_id)
+            same_id = tuple(
+                existing for existing in records if existing.record_id == record.record_id
+            )
             if same_id:
                 if len(same_id) != 1 or same_id[0].policy_digest != record.policy_digest:
                     raise ChangeImpactPolicyConflictError(
@@ -5821,6 +5826,49 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def write_preview_pr_feedback_remediation_record(
+        self, record: PreviewPrFeedbackRemediationRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_preview_pr_feedback_remediations",
+            record.remediation_id,
+            record,
+        )
+
+    def list_preview_pr_feedback_remediation_records(
+        self,
+        *,
+        actor: str = "",
+        idempotency_key: str = "",
+        mode: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackRemediationRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PreviewPrFeedbackRemediationRecord,
+                "launchplane_preview_pr_feedback_remediations",
+            )
+            if (not actor or record.actor == actor)
+            and (not idempotency_key or record.idempotency_key == idempotency_key)
+            and (not mode or record.mode == mode)
+        ]
+        records.sort(key=lambda record: (record.requested_at, record.remediation_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_preview_pr_feedback_remediation_bundle(
+        self,
+        *,
+        remediation_record: PreviewPrFeedbackRemediationRecord,
+        feedback_record: PreviewPrFeedbackRecord,
+        idempotency_record: LaunchplaneIdempotencyRecord,
+    ) -> None:
+        self.write_preview_pr_feedback_remediation_record(remediation_record)
+        self.write_preview_pr_feedback_record(feedback_record)
+        self.write_idempotency_record(idempotency_record)
 
     def write_preview_pr_feedback_notification_policy_record(
         self, record: PreviewPrFeedbackNotificationPolicyRecord

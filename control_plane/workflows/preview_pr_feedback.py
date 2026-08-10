@@ -859,6 +859,31 @@ def _render_preview_pr_feedback_markdown(
     return "\n".join(line for line in lines if line is not None)
 
 
+def render_preview_pr_feedback_markdown(
+    *,
+    marker: str,
+    status: PreviewPrFeedbackStatus,
+    anchor_pr_number: int,
+    preview_url: str = "",
+    immutable_image_reference: str = "",
+    refresh_image_reference: str = "",
+    revision: str = "",
+    run_url: str = "",
+    failure_summary: str = "",
+) -> str:
+    return _render_preview_pr_feedback_markdown(
+        marker=marker,
+        status=status,
+        anchor_pr_number=anchor_pr_number,
+        preview_url=preview_url,
+        immutable_image_reference=immutable_image_reference,
+        refresh_image_reference=refresh_image_reference,
+        revision=revision,
+        run_url=run_url,
+        failure_summary=failure_summary,
+    )
+
+
 def _find_preview_pr_feedback_comment(
     *,
     owner: str,
