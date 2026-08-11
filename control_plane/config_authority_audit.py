@@ -3589,9 +3589,7 @@ def _is_launchplane_config_authority_workflow_reference(value: object) -> bool:
 
 def _is_launchplane_generic_web_preview_facade_reference(value: object) -> bool:
     return (
-        LAUNCHPLANE_GENERIC_WEB_PREVIEW_FACADE_PATTERN.fullmatch(
-            _string_value(value).strip()
-        )
+        LAUNCHPLANE_GENERIC_WEB_PREVIEW_FACADE_PATTERN.fullmatch(_string_value(value).strip())
         is not None
     )
 
@@ -3643,9 +3641,7 @@ def _is_workflow_thin_connector_key_value(*, path: str, key: str, value: object)
 def _is_generic_web_preview_facade_input(*, path: str, key: str) -> bool:
     if path != LAUNCHPLANE_GENERIC_WEB_PREVIEW_CALLER_WORKFLOW_PATH:
         return False
-    match = re.fullmatch(
-        r"generic-web-preview\.with\[\d+\]\.(?P<input_name>[A-Za-z0-9_.-]+)", key
-    )
+    match = re.fullmatch(r"generic-web-preview\.with\[\d+\]\.(?P<input_name>[A-Za-z0-9_.-]+)", key)
     return (
         match is not None
         and match.group("input_name") in LAUNCHPLANE_GENERIC_WEB_PREVIEW_FACADE_INPUTS

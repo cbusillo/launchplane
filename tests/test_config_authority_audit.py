@@ -3634,7 +3634,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "      verification_command: >-\n"
                 "        npm ci &&\n"
                 "        node scripts/ops/check-remote-e2e.mjs\n"
-                "        --base-url \"$LAUNCHPLANE_PREVIEW_URL\"\n"
+                '        --base-url "$LAUNCHPLANE_PREVIEW_URL"\n'
                 "      image_repository: ghcr.io/example/product-preview\n",
                 encoding="utf-8",
             )
@@ -3744,9 +3744,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
         rejected_keys = {
             finding["key"]
-            for finding in cast(
-                "list[dict[str, object]]", product_repo_gate["rejected_findings"]
-            )
+            for finding in cast("list[dict[str, object]]", product_repo_gate["rejected_findings"])
         }
         self.assertIn("generic-web-preview.with[1].dockerfile", rejected_keys)
         self.assertEqual(product_repo_gate["status"], "fail")
@@ -3781,9 +3779,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotIn("generic-web-preview.with[1].verification_command", finding_keys)
         rejected_keys = {
             finding["key"]
-            for finding in cast(
-                "list[dict[str, object]]", product_repo_gate["rejected_findings"]
-            )
+            for finding in cast("list[dict[str, object]]", product_repo_gate["rejected_findings"])
         }
         self.assertIn("verification_command", rejected_keys)
         self.assertEqual(product_repo_gate["status"], "fail")
