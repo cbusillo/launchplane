@@ -3631,7 +3631,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "    uses: cbusillo/launchplane/.github/workflows/"
                 f"reusable-generic-web-preview.yml@{revision}\n"
                 "    with:\n"
-                "      verification_command: curl --fail https://preview.example.test/healthz\n"
+                "      verification_command: >-\n"
+                "        npm ci &&\n"
+                "        node scripts/ops/check-remote-e2e.mjs\n"
+                "        --base-url \"$LAUNCHPLANE_PREVIEW_URL\"\n"
                 "      image_repository: ghcr.io/example/product-preview\n",
                 encoding="utf-8",
             )
