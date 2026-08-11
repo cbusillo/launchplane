@@ -260,13 +260,22 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
         domains: Mapping[str, object] | None = None,
         history_state: str = "no_history",
         request: DetachedApplicationRetirementRequest | None = None,
+        absent: bool = False,
     ) -> DetachedApplicationDiscovery:
         payloads = _payloads()
         if payload_updates:
             payloads[CANDIDATE_ID].update(payload_updates)
 
         def fetch_payload(**kwargs: object) -> dict[str, object]:
-            return payloads[cast(str, kwargs["target_id"])]
+            target_id = cast(str, kwargs["target_id"])
+            if absent and target_id == CANDIDATE_ID:
+                raise dokploy_api.DokployRequestFailed(
+                    method="GET",
+                    path="/api/application.one",
+                    detail="not found",
+                    status_code=404,
+                )
+            return payloads[target_id]
 
         def domain_request(**kwargs: object) -> object:
             application_id = cast(dict[str, str], kwargs["query"])["applicationId"]
@@ -275,7 +284,13 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
         def search_applications(**kwargs: object) -> tuple[dict[str, object], ...]:
             name = str(kwargs.get("name") or "")
             selected = (
-                (CANDIDATE_ID,) if name else (CANDIDATE_ID, PROTECTED_IDS[0], PROTECTED_IDS[1])
+                (() if absent else (CANDIDATE_ID,))
+                if name
+                else (
+                    (PROTECTED_IDS[0], PROTECTED_IDS[1])
+                    if absent
+                    else (CANDIDATE_ID, *PROTECTED_IDS)
+                )
             )
             return tuple(
                 {
@@ -319,6 +334,9 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
                 control_plane_root=Path("."),
                 request=request or _request(),
                 observed_at=NOW,
+                absent_application_id=CANDIDATE_ID if absent else "",
+                absent_project_id="project-1" if absent else "",
+                absent_environment_id="environment-testing" if absent else "",
             )
 
     def test_request_requires_sorted_protected_set_and_excludes_candidate(self) -> None:
@@ -405,6 +423,12 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
             tuple(target.target_id_sha256 for target in discovery.protected_targets),
             _request().expected_protected_target_sha256,
         )
+
+    def test_service_search_reconciliation_proves_reviewed_target_absent(self) -> None:
+        discovery = self._discover(projects=(), absent=True)
+        self.assertEqual(discovery.candidate.state, "absent")
+        self.assertEqual(discovery.candidate.project_id, "project-1")
+        self.assertEqual(discovery.candidate.environment_id, "environment-testing")
 
     def test_authority_absence_scans_every_required_source_and_preserves_target_name_distinction(
         self,

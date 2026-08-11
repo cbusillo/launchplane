@@ -332,6 +332,8 @@ def discover_detached_application(
     request: DetachedApplicationRetirementRequest,
     observed_at: str,
     absent_application_id: str = "",
+    absent_project_id: str = "",
+    absent_environment_id: str = "",
 ) -> DetachedApplicationDiscovery:
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     projects = dokploy_api.fetch_dokploy_projects(host=host, token=token)
@@ -353,6 +355,8 @@ def discover_detached_application(
             request=request,
             observed_at=observed_at,
             absent_application_id=absent_application_id,
+            absent_project_id=absent_project_id,
+            absent_environment_id=absent_environment_id,
         )
     matching_environments = {
         environment_id
@@ -476,6 +480,8 @@ def _discover_detached_application_with_service_search(
     request: DetachedApplicationRetirementRequest,
     observed_at: str,
     absent_application_id: str,
+    absent_project_id: str,
+    absent_environment_id: str,
 ) -> DetachedApplicationDiscovery:
     matches = tuple(
         item
@@ -510,6 +516,12 @@ def _discover_detached_application_with_service_search(
             host=host, token=token, project_id=candidate_reference.project_id
         )
     elif normalized_absent_id:
+        normalized_absent_project_id = absent_project_id.strip()
+        normalized_absent_environment_id = absent_environment_id.strip()
+        if not normalized_absent_project_id or not normalized_absent_environment_id:
+            raise DetachedApplicationRetirementBlockedError(
+                "Detached application search requires reviewed absent project and environment identity."
+            )
         try:
             dokploy_api.fetch_dokploy_target_payload(
                 host=host,
@@ -524,7 +536,11 @@ def _discover_detached_application_with_service_search(
             raise DetachedApplicationRetirementBlockedError(
                 "Detached application name disappeared but its reviewed target still exists."
             )
-        project_items = dokploy_api.search_dokploy_applications(host=host, token=token)
+        project_items = dokploy_api.search_dokploy_applications(
+            host=host,
+            token=token,
+            project_id=normalized_absent_project_id,
+        )
         candidate_reference = None
     else:
         raise DetachedApplicationRetirementBlockedError(
@@ -551,7 +567,9 @@ def _discover_detached_application_with_service_search(
             raise DetachedApplicationRetirementBlockedError(
                 "Dokploy application.search returned cross-project evidence."
             )
-        if reference.project_name == request.project_name:
+        if reference.project_name == request.project_name and (
+            candidate_reference is not None or reference.project_id == normalized_absent_project_id
+        ):
             project_references.append(reference)
     if candidate_reference is not None:
         if (
@@ -570,21 +588,11 @@ def _discover_detached_application_with_service_search(
             candidate=True,
         )
     else:
-        environment_matches = tuple(
-            reference
-            for reference in project_references
-            if reference.environment_name == request.environment_name
-        )
-        if len(environment_matches) != 1:
-            raise DetachedApplicationRetirementBlockedError(
-                "Detached application search requires exactly one reviewed absent environment."
-            )
-        environment_reference = environment_matches[0]
         candidate = DetachedApplicationProviderObservation(
             observed_at=observed_at,
-            project_id=environment_reference.project_id,
+            project_id=normalized_absent_project_id,
             project_name=request.project_name,
-            environment_id=environment_reference.environment_id,
+            environment_id=normalized_absent_environment_id,
             environment_name=request.environment_name,
             application_id=normalized_absent_id,
             application_name=request.application_name,
@@ -973,6 +981,8 @@ class DokployDetachedApplicationRetirementAdapter:
             request=self._request,
             observed_at=self._requested_at,
             absent_application_id=self._plan.candidate_observation.application_id,
+            absent_project_id=self._plan.candidate_observation.project_id,
+            absent_environment_id=self._plan.candidate_observation.environment_id,
         )
         proof = prove_detached_application_authority_absence(
             record_store=self._record_store,
