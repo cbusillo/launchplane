@@ -75,7 +75,7 @@ written to the workflow log by the upstream implementation.
   generic-web onboarding/preview-authz protected apply, route-binding
   reconciliation, exact-instance product health-policy mutation,
   protected immutable product retirement,
-  reusable-only detached application retirement,
+  protected immutable detached application retirement,
   exact-instance immutable Odoo artifact publication, and exact-instance Odoo
   target-replacement plan/apply workers whose actions are separately authorized.
   It also includes exact-instance redacted target-log diagnostics and Odoo

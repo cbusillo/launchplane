@@ -549,7 +549,7 @@ class GitHubActionsSecurityTests(TestCase):
         self.assertIn("First-party cross-repository", policy)
         self.assertIn("High-privilege", policy)
         self.assertIn("protected immutable product retirement", policy)
-        self.assertIn("reusable-only detached application retirement", policy)
+        self.assertIn("protected immutable detached application retirement", policy)
         self.assertIn("container image", policy)
         self.assertIn("MUTABLE_REFERENCE_ALLOWLIST", policy)
         self.assertIn("Dependabot", policy)
