@@ -879,6 +879,8 @@ export type OwnerAcceptanceAuthorization = {
     owner_requirement_record_id: string;
     owner_requirement_revision: number;
     schema_version: number;
+    self_review: boolean;
+    self_review_exception_revision: number;
 };
 
 export type OwnerAcceptanceBinding = {
@@ -901,9 +903,18 @@ export type OwnerAcceptanceBinding = {
     repository: string;
     repository_id: string;
     repository_owner_id: string;
+    review_context: OwnerAcceptanceReviewContext | null;
     schema_version: number;
     system: string;
     tree_sha: string;
+};
+
+export type OwnerAcceptanceContributionBinding = {
+    commit_count: number;
+    contributor_github_ids: Array<number>;
+    reason_code: 'server_resolved' | 'identity_evidence_unavailable' | 'identity_evidence_conflicting' | 'identity_evidence_incomplete';
+    resolution: 'resolved' | 'unknown';
+    schema_version: number;
 };
 
 export type OwnerAcceptanceCurrentItem = {
@@ -942,14 +953,17 @@ export type OwnerAcceptanceCurrentItemsResponse = {
 };
 
 export type OwnerAcceptanceDecision = {
+    admissible: boolean;
     authoritative: false;
+    authorizes: Array<string>;
     binding: OwnerAcceptanceBinding | null;
     current_event: OwnerAcceptanceEventRecord | null;
     enforcement_effect: 'none';
     evaluated_at: string;
+    human_action_semantics: 'none' | 'product_review_accepted' | 'product_review_changes_requested' | 'product_review_revoked' | 'product_review_superseded' | 'product_review_invalidated';
     mode: 'shadow';
     products: Array<OwnerAcceptanceProductDecision>;
-    reason_code: 'engineering_only' | 'acceptance_missing' | 'acceptance_valid' | 'changes_requested' | 'acceptance_revoked' | 'acceptance_stale' | 'change_impact_unavailable' | 'change_impact_stale' | 'multi_product_unsupported' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'preview_evidence_unavailable' | 'preview_evidence_stale';
+    reason_code: 'engineering_only' | 'acceptance_missing' | 'acceptance_valid' | 'changes_requested' | 'acceptance_revoked' | 'acceptance_stale' | 'change_impact_unavailable' | 'change_impact_stale' | 'multi_product_unsupported' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'preview_evidence_unavailable' | 'preview_evidence_stale' | 'owner_review_expired' | 'preview_isolation_insufficient' | 'contributing_identity_unknown' | 'self_review_denied' | 'review_context_missing';
     schema_version: number;
     status: 'not_required' | 'pending' | 'accepted' | 'changes_requested' | 'revoked' | 'stale' | 'unavailable';
 };
@@ -985,9 +999,25 @@ export type OwnerAcceptanceEventRecord = {
 export type OwnerAcceptanceEventResponse = {
     decision: OwnerAcceptanceDecision;
     record: OwnerAcceptanceEventRecord;
+    semantics: OwnerAcceptanceEventSemantics;
     status: 'ok';
     trace_id: string;
     write_status: 'written' | 'replayed';
+};
+
+export type OwnerAcceptanceEventSemantics = {
+    authorizes: Array<string>;
+    human_action_semantics: 'none' | 'product_review_accepted' | 'product_review_changes_requested' | 'product_review_revoked' | 'product_review_superseded' | 'product_review_invalidated';
+};
+
+export type OwnerAcceptancePolicyFingerprintBinding = {
+    fingerprint_version: number;
+    owner_membership_fingerprint: string;
+    preview_trust_fingerprint: string;
+    requirement_fingerprint: string;
+    review_age_fingerprint: string;
+    schema_version: number;
+    self_review_fingerprint: string;
 };
 
 export type OwnerAcceptancePreviewBinding = {
@@ -1002,13 +1032,23 @@ export type OwnerAcceptancePreviewBinding = {
     serving_generation_id: string;
 };
 
+export type OwnerAcceptancePreviewIsolationBinding = {
+    data_transport_mode: string;
+    isolation_class: 'not_applicable' | 'no_product_data' | 'synthetic_seeded' | 'cloned_product_data' | 'unknown';
+    schema_version: number;
+    source: 'product_preview_profile' | 'no_preview_binding';
+};
+
 export type OwnerAcceptanceProductDecision = {
     action: string;
+    admissible: boolean;
+    authorizes: Array<string>;
     binding: OwnerAcceptanceBinding | null;
     current_event: OwnerAcceptanceEventRecord | null;
     environment: string;
+    human_action_semantics: 'none' | 'product_review_accepted' | 'product_review_changes_requested' | 'product_review_revoked' | 'product_review_superseded' | 'product_review_invalidated';
     product: string;
-    reason_code: 'engineering_only' | 'acceptance_missing' | 'acceptance_valid' | 'changes_requested' | 'acceptance_revoked' | 'acceptance_stale' | 'change_impact_unavailable' | 'change_impact_stale' | 'multi_product_unsupported' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'preview_evidence_unavailable' | 'preview_evidence_stale';
+    reason_code: 'engineering_only' | 'acceptance_missing' | 'acceptance_valid' | 'changes_requested' | 'acceptance_revoked' | 'acceptance_stale' | 'change_impact_unavailable' | 'change_impact_stale' | 'multi_product_unsupported' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'preview_evidence_unavailable' | 'preview_evidence_stale' | 'owner_review_expired' | 'preview_isolation_insufficient' | 'contributing_identity_unknown' | 'self_review_denied' | 'review_context_missing';
     schema_version: number;
     status: 'not_required' | 'pending' | 'accepted' | 'changes_requested' | 'revoked' | 'stale' | 'unavailable';
     system: string;
@@ -1050,6 +1090,18 @@ export type OwnerAcceptanceQueueResponse = {
     truncated: boolean;
 };
 
+export type OwnerAcceptanceReviewContext = {
+    base_ref: string;
+    base_sha: string;
+    change_class: 'routine' | 'sensitive' | 'unknown' | 'production_affecting';
+    contributions: OwnerAcceptanceContributionBinding;
+    engineering_review_tier: 'routine' | 'sensitive';
+    policy_fingerprints: OwnerAcceptancePolicyFingerprintBinding;
+    preview_isolation: OwnerAcceptancePreviewIsolationBinding;
+    review_max_age_seconds: number;
+    schema_version: number;
+};
+
 export type OwnerAcceptanceRuntimeIdentityBinding = {
     artifact_id: string;
     context: string;
@@ -1069,10 +1121,13 @@ export type OwnerAcceptanceRuntimeIdentityBinding = {
 export type OwnerAcceptanceViewerBindingEligibility = {
     action: string;
     binding_sha256: string;
+    can_accept: boolean;
+    can_request_changes: boolean;
+    can_revoke: boolean;
     can_submit_event: boolean;
     environment: string;
     product: string;
-    reason_code: 'current_product_owner' | 'not_current_product_owner' | 'viewer_identity_unsupported' | 'owner_authority_unavailable';
+    reason_code: 'current_product_owner' | 'not_current_product_owner' | 'viewer_identity_unsupported' | 'owner_authority_unavailable' | 'self_review_denied';
     schema_version: number;
     system: string;
 };

@@ -7,6 +7,8 @@ from urllib.parse import quote
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.change_impact import (
+    ChangeImpactAuthorshipEvidence,
+    ChangeImpactBaseEvidence,
     ChangeImpactChangeKind,
     ChangeImpactChangedFileEvidence,
     ChangeImpactRepositoryEvidence,
@@ -52,14 +54,18 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
         github_api: Callable[..., object],
         token_context: str,
         max_file_pages: int = 30,
+        max_commit_pages: int = 10,
     ) -> None:
         if max_file_pages < 1:
             raise ValueError("change-impact GitHub provider requires at least one file page")
+        if max_commit_pages < 1:
+            raise ValueError("change-impact GitHub provider requires at least one commit page")
         self._control_plane_root = control_plane_root
         self._github_token = github_token
         self._github_api = github_api
         self._token_context = token_context.strip()
         self._max_file_pages = max_file_pages
+        self._max_commit_pages = max_commit_pages
         if not self._token_context:
             raise ValueError("change-impact GitHub provider requires a token context")
 
@@ -147,6 +153,7 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
             )
             head_sha = _pull_request_head_sha(pull_request)
             base_sha = _pull_request_base_sha(pull_request)
+            base_ref = _pull_request_base_ref(pull_request)
             merge_commit_sha = _pull_request_merge_commit_sha(pull_request)
             updated_at = _required_string(pull_request, "updated_at")
             tree_sha = _git_commit_tree_sha(
@@ -160,6 +167,12 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
                 pull_request_number=target.pull_request_number,
                 token=token,
                 max_file_pages=max_file_pages,
+            )
+            authorship = self._authorship(
+                repository_path=repository_path,
+                pull_request=pull_request,
+                pull_request_number=target.pull_request_number,
+                token=token,
             )
 
             confirmed_pull_request = _object_payload(
@@ -191,6 +204,8 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
                 ),
                 merge_commit_sha=merge_commit_sha,
                 changed_files=changed_files,
+                base=ChangeImpactBaseEvidence(base_ref=base_ref, base_sha=base_sha),
+                authorship=authorship,
             )
         except ChangeImpactRepositoryEvidenceError:
             raise
@@ -209,6 +224,103 @@ class GitHubChangeImpactRepositoryEvidenceProvider:
                 "Launchplane GitHub repository evidence credentials are unavailable."
             )
         return token
+
+    def _authorship(
+        self,
+        *,
+        repository_path: str,
+        pull_request: dict[str, object],
+        pull_request_number: int,
+        token: str,
+    ) -> ChangeImpactAuthorshipEvidence:
+        """Resolve numeric GitHub contributing identities over the reviewed range.
+
+        Bot or agent work pushed under a human GitHub identity resolves to that
+        human identity because GitHub links the commit to it. Any commit without a
+        linked numeric identity, any login that maps to two different numeric IDs,
+        and any range longer than the provider page bound fail closed as unresolved.
+        """
+        identity_by_login: dict[str, int] = {}
+        contributor_ids: set[int] = set()
+        conflicts: list[str] = []
+
+        def record(actor: object, label: str) -> bool:
+            if not isinstance(actor, dict):
+                return False
+            raw_id = str(actor.get("id", "")).strip()
+            login = str(actor.get("login", "")).strip().casefold()
+            if not raw_id.isdecimal() or int(raw_id) < 1 or not login:
+                return False
+            github_id = int(raw_id)
+            known_id = identity_by_login.get(login)
+            if known_id is not None and known_id != github_id:
+                conflicts.append(f"{label} login {login} maps to {known_id} and {github_id}")
+                return True
+            identity_by_login[login] = github_id
+            if str(actor.get("type", "")).strip().casefold() != "user":
+                return False
+            contributor_ids.add(github_id)
+            return True
+
+        if not record(pull_request.get("user"), "pull request author"):
+            return ChangeImpactAuthorshipEvidence(
+                resolution="unresolved",
+                reason="pull request author has no linked numeric GitHub identity",
+            )
+
+        commit_count = 0
+        for page in range(1, self._max_commit_pages + 1):
+            commits = _list_payload(
+                self._github_api(
+                    path=(
+                        f"/repos/{repository_path}/pulls/{pull_request_number}/commits"
+                        f"?per_page=100&page={page}"
+                    ),
+                    token=token,
+                ),
+                "GitHub pull request commits",
+            )
+            for commit in commits:
+                commit_count += 1
+                commit_sha = str(commit.get("sha", "")).strip().lower() or "unknown"
+                linked = record(commit.get("author"), f"commit {commit_sha} author")
+                linked = record(commit.get("committer"), f"commit {commit_sha} committer") or linked
+                if not linked:
+                    return ChangeImpactAuthorshipEvidence(
+                        resolution="unresolved",
+                        commit_count=commit_count,
+                        reason=f"commit {commit_sha} has no linked numeric GitHub identity",
+                    )
+            if len(commits) < 100:
+                break
+        else:
+            return ChangeImpactAuthorshipEvidence(
+                resolution="unresolved",
+                commit_count=commit_count,
+                reason="reviewed commit range exceeded the provider page bound",
+            )
+        if conflicts:
+            return ChangeImpactAuthorshipEvidence(
+                resolution="conflicting",
+                commit_count=commit_count,
+                reason="; ".join(sorted(set(conflicts)))[:500],
+            )
+        if not commit_count:
+            return ChangeImpactAuthorshipEvidence(
+                resolution="unresolved",
+                reason="pull request returned no commit authorship evidence",
+            )
+        if not contributor_ids:
+            return ChangeImpactAuthorshipEvidence(
+                resolution="unresolved",
+                commit_count=commit_count,
+                reason="reviewed range has no human GitHub contributing identity",
+            )
+        return ChangeImpactAuthorshipEvidence(
+            resolution="resolved",
+            contributor_github_ids=tuple(sorted(contributor_ids)),
+            commit_count=commit_count,
+        )
 
     def _changed_files(
         self,
@@ -319,6 +431,10 @@ def _pull_request_head_sha(pull_request: dict[str, object]) -> str:
 
 def _pull_request_base_sha(pull_request: dict[str, object]) -> str:
     return _required_string(_object_field(pull_request, "base"), "sha").lower()
+
+
+def _pull_request_base_ref(pull_request: dict[str, object]) -> str:
+    return _required_string(_object_field(pull_request, "base"), "ref")
 
 
 def _pull_request_merge_commit_sha(pull_request: dict[str, object]) -> str:

@@ -13,6 +13,11 @@ from control_plane.contracts.artifact_dependency_provenance import (
     normalize_artifact_sha256_digest,
 )
 from control_plane.contracts.deploy_reference import docker_image_digest
+from control_plane.contracts.product_owner import (
+    PRODUCT_OWNER_POLICY_FINGERPRINT_VERSION,
+    ProductOwnerPreviewIsolationClass,
+    ProductOwnerReviewChangeClass,
+)
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 
 OWNER_ACCEPTANCE_READ_ACTION = "owner_acceptance.read"
@@ -48,6 +53,11 @@ OwnerAcceptanceReasonCode = Literal[
     "owner_authority_denied",
     "preview_evidence_unavailable",
     "preview_evidence_stale",
+    "owner_review_expired",
+    "preview_isolation_insufficient",
+    "contributing_identity_unknown",
+    "self_review_denied",
+    "review_context_missing",
 ]
 OwnerAcceptanceEventWriteStatus = Literal["written", "replayed"]
 OwnerAcceptanceSourceEventKind = Literal["browser_api", "system"]
@@ -56,7 +66,31 @@ OwnerAcceptanceViewerEligibilityReason = Literal[
     "not_current_product_owner",
     "viewer_identity_unsupported",
     "owner_authority_unavailable",
+    "self_review_denied",
 ]
+OwnerAcceptanceContributionResolution = Literal["resolved", "unknown"]
+OwnerAcceptanceContributionReason = Literal[
+    "server_resolved",
+    "identity_evidence_unavailable",
+    "identity_evidence_conflicting",
+    "identity_evidence_incomplete",
+]
+OwnerAcceptanceHumanActionSemantics = Literal[
+    "none",
+    "product_review_accepted",
+    "product_review_changes_requested",
+    "product_review_revoked",
+    "product_review_superseded",
+    "product_review_invalidated",
+]
+
+_HUMAN_ACTION_SEMANTICS: dict[str, OwnerAcceptanceHumanActionSemantics] = {
+    "accepted": "product_review_accepted",
+    "changes_requested": "product_review_changes_requested",
+    "revoked": "product_review_revoked",
+    "superseded": "product_review_superseded",
+    "invalidated": "product_review_invalidated",
+}
 OWNER_ACCEPTANCE_PROJECT_ACTION = "owner_acceptance.project"
 
 OWNER_ACCEPTANCE_STATUS_PRECEDENCE: tuple[OwnerAcceptanceDecisionStatus, ...] = (
@@ -270,6 +304,158 @@ class OwnerAcceptancePreviewBinding(BaseModel):
         return self
 
 
+class OwnerAcceptanceContributionBinding(BaseModel):
+    """Server-resolved numeric GitHub contributing identities for a reviewed range.
+
+    Launchplane resolves these from trusted pull-request and GitHub-linked commit
+    evidence. Unresolved or conflicting evidence is recorded as ``unknown`` with no
+    identities so self-review and admissibility fail closed.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    resolution: OwnerAcceptanceContributionResolution
+    reason_code: OwnerAcceptanceContributionReason
+    contributor_github_ids: tuple[int, ...] = ()
+    commit_count: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_contribution(self) -> "OwnerAcceptanceContributionBinding":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Owner acceptance contribution schema version.")
+        for github_id in self.contributor_github_ids:
+            if github_id < 1:
+                raise ValueError("contributor_github_ids must be positive numeric GitHub IDs")
+        object.__setattr__(
+            self,
+            "contributor_github_ids",
+            tuple(sorted(set(self.contributor_github_ids))),
+        )
+        if self.resolution == "resolved":
+            if self.reason_code != "server_resolved":
+                raise ValueError("resolved contributing identities require server_resolved reason")
+            if not self.contributor_github_ids:
+                raise ValueError("resolved contributing identities cannot be empty")
+        else:
+            if self.reason_code == "server_resolved":
+                raise ValueError("unknown contributing identities require a failure reason")
+            if self.contributor_github_ids:
+                raise ValueError("unknown contributing identities cannot name identities")
+        return self
+
+    def includes(self, github_id: int) -> bool:
+        return github_id in self.contributor_github_ids
+
+
+class OwnerAcceptancePolicyFingerprintBinding(BaseModel):
+    """Product/action-scoped, explicitly versioned Owner policy fingerprints."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    fingerprint_version: int = Field(
+        default=PRODUCT_OWNER_POLICY_FINGERPRINT_VERSION,
+        ge=1,
+    )
+    owner_membership_fingerprint: str
+    self_review_fingerprint: str
+    review_age_fingerprint: str
+    requirement_fingerprint: str
+    preview_trust_fingerprint: str
+
+    @model_validator(mode="after")
+    def _validate_fingerprints(self) -> "OwnerAcceptancePolicyFingerprintBinding":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Owner acceptance policy fingerprint schema version.")
+        if self.fingerprint_version != PRODUCT_OWNER_POLICY_FINGERPRINT_VERSION:
+            raise ValueError("Unsupported Owner acceptance policy fingerprint version.")
+        for field_name in (
+            "owner_membership_fingerprint",
+            "self_review_fingerprint",
+            "review_age_fingerprint",
+            "requirement_fingerprint",
+            "preview_trust_fingerprint",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _normalize_sha256(str(getattr(self, field_name)), field_name),
+            )
+        return self
+
+
+class OwnerAcceptancePreviewIsolationBinding(BaseModel):
+    """Recorded preview data/credential isolation class for the reviewed evidence.
+
+    L1 product judgment is never a security control. This binding exists so weak or
+    unknown preview isolation makes the recorded review inadmissible rather than
+    silently trusted.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    isolation_class: ProductOwnerPreviewIsolationClass
+    data_transport_mode: str = ""
+    source: Literal["product_preview_profile", "no_preview_binding"]
+
+    @model_validator(mode="after")
+    def _validate_isolation(self) -> "OwnerAcceptancePreviewIsolationBinding":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Owner acceptance preview isolation schema version.")
+        object.__setattr__(self, "data_transport_mode", self.data_transport_mode.strip())
+        if self.source == "no_preview_binding":
+            if self.isolation_class != "not_applicable":
+                raise ValueError(
+                    "Owner acceptance isolation without a preview binding must be not_applicable"
+                )
+            if self.data_transport_mode:
+                raise ValueError(
+                    "Owner acceptance isolation without a preview binding has no transport mode"
+                )
+        else:
+            if self.isolation_class == "not_applicable":
+                raise ValueError(
+                    "Owner acceptance preview isolation requires a real isolation class"
+                )
+            if not self.data_transport_mode:
+                raise ValueError(
+                    "Owner acceptance preview isolation requires the bound data transport mode"
+                )
+        return self
+
+
+class OwnerAcceptanceReviewContext(BaseModel):
+    """Exact reviewed context bound to one Owner product-review event.
+
+    The context is entirely server-resolved. It never grants merge or release
+    authority; it exists so historical evidence can be judged currently admissible
+    using bound base identity, impact class, authorship, finite age, scoped policy
+    fingerprints, and preview isolation.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    base_ref: str
+    base_sha: str
+    change_class: ProductOwnerReviewChangeClass
+    engineering_review_tier: Literal["routine", "sensitive"]
+    review_max_age_seconds: int = Field(ge=1)
+    contributions: OwnerAcceptanceContributionBinding
+    policy_fingerprints: OwnerAcceptancePolicyFingerprintBinding
+    preview_isolation: OwnerAcceptancePreviewIsolationBinding
+
+    @model_validator(mode="after")
+    def _validate_review_context(self) -> "OwnerAcceptanceReviewContext":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Owner acceptance review context schema version.")
+        object.__setattr__(self, "base_ref", _required_token(self.base_ref, "base_ref"))
+        object.__setattr__(self, "base_sha", _normalize_git_sha(self.base_sha, "base_sha"))
+        return self
+
+
 class OwnerAcceptanceBinding(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -294,6 +480,7 @@ class OwnerAcceptanceBinding(BaseModel):
     owner_requirement_revision: int = Field(ge=1)
     owner_requirement_digest: str
     preview: OwnerAcceptancePreviewBinding | None = None
+    review_context: OwnerAcceptanceReviewContext | None = None
     binding_sha256: str = ""
 
     @model_validator(mode="after")
@@ -343,6 +530,16 @@ class OwnerAcceptanceBinding(BaseModel):
                 raise ValueError(
                     "Owner acceptance preview binding mismatched fields: " + ", ".join(mismatches)
                 )
+        if self.review_context is not None:
+            expected_source = (
+                "no_preview_binding" if self.preview is None else "product_preview_profile"
+            )
+            if self.review_context.preview_isolation.source != expected_source:
+                raise ValueError(
+                    "Owner acceptance preview isolation source does not match the preview binding"
+                )
+            if self.review_context.base_sha == self.head_sha:
+                raise ValueError("Owner acceptance reviewed base cannot equal the reviewed head")
         computed_binding = owner_acceptance_binding_sha256(self)
         if self.binding_sha256:
             normalized_binding = _normalize_sha256(self.binding_sha256, "binding_sha256")
@@ -368,11 +565,17 @@ class OwnerAcceptanceAuthorization(BaseModel):
     owner_requirement_revision: int = Field(ge=1)
     owner_requirement_digest: str
     authorized_at: str
+    self_review: bool = False
+    self_review_exception_revision: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _validate_authorization(self) -> "OwnerAcceptanceAuthorization":
         if self.schema_version != 1:
             raise ValueError("Unsupported Owner acceptance authorization schema version.")
+        if not self.self_review and self.self_review_exception_revision:
+            raise ValueError(
+                "Owner acceptance self-review exception revision requires a self review"
+            )
         for field_name in (
             "owner_identity_id",
             "owner_login",
@@ -471,6 +674,14 @@ class OwnerAcceptanceEventRecord(BaseModel):
                 raise ValueError(
                     "Owner acceptance authorization requirement digest does not match binding"
                 )
+            if (
+                self.action == "accepted"
+                and self.authorization.self_review
+                and self.authorization.self_review_exception_revision < 1
+            ):
+                raise ValueError(
+                    "Owner acceptance self-review requires a revisioned routine policy exception"
+                )
         elif self.action in _SYSTEM_ACTIONS:
             if self.source_event_kind != "system":
                 raise ValueError("System Owner acceptance events require system source")
@@ -500,6 +711,39 @@ class OwnerAcceptanceEventRecord(BaseModel):
         return self
 
 
+def owner_acceptance_human_action_semantics(
+    action: OwnerAcceptanceAction | None,
+) -> OwnerAcceptanceHumanActionSemantics:
+    """Project a stored human action into machine-readable non-authority semantics.
+
+    The stored enum never changes. This projection exists so an API or UI client
+    cannot read L1 ``accepted`` as merge readiness, landed state, or production
+    authorization.
+    """
+    if action is None:
+        return "none"
+    return _HUMAN_ACTION_SEMANTICS[action]
+
+
+def _validate_non_authority(
+    *,
+    admissible: bool,
+    status: OwnerAcceptanceDecisionStatus,
+    authorizes: tuple[str, ...],
+    current_event: "OwnerAcceptanceEventRecord | None",
+    human_action_semantics: OwnerAcceptanceHumanActionSemantics,
+) -> None:
+    if authorizes:
+        raise ValueError("Owner product review never authorizes merge, release, or production")
+    if admissible and status != "accepted":
+        raise ValueError("Only a currently accepted Owner product review can be admissible")
+    expected_semantics = owner_acceptance_human_action_semantics(
+        current_event.action if current_event is not None else None
+    )
+    if human_action_semantics != expected_semantics:
+        raise ValueError("Owner acceptance human_action_semantics must project the current event")
+
+
 class OwnerAcceptanceProductDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -512,11 +756,21 @@ class OwnerAcceptanceProductDecision(BaseModel):
     reason_code: OwnerAcceptanceReasonCode
     binding: OwnerAcceptanceBinding | None = None
     current_event: OwnerAcceptanceEventRecord | None = None
+    admissible: bool = False
+    human_action_semantics: OwnerAcceptanceHumanActionSemantics = "none"
+    authorizes: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_product_decision(self) -> "OwnerAcceptanceProductDecision":
         if self.schema_version != 1:
             raise ValueError("Unsupported Owner acceptance product decision schema version.")
+        _validate_non_authority(
+            admissible=self.admissible,
+            status=self.status,
+            authorizes=self.authorizes,
+            current_event=self.current_event,
+            human_action_semantics=self.human_action_semantics,
+        )
         for field_name in ("product", "system", "action", "environment"):
             object.__setattr__(
                 self,
@@ -550,6 +804,9 @@ class OwnerAcceptanceViewerBindingEligibility(BaseModel):
     action: str
     environment: str
     can_submit_event: bool
+    can_accept: bool
+    can_request_changes: bool
+    can_revoke: bool
     reason_code: OwnerAcceptanceViewerEligibilityReason
 
     @model_validator(mode="after")
@@ -569,8 +826,22 @@ class OwnerAcceptanceViewerBindingEligibility(BaseModel):
                 field_name,
                 _required_token(str(getattr(self, field_name)), field_name),
             )
-        if self.can_submit_event != (self.reason_code == "current_product_owner"):
-            raise ValueError("Owner acceptance viewer eligibility must match its reason code.")
+        if self.can_submit_event != any(
+            (self.can_accept, self.can_request_changes, self.can_revoke)
+        ):
+            raise ValueError(
+                "Owner acceptance viewer eligibility must match its action capabilities."
+            )
+        if self.reason_code == "current_product_owner":
+            if not all((self.can_accept, self.can_request_changes, self.can_revoke)):
+                raise ValueError("Current product Owners must receive every Owner review action.")
+        elif self.reason_code == "self_review_denied":
+            if self.can_accept or not self.can_request_changes or not self.can_revoke:
+                raise ValueError(
+                    "Self-review denial must block acceptance while preserving withdrawal actions."
+                )
+        elif self.can_submit_event:
+            raise ValueError("Ineligible viewers cannot submit Owner review events.")
         return self
 
 
@@ -585,6 +856,9 @@ class OwnerAcceptanceDecision(BaseModel):
     reason_code: OwnerAcceptanceReasonCode
     binding: OwnerAcceptanceBinding | None = None
     current_event: OwnerAcceptanceEventRecord | None = None
+    admissible: bool = False
+    human_action_semantics: OwnerAcceptanceHumanActionSemantics = "none"
+    authorizes: tuple[str, ...] = ()
     products: tuple[OwnerAcceptanceProductDecision, ...] = ()
     evaluated_at: str
 
@@ -592,6 +866,13 @@ class OwnerAcceptanceDecision(BaseModel):
     def _validate_decision(self) -> "OwnerAcceptanceDecision":
         if self.schema_version != 1:
             raise ValueError("Unsupported Owner acceptance decision schema version.")
+        _validate_non_authority(
+            admissible=self.admissible,
+            status=self.status,
+            authorizes=self.authorizes,
+            current_event=self.current_event,
+            human_action_semantics=self.human_action_semantics,
+        )
         object.__setattr__(
             self,
             "evaluated_at",

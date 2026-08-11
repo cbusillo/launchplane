@@ -18,7 +18,9 @@ from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_READ_ACTION,
     OwnerAcceptanceDecision,
     OwnerAcceptanceEventRecord,
+    OwnerAcceptanceHumanActionSemantics,
     OwnerAcceptanceViewerBindingEligibility,
+    owner_acceptance_human_action_semantics,
 )
 from control_plane.github_app_identity import (
     GitHubAppInstallationToken,
@@ -33,6 +35,7 @@ from control_plane.owner_acceptance import (
     OwnerAcceptanceBindingConflictError,
     OwnerAcceptanceEvaluationUnavailableError,
     OwnerAcceptanceEventConflictError,
+    OwnerAcceptanceSelfReviewDeniedError,
     OwnerAcceptanceWriteResult,
     evaluate_owner_acceptance,
     evaluate_owner_acceptance_viewer_eligibility,
@@ -133,6 +136,29 @@ class OwnerAcceptanceEvaluationResponse(BaseModel):
     viewer_capabilities: OwnerAcceptanceViewerCapabilities
 
 
+class OwnerAcceptanceEventSemantics(BaseModel):
+    """Machine-readable projection of a stored human product-review action.
+
+    The stored enum and every persisted digest stay unchanged. This projection
+    exists so no API client can read Owner product review as merge readiness,
+    landed state, or production authorization.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    human_action_semantics: OwnerAcceptanceHumanActionSemantics
+    authorizes: tuple[str, ...] = Field(
+        default=(),
+        description="Always empty. Owner product review authorizes nothing on its own.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_semantics(self) -> "OwnerAcceptanceEventSemantics":
+        if self.authorizes:
+            raise ValueError("Owner product review never authorizes merge, release, or production")
+        return self
+
+
 class OwnerAcceptanceEventResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -140,6 +166,7 @@ class OwnerAcceptanceEventResponse(BaseModel):
     trace_id: str
     write_status: Literal["written", "replayed"]
     record: OwnerAcceptanceEventRecord
+    semantics: OwnerAcceptanceEventSemantics
     decision: OwnerAcceptanceDecision
 
 
@@ -149,6 +176,7 @@ class OwnerAcceptanceEventReadResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     record: OwnerAcceptanceEventRecord
+    semantics: OwnerAcceptanceEventSemantics
 
 
 class OwnerAcceptanceQueueResponse(BaseModel):
@@ -212,6 +240,12 @@ class OwnerAcceptanceProjectionResponse(BaseModel):
     trace_id: str
     decision: OwnerAcceptanceDecision
     result: AdvisoryCheckProjectionResult
+
+
+def _event_semantics(record: OwnerAcceptanceEventRecord) -> OwnerAcceptanceEventSemantics:
+    return OwnerAcceptanceEventSemantics(
+        human_action_semantics=owner_acceptance_human_action_semantics(record.action),
+    )
 
 
 def _validate_projection_target(
@@ -376,6 +410,13 @@ def register_owner_acceptance_routes(
                 source_event_id=idempotency_key,
                 reason=envelope.reason,
             )
+        except OwnerAcceptanceSelfReviewDeniedError as error:
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="owner_acceptance_self_review_denied",
+                message=str(error),
+            ) from error
         except OwnerAcceptanceAuthorizationError as error:
             raise common.http_error(
                 status_code=403,
@@ -415,6 +456,7 @@ def register_owner_acceptance_routes(
             trace_id=trace_id,
             write_status=result.status,
             record=result.record,
+            semantics=_event_semantics(result.record),
             decision=result.decision,
         )
 
@@ -455,7 +497,11 @@ def register_owner_acceptance_routes(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        return OwnerAcceptanceEventReadResponse(trace_id=trace_id, record=record)
+        return OwnerAcceptanceEventReadResponse(
+            trace_id=trace_id,
+            record=record,
+            semantics=_event_semantics(record),
+        )
 
     def read_queue(
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],

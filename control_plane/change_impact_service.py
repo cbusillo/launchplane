@@ -210,6 +210,7 @@ def evaluate_change_impact(
 
     matched: list[ChangeImpactMatchedEvidence] = []
     affected_products: set[ChangeImpactProductScope] = set()
+    production_affecting_products: set[ChangeImpactProductScope] = set()
     sensitive = False
     unknown: list[str] = []
 
@@ -222,6 +223,8 @@ def evaluate_change_impact(
         for rule in path_matches:
             matched.append(_file_match(changed_file=changed_file, rule=rule))
             affected_products.update(rule.affected_products)
+            if rule.production_affecting:
+                production_affecting_products.update(rule.affected_products)
             if rule.review_tier == "sensitive":
                 sensitive = True
 
@@ -256,6 +259,9 @@ def evaluate_change_impact(
             continue
         affected_products.update(evidence.affected_products)
         affected_products.update(rule.affected_products)
+        if rule.production_affecting:
+            production_affecting_products.update(evidence.affected_products)
+            production_affecting_products.update(rule.affected_products)
         matched.append(_stored_evidence_match(evidence=evidence, rule=rule))
         if rule.review_tier == "sensitive":
             sensitive = True
@@ -284,6 +290,7 @@ def evaluate_change_impact(
         required_engineering_review_count=2 if review_tier == "sensitive" else 1,
         owner_impact="required" if affected else "not_required",
         affected_products=affected,
+        production_affecting_products=tuple(sorted(production_affecting_products, key=_scope_key)),
         matched_evidence=tuple(matched),
         unknown_evidence=(),
     )
@@ -468,6 +475,7 @@ def _file_match(
         component=rule.component,
         rule_id=rule.rule_id,
         review_tier=rule.review_tier,
+        production_affecting=rule.production_affecting,
         affected_products=rule.affected_products,
         reason=rule.reason,
     )
@@ -485,6 +493,7 @@ def _stored_evidence_match(
         component=evidence.component,
         rule_id=rule.rule_id,
         review_tier=rule.review_tier,
+        production_affecting=rule.production_affecting,
         affected_products=tuple(
             sorted(set(rule.affected_products) | set(evidence.affected_products), key=_scope_key)
         ),

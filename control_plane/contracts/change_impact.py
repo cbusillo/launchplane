@@ -23,10 +23,12 @@ ChangeImpactEvidenceSource = Literal[
 ]
 ChangeImpactChangeKind = Literal["added", "modified", "removed", "renamed", "unknown"]
 ChangeImpactStoredEvidenceKind = Literal["dependency", "reviewer"]
+ChangeImpactAuthorshipResolution = Literal["resolved", "unresolved", "conflicting"]
 
 _GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _REPOSITORY_PATTERN = re.compile(r"^[^/\s]+/[^/\s]+$")
+_GIT_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]{0,254}$")
 
 
 def _required_token(value: str, field_name: str) -> str:
@@ -135,6 +137,7 @@ class ChangeImpactComponentRule(BaseModel):
     path_prefixes: tuple[str, ...]
     affected_products: tuple[ChangeImpactProductScope, ...] = ()
     review_tier: ChangeImpactReviewTier = "routine"
+    production_affecting: bool | None = None
     reason: str
 
     @model_validator(mode="after")
@@ -142,6 +145,8 @@ class ChangeImpactComponentRule(BaseModel):
         if self.schema_version != 1:
             raise ValueError("Unsupported change-impact component rule schema version.")
         object.__setattr__(self, "component", _required_token(self.component, "component"))
+        if self.production_affecting is False:
+            object.__setattr__(self, "production_affecting", None)
         object.__setattr__(
             self,
             "path_prefixes",
@@ -381,6 +386,64 @@ class ChangeImpactEvaluationRequest(BaseModel):
         return self
 
 
+class ChangeImpactBaseEvidence(BaseModel):
+    """Server-resolved base ref and SHA the reviewed change was compared against."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    base_ref: str
+    base_sha: str
+
+    @model_validator(mode="after")
+    def _validate_base(self) -> "ChangeImpactBaseEvidence":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported change-impact base evidence schema version.")
+        normalized_ref = _required_token(self.base_ref, "base_ref")
+        if _GIT_REF_PATTERN.fullmatch(normalized_ref) is None:
+            raise ValueError("base_ref must be a canonical Git ref name")
+        object.__setattr__(self, "base_ref", normalized_ref)
+        object.__setattr__(self, "base_sha", _normalize_git_sha(self.base_sha, "base_sha"))
+        return self
+
+
+class ChangeImpactAuthorshipEvidence(BaseModel):
+    """Server-resolved numeric GitHub contributing identities over the reviewed range.
+
+    ``resolution`` is ``resolved`` only when every reviewed commit and the pull
+    request itself carry a consistent GitHub-linked numeric identity. Missing,
+    incomplete, or contradictory identity evidence is never repaired here; it is
+    reported so downstream Owner-review admissibility can fail closed.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    resolution: ChangeImpactAuthorshipResolution
+    contributor_github_ids: tuple[int, ...] = ()
+    commit_count: int = Field(default=0, ge=0)
+    reason: str = Field(default="", max_length=500)
+
+    @model_validator(mode="after")
+    def _validate_authorship(self) -> "ChangeImpactAuthorshipEvidence":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported change-impact authorship evidence schema version.")
+        for github_id in self.contributor_github_ids:
+            if github_id < 1:
+                raise ValueError("contributor_github_ids must be positive numeric GitHub IDs")
+        object.__setattr__(
+            self,
+            "contributor_github_ids",
+            tuple(sorted(set(self.contributor_github_ids))),
+        )
+        object.__setattr__(self, "reason", self.reason.strip())
+        if self.resolution == "resolved" and not self.contributor_github_ids:
+            raise ValueError("resolved change-impact authorship requires contributing identities")
+        if self.resolution != "resolved" and not self.reason:
+            raise ValueError("unresolved change-impact authorship requires a reason")
+        return self
+
+
 class ChangeImpactRepositoryEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -388,6 +451,8 @@ class ChangeImpactRepositoryEvidence(BaseModel):
     target: ChangeImpactTarget
     merge_commit_sha: str = ""
     changed_files: tuple[ChangeImpactChangedFileEvidence, ...]
+    base: ChangeImpactBaseEvidence | None = None
+    authorship: ChangeImpactAuthorshipEvidence | None = None
 
     @model_validator(mode="after")
     def _validate_evidence(self) -> "ChangeImpactRepositoryEvidence":
@@ -421,6 +486,7 @@ class ChangeImpactMatchedEvidence(BaseModel):
     component: str = ""
     rule_id: str = ""
     review_tier: ChangeImpactReviewTier | None = None
+    production_affecting: bool | None = None
     affected_products: tuple[ChangeImpactProductScope, ...] = ()
     reason: str
 
@@ -453,6 +519,7 @@ class ChangeImpactEvaluation(BaseModel):
     required_engineering_review_count: Literal[1, 2] = 2
     owner_impact: Literal["required", "not_required", "unknown"] = "unknown"
     affected_products: tuple[ChangeImpactAffectedProduct, ...] = ()
+    production_affecting_products: tuple[ChangeImpactProductScope, ...] = ()
     matched_evidence: tuple[ChangeImpactMatchedEvidence, ...] = ()
     unknown_evidence: tuple[str, ...] = ()
 

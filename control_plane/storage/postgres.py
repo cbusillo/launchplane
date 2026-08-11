@@ -19,6 +19,7 @@ from sqlalchemy import (
     create_engine,
     delete,
     desc,
+    false,
     func,
     inspect,
     or_,
@@ -906,6 +907,25 @@ class LaunchplaneOwnerAcceptanceEventRow(Base):
     action: Mapped[str] = mapped_column(String, nullable=False)
     owner_github_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     owner_login: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    base_ref: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    base_sha: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    change_class: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    review_max_age_seconds: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default="0",
+    )
+    contribution_resolution: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default="",
+    )
+    preview_isolation_class: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default="",
+    )
+    self_review: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     occurred_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
@@ -8184,6 +8204,7 @@ class PostgresRecordStore(HumanSessionStore):
     def write_owner_acceptance_event_record(
         self, record: OwnerAcceptanceEventRecord
     ) -> OwnerAcceptanceEventWriteStatus:
+        review_context = record.binding.review_context
         row = LaunchplaneOwnerAcceptanceEventRow(
             event_id=record.event_id,
             acceptance_id=record.acceptance_id,
@@ -8201,6 +8222,17 @@ class PostgresRecordStore(HumanSessionStore):
             action=record.action,
             owner_github_id=(record.authorization.owner_github_id if record.authorization else 0),
             owner_login=(record.authorization.owner_login if record.authorization else ""),
+            base_ref=(review_context.base_ref if review_context else ""),
+            base_sha=(review_context.base_sha if review_context else ""),
+            change_class=(review_context.change_class if review_context else ""),
+            review_max_age_seconds=(review_context.review_max_age_seconds if review_context else 0),
+            contribution_resolution=(
+                review_context.contributions.resolution if review_context else ""
+            ),
+            preview_isolation_class=(
+                review_context.preview_isolation.isolation_class if review_context else ""
+            ),
+            self_review=bool(record.authorization and record.authorization.self_review),
             occurred_at=record.occurred_at,
             payload=self._payload_dict(record),
         )

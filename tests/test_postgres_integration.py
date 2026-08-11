@@ -39,6 +39,10 @@ from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalEventRecord,
 )
 from control_plane.contracts.owner_acceptance import (
+    OwnerAcceptanceContributionBinding,
+    OwnerAcceptancePolicyFingerprintBinding,
+    OwnerAcceptancePreviewIsolationBinding,
+    OwnerAcceptanceReviewContext,
     OwnerAcceptanceAuthorization,
     OwnerAcceptanceBinding,
     OwnerAcceptanceEventRecord,
@@ -92,6 +96,9 @@ from control_plane.contracts.repository_human_admission import (
     TenantTechnicalHumanWaiverEventRecord,
 )
 from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
+from control_plane.contracts.product_owner import (
+    PRODUCT_OWNER_ROUTINE_REVIEW_MAX_AGE_SECONDS,
+)
 from control_plane.owner_acceptance import OwnerAcceptanceEventConflictError
 from control_plane.repository_human_admission import (
     RepositoryHumanRolePolicyConflictError,
@@ -889,6 +896,31 @@ def _owner_acceptance_event(*, product: str = "example-site") -> OwnerAcceptance
                 )
             ),
         ),
+        review_context=OwnerAcceptanceReviewContext(
+            base_ref="main",
+            base_sha="3" * 40,
+            change_class="routine",
+            engineering_review_tier="routine",
+            review_max_age_seconds=PRODUCT_OWNER_ROUTINE_REVIEW_MAX_AGE_SECONDS,
+            contributions=OwnerAcceptanceContributionBinding(
+                resolution="resolved",
+                reason_code="server_resolved",
+                contributor_github_ids=(4001,),
+                commit_count=2,
+            ),
+            policy_fingerprints=OwnerAcceptancePolicyFingerprintBinding(
+                owner_membership_fingerprint="1" * 64,
+                self_review_fingerprint="2" * 64,
+                review_age_fingerprint="3" * 64,
+                requirement_fingerprint="4" * 64,
+                preview_trust_fingerprint="5" * 64,
+            ),
+            preview_isolation=OwnerAcceptancePreviewIsolationBinding(
+                isolation_class="synthetic_seeded",
+                data_transport_mode="migrate_seed",
+                source="product_preview_profile",
+            ),
+        ),
     )
     return OwnerAcceptanceEventRecord(
         binding=binding,
@@ -1005,6 +1037,33 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             )
             with self.assertRaises(OwnerAcceptanceEventConflictError):
                 store.write_owner_acceptance_event_record(conflicting)
+
+    def test_owner_acceptance_events_project_bound_review_context_columns(self) -> None:
+        """The queryable columns mirror the bound reviewed context for audit and fencing."""
+        with _store_for_fresh_head_database() as store:
+            event = _owner_acceptance_event()
+            store.write_owner_acceptance_event_record(event)
+
+            with store._session_factory() as session:  # noqa: SLF001
+                row = session.execute(
+                    text(
+                        "SELECT base_ref, base_sha, change_class, review_max_age_seconds, "
+                        "contribution_resolution, preview_isolation_class, self_review "
+                        "FROM launchplane_owner_acceptance_events WHERE event_id = :event_id"
+                    ),
+                    {"event_id": event.event_id},
+                ).one()
+
+            self.assertEqual(row.base_ref, "main")
+            self.assertEqual(row.base_sha, "3" * 40)
+            self.assertEqual(row.change_class, "routine")
+            self.assertEqual(
+                row.review_max_age_seconds,
+                PRODUCT_OWNER_ROUTINE_REVIEW_MAX_AGE_SECONDS,
+            )
+            self.assertEqual(row.contribution_resolution, "resolved")
+            self.assertEqual(row.preview_isolation_class, "synthetic_seeded")
+            self.assertFalse(row.self_review)
 
     def test_full_release_upgrades_compatibility_floor_before_store_startup(self) -> None:
         with _isolated_postgres_database() as database_url:

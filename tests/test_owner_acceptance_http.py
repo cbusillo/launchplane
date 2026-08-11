@@ -208,6 +208,9 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 eligibility = evaluated.json()["viewer_capabilities"]["bindings"]
                 self.assertEqual(len(eligibility), 1)
                 self.assertIs(eligibility[0]["can_submit_event"], True)
+                self.assertIs(eligibility[0]["can_accept"], True)
+                self.assertIs(eligibility[0]["can_request_changes"], True)
+                self.assertIs(eligibility[0]["can_revoke"], True)
                 self.assertEqual(eligibility[0]["reason_code"], "current_product_owner")
                 expected_binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
                 self.assertEqual(eligibility[0]["binding_sha256"], expected_binding_sha256)
@@ -305,6 +308,9 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 eligibility = payload["viewer_capabilities"]["bindings"]
                 self.assertEqual(len(eligibility), 1)
                 self.assertIs(eligibility[0]["can_submit_event"], False)
+                self.assertIs(eligibility[0]["can_accept"], False)
+                self.assertIs(eligibility[0]["can_request_changes"], False)
+                self.assertIs(eligibility[0]["can_revoke"], False)
                 self.assertEqual(
                     eligibility[0]["reason_code"],
                     "not_current_product_owner",
