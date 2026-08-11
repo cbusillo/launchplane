@@ -2599,8 +2599,11 @@ comments, or local CLI fallbacks.
 
 Planning stops on ambiguous or malformed `/api/project.all` evidence, a
 non-idle candidate, any domain, any recognized deployment history, digest/set
-drift, or any Launchplane authority reference. Apply repeats all proofs under a
-durable provider-operation lease before checkpointing the sole
+drift, or any Launchplane authority reference. A deployment-source block means
+either the candidate provider target ID is present or the deployment record
+lacks consistent application-typed target evidence and still names the
+candidate; do not rewrite append-only deployment history to bypass that gate.
+Apply repeats all proofs under a durable provider-operation lease before checkpointing the sole
 `application.delete`. Reconciliation and already-absent retries reuse the same
 apply idempotency key. Completion requires candidate absence, unchanged
 protected fingerprints, and zero authority writes.

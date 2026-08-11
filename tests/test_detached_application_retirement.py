@@ -643,6 +643,112 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
                 candidate_application_name="detached-application",
             )
 
+    def test_deployment_authority_uses_consistent_application_target_identity(self) -> None:
+        store = _Store()
+        protected_target_id = PROTECTED_IDS[0]
+        store.sources["deployment"] = (
+            {
+                "resolved_target": {
+                    "target_type": "application",
+                    "target_id": protected_target_id,
+                    "target_name": "detached-application",
+                },
+                "deployed_target": {
+                    "target_category": "application",
+                    "provider_target_type": "application",
+                    "target_id": protected_target_id,
+                    "display_name": "detached-application",
+                },
+            },
+        )
+        proof = prove_detached_application_authority_absence(
+            record_store=cast(DetachedApplicationRetirementStore, store),
+            candidate_target_id=CANDIDATE_ID,
+            candidate_application_name="detached-application",
+        )
+        deployment_source = next(
+            source for source in proof.sources if source.source == "deployment"
+        )
+        self.assertEqual(deployment_source.match_count, 0)
+
+    def test_deployment_authority_still_blocks_candidate_target_identity(self) -> None:
+        store = _Store()
+        store.sources["deployment"] = (
+            {
+                "resolved_target": {
+                    "target_type": "application",
+                    "target_id": CANDIDATE_ID,
+                    "target_name": "detached-application",
+                }
+            },
+        )
+        with self.assertRaisesRegex(DetachedApplicationRetirementBlockedError, "deployment"):
+            prove_detached_application_authority_absence(
+                record_store=cast(DetachedApplicationRetirementStore, store),
+                candidate_target_id=CANDIDATE_ID,
+                candidate_application_name="detached-application",
+            )
+
+    def test_deployment_authority_retains_name_matching_without_consistent_application_id(
+        self,
+    ) -> None:
+        payloads = (
+            {"display_name": "detached-application"},
+            {
+                "deployed_target": {
+                    "target_category": "compose",
+                    "target_id": PROTECTED_IDS[0],
+                    "display_name": "detached-application",
+                }
+            },
+            {
+                "resolved_target": {
+                    "target_type": "application",
+                    "target_id": PROTECTED_IDS[0],
+                    "target_name": "detached-application",
+                },
+                "deployed_target": {
+                    "target_category": "application",
+                    "target_id": PROTECTED_IDS[1],
+                    "display_name": "detached-application",
+                },
+            },
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                store = _Store()
+                store.sources["deployment"] = (payload,)
+                with self.assertRaisesRegex(
+                    DetachedApplicationRetirementBlockedError, "deployment"
+                ):
+                    prove_detached_application_authority_absence(
+                        record_store=cast(DetachedApplicationRetirementStore, store),
+                        candidate_target_id=CANDIDATE_ID,
+                        candidate_application_name="detached-application",
+                    )
+
+    def test_non_deployment_sources_retain_provider_name_authority(self) -> None:
+        source_names = tuple(
+            source.source
+            for source in prove_detached_application_authority_absence(
+                record_store=cast(DetachedApplicationRetirementStore, _Store()),
+                candidate_target_id=CANDIDATE_ID,
+                candidate_application_name="detached-application",
+            ).sources
+        )
+        for source_name in source_names:
+            if source_name == "deployment":
+                continue
+            with self.subTest(source=source_name):
+                store = _Store()
+                store.sources[source_name] = ({"display_name": "detached-application"},)
+                with self.assertRaisesRegex(DetachedApplicationRetirementBlockedError, source_name):
+                    prove_detached_application_authority_absence(
+                        record_store=cast(DetachedApplicationRetirementStore, store),
+                        candidate_target_id=CANDIDATE_ID,
+                        candidate_application_name="detached-application",
+                    )
+
     def test_plan_is_deterministic_private_and_redacted(self) -> None:
         plan = _plan()
         replay = _plan()
