@@ -3,6 +3,8 @@ import re
 import time
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -38,6 +40,13 @@ _DOKPLOY_COMPOSE_SERVICE_PATTERN = re.compile(r"^$|^[a-z0-9][a-z0-9._-]{0,127}$"
 type JsonPrimitive = str | int | float | bool | None
 type JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
 type JsonObject = dict[str, JsonValue]
+type DeploymentHistoryState = Literal["present", "no_history", "unknown"]
+
+
+@dataclass(frozen=True)
+class DeploymentHistory:
+    state: DeploymentHistoryState
+    latest_deployment: JsonObject | None = None
 
 
 class DokployDeploymentFailed(click.ClickException):
@@ -144,6 +153,22 @@ def latest_deployment_for_target(
             target_id=target_id,
         )
     )
+
+
+def deployment_history_for_target(
+    *, host: str, token: str, target_type: str, target_id: str
+) -> DeploymentHistory:
+    if target_type != "application":
+        raise click.ClickException(
+            f"Unsupported Dokploy deployment-history target type: {target_type}"
+        )
+    payload = dokploy_request(
+        host=host,
+        token=token,
+        path="/api/deployment.all",
+        query={"applicationId": target_id},
+    )
+    return parse_deployment_history(payload)
 
 
 def list_deployments_for_target(
@@ -1168,6 +1193,34 @@ def extract_deployments(raw_payload: JsonValue) -> list[JsonObject]:
             if isinstance(nested_items, list):
                 return _collect_object_items(nested_items)
     return []
+
+
+def parse_deployment_history(raw_payload: JsonValue) -> DeploymentHistory:
+    if isinstance(raw_payload, list):
+        return _parse_deployment_history_items(raw_payload)
+    if not isinstance(raw_payload, dict):
+        return DeploymentHistory(state="unknown")
+
+    wrapped_items = [
+        raw_payload[key_name]
+        for key_name in ("data", "deployments", "items", "result")
+        if key_name in raw_payload
+    ]
+    if len(wrapped_items) != 1 or not isinstance(wrapped_items[0], list):
+        return DeploymentHistory(state="unknown")
+    return _parse_deployment_history_items(wrapped_items[0])
+
+
+def _parse_deployment_history_items(raw_items: list[JsonValue]) -> DeploymentHistory:
+    if not raw_items:
+        return DeploymentHistory(state="no_history")
+    deployments = _collect_object_items(raw_items)
+    if len(deployments) != len(raw_items):
+        return DeploymentHistory(state="unknown")
+    return DeploymentHistory(
+        state="present",
+        latest_deployment=_latest_deployment_from_list(deployments),
+    )
 
 
 def _collect_object_items(raw_items: list[JsonValue]) -> list[JsonObject]:

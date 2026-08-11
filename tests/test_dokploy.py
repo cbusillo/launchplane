@@ -194,6 +194,64 @@ class DokployConfigTests(unittest.TestCase):
         self.assertIsNone(raised.exception.status_code)
         self.assertIn("response read timed out", raised.exception.format_message())
 
+    def test_parse_deployment_history_accepts_only_unambiguous_list_shapes(self) -> None:
+        recognized_empty_payloads: tuple[dokploy_api.JsonValue, ...] = (
+            [],
+            {"data": []},
+            {"deployments": []},
+        )
+        for payload in recognized_empty_payloads:
+            with self.subTest(payload=payload):
+                history = dokploy_api.parse_deployment_history(payload)
+                self.assertEqual(history.state, "no_history")
+                self.assertIsNone(history.latest_deployment)
+
+        history = dokploy_api.parse_deployment_history(
+            [
+                {"deploymentId": "deployment-old", "createdAt": "2026-08-10T00:00:00Z"},
+                {"deploymentId": "deployment-new", "createdAt": "2026-08-11T00:00:00Z"},
+            ]
+        )
+        self.assertEqual(history.state, "present")
+        self.assertEqual(
+            history.latest_deployment,
+            {"deploymentId": "deployment-new", "createdAt": "2026-08-11T00:00:00Z"},
+        )
+
+        malformed_payloads: tuple[dokploy_api.JsonValue, ...] = (
+            {"data": {}},
+            {"other": []},
+            {"data": [], "items": []},
+            [{"deploymentId": "deployment-one"}, "not-a-deployment"],
+        )
+        for payload in malformed_payloads:
+            with self.subTest(payload=payload):
+                self.assertEqual(dokploy_api.parse_deployment_history(payload).state, "unknown")
+
+        legacy_payload: dokploy_api.JsonValue = [
+            {"deploymentId": "deployment-one"},
+            "not-a-deployment",
+        ]
+        self.assertEqual(
+            dokploy_api.extract_deployments(legacy_payload), [{"deploymentId": "deployment-one"}]
+        )
+
+    def test_deployment_history_request_errors_propagate(self) -> None:
+        request_error = dokploy_api.DokployRequestFailed(
+            method="GET",
+            path="/api/deployment.all",
+            status_code=503,
+            detail="service unavailable",
+        )
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=request_error):
+            with self.assertRaisesRegex(dokploy_api.DokployRequestFailed, "service unavailable"):
+                dokploy_api.deployment_history_for_target(
+                    host="https://dokploy.example",
+                    token="provider-token",
+                    target_type="application",
+                    target_id="application-one",
+                )
+
     def test_run_dokploy_schedule_enriches_synchronous_remote_exit(self) -> None:
         request_error = dokploy_api.DokployRequestFailed(
             method="POST",

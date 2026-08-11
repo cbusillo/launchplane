@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from collections.abc import Mapping
 from typing import cast
 from unittest.mock import patch
 
@@ -29,6 +30,7 @@ from control_plane.product_retirement import (
     bind_product_retirement_authority,
     build_product_retirement_plan_record,
     build_provider_observation,
+    observe_tracked_dokploy_application,
 )
 from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -181,7 +183,7 @@ def _observation(*, domains: tuple[str, ...] = ()) -> ProductRetirementProviderO
         payload={
             "applicationId": TARGET_ID,
             "name": "example-site-prod",
-            "applicationStatus": "running",
+            "applicationStatus": "idle",
         },
         domains=tuple(
             {"domainId": domain_id, "host": f"{domain_id}.example"} for domain_id in domains
@@ -257,6 +259,97 @@ class ProductRetirementTests(unittest.TestCase):
             observed_at=NOW,
         )
         self.assertFalse(observation.retirable)
+
+    def test_provider_observation_allows_no_history_only_for_non_serving_application(self) -> None:
+        observation = build_provider_observation(
+            target_id=TARGET_ID,
+            payload={"applicationId": TARGET_ID, "applicationStatus": "stopped"},
+            domains=(),
+            latest_deployment=None,
+            deployment_history_state="no_history",
+            observed_at=NOW,
+        )
+        self.assertEqual(observation.deployment_status, "no_history")
+        self.assertTrue(observation.retirable)
+
+        for application_state in ("running", "ready", "success", "deploying", "mystery"):
+            with self.subTest(application_state=application_state):
+                blocked = build_provider_observation(
+                    target_id=TARGET_ID,
+                    payload={"applicationId": TARGET_ID, "applicationStatus": application_state},
+                    domains=(),
+                    latest_deployment=None,
+                    deployment_history_state="no_history",
+                    observed_at=NOW,
+                )
+                self.assertFalse(blocked.retirable)
+
+    def test_provider_observation_maps_recognized_empty_history_to_local_sentinel(self) -> None:
+        with (
+            patch(
+                "control_plane.product_retirement.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "provider-token"),
+            ),
+            patch(
+                "control_plane.product_retirement.dokploy_api.fetch_dokploy_target_payload",
+                return_value={"applicationId": TARGET_ID, "applicationStatus": "idle"},
+            ),
+            patch(
+                "control_plane.product_retirement.dokploy_api.fetch_dokploy_application_domains",
+                return_value=(),
+            ),
+            patch(
+                "control_plane.product_retirement.dokploy_api.deployment_history_for_target",
+                return_value=dokploy_api.DeploymentHistory(state="no_history"),
+            ),
+        ):
+            observation = observe_tracked_dokploy_application(
+                control_plane_root=Path("."),
+                target_id=TARGET_ID,
+                observed_at=NOW,
+            )
+
+        self.assertEqual(observation.deployment_status, "no_history")
+        self.assertTrue(observation.retirable)
+
+    def test_provider_observation_blocks_unknown_or_unusable_deployment_history(self) -> None:
+        history_cases: tuple[
+            tuple[dokploy_api.DeploymentHistoryState, Mapping[str, object] | None], ...
+        ] = (
+            ("unknown", None),
+            ("present", None),
+            ("present", {"status": "mystery"}),
+            ("present", {"status": "running"}),
+        )
+        for deployment_history_state, latest_deployment in history_cases:
+            with self.subTest(
+                deployment_history_state=deployment_history_state,
+                latest_deployment=latest_deployment,
+            ):
+                observation = build_provider_observation(
+                    target_id=TARGET_ID,
+                    payload={"applicationId": TARGET_ID, "applicationStatus": "idle"},
+                    domains=(),
+                    latest_deployment=latest_deployment,
+                    deployment_history_state=deployment_history_state,
+                    observed_at=NOW,
+                )
+                self.assertFalse(observation.retirable)
+
+    def test_plan_preserves_no_history_observation_for_apply_reconciliation(self) -> None:
+        plan = _plan(
+            _Store(),
+            build_provider_observation(
+                target_id=TARGET_ID,
+                payload={"applicationId": TARGET_ID, "applicationStatus": "idle"},
+                domains=(),
+                latest_deployment=None,
+                deployment_history_state="no_history",
+                observed_at=NOW,
+            ),
+        )
+        self.assertTrue(plan.provider_observation.retirable)
+        self.assertEqual(plan.provider_observation.deployment_status, "no_history")
 
     def test_provider_observation_rejects_unknown_states(self) -> None:
         observation = build_provider_observation(

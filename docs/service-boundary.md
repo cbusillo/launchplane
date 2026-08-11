@@ -3630,6 +3630,13 @@ target identifier. Launchplane derives the context from the stored product
 profile and rejects untracked, ambiguous, non-application, preview-active,
 busy, or changed authority.
 
+An application with an explicitly recognized empty Dokploy deployment list can
+be retired only when its current application state is unambiguously non-serving
+(`idle`, `stopped`, `exited`, `done`, or `completed`). The retirement record
+preserves this as a local `no_history` deployment-status sentinel. Malformed or
+unrecognized deployment responses, a blank or nonterminal deployment status,
+and serving, deploying, or unknown application states fail closed.
+
 Planning persists an append-only audit record and returns its record ID and
 digest without exposing provider identifiers. Apply requires that exact stored
 record and digest plus the target-bound confirmation phrase. Before the first

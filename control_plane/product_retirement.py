@@ -42,9 +42,8 @@ from control_plane.provider_operations import (
 
 
 _ACTIVE_PREVIEW_STATES = frozenset({"pending", "active", "paused", "teardown_pending"})
-_RETIRABLE_APPLICATION_STATES = frozenset(
-    {"completed", "done", "exited", "idle", "ready", "running", "stopped", "success"}
-)
+_NO_DEPLOYMENT_HISTORY_STATUS = "no_history"
+_RETIRABLE_APPLICATION_STATES = frozenset({"completed", "done", "exited", "idle", "stopped"})
 _RETIRABLE_DEPLOYMENT_STATES = frozenset(
     {"cancelled", "canceled", "completed", "done", "failed", "idle", "skipped", "success"}
 )
@@ -284,7 +283,7 @@ def observe_tracked_dokploy_application(
         token=token,
         application_id=target_id,
     )
-    latest_deployment = dokploy_api.latest_deployment_for_target(
+    deployment_history = dokploy_api.deployment_history_for_target(
         host=host,
         token=token,
         target_type="application",
@@ -294,7 +293,8 @@ def observe_tracked_dokploy_application(
         target_id=target_id,
         payload=payload,
         domains=domains,
-        latest_deployment=latest_deployment,
+        latest_deployment=deployment_history.latest_deployment,
+        deployment_history_state=deployment_history.state,
         observed_at=observed_at,
     )
 
@@ -305,6 +305,7 @@ def build_provider_observation(
     payload: Mapping[str, object],
     domains: tuple[Mapping[str, object], ...],
     latest_deployment: Mapping[str, object] | None,
+    deployment_history_state: dokploy_api.DeploymentHistoryState = "present",
     observed_at: str,
 ) -> ProductRetirementProviderObservation:
     observed_target_id = _application_id(payload)
@@ -332,12 +333,21 @@ def build_provider_observation(
         .strip()
         .lower()
     )
-    deployment_status = dokploy_api.deployment_status(
-        cast(dokploy_api.JsonObject | None, latest_deployment)
-    )
-    retirable = (
-        application_state in _RETIRABLE_APPLICATION_STATES
-        and deployment_status in _RETIRABLE_DEPLOYMENT_STATES
+    if deployment_history_state == "no_history":
+        if latest_deployment is not None:
+            raise ProductRetirementBlockedError(
+                "No deployment history cannot include a latest deployment."
+            )
+        deployment_status = _NO_DEPLOYMENT_HISTORY_STATUS
+    elif deployment_history_state == "present":
+        deployment_status = dokploy_api.deployment_status(
+            cast(dokploy_api.JsonObject | None, latest_deployment)
+        )
+    else:
+        deployment_status = ""
+    retirable = application_state in _RETIRABLE_APPLICATION_STATES and (
+        deployment_status == _NO_DEPLOYMENT_HISTORY_STATUS
+        or deployment_status in _RETIRABLE_DEPLOYMENT_STATES
     )
     core_payload = {
         "application_id": observed_target_id,
