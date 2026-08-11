@@ -3691,7 +3691,14 @@ class FilesystemRecordStore:
             record,
         ):
             existing = self.read_product_retirement_record(record.record_id)
-            if existing != record:
+            if existing != record and not (
+                record.mode == "plan"
+                and existing.mode == "plan"
+                and existing.product == record.product
+                and existing.identity.actor == record.identity.actor
+                and existing.idempotency_key == record.idempotency_key
+                and existing.continuity_sha256 == record.continuity_sha256
+            ):
                 raise ValueError("Product retirement records are append-only.")
         return self._record_path("launchplane_product_retirements", record.record_id)
 

@@ -13244,7 +13244,14 @@ class PostgresRecordStore(HumanSessionStore):
                     model_type=ProductRetirementRecord,
                     payload=existing.payload,
                 )
-                if stored != record:
+                if stored != record and not (
+                    record.mode == "plan"
+                    and stored.mode == "plan"
+                    and stored.product == record.product
+                    and stored.identity.actor == record.identity.actor
+                    and stored.idempotency_key == record.idempotency_key
+                    and stored.continuity_sha256 == record.continuity_sha256
+                ):
                     raise ValueError("Product retirement records are append-only.")
                 return
             session.add(

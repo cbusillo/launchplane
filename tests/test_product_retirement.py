@@ -388,8 +388,19 @@ class ProductRetirementTests(unittest.TestCase):
             plan = _plan(_Store(), _observation())
             store.write_product_retirement_record(plan)
             store.write_product_retirement_record(plan)
+            store.write_product_retirement_record(
+                plan.model_copy(
+                    update={
+                        "trace_id": "concurrent-plan-trace",
+                        "requested_at": "2026-08-11T01:00:01Z",
+                        "recorded_at": "2026-08-11T01:00:01Z",
+                    }
+                )
+            )
             self.assertEqual(store.read_product_retirement_record(plan.record_id), plan)
-            changed = plan.model_copy(update={"reason": "different"})
+            changed = plan.model_copy(
+                update={"reason": "different", "continuity_sha256": "f" * 64}
+            )
             with self.assertRaisesRegex(ValueError, "append-only"):
                 store.write_product_retirement_record(changed)
 
@@ -414,6 +425,15 @@ class ProductRetirementTests(unittest.TestCase):
             )
             plan = _plan(_Store(), _observation())
             store.write_product_retirement_record(plan)
+            store.write_product_retirement_record(
+                plan.model_copy(
+                    update={
+                        "trace_id": "concurrent-plan-trace",
+                        "requested_at": "2026-08-11T01:00:01Z",
+                        "recorded_at": "2026-08-11T01:00:01Z",
+                    }
+                )
+            )
             self.assertEqual(store.read_product_retirement_record(plan.record_id), plan)
             self.assertEqual(
                 store.list_product_retirement_records(product="example-site"),
@@ -421,7 +441,9 @@ class ProductRetirementTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "append-only"):
                 store.write_product_retirement_record(
-                    plan.model_copy(update={"reason": "different"})
+                    plan.model_copy(
+                        update={"reason": "different", "continuity_sha256": "f" * 64}
+                    )
                 )
             store.close()
 
