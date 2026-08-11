@@ -1594,6 +1594,15 @@ class LaunchplaneProductRetirementRow(Base):
             "idempotency_key",
             desc("recorded_at"),
         ),
+        Index(
+            "launchplane_product_retirements_plan_idempotency_unique",
+            "product",
+            "actor",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("mode = 'plan'"),
+            sqlite_where=text("mode = 'plan'"),
+        ),
     )
 
     record_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -7200,7 +7209,6 @@ class PostgresRecordStore(HumanSessionStore):
             self._sync_odoo_prod_retained_volume_backup_import_operation_row(
                 row, checkpointed_record
             )
-            session.commit()
             return checkpointed_record
 
     def complete_odoo_prod_retained_volume_backup_import_operation_record(
@@ -13254,7 +13262,28 @@ class PostgresRecordStore(HumanSessionStore):
                     payload=self._payload_dict(record),
                 )
             )
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError as error:
+                session.rollback()
+                if record.mode != "plan":
+                    raise
+                existing_plan = session.scalar(
+                    select(LaunchplaneProductRetirementRow).where(
+                        LaunchplaneProductRetirementRow.product == record.product,
+                        LaunchplaneProductRetirementRow.actor == record.identity.actor,
+                        LaunchplaneProductRetirementRow.idempotency_key == record.idempotency_key,
+                        LaunchplaneProductRetirementRow.mode == "plan",
+                    )
+                )
+                if existing_plan is None:
+                    raise error
+                stored = self._read_payload(
+                    model_type=ProductRetirementRecord,
+                    payload=existing_plan.payload,
+                )
+                if stored.continuity_sha256 != record.continuity_sha256:
+                    raise ValueError("Product retirement plan idempotency key was reused.") from error
 
     def read_product_retirement_record(self, record_id: str) -> ProductRetirementRecord:
         with self._session_factory() as session:

@@ -228,7 +228,8 @@ class ProductRetirementMutationEvidence(BaseModel):
     provider_absence_verified: bool = False
     runtime_delete_event_ids: tuple[str, ...] = ()
     deleted_authority_refs: tuple[str, ...] = ()
-    preserved_secret_record_refs: tuple[str, ...] = ()
+    disabled_secret_record_sha256: tuple[str, ...] = ()
+    secret_disable_event_sha256: tuple[str, ...] = ()
     lifecycle_before: Literal["", "active", "retiring", "retired"] = ""
     lifecycle_after: Literal["", "active", "retiring", "retired"] = ""
     error_code: str = ""

@@ -27,6 +27,7 @@ from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentRecord,
 )
 from control_plane.contracts.secret_record import SecretRecord
+from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.provider_operations import (
@@ -40,10 +41,12 @@ from control_plane.provider_operations import (
 
 
 _ACTIVE_PREVIEW_STATES = frozenset({"pending", "active", "paused", "teardown_pending"})
-_BUSY_APPLICATION_STATES = frozenset(
-    {"building", "deploying", "in_progress", "pending", "queued", "running", "starting"}
+_RETIRABLE_APPLICATION_STATES = frozenset(
+    {"completed", "done", "exited", "idle", "ready", "running", "stopped", "success"}
 )
-_BUSY_DEPLOYMENT_STATES = frozenset({"in_progress", "pending", "queued", "running", "starting"})
+_RETIRABLE_DEPLOYMENT_STATES = frozenset(
+    {"cancelled", "canceled", "completed", "done", "failed", "idle", "skipped", "success"}
+)
 
 
 class ProductRetirementBlockedError(ValueError):
@@ -92,6 +95,21 @@ class ProductRetirementStore(Protocol):
         instance_name: str = "",
         limit: int | None = None,
     ) -> tuple[SecretRecord, ...]: ...
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]: ...
+
+    def write_secret_record(self, record: SecretRecord) -> object: ...
+
+    def write_secret_binding(self, binding: SecretBinding) -> object: ...
+
+    def write_secret_audit_event(self, event: SecretAuditEvent) -> object: ...
 
     def list_preview_records(
         self,
@@ -317,8 +335,8 @@ def build_provider_observation(
         cast(dokploy_api.JsonObject | None, latest_deployment)
     )
     retirable = (
-        application_state not in _BUSY_APPLICATION_STATES
-        and deployment_status not in _BUSY_DEPLOYMENT_STATES
+        application_state in _RETIRABLE_APPLICATION_STATES
+        and deployment_status in _RETIRABLE_DEPLOYMENT_STATES
     )
     core_payload = {
         "application_id": observed_target_id,
@@ -355,7 +373,7 @@ def build_provider_observation(
 
 def authority_snapshot(bound: BoundProductRetirement) -> ProductRetirementAuthoritySnapshot:
     runtime_refs = tuple(_runtime_ref(record) for record in bound.runtime_records)
-    secret_refs = tuple(record.secret_id for record in bound.secret_records)
+    secret_refs, secret_sha256 = _secret_snapshot(bound.secret_records)
     return ProductRetirementAuthoritySnapshot(
         context=bound.context,
         profile_sha256=canonical_sha256(bound.profile.model_dump(mode="json")),
@@ -368,9 +386,7 @@ def authority_snapshot(bound: BoundProductRetirement) -> ProductRetirementAuthor
             canonical_sha256(record.model_dump(mode="json")) for record in bound.runtime_records
         ),
         secret_record_refs=secret_refs,
-        secret_record_sha256=tuple(
-            canonical_sha256(record.model_dump(mode="json")) for record in bound.secret_records
-        ),
+        secret_record_sha256=secret_sha256,
     )
 
 
@@ -400,7 +416,14 @@ def build_product_retirement_plan_record(
         "authority_snapshot": snapshot.model_dump(mode="json"),
         "provider_observation": observation.model_dump(mode="json"),
     }
-    record_id = build_product_retirement_record_id(trace_id=trace_id, outcome="planned")
+    record_id = (
+        "product-retirement-plan-"
+        f"{canonical_sha256({
+            'product': request.product,
+            'actor': identity.actor,
+            'idempotency_key': idempotency_key,
+        })[:32]}"
+    )
     return ProductRetirementRecord(
         record_id=record_id,
         plan_record_id=record_id,
@@ -438,25 +461,6 @@ def validate_reviewed_product_retirement_plan(
         )
 
 
-def validate_plan_continuity(
-    *,
-    plan: ProductRetirementRecord,
-    bound: BoundProductRetirement,
-    observation: ProductRetirementProviderObservation,
-) -> None:
-    if bound.context != plan.context:
-        raise ProductRetirementBlockedError("Product profile route changed after planning.")
-    if authority_snapshot(bound) != plan.authority_snapshot:
-        raise ProductRetirementBlockedError("Tracked retirement authority changed after planning.")
-    if not _same_planned_observation(
-        planned=plan.provider_observation,
-        current=observation,
-    ):
-        raise ProductRetirementBlockedError("Provider observation changed after planning.")
-    if observation.state != "present" or not observation.retirable:
-        raise ProductRetirementBlockedError("Provider application is not idle and retirable.")
-
-
 class DokployProductRetirementAdapter:
     def __init__(
         self,
@@ -481,7 +485,11 @@ class DokployProductRetirementAdapter:
         self._phases: list[str] = []
         self._runtime_delete_event_ids: list[str] = []
         self._deleted_authority_refs: list[str] = []
+        self._disabled_secret_record_sha256: list[str] = []
+        self._secret_disable_event_sha256: list[str] = []
         self._provider_effect_performed = False
+        self._started = False
+        self._lifecycle_before_value: Literal["active", "retiring", "retired"] | None = None
 
     def target_key(self) -> str:
         return f"provider-target:dokploy:application:{self._plan.provider_observation.target_id}"
@@ -539,6 +547,7 @@ class DokployProductRetirementAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         try:
+            self._write_started_record(provider_operation_key)
             current_bound = bind_product_retirement_authority(
                 record_store=self._record_store,
                 request=self._request,
@@ -661,6 +670,31 @@ class DokployProductRetirementAdapter:
             error_message=error_message,
         )
 
+    @property
+    def started(self) -> bool:
+        return self._started
+
+    def _write_started_record(self, provider_operation_key: str) -> None:
+        if self._started:
+            return
+        lifecycle_before = self._record_store.read_product_profile_record(
+            self._request.product
+        ).lifecycle_state
+        self._lifecycle_before_value = lifecycle_before
+        self._record_store.write_product_retirement_record(
+            build_started_product_retirement_record(
+                request=self._request,
+                plan=self._plan,
+                identity=self._identity,
+                trace_id=self._trace_id,
+                idempotency_key=self._idempotency_key,
+                requested_at=self._requested_at,
+                provider_operation_key=provider_operation_key,
+                lifecycle_before=self._lifecycle_before_value,
+            )
+        )
+        self._started = True
+
     def _checkpoint(self, lease: ProviderOperationLease, phase: str) -> None:
         lease.checkpoint_effect(phase)
         self._phases.append(phase)
@@ -725,18 +759,17 @@ class DokployProductRetirementAdapter:
             context_name=self._plan.context,
             instance_name=self._plan.instance,
         )
-        if tuple(record.secret_id for record in current_secrets) != tuple(
-            self._plan.authority_snapshot.secret_record_refs
-        ) or tuple(
-            canonical_sha256(record.model_dump(mode="json")) for record in current_secrets
-        ) != tuple(self._plan.authority_snapshot.secret_record_sha256):
+        if _secret_snapshot(current_secrets) != (
+            self._plan.authority_snapshot.secret_record_refs,
+            self._plan.authority_snapshot.secret_record_sha256,
+        ):
             raise ProductRetirementBlockedError("Managed secret evidence changed after planning.")
         for runtime_record in current_runtime:
             event_id = (
                 f"product-retirement:{self._plan.plan_sha256}:"
                 f"{provider_identifier_sha256(_runtime_ref(runtime_record))[:24]}"
             )
-            self._record_store.delete_runtime_environment_record_with_event(
+            delete_status = self._record_store.delete_runtime_environment_record_with_event(
                 expected_record=runtime_record,
                 event=RuntimeEnvironmentDeleteEvent(
                     event_id=event_id,
@@ -751,7 +784,12 @@ class DokployProductRetirementAdapter:
                     detail=f"product-retirement-plan:{self._plan.record_id}",
                 ),
             )
+            if delete_status not in {"deleted", "missing", None}:
+                raise ProductRetirementBlockedError(
+                    "Runtime environment authority changed while retiring."
+                )
             self._runtime_delete_event_ids.append(event_id)
+        self._disable_managed_secrets(current_secrets)
         self._delete_target_authority()
         retired_profile = profile.model_copy(
             update={
@@ -811,8 +849,51 @@ class DokployProductRetirementAdapter:
                 raise ProductRetirementBlockedError(
                     "Tracked target authority changed after planning."
                 )
-            deleter(expected_record=record)
+            delete_status = deleter(expected_record=record)
+            if delete_status not in {"deleted", "missing", None}:
+                raise ProductRetirementBlockedError(
+                    "Tracked target authority changed while retiring."
+                )
             self._deleted_authority_refs.append(reference)
+
+    def _disable_managed_secrets(self, records: tuple[SecretRecord, ...]) -> None:
+        for record in records:
+            if record.status != "disabled":
+                self._record_store.write_secret_record(
+                    record.model_copy(
+                        update={
+                            "status": "disabled",
+                            "updated_at": self._requested_at,
+                            "updated_by": self._identity.actor,
+                        }
+                    )
+                )
+            for binding in self._record_store.list_secret_bindings(
+                integration=record.integration,
+                context_name=record.context,
+                instance_name=record.instance,
+            ):
+                if binding.secret_id == record.secret_id and binding.status != "disabled":
+                    self._record_store.write_secret_binding(
+                        binding.model_copy(
+                            update={"status": "disabled", "updated_at": self._requested_at}
+                        )
+                    )
+            event = SecretAuditEvent(
+                event_id=(
+                    f"product-retirement:{self._plan.plan_sha256}:"
+                    f"secret-disabled:{provider_identifier_sha256(record.secret_id)[:24]}"
+                ),
+                secret_id=record.secret_id,
+                event_type="disabled",
+                recorded_at=self._requested_at,
+                actor=self._identity.actor,
+                detail="Launchplane disabled managed secret authority for product retirement.",
+                metadata={"plan_sha256": self._plan.plan_sha256},
+            )
+            self._record_store.write_secret_audit_event(event)
+            self._disabled_secret_record_sha256.append(provider_identifier_sha256(record.secret_id))
+            self._secret_disable_event_sha256.append(provider_identifier_sha256(event.event_id))
 
     def _write_terminal_record(
         self,
@@ -881,8 +962,9 @@ class DokployProductRetirementAdapter:
                 provider_absence_verified=provider_absence_verified,
                 runtime_delete_event_ids=tuple(self._runtime_delete_event_ids),
                 deleted_authority_refs=tuple(self._deleted_authority_refs),
-                preserved_secret_record_refs=self._plan.authority_snapshot.secret_record_refs,
-                lifecycle_before="active",
+                disabled_secret_record_sha256=tuple(self._disabled_secret_record_sha256),
+                secret_disable_event_sha256=tuple(self._secret_disable_event_sha256),
+                lifecycle_before=self._lifecycle_before_value or "retiring",
                 lifecycle_after=cast(
                     "Literal['', 'active', 'retiring', 'retired']",
                     lifecycle_after,
@@ -891,6 +973,7 @@ class DokployProductRetirementAdapter:
                 error_message=error_message,
             ),
         )
+
 
 
 def build_started_product_retirement_record(
@@ -902,6 +985,7 @@ def build_started_product_retirement_record(
     idempotency_key: str,
     requested_at: str,
     provider_operation_key: str,
+    lifecycle_before: Literal["active", "retiring", "retired"],
 ) -> ProductRetirementRecord:
     return ProductRetirementRecord(
         record_id=build_product_retirement_record_id(trace_id=trace_id, outcome="started"),
@@ -927,8 +1011,7 @@ def build_started_product_retirement_record(
         mutation_evidence=ProductRetirementMutationEvidence(
             provider_operation_key=provider_operation_key,
             reconciliation_key=f"product-retirement:{plan.plan_sha256}",
-            preserved_secret_record_refs=plan.authority_snapshot.secret_record_refs,
-            lifecycle_before="active",
+            lifecycle_before=lifecycle_before,
         ),
     )
 
@@ -964,7 +1047,7 @@ def redacted_product_retirement_response(record: ProductRetirementRecord) -> dic
             "provider_absence_verified": evidence.provider_absence_verified,
             "runtime_delete_event_count": len(evidence.runtime_delete_event_ids),
             "deleted_authority_refs": list(evidence.deleted_authority_refs),
-            "preserved_secret_record_count": len(evidence.preserved_secret_record_refs),
+            "disabled_secret_record_count": len(evidence.disabled_secret_record_sha256),
             "lifecycle_after": evidence.lifecycle_after,
             "error_code": evidence.error_code,
         },
@@ -980,7 +1063,10 @@ def active_preview_ids(
     return tuple(
         sorted(
             preview_id
-            for preview in record_store.list_preview_records(context_name=preview_context)
+        for preview in record_store.list_preview_records(
+            context_name=preview_context,
+            anchor_repo=profile.repository,
+        )
             if getattr(preview, "state", "") in _ACTIVE_PREVIEW_STATES
             and (preview_id := str(getattr(preview, "preview_id", "")).strip())
         )
@@ -1023,3 +1109,21 @@ def _domain_id(payload: Mapping[str, object]) -> str:
 
 def _runtime_ref(record: RuntimeEnvironmentRecord) -> str:
     return f"runtime_environment:{record.scope}:{record.context}:{record.instance}"
+
+
+def _secret_snapshot(
+    records: tuple[SecretRecord, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    pairs = sorted(
+        (
+            provider_identifier_sha256(record.secret_id),
+            canonical_sha256(
+                record.model_dump(
+                    mode="json",
+                    exclude={"status", "updated_at", "updated_by"},
+                )
+            ),
+        )
+        for record in records
+    )
+    return tuple(item[0] for item in pairs), tuple(item[1] for item in pairs)

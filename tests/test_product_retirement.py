@@ -174,7 +174,11 @@ def _request(*, mode: str = "plan", **overrides: object) -> ProductRetirementReq
 def _observation(*, domains: tuple[str, ...] = ()) -> ProductRetirementProviderObservation:
     return build_provider_observation(
         target_id=TARGET_ID,
-        payload={"applicationId": TARGET_ID, "name": "example-site-prod"},
+        payload={
+            "applicationId": TARGET_ID,
+            "name": "example-site-prod",
+            "applicationStatus": "running",
+        },
         domains=tuple(
             {"domainId": domain_id, "host": f"{domain_id}.example"} for domain_id in domains
         ),
@@ -246,6 +250,16 @@ class ProductRetirementTests(unittest.TestCase):
             payload={"applicationId": TARGET_ID, "status": "deploying"},
             domains=(),
             latest_deployment={"status": "running"},
+            observed_at=NOW,
+        )
+        self.assertFalse(observation.retirable)
+
+    def test_provider_observation_rejects_unknown_states(self) -> None:
+        observation = build_provider_observation(
+            target_id=TARGET_ID,
+            payload={"applicationId": TARGET_ID, "applicationStatus": "mystery"},
+            domains=(),
+            latest_deployment={"status": "mystery"},
             observed_at=NOW,
         )
         self.assertFalse(observation.retirable)

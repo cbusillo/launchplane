@@ -16353,6 +16353,23 @@ def create_launchplane_fastapi_app(
                 code="idempotency_key_required",
                 message="Product retirement requires Idempotency-Key.",
             )
+        action = (
+            "product_retirement.plan"
+            if retirement_request.mode == "plan"
+            else "product_retirement.apply"
+        )
+        if not resolved_authz_policy_runtime.policy.allows_product_instance_preflight(
+            identity=identity,
+            action=action,
+            product=retirement_request.product,
+            instance=retirement_request.instance,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity is not authorized for product retirement.",
+            )
         try:
             retirement_store = cast(
                 control_plane_product_retirement.ProductRetirementStore,
@@ -16399,11 +16416,6 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
 
-        action = (
-            "product_retirement.plan"
-            if retirement_request.mode == "plan"
-            else "product_retirement.apply"
-        )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action=action,
@@ -16472,6 +16484,16 @@ def create_launchplane_fastapi_app(
                     observation=observation,
                 )
                 retirement_store.write_product_retirement_record(plan)
+                persisted_plans = retirement_store.list_product_retirement_records(
+                    product=retirement_request.product,
+                    actor=actor_identity.actor,
+                    mode="plan",
+                    idempotency_key=normalized_key,
+                    limit=1,
+                )
+                if not persisted_plans:
+                    raise RuntimeError("Product retirement plan reservation was not persisted.")
+                plan = persisted_plans[0]
             except FileNotFoundError as error:
                 raise _launchplane_http_error(
                     status_code=404,
@@ -16523,16 +16545,6 @@ def create_launchplane_fastapi_app(
             route_path=_PRODUCT_RETIREMENT_ROUTE,
             fingerprint=payload_fingerprint,
         )
-        started_record = control_plane_product_retirement.build_started_product_retirement_record(
-            request=retirement_request,
-            plan=plan_record,
-            identity=actor_identity,
-            trace_id=trace_id,
-            idempotency_key=normalized_key,
-            requested_at=requested_at,
-            provider_operation_key=provider_operation_key,
-        )
-        retirement_store.write_product_retirement_record(started_record)
         try:
             return await run_provider_mutation(
                 record_store=retirement_store,
@@ -16552,6 +16564,8 @@ def create_launchplane_fastapi_app(
                 ),
             )
         except HTTPException as error:
+            if not adapter.started:
+                raise
             detail = error.detail if isinstance(error.detail, Mapping) else {}
             code = str(detail.get("code") or "product_retirement_failed")
             outcome = "reconcile_required" if "reconciliation" in code else "failed"
@@ -16564,6 +16578,13 @@ def create_launchplane_fastapi_app(
             retirement_store.write_product_retirement_record(terminal)
             raise
         except (ValueError, click.ClickException) as error:
+            if not adapter.started:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_retirement_blocked",
+                    message=str(error),
+                ) from error
             terminal = adapter.terminal_record(
                 outcome="failed",
                 provider_operation_key=provider_operation_key,

@@ -68,12 +68,22 @@ def upgrade() -> None:
                 _TABLE,
                 [first_column, sa.text("recorded_at DESC")],
             )
+    if not _index_exists("launchplane_product_retirements_plan_idempotency_unique"):
+        op.create_index(
+            "launchplane_product_retirements_plan_idempotency_unique",
+            _TABLE,
+            ["product", "actor", "idempotency_key"],
+            unique=True,
+            postgresql_where=sa.text("mode = 'plan'"),
+            sqlite_where=sa.text("mode = 'plan'"),
+        )
 
 
 def downgrade() -> None:
     if not _table_exists():
         return
     for index_name in (
+        "launchplane_product_retirements_plan_idempotency_unique",
         "launchplane_product_retirements_idempotency_idx",
         "launchplane_product_retirements_plan_idx",
         "launchplane_product_retirements_product_idx",

@@ -968,16 +968,48 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 )
                 for rule in self.local_admins
             )
-        return any(
-            rule.allows(
-                identity=identity,
-                action=action,
-                product=product,
-                context=context,
-                target=resolved_target,
-                schema_version=self.schema_version,
+        if isinstance(identity, GitHubActionsIdentity):
+            return any(
+                rule.allows(
+                    identity=identity,
+                    action=action,
+                    product=product,
+                    context=context,
+                    target=resolved_target,
+                    schema_version=self.schema_version,
+                )
+                for rule in self.github_actions
             )
-            for rule in self.github_actions
+        return False
+
+    def allows_product_instance_preflight(
+        self,
+        *,
+        identity: LaunchplaneIdentity,
+        action: str,
+        product: str,
+        instance: str,
+    ) -> bool:
+        """Authorize a product/instance request before resolving its private context.
+
+        Callers must re-check the resolved context before performing a mutation.
+        """
+        policy = self.model_copy(deep=True)
+        for collection_name in (
+            "github_actions",
+            "github_humans",
+            "terminal_agents",
+            "local_operators",
+            "local_admins",
+        ):
+            for rule in getattr(policy, collection_name):
+                rule.contexts = ()
+        return policy.allows(
+            identity=identity,
+            action=action,
+            product=product,
+            context="",
+            target=AuthorizationTarget(scope="instance", instances=(instance,)),
         )
 
     def human_role_for(

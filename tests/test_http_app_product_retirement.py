@@ -35,7 +35,7 @@ TARGET_SHA256 = provider_identifier_sha256(TARGET_ID)
 def _observation(*, name: str = "example-site-prod") -> ProductRetirementProviderObservation:
     return build_provider_observation(
         target_id=TARGET_ID,
-        payload={"applicationId": TARGET_ID, "name": name},
+        payload={"applicationId": TARGET_ID, "name": name, "applicationStatus": "running"},
         domains=(),
         latest_deployment={"status": "done"},
         observed_at=NOW,
