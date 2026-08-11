@@ -96,15 +96,20 @@ The security workflow runs this policy for both same-repository and fork pull
 requests before actionlint. The unit-test suite runs it as well, so a mutable
 reference cannot pass the required CI path.
 
-Detached application retirement follows a two-phase trust rollout. The first
-phase lands only the service contract, persistence, managed authz selector/
-secret routing, and a protected `workflow_call` worker. No dispatch workflow may
-call that worker in the same phase, and no live managed secret or rule is
-configured. The service additionally rejects GitHub Actions identities whose
-`job_workflow_ref` is not the exact reusable workflow path at a 40-character
-commit SHA. A later thin dispatch caller must be pinned to the merged worker SHA
-and authorized as an exact caller/worker pair before provider mutation is
-possible.
+Detached application retirement follows a two-phase trust rollout. Phase one
+landed only the service contract, persistence, managed authz selector/secret
+routing, and a protected `workflow_call` worker. Phase two adds the thin
+`workflow_dispatch` caller at
+`.github/workflows/detached-application-retirement.yml`, pinned to the exact
+merged worker identity
+`cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml@11d53d2840a6f1898785d7c8f1553c202caa3fbf`.
+The caller has only `contents: read` and `id-token: write`; it has no runner,
+steps, environment, or concurrency of its own. No live managed secret or rule
+is configured by this change. The service additionally rejects GitHub Actions
+identities whose `job_workflow_ref` is not the exact reusable workflow path at a
+40-character commit SHA. After the wrapper is merged and deployed, the exact
+caller `workflow_ref` and worker `job_workflow_ref` must be configured together
+before any protected plan/apply run or provider mutation is possible.
 
 ## Provenance And Updates
 

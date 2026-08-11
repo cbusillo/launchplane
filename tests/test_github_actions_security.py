@@ -107,6 +107,9 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/product-retirement.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml"}
     ),
+    Path(".github/workflows/detached-application-retirement.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml"}
+    ),
 }
 
 
@@ -275,6 +278,12 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
         ActionClassification(
             "First-party same-repository",
             "protected immutable product retirement",
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "protected immutable detached application retirement",
         )
     ),
     "docker/build-push-action": ActionClassification(
@@ -540,6 +549,7 @@ class GitHubActionsSecurityTests(TestCase):
         self.assertIn("First-party cross-repository", policy)
         self.assertIn("High-privilege", policy)
         self.assertIn("protected immutable product retirement", policy)
+        self.assertIn("reusable-only detached application retirement", policy)
         self.assertIn("container image", policy)
         self.assertIn("MUTABLE_REFERENCE_ALLOWLIST", policy)
         self.assertIn("Dependabot", policy)

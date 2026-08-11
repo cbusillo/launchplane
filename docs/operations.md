@@ -2568,11 +2568,23 @@ job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-product-retirem
 ## Detached Application Retirement
 
 Phase one provides **Reusable Detached Application Retirement** as a
-`workflow_call`-only worker. It is intentionally uncalled: do not add or invoke
-a `workflow_dispatch` wrapper, configure the future live authz managed-set
-secret, deploy this branch, or attempt a provider mutation as part of phase one.
-The worker uses the protected `launchplane-authz-admin` environment, OIDC,
-target-digest concurrency, exact input validation, and redacted evidence.
+`workflow_call`-only worker. Phase two adds the thin
+**Detached Application Retirement** `workflow_dispatch` wrapper, pinned to the
+exact merged worker SHA below. The wrapper only defines the manual inputs,
+forwards them unchanged, and grants `contents: read` plus `id-token: write`; it
+does not define a runner, environment, steps, or concurrency. Do not configure
+the live authz managed-set secret, deploy this branch, or attempt a provider
+mutation as part of this code phase. The worker uses the protected
+`launchplane-authz-admin` environment, OIDC, target-digest concurrency, exact
+input validation, and redacted evidence.
+
+The protected identity pair to configure only after this wrapper is merged and
+deployed is:
+
+```text
+workflow_ref=cbusillo/launchplane/.github/workflows/detached-application-retirement.yml@refs/heads/main
+job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml@11d53d2840a6f1898785d7c8f1553c202caa3fbf
+```
 
 The future operator sequence is plan then apply. Inputs are exact Dokploy
 project/environment/application names, the candidate target SHA-256, a sorted
@@ -2593,8 +2605,9 @@ protected fingerprints, and zero authority writes.
 Managed authz routing is reserved through the
 `detached-application-retirement` selector, managed-set ID
 `operator.detached-application-retirement`, and secret name
-`LAUNCHPLANE_AUTHZ_DETACHED_APPLICATION_RETIREMENT_MANAGED_SET_JSON`. Phase one
-does not create or populate that secret and does not reconcile a live rule. A
-later phase must first pin a thin caller to the exact merged reusable-worker SHA,
-then authorize the exact caller `workflow_ref` and immutable worker
-`job_workflow_ref` before any protected plan/apply run.
+`LAUNCHPLANE_AUTHZ_DETACHED_APPLICATION_RETIREMENT_MANAGED_SET_JSON`. Neither
+phase creates or populates that secret or reconciles a live rule. The remaining
+sequence is: merge and deploy this wrapper, configure the exact caller and
+worker authz pair through the managed authz path, then run the reviewed plan and
+apply sequence. Never substitute a mutable ref, a checked-in target value, or a
+local CLI live-target fallback.

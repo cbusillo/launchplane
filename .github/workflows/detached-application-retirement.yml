@@ -1,0 +1,86 @@
+---
+name: Detached Application Retirement
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Persist a reviewed plan or apply that exact persisted plan.
+        required: true
+        type: string
+      project_name:
+        description: Exact Dokploy project name.
+        required: true
+        type: string
+      environment_name:
+        description: Exact Dokploy environment name.
+        required: true
+        type: string
+      application_name:
+        description: Exact globally unique detached Dokploy application name.
+        required: true
+        type: string
+      candidate_target_sha256:
+        description: SHA-256 of the detached application identifier.
+        required: true
+        type: string
+      expected_protected_target_sha256_json:
+        # yamllint disable-line rule:line-length
+        description: Sorted non-empty JSON array of protected application target SHA-256 values.
+        required: true
+        type: string
+      operator_idempotency_key:
+        # yamllint disable-line rule:line-length
+        description: Stable operator-selected key reused for retries of this retirement intent.
+        required: true
+        type: string
+      reason:
+        # yamllint disable-line rule:line-length
+        description: Required single-line operator reason bound into plan continuity.
+        required: true
+        type: string
+      related_issue:
+        # yamllint disable-line rule:line-length
+        description: Required issue or change reference bound into plan continuity.
+        required: true
+        type: string
+      reviewed_plan_record_id:
+        # yamllint disable-line rule:line-length
+        description: Persisted plan record id returned by the reviewed plan; required for apply.
+        required: false
+        default: ""
+        type: string
+      reviewed_plan_sha256:
+        # yamllint disable-line rule:line-length
+        description: Plan SHA-256 returned by the reviewed plan; required for apply.
+        required: false
+        default: ""
+        type: string
+      confirmation:
+        # yamllint disable-line rule:line-length
+        description: Exact target-bound apply confirmation returned by the plan contract.
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  retire:
+    # yamllint disable-line rule:line-length
+    uses: cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml@11d53d2840a6f1898785d7c8f1553c202caa3fbf  # main
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      mode: ${{ inputs.mode }}
+      project_name: ${{ inputs.project_name }}
+      environment_name: ${{ inputs.environment_name }}
+      application_name: ${{ inputs.application_name }}
+      candidate_target_sha256: ${{ inputs.candidate_target_sha256 }}
+      # yamllint disable-line rule:line-length
+      expected_protected_target_sha256_json: ${{ inputs.expected_protected_target_sha256_json }}
+      operator_idempotency_key: ${{ inputs.operator_idempotency_key }}
+      reason: ${{ inputs.reason }}
+      related_issue: ${{ inputs.related_issue }}
+      reviewed_plan_record_id: ${{ inputs.reviewed_plan_record_id }}
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      confirmation: ${{ inputs.confirmation }}
