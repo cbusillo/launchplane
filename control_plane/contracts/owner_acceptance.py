@@ -77,6 +77,10 @@ _HUMAN_ACTIONS = frozenset({"accepted", "changes_requested", "revoked"})
 _SYSTEM_ACTIONS = frozenset({"superseded", "invalidated"})
 
 
+class OwnerAcceptanceTransitionError(ValueError):
+    """Raised when an Owner acceptance append violates the human transition table."""
+
+
 def _required_token(value: str, field_name: str) -> str:
     normalized = value.strip()
     if not normalized:
@@ -398,18 +402,46 @@ class OwnerAcceptanceAuthorization(BaseModel):
         return self
 
 
+class OwnerAcceptanceResolutionEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    summary: str = Field(min_length=1, max_length=4000)
+    resolved_evidence_references: tuple[str, ...] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def _validate_resolution(self) -> "OwnerAcceptanceResolutionEvidence":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Owner acceptance resolution schema version.")
+        object.__setattr__(self, "summary", _required_token(self.summary, "summary"))
+        references = tuple(
+            _required_token(reference, "resolved_evidence_references")
+            for reference in self.resolved_evidence_references
+        )
+        if any(len(reference) > 512 for reference in references):
+            raise ValueError(
+                "Owner acceptance resolved evidence references must be at most 512 characters"
+            )
+        if len(set(references)) != len(references):
+            raise ValueError("Owner acceptance resolved evidence references must be unique")
+        object.__setattr__(self, "resolved_evidence_references", references)
+        return self
+
+
 class OwnerAcceptanceEventRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = Field(default=1, ge=1)
     event_id: str = ""
     acceptance_id: str = ""
+    subject_sequence: int = Field(default=0, ge=0)
     binding: OwnerAcceptanceBinding
     action: OwnerAcceptanceAction
     occurred_at: str
     source_event_kind: OwnerAcceptanceSourceEventKind
     source_event_id: str = Field(min_length=1, max_length=128)
     reason: str = Field(default="", max_length=4000)
+    resolution: OwnerAcceptanceResolutionEvidence | None = None
     authorization: OwnerAcceptanceAuthorization | None = None
 
     @model_validator(mode="after")
@@ -436,6 +468,8 @@ class OwnerAcceptanceEventRecord(BaseModel):
         object.__setattr__(self, "reason", self.reason.strip())
         if self.action != "accepted" and not self.reason:
             raise ValueError(f"Owner acceptance action {self.action!r} requires a reason")
+        if self.resolution is not None and self.action != "accepted":
+            raise ValueError("Only accepted Owner acceptance events may carry resolution evidence")
         if self.action in _HUMAN_ACTIONS:
             if self.source_event_kind != "browser_api":
                 raise ValueError("Human Owner acceptance events require browser_api source")
@@ -670,8 +704,83 @@ def build_owner_acceptance_event_id(
 
 def owner_acceptance_event_replay_digest(record: OwnerAcceptanceEventRecord) -> str:
     payload = record.model_dump(mode="json", exclude_none=True)
+    payload.pop("subject_sequence", None)
     payload.pop("occurred_at", None)
     authorization = payload.get("authorization")
     if isinstance(authorization, dict):
         authorization.pop("authorized_at", None)
     return _canonical_sha256(payload)
+
+
+def owner_acceptance_subject_key(
+    record: OwnerAcceptanceEventRecord,
+) -> tuple[str, int, str, str, str, str]:
+    binding = record.binding
+    return (
+        binding.repository_id,
+        binding.pull_request_number,
+        binding.product,
+        binding.system,
+        binding.action,
+        binding.environment,
+    )
+
+
+def validate_owner_acceptance_event_transition(
+    *,
+    previous: OwnerAcceptanceEventRecord | None,
+    proposed: OwnerAcceptanceEventRecord,
+) -> None:
+    if previous is not None and owner_acceptance_subject_key(
+        previous
+    ) != owner_acceptance_subject_key(proposed):
+        raise OwnerAcceptanceTransitionError(
+            "Owner acceptance transition events must share one subject."
+        )
+    if proposed.action in _SYSTEM_ACTIONS:
+        return
+
+    same_binding = (
+        previous is not None and previous.binding.binding_sha256 == proposed.binding.binding_sha256
+    )
+    if not same_binding:
+        if proposed.action == "revoked":
+            raise OwnerAcceptanceTransitionError(
+                "Owner acceptance revocation requires a current human event on the identical binding."
+            )
+        if proposed.resolution is not None:
+            raise OwnerAcceptanceTransitionError(
+                "Owner acceptance resolution evidence is valid only when resolving changes requested on the identical binding."
+            )
+        return
+
+    assert previous is not None
+    if previous.action == "accepted":
+        if proposed.action in {"changes_requested", "revoked"}:
+            if proposed.resolution is not None:
+                raise OwnerAcceptanceTransitionError(
+                    "Owner acceptance resolution evidence is valid only for changes_requested to accepted."
+                )
+            return
+        raise OwnerAcceptanceTransitionError(
+            "An accepted Owner review cannot be deliberately reaffirmed on an identical binding."
+        )
+    if previous.action == "changes_requested":
+        if proposed.action == "accepted":
+            if proposed.resolution is None:
+                raise OwnerAcceptanceTransitionError(
+                    "Resolving Owner changes requested requires a structured summary and evidence references."
+                )
+            return
+        if proposed.action == "revoked":
+            if proposed.resolution is not None:
+                raise OwnerAcceptanceTransitionError(
+                    "Owner acceptance revocation cannot carry resolution evidence."
+                )
+            return
+        raise OwnerAcceptanceTransitionError(
+            "Owner changes requested cannot be deliberately reaffirmed on an identical binding."
+        )
+    raise OwnerAcceptanceTransitionError(
+        "A revoked or system-derived Owner review cannot transition again on an identical binding."
+    )

@@ -43,6 +43,7 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceBinding,
     OwnerAcceptanceEventRecord,
     OwnerAcceptancePreviewBinding,
+    OwnerAcceptanceTransitionError,
     owner_acceptance_runtime_identity_binding,
 )
 from control_plane.contracts.merge_train_controller_state import (
@@ -847,8 +848,12 @@ def _manager_preview_approval_event() -> ManagerPreviewApprovalEventRecord:
     )
 
 
-def _owner_acceptance_event(*, product: str = "example-site") -> OwnerAcceptanceEventRecord:
-    occurred_at = "2026-08-07T12:00:00Z"
+def _owner_acceptance_event(
+    *,
+    product: str = "example-site",
+    source_event_id: str = "",
+    occurred_at: str = "2026-08-07T12:00:00Z",
+) -> OwnerAcceptanceEventRecord:
     binding = OwnerAcceptanceBinding(
         repository_id="1001",
         repository_owner_id="2001",
@@ -898,7 +903,7 @@ def _owner_acceptance_event(*, product: str = "example-site") -> OwnerAcceptance
         action="accepted",
         occurred_at=occurred_at,
         source_event_kind="browser_api",
-        source_event_id=f"acceptance-{product}-101",
+        source_event_id=source_event_id or f"acceptance-{product}-101",
         authorization=OwnerAcceptanceAuthorization(
             owner_identity_id=f"owner-identity-github-{product}",
             owner_github_id=101,
@@ -911,6 +916,22 @@ def _owner_acceptance_event(*, product: str = "example-site") -> OwnerAcceptance
             owner_requirement_digest=binding.owner_requirement_digest,
             authorized_at=occurred_at,
         ),
+    )
+
+
+def _owner_acceptance_system_event(
+    *,
+    action: str,
+    source_event_id: str,
+    occurred_at: str,
+) -> OwnerAcceptanceEventRecord:
+    return OwnerAcceptanceEventRecord(
+        binding=_owner_acceptance_event().binding,
+        action=action,  # type: ignore[arg-type]
+        occurred_at=occurred_at,
+        source_event_kind="system",
+        source_event_id=source_event_id,
+        reason="PostgreSQL subject sequence integration evidence.",
     )
 
 
@@ -981,7 +1002,12 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             replay_payload["authorization"]["authorized_at"] = "2026-08-07T12:01:00Z"
             replay = OwnerAcceptanceEventRecord.model_validate(replay_payload)
             self.assertEqual(store.write_owner_acceptance_event_record(replay), "replayed")
-            self.assertEqual(store.read_owner_acceptance_event_record(event.event_id), event)
+            persisted_event = store.read_owner_acceptance_event_record(event.event_id)
+            self.assertEqual(persisted_event.subject_sequence, 1)
+            self.assertEqual(
+                persisted_event.model_dump(mode="json", exclude={"subject_sequence"}),
+                event.model_dump(mode="json", exclude={"subject_sequence"}),
+            )
             self.assertEqual(
                 store.list_owner_acceptance_event_records(
                     repository_id="1001",
@@ -991,7 +1017,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     system="web",
                     action="pull_request.owner_acceptance",
                 ),
-                (event,),
+                (persisted_event,),
             )
             all_product_events = store.list_owner_acceptance_event_records(
                 repository_id="1001",
@@ -1008,6 +1034,140 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             )
             with self.assertRaises(OwnerAcceptanceEventConflictError):
                 store.write_owner_acceptance_event_record(conflicting)
+
+    def test_owner_acceptance_subject_sequences_serialize_concurrent_appends_and_replay(
+        self,
+    ) -> None:
+        with _store_for_fresh_head_database() as first_store:
+            second_store = PostgresRecordStore(database_url=first_store.database_url)
+            first = _owner_acceptance_system_event(
+                action="superseded",
+                source_event_id="concurrent-owner-event-one",
+                occurred_at="2026-08-07T13:00:00Z",
+            )
+            second = _owner_acceptance_system_event(
+                action="invalidated",
+                source_event_id="concurrent-owner-event-two",
+                occurred_at="2026-08-07T11:00:00Z",
+            )
+            barrier = threading.Barrier(2)
+
+            def append(
+                store_and_event: tuple[PostgresRecordStore, OwnerAcceptanceEventRecord],
+            ) -> str:
+                active_store, event = store_and_event
+                barrier.wait()
+                return active_store.write_owner_acceptance_event_record(event)
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(
+                        executor.map(append, ((first_store, first), (second_store, second)))
+                    )
+                self.assertEqual(sorted(statuses), ["written", "written"])
+                records = first_store.list_owner_acceptance_event_records()
+                self.assertEqual(sorted(record.subject_sequence for record in records), [1, 2])
+
+                self.assertEqual(
+                    second_store.write_owner_acceptance_event_record(first),
+                    "replayed",
+                )
+                third = _owner_acceptance_system_event(
+                    action="superseded",
+                    source_event_id="concurrent-owner-event-three",
+                    occurred_at="2026-08-07T10:00:00Z",
+                )
+                self.assertEqual(
+                    first_store.write_owner_acceptance_event_record(third),
+                    "written",
+                )
+                self.assertEqual(
+                    first_store.read_owner_acceptance_event_record(third.event_id).subject_sequence,
+                    3,
+                )
+            finally:
+                second_store.close()
+
+    def test_owner_acceptance_concurrent_exact_replay_receives_no_new_sequence(self) -> None:
+        with _store_for_fresh_head_database() as first_store:
+            second_store = PostgresRecordStore(database_url=first_store.database_url)
+            event = _owner_acceptance_system_event(
+                action="superseded",
+                source_event_id="concurrent-owner-exact-replay",
+                occurred_at="2026-08-07T13:00:00Z",
+            )
+            barrier = threading.Barrier(2)
+
+            def append(active_store: PostgresRecordStore) -> str:
+                barrier.wait()
+                return active_store.write_owner_acceptance_event_record(event)
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    statuses = tuple(executor.map(append, (first_store, second_store)))
+                self.assertEqual(sorted(statuses), ["replayed", "written"])
+                persisted = first_store.read_owner_acceptance_event_record(event.event_id)
+                self.assertEqual(persisted.subject_sequence, 1)
+
+                next_event = _owner_acceptance_system_event(
+                    action="invalidated",
+                    source_event_id="after-concurrent-owner-exact-replay",
+                    occurred_at="2026-08-07T11:00:00Z",
+                )
+                self.assertEqual(
+                    first_store.write_owner_acceptance_event_record(next_event),
+                    "written",
+                )
+                self.assertEqual(
+                    first_store.read_owner_acceptance_event_record(
+                        next_event.event_id
+                    ).subject_sequence,
+                    2,
+                )
+            finally:
+                second_store.close()
+
+    def test_owner_acceptance_invalid_transition_rolls_back_sequence_allocation(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            accepted = _owner_acceptance_event(source_event_id="accepted-before-rollback")
+            reaffirmed = _owner_acceptance_event(source_event_id="invalid-reaffirmation")
+            self.assertEqual(store.write_owner_acceptance_event_record(accepted), "written")
+
+            with self.assertRaises(OwnerAcceptanceTransitionError):
+                store.write_owner_acceptance_event_record(reaffirmed)
+
+            revoked = OwnerAcceptanceEventRecord(
+                binding=accepted.binding,
+                action="revoked",
+                occurred_at="2026-08-07T11:00:00Z",
+                source_event_kind="browser_api",
+                source_event_id="revoke-after-rollback",
+                reason="Owner withdrew the product review.",
+                authorization=accepted.authorization.model_copy(
+                    update={"authorized_at": "2026-08-07T11:00:00Z"}
+                )
+                if accepted.authorization is not None
+                else None,
+            )
+            self.assertEqual(store.write_owner_acceptance_event_record(revoked), "written")
+            persisted = store.read_owner_acceptance_event_record(revoked.event_id)
+            self.assertEqual(persisted.subject_sequence, 2)
+            with store._engine.connect() as connection:
+                last_sequence = connection.execute(
+                    text(
+                        """
+                        SELECT last_sequence
+                        FROM launchplane_owner_acceptance_subject_sequences
+                        WHERE repository_id = '1001'
+                          AND pr_number = 17
+                          AND product = 'example-site'
+                          AND system = 'web'
+                          AND owner_action = 'pull_request.owner_acceptance'
+                          AND environment = 'pull_request'
+                        """
+                    )
+                ).scalar_one()
+            self.assertEqual(last_sequence, 2)
 
     def test_full_release_upgrades_compatibility_floor_before_store_startup(self) -> None:
         with _isolated_postgres_database() as database_url:

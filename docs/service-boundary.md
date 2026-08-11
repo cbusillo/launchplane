@@ -3569,6 +3569,16 @@ rejected by the bounded request contract. `GET
 /v1/owner-acceptance/events/{event_id}` reads the persisted append-only event
 through the same Owner-acceptance read authority.
 
+The request may include structured `resolution` evidence only for an
+`accepted` event that resolves the current `changes_requested` event on the
+identical binding. That object requires a non-empty summary and one or more
+unique resolved evidence references. The append transaction assigns the next
+per-subject `subject_sequence`, validates the complete human transition table,
+and inserts the event atomically. Exact replay receives no new sequence;
+invalid reaffirmations, unreasoned revocations, and unsupported transitions
+return a conflict. Current state folds by sequence only, while timestamps remain
+audit and display fields.
+
 The ledger is append-only and shadow-only. Changed bound evidence or changed
 Owner policy/requirement/membership makes prior acceptance stale for the new
 binding. Evaluation returns one decision per affected product and is accepted

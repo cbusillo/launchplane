@@ -278,12 +278,20 @@ caller-supplied product.
 
 Filesystem rehearsal records live under `launchplane_owner_acceptance_events/`.
 PostgreSQL stores the ledger in `launchplane_owner_acceptance_events` with an
-event-id primary key and subject, binding, and acceptance indexes. Migration
-`f3a5c7e9b1d4` creates the empty table and indexes without backfilling from
-GitHub comments, manager-preview approvals, or tenant admission evidence.
-Optional preview evidence lives inside the existing JSONB payload, so this
-additive slice requires no new schema migration. Non-preview payloads omit the
-field and preserve the original #2022 binding and replay digests.
+event-id primary key, database-assigned monotonic `subject_sequence`, and
+subject, binding, acceptance, and unique subject-sequence indexes. The companion
+`launchplane_owner_acceptance_subject_sequences` table serializes allocation for
+each full Owner-review subject in the append transaction. Filesystem rehearsal
+holds the equivalent cross-process lock while it checks replay, validates the
+transition, allocates sequence, and atomically replaces the new event file.
+
+Migration `f3a5c7e9b1d4` creates the empty event table. Migration
+`c6e8f1b3d5a7` backfills existing rows in their prior deterministic
+`(occurred_at, event_id)` order, creates the counter and uniqueness fence, and
+does not change semantic payload identity. Sequence metadata is excluded from
+event IDs, binding digests, and replay digests. Optional preview and structured
+resolution evidence live inside the JSON payload; omitted optional fields
+preserve the original #2022 binding, event, and replay digests byte-for-byte.
 
 ## Change Impact Policy Records
 

@@ -32,7 +32,9 @@ class OwnerAcceptanceQueueReadStore(Protocol):
 
 def require_owner_acceptance_queue_read_store(store: object) -> OwnerAcceptanceQueueReadStore:
     if not callable(getattr(store, "list_owner_acceptance_event_records", None)):
-        raise TypeError("Owner acceptance queue storage requires list_owner_acceptance_event_records.")
+        raise TypeError(
+            "Owner acceptance queue storage requires list_owner_acceptance_event_records."
+        )
     return cast(OwnerAcceptanceQueueReadStore, store)
 
 
@@ -79,13 +81,20 @@ def build_owner_acceptance_queue(
     all_events = queue_store.list_owner_acceptance_event_records()
 
     # Fold by full subject: (repository_id, pull_request_number, product, system, action, environment)
-    # Latest event per subject by (occurred_at, event_id) — deterministic tie-break
+    # Latest event per subject by database/filesystem-assigned sequence only.
     latest_by_subject: dict[tuple[str, int, str, str, str, str], OwnerAcceptanceEventRecord] = {}
+    sequences_by_subject: dict[tuple[str, int, str, str, str, str], set[int]] = {}
     for event in all_events:
+        if event.subject_sequence < 1:
+            raise ValueError("Owner acceptance queue event is missing subject sequence metadata")
         b = event.binding
         key = (b.repository_id, b.pull_request_number, b.product, b.system, b.action, b.environment)
+        subject_sequences = sequences_by_subject.setdefault(key, set())
+        if event.subject_sequence in subject_sequences:
+            raise ValueError("Owner acceptance queue subject contains a duplicate sequence")
+        subject_sequences.add(event.subject_sequence)
         existing = latest_by_subject.get(key)
-        if existing is None or (event.occurred_at, event.event_id) > (existing.occurred_at, existing.event_id):
+        if existing is None or event.subject_sequence > existing.subject_sequence:
             latest_by_subject[key] = event
 
     total = len(latest_by_subject)
@@ -115,7 +124,8 @@ def build_owner_acceptance_queue(
     normalized_repository = repository.strip().lower()
     normalized_status = status.strip().lower()
     filtered = [
-        entry for entry in all_entries
+        entry
+        for entry in all_entries
         if (not normalized_repository or normalized_repository in entry.repository)
         and (not normalized_status or entry.ledger_status == normalized_status)
     ]
@@ -169,8 +179,4 @@ def _next_action(status: OwnerAcceptanceDecisionStatus) -> str:
 
 
 def now_utc() -> str:
-    return (
-        datetime.now(timezone.utc)
-        .isoformat(timespec="microseconds")
-        .replace("+00:00", "Z")
-    )
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")

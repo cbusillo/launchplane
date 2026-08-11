@@ -57,10 +57,7 @@ RUN apt-get update \
 COPY --from=github-cli-build /go/bin/gh /usr/local/bin/gh
 
 RUN pip install --no-cache-dir uv \
-    && rm -rf \
-        /usr/local/bin/pip* \
-        /usr/local/lib/python3.13/site-packages/pip \
-        /usr/local/lib/python3.13/site-packages/pip-*.dist-info
+    && python -m pip uninstall --yes pip setuptools
 
 WORKDIR /app
 

@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "b5d7f9a1c3e6"
+EXPECTED_ALEMBIC_HEAD_REVISION = "c6e8f1b3d5a7"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -209,8 +209,23 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_owner_acceptance_events",
+        "subject_sequence",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_events",
         "payload",
         ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_subject_sequences",
+        "pr_number",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_subject_sequences",
+        "last_sequence",
+        ("bigint", "int8"),
     ),
     CriticalColumnType(
         "launchplane_public_ingress_incident_reminders",
@@ -606,8 +621,23 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
             "product",
             "system",
             "owner_action",
-            "occurred_at",
+            "environment",
+            "subject_sequence",
         ),
+    ),
+    CriticalIndex(
+        "launchplane_owner_acceptance_events",
+        "launchplane_owner_acceptance_events_subject_sequence_uidx",
+        (
+            "repository_id",
+            "pr_number",
+            "product",
+            "system",
+            "owner_action",
+            "environment",
+            "subject_sequence",
+        ),
+        unique=True,
     ),
     CriticalIndex(
         "launchplane_owner_acceptance_events",
@@ -798,6 +828,17 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_owner_acceptance_events",
         ("event_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_owner_acceptance_subject_sequences",
+        (
+            "repository_id",
+            "pr_number",
+            "product",
+            "system",
+            "owner_action",
+            "environment",
+        ),
     ),
     CriticalPrimaryKey(
         "launchplane_tenant_repository_classifications",

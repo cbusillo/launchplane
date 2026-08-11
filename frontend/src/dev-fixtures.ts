@@ -2805,6 +2805,7 @@ function _ownerAcceptanceEvent(
     schema_version: 1,
     event_id: overrides.event_id ?? `owner-acceptance-event-fixture-${action}`,
     acceptance_id: overrides.acceptance_id ?? `owner-acceptance-${binding.binding_sha256.slice(0, 32)}`,
+    subject_sequence: 1,
     binding,
     action,
     occurred_at: overrides.occurred_at ?? OBSERVED_AT,
@@ -2813,6 +2814,7 @@ function _ownerAcceptanceEvent(
       | "browser_api",
     source_event_id: `fixture-${action}`,
     reason: action === "accepted" ? "" : `Fixture reason for ${action}`,
+    resolution: null,
     authorization:
       action === "accepted" || action === "changes_requested" || action === "revoked"
         ? {

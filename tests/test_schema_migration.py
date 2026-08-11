@@ -1061,6 +1061,147 @@ class SchemaMigrationTests(unittest.TestCase):
         )
         self.assertNotIn("launchplane_owner_acceptance_events", downgraded_table_names)
 
+    def test_owner_acceptance_subject_sequence_migration_backfills_legacy_order(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = _alembic_config(database_url)
+            command.upgrade(config, "a4c6e8f0b2d5")
+            engine = create_engine(database_url)
+            legacy_rows = [
+                {
+                    "event_id": "event-b",
+                    "occurred_at": "2026-08-07T13:00:00Z",
+                    "product": "example-site",
+                },
+                {
+                    "event_id": "event-a",
+                    "occurred_at": "2026-08-07T13:00:00Z",
+                    "product": "example-site",
+                },
+                {
+                    "event_id": "event-c",
+                    "occurred_at": "2026-08-07T11:00:00Z",
+                    "product": "example-site",
+                },
+                {
+                    "event_id": "event-other",
+                    "occurred_at": "2026-08-07T14:00:00Z",
+                    "product": "example-admin",
+                },
+            ]
+            insert_statement = text(
+                """
+                INSERT INTO launchplane_owner_acceptance_events (
+                    event_id, acceptance_id, binding_sha256, repository_id,
+                    repository_owner_id, repository, pr_number, head_sha, tree_sha,
+                    product, system, owner_action, environment, action,
+                    owner_github_id, owner_login, occurred_at, payload
+                ) VALUES (
+                    :event_id, :event_id, :binding_sha256, '1001', '2001',
+                    'example/example-site', 17, :head_sha, :tree_sha, :product,
+                    'web', 'pull_request.owner_acceptance', 'pull_request',
+                    'accepted', 101, 'owner', :occurred_at, '{}'
+                )
+                """
+            )
+            with engine.begin() as connection:
+                connection.execute(
+                    insert_statement,
+                    [
+                        row
+                        | {
+                            "binding_sha256": str(index + 1) * 64,
+                            "head_sha": str(index + 1) * 40,
+                            "tree_sha": str(index + 5) * 40,
+                        }
+                        for index, row in enumerate(legacy_rows)
+                    ],
+                )
+            engine.dispose()
+
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                with engine.connect() as connection:
+                    sequences = connection.execute(
+                        text(
+                            """
+                            SELECT event_id, product, subject_sequence
+                            FROM launchplane_owner_acceptance_events
+                            ORDER BY product, subject_sequence
+                            """
+                        )
+                    ).all()
+                    counters = connection.execute(
+                        text(
+                            """
+                            SELECT product, last_sequence
+                            FROM launchplane_owner_acceptance_subject_sequences
+                            ORDER BY product
+                            """
+                        )
+                    ).all()
+                inspector = inspect(engine)
+                columns = {
+                    column["name"]
+                    for column in inspector.get_columns("launchplane_owner_acceptance_events")
+                }
+                indexes = {
+                    index["name"]: index
+                    for index in inspector.get_indexes("launchplane_owner_acceptance_events")
+                }
+                sequence_primary_key = inspector.get_pk_constraint(
+                    "launchplane_owner_acceptance_subject_sequences"
+                )
+            finally:
+                engine.dispose()
+
+            command.downgrade(config, "a4c6e8f0b2d5")
+            engine = create_engine(database_url)
+            try:
+                downgraded_inspector = inspect(engine)
+                downgraded_columns = {
+                    column["name"]
+                    for column in downgraded_inspector.get_columns(
+                        "launchplane_owner_acceptance_events"
+                    )
+                }
+                downgraded_tables = set(downgraded_inspector.get_table_names())
+            finally:
+                engine.dispose()
+
+        self.assertIn("subject_sequence", columns)
+        self.assertEqual(
+            sequences,
+            [
+                ("event-other", "example-admin", 1),
+                ("event-c", "example-site", 1),
+                ("event-a", "example-site", 2),
+                ("event-b", "example-site", 3),
+            ],
+        )
+        self.assertEqual(counters, [("example-admin", 1), ("example-site", 3)])
+        self.assertTrue(
+            indexes["launchplane_owner_acceptance_events_subject_sequence_uidx"]["unique"]
+        )
+        self.assertEqual(
+            sequence_primary_key["constrained_columns"],
+            [
+                "repository_id",
+                "pr_number",
+                "product",
+                "system",
+                "owner_action",
+                "environment",
+            ],
+        )
+        self.assertNotIn("subject_sequence", downgraded_columns)
+        self.assertNotIn(
+            "launchplane_owner_acceptance_subject_sequences",
+            downgraded_tables,
+        )
+
     def test_policy_schema_invariants_are_expected(self) -> None:
         column_types = {
             (column.table_name, column.column_name): column.accepted_type_tokens
@@ -1072,7 +1213,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "b5d7f9a1c3e6")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "c6e8f1b3d5a7")
         self.assertEqual(
             column_types[("launchplane_repository_human_role_policies", "payload")],
             ("jsonb",),
@@ -1124,6 +1265,10 @@ class SchemaMigrationTests(unittest.TestCase):
             ("bigint", "int8"),
         )
         self.assertEqual(
+            column_types[("launchplane_owner_acceptance_events", "subject_sequence")],
+            ("bigint", "int8"),
+        )
+        self.assertEqual(
             indexes[
                 (
                     "launchplane_owner_acceptance_events",
@@ -1136,12 +1281,32 @@ class SchemaMigrationTests(unittest.TestCase):
                 "product",
                 "system",
                 "owner_action",
-                "occurred_at",
+                "environment",
+                "subject_sequence",
             ),
+        )
+        self.assertTrue(
+            indexes[
+                (
+                    "launchplane_owner_acceptance_events",
+                    "launchplane_owner_acceptance_events_subject_sequence_uidx",
+                )
+            ].unique
         )
         self.assertEqual(
             primary_keys["launchplane_owner_acceptance_events"],
             ("event_id",),
+        )
+        self.assertEqual(
+            primary_keys["launchplane_owner_acceptance_subject_sequences"],
+            (
+                "repository_id",
+                "pr_number",
+                "product",
+                "system",
+                "owner_action",
+                "environment",
+            ),
         )
         self.assertEqual(
             primary_keys["launchplane_repository_human_role_policies"],

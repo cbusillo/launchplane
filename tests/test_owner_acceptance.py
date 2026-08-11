@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+import json
 import unittest
 
 from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
@@ -16,7 +19,12 @@ from control_plane.contracts.change_impact import (
     ChangeImpactTarget,
     ChangeImpactTargetReference,
 )
-from control_plane.contracts.owner_acceptance import OwnerAcceptanceEventRecord
+from control_plane.contracts.owner_acceptance import (
+    OwnerAcceptanceEventRecord,
+    OwnerAcceptanceResolutionEvidence,
+    OwnerAcceptanceTransitionError,
+    owner_acceptance_event_replay_digest,
+)
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -41,12 +49,14 @@ from control_plane.owner_acceptance import (
     OwnerAcceptanceEvaluationUnavailableError,
     OwnerAcceptanceEventConflictError,
     aggregate_owner_acceptance_decision,
+    build_owner_acceptance_system_event,
     evaluate_owner_acceptance,
     record_owner_acceptance_event,
 )
 from control_plane.service_auth import GitHubHumanIdentity, TerminalAgentIdentity
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 
 
 REPOSITORY_ID = "1001"
@@ -646,7 +656,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
                     occurred_at="2026-08-07T12:30:00Z",
                 )
 
-    def test_future_preview_acceptance_is_not_effective_after_teardown(self) -> None:
+    def test_event_timestamps_do_not_change_preview_history_folding(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
             _write_preview_evidence(store)
@@ -672,9 +682,9 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 evaluated_at="2026-08-07T12:00:00Z",
             )
 
-            self.assertEqual(decision.status, "unavailable")
-            self.assertEqual(decision.reason_code, "preview_evidence_unavailable")
-            self.assertIsNone(decision.current_event)
+            self.assertEqual(decision.status, "stale")
+            self.assertEqual(decision.reason_code, "preview_evidence_stale")
+            self.assertIsNotNone(decision.current_event)
 
     def test_acceptance_records_and_replays_for_exact_binding(self) -> None:
         with TemporaryDirectory() as directory:
@@ -695,6 +705,19 @@ class OwnerAcceptanceTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "written")
             self.assertEqual(result.decision.status, "accepted")
+            self.assertEqual(result.record.subject_sequence, 1)
+            self.assertEqual(
+                result.record.acceptance_id,
+                "owner-acceptance-6f61c0b708961a549242c3ae7c97b599",
+            )
+            self.assertEqual(
+                result.record.event_id,
+                "owner-acceptance-event-549255e3dcf45d08d49de4bc409f0fff",
+            )
+            self.assertEqual(
+                owner_acceptance_event_replay_digest(result.record),
+                "f1ef1f87f252e928863af69740f5c55d8a49bfcfe2a302df877680035a1c708c",
+            )
 
             replay = record_owner_acceptance_event(
                 store=store,
@@ -715,6 +738,295 @@ class OwnerAcceptanceTests(unittest.TestCase):
             )
             with self.assertRaises(OwnerAcceptanceEventConflictError):
                 store.write_owner_acceptance_event_record(conflicting)
+
+    def test_complete_human_transition_table_and_resolution_evidence(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            provider = _EvidenceProvider(_repository_evidence())
+            binding_sha256 = _expected_binding_sha256(store=store, provider=provider)
+
+            changes_requested = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="changes_requested",
+                expected_binding_sha256=binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="request-changes",
+                reason="Clarify the product behavior.",
+                occurred_at="2026-08-07T13:00:00Z",
+            )
+            self.assertEqual(changes_requested.record.subject_sequence, 1)
+
+            with self.assertRaises(OwnerAcceptanceTransitionError):
+                record_owner_acceptance_event(
+                    store=store,
+                    repository_evidence_provider=provider,
+                    target=target,
+                    identity=_human(),
+                    action="accepted",
+                    expected_binding_sha256=binding_sha256,
+                    source_event_kind="browser_api",
+                    source_event_id="resolve-without-evidence",
+                    occurred_at="2026-08-07T12:00:00Z",
+                )
+
+            accepted = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="accepted",
+                expected_binding_sha256=binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="resolve-with-evidence",
+                resolution=OwnerAcceptanceResolutionEvidence(
+                    summary="The requested behavior is now explicit and covered.",
+                    resolved_evidence_references=("test:owner-flow", "record:product-spec-17"),
+                ),
+                occurred_at="2026-08-07T11:00:00Z",
+            )
+            self.assertEqual(accepted.record.subject_sequence, 2)
+            self.assertEqual(accepted.decision.status, "accepted")
+
+            changes_after_acceptance = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="changes_requested",
+                expected_binding_sha256=binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="request-more-changes",
+                reason="A later product concern remains.",
+                occurred_at="2026-08-07T10:00:00Z",
+            )
+            self.assertEqual(changes_after_acceptance.record.subject_sequence, 3)
+            self.assertEqual(changes_after_acceptance.decision.status, "changes_requested")
+
+            revoked = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="revoked",
+                expected_binding_sha256=binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="revoke-review",
+                reason="The Owner withdrew the review after new evidence.",
+                occurred_at="2026-08-07T09:00:00Z",
+            )
+            self.assertEqual(revoked.record.subject_sequence, 4)
+            self.assertEqual(revoked.decision.status, "revoked")
+
+            with self.assertRaises(OwnerAcceptanceTransitionError):
+                record_owner_acceptance_event(
+                    store=store,
+                    repository_evidence_provider=provider,
+                    target=target,
+                    identity=_human(),
+                    action="accepted",
+                    expected_binding_sha256=binding_sha256,
+                    source_event_kind="browser_api",
+                    source_event_id="accept-after-revoke",
+                    occurred_at="2026-08-07T14:00:00Z",
+                )
+
+    def test_identical_reaffirmation_is_rejected_without_consuming_sequence(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            provider = _EvidenceProvider(_repository_evidence())
+            binding_sha256 = _expected_binding_sha256(store=store, provider=provider)
+            accepted = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="accepted",
+                expected_binding_sha256=binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="initial-acceptance",
+                occurred_at="2026-08-07T12:00:00Z",
+            )
+            replay = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="accepted",
+                expected_binding_sha256=binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="initial-acceptance",
+                occurred_at="2026-08-07T14:00:00Z",
+            )
+            self.assertEqual(replay.status, "replayed")
+            self.assertEqual(replay.record.subject_sequence, 1)
+
+            with self.assertRaises(OwnerAcceptanceTransitionError):
+                record_owner_acceptance_event(
+                    store=store,
+                    repository_evidence_provider=provider,
+                    target=target,
+                    identity=_human(),
+                    action="accepted",
+                    expected_binding_sha256=binding_sha256,
+                    source_event_kind="browser_api",
+                    source_event_id="deliberate-reaffirmation",
+                    occurred_at="2026-08-07T13:00:00Z",
+                )
+
+            changes = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="changes_requested",
+                expected_binding_sha256=binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="changes-after-rejected-reaffirmation",
+                reason="The product review changed.",
+                occurred_at="2026-08-07T11:00:00Z",
+            )
+            self.assertEqual(accepted.record.subject_sequence, 1)
+            self.assertEqual(changes.record.subject_sequence, 2)
+
+    def test_filesystem_store_assigns_sequences_atomically_across_instances(self) -> None:
+        with TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            store = _store(state_dir)
+            binding = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                target=ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022),
+                evaluated_at="2026-08-07T12:00:00Z",
+            ).binding
+            assert binding is not None
+            first = build_owner_acceptance_system_event(
+                binding=binding,
+                action="superseded",
+                occurred_at="2026-08-07T13:00:00Z",
+                source_event_id="concurrent-system-one",
+                reason="Concurrent ordering proof.",
+            )
+            second = build_owner_acceptance_system_event(
+                binding=binding,
+                action="invalidated",
+                occurred_at="2026-08-07T11:00:00Z",
+                source_event_id="concurrent-system-two",
+                reason="Concurrent ordering proof.",
+            )
+            barrier = Barrier(2)
+
+            def write(event: OwnerAcceptanceEventRecord) -> str:
+                barrier.wait()
+                return FilesystemRecordStore(state_dir).write_owner_acceptance_event_record(event)
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                statuses = tuple(executor.map(write, (first, second)))
+
+            self.assertEqual(sorted(statuses), ["written", "written"])
+            persisted = store.list_owner_acceptance_event_records()
+            self.assertEqual(sorted(event.subject_sequence for event in persisted), [1, 2])
+
+    def test_filesystem_store_appends_legacy_events_after_sequenced_history(self) -> None:
+        with TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            store = _store(state_dir)
+            binding = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                target=ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022),
+                evaluated_at="2026-08-07T12:00:00Z",
+            ).binding
+            assert binding is not None
+            sequenced = build_owner_acceptance_system_event(
+                binding=binding,
+                action="superseded",
+                occurred_at="2026-08-07T13:00:00Z",
+                source_event_id="sequenced-system-event",
+                reason="Initial sequenced history.",
+            )
+            legacy = build_owner_acceptance_system_event(
+                binding=binding,
+                action="invalidated",
+                occurred_at="2026-08-07T14:00:00Z",
+                source_event_id="legacy-system-event",
+                reason="Written by a rolled-back runtime.",
+            )
+            self.assertEqual(store.write_owner_acceptance_event_record(sequenced), "written")
+            legacy_payload = legacy.model_dump(mode="json", exclude_none=True)
+            legacy_payload.pop("subject_sequence", None)
+            legacy_path = store._record_path(
+                "launchplane_owner_acceptance_events",
+                legacy.event_id,
+            )
+            legacy_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+            records = store.list_owner_acceptance_event_records()
+
+            by_event_id = {record.event_id: record for record in records}
+            self.assertEqual(by_event_id[sequenced.event_id].subject_sequence, 1)
+            self.assertEqual(by_event_id[legacy.event_id].subject_sequence, 2)
+
+    def test_filesystem_import_preserves_owner_acceptance_sequence_order(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            filesystem_store = _store(root / "filesystem")
+            target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            provider = _EvidenceProvider(_repository_evidence())
+            binding_sha256 = _expected_binding_sha256(
+                store=filesystem_store,
+                provider=provider,
+            )
+            requested = record_owner_acceptance_event(
+                store=filesystem_store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="changes_requested",
+                expected_binding_sha256=binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="filesystem-import-requested",
+                reason="Clarify the product behavior.",
+                occurred_at="2026-08-07T14:00:00Z",
+            )
+            accepted = record_owner_acceptance_event(
+                store=filesystem_store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(),
+                action="accepted",
+                expected_binding_sha256=binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="filesystem-import-accepted",
+                resolution=OwnerAcceptanceResolutionEvidence(
+                    summary="The requested behavior is now explicit.",
+                    resolved_evidence_references=("test:owner-flow",),
+                ),
+                occurred_at="2026-08-07T13:00:00Z",
+            )
+            postgres_store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}"
+            )
+            postgres_store.ensure_schema()
+
+            counts = postgres_store.import_core_records_from_filesystem(filesystem_store)
+
+            self.assertEqual(counts["owner_acceptance_events"], 2)
+            imported = sorted(
+                postgres_store.list_owner_acceptance_event_records(),
+                key=lambda event: event.subject_sequence,
+            )
+            self.assertEqual(
+                [(event.subject_sequence, event.action) for event in imported],
+                [(1, "changes_requested"), (2, "accepted")],
+            )
+            self.assertEqual(requested.record.subject_sequence, 1)
+            self.assertEqual(accepted.record.subject_sequence, 2)
 
     def test_engineering_only_not_required_writes_no_event(self) -> None:
         with TemporaryDirectory() as directory:
