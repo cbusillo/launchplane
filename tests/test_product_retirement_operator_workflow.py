@@ -48,6 +48,16 @@ class ProductRetirementOperatorWorkflowTests(unittest.TestCase):
         self.worker_reference = self.workflow.job_uses("retire")
         self.reusable_workflow = _load_pinned_workflow(self.worker_reference)
 
+    def test_ci_test_jobs_fetch_full_history_for_pinned_worker(self) -> None:
+        ci_workflow = load_workflow(".github/workflows/ci.yml")
+
+        for job_id in ("test_shards", "test_fork"):
+            with self.subTest(job_id=job_id):
+                checkout = ci_workflow.step_named(job_id, "Checkout")
+                self.assertIsNotNone(checkout)
+                assert checkout is not None
+                self.assertEqual(checkout.with_values.get("fetch-depth"), 0)
+
     def test_wrapper_is_an_immutable_thin_dispatch_contract(self) -> None:
         trigger = self.workflow.data["on"]
         assert isinstance(trigger, dict)
