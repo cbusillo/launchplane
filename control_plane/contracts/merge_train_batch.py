@@ -7,6 +7,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
+from control_plane.contracts.merge_train_structural_provenance import (
+    MergeTrainStackCollapseRootProof,
+    MergeTrainStructuralImpactStatus,
+    MergeTrainStructuralProvenance,
+    MergeTrainStructuralSubject,
+)
 from control_plane.merge_train import MergeTrainDryRunResult
 
 
@@ -25,6 +31,9 @@ class MergeTrainBatchEntry(BaseModel):
     pull_request_number: int = Field(gt=0)
     position: int = Field(gt=0)
     head_sha: str
+    head_tree_sha: str = ""
+    impact_status: MergeTrainStructuralImpactStatus = "unknown"
+    affected_subjects: tuple[MergeTrainStructuralSubject, ...] = ()
     title: str = ""
     url: str = ""
 
@@ -33,6 +42,12 @@ class MergeTrainBatchEntry(BaseModel):
         self.head_sha = _normalize_required_value(
             self.head_sha, "merge train batch entry requires head_sha"
         )
+        self.head_tree_sha = self.head_tree_sha.strip()
+        self.affected_subjects = tuple(
+            sorted(set(self.affected_subjects), key=lambda item: (item.product, item.system))
+        )
+        if self.impact_status == "unknown" and self.affected_subjects:
+            raise ValueError("unknown merge train batch impact cannot carry affected subjects")
         self.title = self.title.strip()
         self.url = self.url.strip()
         return self
@@ -49,8 +64,12 @@ class MergeTrainBatchCandidate(BaseModel):
     policy_sha256: str
     candidate_ref: str
     candidate_sha: str = ""
+    candidate_tree_sha: str = ""
+    candidate_sha256: str = ""
     status: MergeTrainBatchCandidateStatus = "planned"
     entries: tuple[MergeTrainBatchEntry, ...]
+    stack_collapse_root: MergeTrainStackCollapseRootProof | None = None
+    structural_provenance: MergeTrainStructuralProvenance | None = None
     required_checks_status: Literal["unknown", "pending", "pass", "fail"] = "unknown"
     created_at: str
     updated_at: str
@@ -78,6 +97,8 @@ class MergeTrainBatchCandidate(BaseModel):
             self.candidate_ref, "merge train batch candidate requires candidate_ref"
         )
         self.candidate_sha = self.candidate_sha.strip()
+        self.candidate_tree_sha = self.candidate_tree_sha.strip()
+        self.candidate_sha256 = self.candidate_sha256.strip().lower()
         self.created_at = _normalize_required_value(
             self.created_at, "merge train batch candidate requires created_at"
         )
@@ -85,6 +106,50 @@ class MergeTrainBatchCandidate(BaseModel):
             self.updated_at, "merge train batch candidate requires updated_at"
         )
         self.entries = _normalize_entries(self.entries)
+        provenance = self.structural_provenance
+        if provenance is not None:
+            if not provenance.complete and self.status not in {"planned", "building"}:
+                raise ValueError(
+                    "completed batch candidate requires complete structural provenance"
+                )
+            if (
+                provenance.repository != self.repository
+                or provenance.base_branch != self.base_branch
+                or provenance.base_sha != self.base_sha
+                or provenance.policy_key != self.policy_key
+                or provenance.policy_sha256 != self.policy_sha256
+                or provenance.candidate_sha != self.candidate_sha
+                or provenance.candidate_tree_sha != self.candidate_tree_sha
+                or provenance.stack_collapse_root != self.stack_collapse_root
+            ):
+                raise ValueError("batch candidate identity does not match structural provenance")
+            provenance_entries = tuple(
+                (
+                    entry.position,
+                    entry.pull_request_number,
+                    entry.head_sha,
+                    entry.head_tree_sha,
+                    entry.impact_status,
+                    entry.affected_subjects,
+                )
+                for entry in provenance.entries
+            )
+            candidate_entries = tuple(
+                (
+                    entry.position,
+                    entry.pull_request_number,
+                    entry.head_sha,
+                    entry.head_tree_sha,
+                    entry.impact_status,
+                    entry.affected_subjects,
+                )
+                for entry in self.entries
+            )
+            if provenance_entries != candidate_entries:
+                raise ValueError("batch candidate entries do not match structural provenance")
+            if self.candidate_sha256 and self.candidate_sha256 != provenance.candidate_sha256:
+                raise ValueError("batch candidate digest does not match structural provenance")
+            self.candidate_sha256 = provenance.candidate_sha256
         return self
 
 
@@ -94,10 +159,20 @@ class MergeTrainBatchLandingEntry(BaseModel):
     pull_request_number: int = Field(gt=0)
     position: int = Field(gt=0)
     expected_head_sha: str
+    expected_head_tree_sha: str = ""
     expected_base_sha: str
     merge_method: MergeTrainMergeMethod
     status: MergeTrainBatchLandingStatus = "planned"
+    recorded_candidate_parent_sha: str = ""
+    recorded_candidate_parent_tree_sha: str = ""
+    recorded_candidate_result_sha: str = ""
+    recorded_candidate_result_tree_sha: str = ""
+    recorded_rolling_base_sha: str = ""
+    recorded_rolling_base_tree_sha: str = ""
+    landed_head_sha: str = ""
+    landed_head_tree_sha: str = ""
     merge_commit_sha: str = ""
+    merge_commit_tree_sha: str = ""
 
     @model_validator(mode="after")
     def _validate_landing_entry(self) -> "MergeTrainBatchLandingEntry":
@@ -105,11 +180,50 @@ class MergeTrainBatchLandingEntry(BaseModel):
             self.expected_head_sha,
             "merge train batch landing entry requires expected_head_sha",
         )
+        self.expected_head_tree_sha = self.expected_head_tree_sha.strip()
         self.expected_base_sha = _normalize_required_value(
             self.expected_base_sha,
             "merge train batch landing entry requires expected_base_sha",
         )
-        self.merge_commit_sha = self.merge_commit_sha.strip()
+        for field_name in (
+            "recorded_candidate_parent_sha",
+            "recorded_candidate_parent_tree_sha",
+            "recorded_candidate_result_sha",
+            "recorded_candidate_result_tree_sha",
+            "recorded_rolling_base_sha",
+            "recorded_rolling_base_tree_sha",
+            "landed_head_sha",
+            "landed_head_tree_sha",
+            "merge_commit_sha",
+            "merge_commit_tree_sha",
+        ):
+            setattr(self, field_name, str(getattr(self, field_name)).strip())
+        if self.status == "skipped":
+            required_evidence = (
+                self.recorded_candidate_parent_sha,
+                self.recorded_candidate_parent_tree_sha,
+                self.recorded_candidate_result_sha,
+                self.recorded_candidate_result_tree_sha,
+                self.recorded_rolling_base_sha,
+                self.recorded_rolling_base_tree_sha,
+                self.landed_head_sha,
+                self.landed_head_tree_sha,
+                self.merge_commit_sha,
+                self.merge_commit_tree_sha,
+            )
+            if not all(required_evidence):
+                raise ValueError("skipped batch landing entry requires complete Git evidence")
+            if (
+                self.merge_commit_sha != self.recorded_rolling_base_sha
+                or self.merge_commit_tree_sha != self.recorded_rolling_base_tree_sha
+            ):
+                raise ValueError("skipped batch landing entry must preserve its rolling parent")
+            if (
+                self.recorded_candidate_parent_sha != self.recorded_candidate_result_sha
+                or self.recorded_candidate_parent_tree_sha
+                != self.recorded_candidate_result_tree_sha
+            ):
+                raise ValueError("skipped batch landing entry requires a recorded candidate no-op")
         return self
 
 
@@ -122,10 +236,14 @@ class MergeTrainBatchLandingPlan(BaseModel):
     base_branch: str
     candidate_ref: str
     candidate_sha: str
+    candidate_tree_sha: str = ""
+    candidate_sha256: str = ""
+    structural_provenance_sha256: str = ""
     policy_key: str
     policy_sha256: str
     entries: tuple[MergeTrainBatchLandingEntry, ...]
     created_at: str
+    landing_plan_sha256: str = ""
 
     @model_validator(mode="after")
     def _validate_plan(self) -> "MergeTrainBatchLandingPlan":
@@ -145,6 +263,9 @@ class MergeTrainBatchLandingPlan(BaseModel):
         self.candidate_sha = _normalize_required_value(
             self.candidate_sha, "merge train batch landing plan requires candidate_sha"
         )
+        self.candidate_tree_sha = self.candidate_tree_sha.strip()
+        self.candidate_sha256 = self.candidate_sha256.strip().lower()
+        self.structural_provenance_sha256 = self.structural_provenance_sha256.strip().lower()
         self.policy_key = _normalize_required_value(
             self.policy_key, "merge train batch landing plan requires policy_key"
         )
@@ -160,6 +281,12 @@ class MergeTrainBatchLandingPlan(BaseModel):
         positions = [entry.position for entry in self.entries]
         if positions != list(range(1, len(positions) + 1)):
             raise ValueError("merge train batch landing plan positions must be contiguous")
+        expected_digest = merge_train_batch_landing_plan_sha256(self)
+        if self.landing_plan_sha256:
+            normalized_digest = self.landing_plan_sha256.strip().lower()
+            if normalized_digest != expected_digest:
+                raise ValueError("merge train batch landing plan digest does not match payload")
+        self.landing_plan_sha256 = expected_digest
         return self
 
 
@@ -219,6 +346,7 @@ def build_merge_train_batch_candidate(
     base_sha: str,
     policy_sha256: str,
     created_at: str,
+    stack_collapse_root: MergeTrainStackCollapseRootProof | None = None,
 ) -> MergeTrainBatchCandidate:
     if dry_run_result.intended_next_action not in ("merge", "idle"):
         raise ValueError("merge train batch candidate requires a queue without blocking actions")
@@ -262,6 +390,7 @@ def build_merge_train_batch_candidate(
         ),
         status="planned",
         entries=tuple(entries),
+        stack_collapse_root=stack_collapse_root,
         created_at=created_at,
         updated_at=created_at,
     )
@@ -279,8 +408,11 @@ def build_merge_train_batch_candidate_record(
         updated_at=updated_at,
         candidate=candidate,
     )
-    return record_without_id.model_copy(
-        update={"record_id": build_merge_train_batch_candidate_record_id(record_without_id)}
+    return MergeTrainBatchCandidateRecord.model_validate(
+        {
+            **record_without_id.model_dump(mode="python"),
+            "record_id": build_merge_train_batch_candidate_record_id(record_without_id),
+        }
     )
 
 
@@ -307,11 +439,10 @@ def build_merge_train_batch_landing_plan_record(
         updated_at=updated_at,
         landing_plan=landing_plan,
     )
-    return record_without_id.model_copy(
-        update={
-            "record_id": build_merge_train_batch_landing_plan_record_id(
-                record_without_id
-            )
+    return MergeTrainBatchLandingPlanRecord.model_validate(
+        {
+            **record_without_id.model_dump(mode="python"),
+            "record_id": build_merge_train_batch_landing_plan_record_id(record_without_id),
         }
     )
 
@@ -375,13 +506,32 @@ def build_merge_train_batch_landing_plan(
         raise ValueError("merge train batch landing plan requires passed candidate")
     if not candidate.candidate_sha:
         raise ValueError("merge train batch landing plan requires candidate_sha")
+    provenance = candidate.structural_provenance
+    steps_by_position = (
+        {step.position: step for step in provenance.steps}
+        if provenance is not None and provenance.complete
+        else {}
+    )
     entries = tuple(
         MergeTrainBatchLandingEntry(
             pull_request_number=entry.pull_request_number,
             position=entry.position,
             expected_head_sha=entry.head_sha,
+            expected_head_tree_sha=entry.head_tree_sha,
             expected_base_sha=candidate.base_sha,
             merge_method=merge_method,
+            recorded_candidate_parent_sha=(
+                steps_by_position[entry.position].parent_sha if steps_by_position else ""
+            ),
+            recorded_candidate_parent_tree_sha=(
+                steps_by_position[entry.position].parent_tree_sha if steps_by_position else ""
+            ),
+            recorded_candidate_result_sha=(
+                steps_by_position[entry.position].result_sha if steps_by_position else ""
+            ),
+            recorded_candidate_result_tree_sha=(
+                steps_by_position[entry.position].result_tree_sha if steps_by_position else ""
+            ),
         )
         for entry in candidate.entries
     )
@@ -392,13 +542,21 @@ def build_merge_train_batch_landing_plan(
         base_branch=candidate.base_branch,
         candidate_ref=candidate.candidate_ref,
         candidate_sha=candidate.candidate_sha,
+        candidate_tree_sha=candidate.candidate_tree_sha,
+        candidate_sha256=candidate.candidate_sha256,
+        structural_provenance_sha256=(
+            provenance.provenance_sha256 if provenance is not None else ""
+        ),
         policy_key=candidate.policy_key,
         policy_sha256=candidate.policy_sha256,
         entries=entries,
         created_at=created_at,
     )
-    return plan_without_id.model_copy(
-        update={"plan_id": build_merge_train_batch_landing_plan_id(plan_without_id)}
+    return MergeTrainBatchLandingPlan.model_validate(
+        {
+            **plan_without_id.model_dump(mode="python"),
+            "plan_id": build_merge_train_batch_landing_plan_id(plan_without_id),
+        }
     )
 
 
@@ -408,6 +566,33 @@ def build_merge_train_batch_landing_plan_id(plan: MergeTrainBatchLandingPlan) ->
         json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
     return f"merge-train-landing-plan-{plan.batch_id}-{digest}"
+
+
+def merge_train_batch_landing_plan_sha256(plan: MergeTrainBatchLandingPlan) -> str:
+    payload = plan.model_dump(
+        mode="json",
+        exclude={"plan_id", "created_at", "landing_plan_sha256"},
+    )
+    entries = payload.get("entries")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            for field_name in (
+                "status",
+                "recorded_rolling_base_sha",
+                "recorded_rolling_base_tree_sha",
+                "landed_head_sha",
+                "landed_head_tree_sha",
+                "merge_commit_sha",
+                "merge_commit_tree_sha",
+            ):
+                entry.pop(field_name, None)
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+            "utf-8"
+        )
+    ).hexdigest()
 
 
 def _normalize_entries(
@@ -427,8 +612,10 @@ def _normalize_entries(
 
 
 def _normalize_repository(repository: str) -> str:
-    normalized = _normalize_required_value(repository, "merge train batch requires repository")
-    if "/" not in normalized:
+    normalized = _normalize_required_value(
+        repository, "merge train batch requires repository"
+    ).lower()
+    if normalized.count("/") != 1 or not all(normalized.split("/", 1)):
         raise ValueError("merge train batch repository must be owner/name")
     return normalized
 
