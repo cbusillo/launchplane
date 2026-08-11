@@ -46,8 +46,7 @@ from control_plane.generic_web_onboarding import (
 from control_plane.generic_web_preview_authz import (
     GenericWebPreviewAuthzPlanResult,
     GenericWebPreviewAuthzPlanRequest,
-    build_generic_web_preview_authz_reconcile_request,
-    resolve_generic_web_preview_retirement_authority,
+    plan_generic_web_preview_authz_reconcile,
 )
 from control_plane import (
     product_prelaunch_rebuild_policy as control_plane_product_prelaunch_rebuild_policy,
@@ -13560,7 +13559,6 @@ def create_launchplane_fastapi_app(
         observed_record = active_records[0]
         try:
             profile = None
-            retirement_authority = None
             if planning_request.operation == "retire":
                 profile_store = require_product_profile_read_store(database_store)
                 try:
@@ -13569,23 +13567,12 @@ def create_launchplane_fastapi_app(
                     )
                 except (FileNotFoundError, KeyError):
                     profile = None
-                current_target_rules = tuple(
-                    rule
-                    for rule in observed_record.policy.github_actions
-                    if rule.managed_set_id == "operator.generic-web-preview"
-                    and planning_request.target_product in rule.products
-                )
-                retirement_authority = resolve_generic_web_preview_retirement_authority(
-                    current_target_rules=current_target_rules,
-                    request=planning_request,
-                    profile=profile,
-                )
-            reconcile_request = build_generic_web_preview_authz_reconcile_request(
+            reconcile_plan = plan_generic_web_preview_authz_reconcile(
                 current_policy=observed_record.policy,
                 request=planning_request,
                 profile=profile,
-                retirement_authority=retirement_authority,
             )
+            reconcile_request = reconcile_plan.reconcile_request
             (
                 _,
                 current_record,
@@ -13629,7 +13616,9 @@ def create_launchplane_fastapi_app(
             configuration=reconcile_request.model_dump(mode="json"),
             diff=diff.model_dump(mode="json"),
             retirement_authority=(
-                retirement_authority.evidence if retirement_authority is not None else None
+                reconcile_plan.retirement_authority.evidence
+                if reconcile_plan.retirement_authority is not None
+                else None
             ),
         )
         return accepted_evidence_response(

@@ -388,7 +388,6 @@ Current implementation scope:
 - `POST /v1/previews/lifecycle-plan`
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-destroy`
-
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/testing-verification`
 - `POST /v1/drivers/verireel/prod-deploy`

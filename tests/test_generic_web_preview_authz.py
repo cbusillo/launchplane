@@ -293,9 +293,6 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
 
         authority = resolve_generic_web_preview_retirement_authority(
             current_target_rules=target_rules,
-            request=_request(
-                operation="retire", repository="", repository_id="", repository_owner_id=""
-            ),
             profile=None,
         )
 
@@ -353,20 +350,14 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             )
             for rule in generic_web_preview_rules(_request())
         )
-        retire_request = _request(
-            operation="retire", repository="", repository_id="", repository_owner_id=""
-        )
-
         with self.assertRaisesRegex(ValueError, "matching product profile with complete"):
             resolve_generic_web_preview_retirement_authority(
                 current_target_rules=target_rules,
-                request=retire_request,
                 profile=None,
             )
 
         authority = resolve_generic_web_preview_retirement_authority(
             current_target_rules=target_rules,
-            request=retire_request,
             profile=_profile(),
         )
 
@@ -385,14 +376,9 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
                 "repository_id": "789",
             }
         )
-        retire_request = _request(
-            operation="retire", repository="", repository_id="", repository_owner_id=""
-        )
-
         with self.assertRaisesRegex(ValueError, "ambiguous repository identities"):
             resolve_generic_web_preview_retirement_authority(
                 current_target_rules=(*target_rules[1:], mismatched_rule),
-                request=retire_request,
                 profile=None,
             )
         with self.assertRaisesRegex(ValueError, "after excluding ingress-operator"):
@@ -404,7 +390,6 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
                     ),
                     request=_request(include_ingress_operator=True),
                 ),
-                request=retire_request,
                 profile=None,
             )
 
@@ -422,20 +407,15 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ambiguous repository identities"):
             resolve_generic_web_preview_retirement_authority(
                 current_target_rules=(*target_rules[1:], ingress_trap),
-                request=_request(
-                    operation="retire", repository="", repository_id="", repository_owner_id=""
-                ),
                 profile=None,
             )
 
     def test_retire_rejects_profile_or_caller_assertion_disagreement(self) -> None:
         target_rules = generic_web_preview_rules(_request())
-        retire_request = _request(operation="retire")
 
         with self.assertRaisesRegex(ValueError, "profile and rule identity disagreement"):
             resolve_generic_web_preview_retirement_authority(
                 current_target_rules=target_rules,
-                request=retire_request,
                 profile=_profile(repository_id="789"),
             )
         with self.assertRaisesRegex(ValueError, "assertion does not match authority"):
@@ -455,6 +435,42 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
                 request=_request(
                     operation="retire", repository_id="789", repository_owner_id="456"
                 ),
+            )
+
+    def test_retire_rejects_multi_product_current_rule(self) -> None:
+        target_rules = generic_web_preview_rules(_request())
+        multi_product_rule = GitHubActionsPolicyRule.model_validate(
+            {
+                **target_rules[0].model_dump(mode="json"),
+                "products": ["demo-web", "other-web"],
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "exact singleton target product selector"):
+            build_generic_web_preview_authz_reconcile_request(
+                current_policy=LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    github_actions=(*target_rules[1:], multi_product_rule),
+                ),
+                request=_request(operation="retire"),
+            )
+
+    def test_retire_rejects_wildcard_current_rule(self) -> None:
+        target_rules = generic_web_preview_rules(_request())
+        wildcard_rule = GitHubActionsPolicyRule.model_validate(
+            {
+                **target_rules[0].model_dump(mode="json"),
+                "products": ["demo-*"],
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "exact singleton target product selector"):
+            build_generic_web_preview_authz_reconcile_request(
+                current_policy=LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    github_actions=(*target_rules[1:], wildcard_rule),
+                ),
+                request=_request(operation="retire"),
             )
 
     def test_retire_request_rejects_partial_assertions_and_ingress_expansion(self) -> None:

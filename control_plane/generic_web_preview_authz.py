@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -129,13 +130,31 @@ class GenericWebPreviewRetirementAuthority:
     evidence: GenericWebPreviewRetirementAuthorityEvidence
 
 
+@dataclass(frozen=True)
+class GenericWebPreviewAuthzReconcilePlan:
+    reconcile_request: AuthzManagedPolicyReconcileEnvelope
+    retirement_authority: GenericWebPreviewRetirementAuthority | None
+
+
 def build_generic_web_preview_authz_reconcile_request(
     *,
     current_policy: LaunchplaneAuthzPolicy,
     request: GenericWebPreviewAuthzPlanRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
-    retirement_authority: GenericWebPreviewRetirementAuthority | None = None,
 ) -> AuthzManagedPolicyReconcileEnvelope:
+    return plan_generic_web_preview_authz_reconcile(
+        current_policy=current_policy,
+        request=request,
+        profile=profile,
+    ).reconcile_request
+
+
+def plan_generic_web_preview_authz_reconcile(
+    *,
+    current_policy: LaunchplaneAuthzPolicy,
+    request: GenericWebPreviewAuthzPlanRequest,
+    profile: LaunchplaneProductProfileRecord | None = None,
+) -> GenericWebPreviewAuthzReconcilePlan:
     retained_github_rules = tuple(
         rule
         for rule in current_policy.github_actions
@@ -161,8 +180,9 @@ def build_generic_web_preview_authz_reconcile_request(
         for rule in current_policy.local_admins
         if rule.managed_set_id == GENERIC_WEB_PREVIEW_MANAGED_SET_ID
     )
-    current_target_rules = tuple(
-        rule for rule in retained_github_rules if request.target_product in rule.products
+    current_target_rules = generic_web_preview_managed_target_rules(
+        current_policy=current_policy,
+        target_product=request.target_product,
     )
     if request.operation == "onboard" and current_target_rules:
         generated_rules = _desired_generic_web_preview_rules(
@@ -178,18 +198,19 @@ def build_generic_web_preview_authz_reconcile_request(
         raise ValueError(
             f"generic-web preview authz {request.operation} requires current product rules"
         )
+    retirement_authority = None
     if request.operation == "retire":
-        resolved_retirement_authority = (
-            retirement_authority
-            or resolve_generic_web_preview_retirement_authority(
-                current_target_rules=current_target_rules,
-                request=request,
-                profile=profile,
-            )
+        _validate_retirement_product_selectors(
+            current_target_rules=current_target_rules,
+            target_product=request.target_product,
+        )
+        retirement_authority = resolve_generic_web_preview_retirement_authority(
+            current_target_rules=current_target_rules,
+            profile=profile,
         )
         _validate_retirement_assertions(
             request=request,
-            authority=resolved_retirement_authority,
+            authority=retirement_authority,
         )
     desired_github_rules = tuple(
         rule
@@ -217,20 +238,22 @@ def build_generic_web_preview_authz_reconcile_request(
         local_operators=retained_operator_rules,
         local_admins=retained_admin_rules,
     )
-    return AuthzManagedPolicyReconcileEnvelope(
-        product="launchplane",
-        mode="dry_run",
-        managed_set_id=GENERIC_WEB_PREVIEW_MANAGED_SET_ID,
-        reason=request.reason,
-        related_issue=request.related_issue,
-        desired_policy=desired_policy,
+    return GenericWebPreviewAuthzReconcilePlan(
+        reconcile_request=AuthzManagedPolicyReconcileEnvelope(
+            product="launchplane",
+            mode="dry_run",
+            managed_set_id=GENERIC_WEB_PREVIEW_MANAGED_SET_ID,
+            reason=request.reason,
+            related_issue=request.related_issue,
+            desired_policy=desired_policy,
+        ),
+        retirement_authority=retirement_authority,
     )
 
 
 def resolve_generic_web_preview_retirement_authority(
     *,
     current_target_rules: tuple[GitHubActionsPolicyRule, ...],
-    request: GenericWebPreviewAuthzPlanRequest,
     profile: LaunchplaneProductProfileRecord | None,
 ) -> GenericWebPreviewRetirementAuthority:
     if not current_target_rules:
@@ -305,6 +328,37 @@ def resolve_generic_web_preview_retirement_authority(
             repository_identity_sha256=identity_digest,
         ),
     )
+
+
+def generic_web_preview_managed_target_rules(
+    *,
+    current_policy: LaunchplaneAuthzPolicy,
+    target_product: str,
+) -> tuple[GitHubActionsPolicyRule, ...]:
+    return tuple(
+        rule
+        for rule in current_policy.github_actions
+        if rule.managed_set_id == GENERIC_WEB_PREVIEW_MANAGED_SET_ID
+        and _rule_authorizes_product(rule=rule, target_product=target_product)
+    )
+
+
+def _rule_authorizes_product(*, rule: GitHubActionsPolicyRule, target_product: str) -> bool:
+    return not rule.products or any(
+        fnmatchcase(target_product, product_selector) for product_selector in rule.products
+    )
+
+
+def _validate_retirement_product_selectors(
+    *,
+    current_target_rules: tuple[GitHubActionsPolicyRule, ...],
+    target_product: str,
+) -> None:
+    if any(rule.products != (target_product,) for rule in current_target_rules):
+        raise ValueError(
+            "generic-web preview authz retire requires every current managed preview rule "
+            "authorizing the target to use the exact singleton target product selector"
+        )
 
 
 def _validate_retirement_assertions(
