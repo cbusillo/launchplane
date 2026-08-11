@@ -3683,14 +3683,16 @@ expected protected application target SHA-256 values, reason and issue, plus
 apply-only reviewed-plan identity/digest and exact confirmation. Raw target IDs
 are never accepted. The candidate digest must not be protected.
 
-Planning strictly parses `/api/project.all`, requires one exact project,
-environment, and globally unique application name, then reads
-`application.one`, domains, and deployment history. The candidate must match
-the requested digest, be exactly `idle`, have a recognized empty deployment
-history, and have zero domains. Every other application in the project is a
-protected provider target. Launchplane requires the exact expected protected
-digest set and persists each protected application fingerprint, domains, and
-history snapshot.
+Planning combines `/api/project.all` with a bounded, paginated global
+`application.search` inventory. The candidate remains bound by globally unique
+application name, exact target digest, matching project/search evidence, and its
+own `application.one` project/environment evidence. Every accessible
+application whose target payload has the same exact project name forms one
+logical protection domain across duplicate physical project IDs. Launchplane
+requires the exact expected protected digest set and persists each protected
+application fingerprint, domains, and history snapshot. Search pagination,
+totals, application IDs, and search-item-to-payload identity must remain stable
+or planning fails closed.
 
 The candidate ID must also be absent from every bounded Launchplane authority
 source capable of carrying or resolving provider-target authority. The proof
