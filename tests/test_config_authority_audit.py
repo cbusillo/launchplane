@@ -3712,6 +3712,82 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     self.assertIn(key, rejected_keys)
                 self.assertEqual(product_repo_gate["status"], "fail")
 
+    def test_product_repo_gate_rejects_unclassified_input_on_pinned_preview_facade(self) -> None:
+        revision = "a" * 40
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-preview.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Launchplane Preview\n"
+                "jobs:\n"
+                "  preview:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                f"reusable-generic-web-preview.yml@{revision}\n"
+                "    with:\n"
+                "      verification_command: curl --fail https://preview.example.test/healthz\n"
+                "      dockerfile: apps/web/Dockerfile\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+            product_repo_gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+        allowed_findings = {
+            finding["key"]: finding["allow_reason"] for finding in _findings(payload)
+        }
+        self.assertEqual(
+            allowed_findings["generic-web-preview.with[1].verification_command"],
+            "thin_connector_input",
+        )
+        rejected_keys = {
+            finding["key"]
+            for finding in cast(
+                "list[dict[str, object]]", product_repo_gate["rejected_findings"]
+            )
+        }
+        self.assertIn("generic-web-preview.with[1].dockerfile", rejected_keys)
+        self.assertEqual(product_repo_gate["status"], "fail")
+
+    def test_preview_facade_parser_context_does_not_bleed_into_later_job(self) -> None:
+        revision = "a" * 40
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-preview.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Launchplane Preview\n"
+                "jobs:\n"
+                "  preview:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                f"reusable-generic-web-preview.yml@{revision}\n"
+                "  unrelated:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                f"reusable-generic-web-preview-verification.yml@{revision}\n"
+                "    with:\n"
+                "      verification_command: curl --fail https://other.example.test/healthz\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+            product_repo_gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+        finding_keys = {finding["key"] for finding in _findings(payload)}
+        self.assertIn("verification_command", finding_keys)
+        self.assertNotIn("generic-web-preview.with[1].verification_command", finding_keys)
+        rejected_keys = {
+            finding["key"]
+            for finding in cast(
+                "list[dict[str, object]]", product_repo_gate["rejected_findings"]
+            )
+        }
+        self.assertIn("verification_command", rejected_keys)
+        self.assertEqual(product_repo_gate["status"], "fail")
+
     def test_generic_web_rollback_and_stable_verification_defaults_are_thin_connector_inputs(
         self,
     ) -> None:
