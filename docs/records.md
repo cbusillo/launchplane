@@ -2435,9 +2435,12 @@ preflights.
 Batch candidate and landing-plan payloads add structural provenance in place;
 they do not create a new record family or table. Candidate records own exact
 base/head/result commit and tree identities, ordered positions, impact subjects,
-policy and candidate fingerprints, and optional stack-collapse proof. Landing
+policy and candidate fingerprints, and optional stack-collapse proof. Current
+impact, changed-path, and Owner review composition evidence is supplied to the
+pure evaluator later rather than persisted in the candidate record. Landing
 plan records own the active plan fingerprint and additive per-entry rolling-base,
-landed-head, and merge-result identities. Records written before this contract
+landed-head, and merge-result identities, including parent-preserving `skipped`
+entries for recorded GitHub 204 candidate no-ops. Records written before this contract
 remain readable with missing provenance and are classified `unknown`, never
 implicitly exact.
 - Launchplane service evidence ingress now applies the same pattern for external

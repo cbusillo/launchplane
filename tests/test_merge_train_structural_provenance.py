@@ -6,6 +6,8 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchEntry,
+    MergeTrainBatchLandingEntry,
+    MergeTrainBatchLandingPlan,
     MergeTrainBatchLandingPlanRecord,
     build_merge_train_batch_candidate_ref,
     build_merge_train_batch_id,
@@ -13,19 +15,15 @@ from control_plane.contracts.merge_train_batch import (
 )
 from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainCombinedCandidateOwnerReview,
+    MergeTrainOwnerEvidenceBinding,
     MergeTrainRollingStep,
+    MergeTrainStructuralDeltaFingerprint,
+    MergeTrainStructuralCandidateResult,
     MergeTrainStructuralEntryBinding,
     MergeTrainStructuralEntryObservation,
     MergeTrainStructuralEvaluationInput,
     MergeTrainStructuralProvenance,
     MergeTrainStructuralSubject,
-    MergeTrainStackCollapseRootProof,
-)
-from control_plane.contracts.merge_train_stack_collapse import (
-    MergeTrainStackCollapseEntry,
-    MergeTrainStackCollapseMutation,
-    MergeTrainStackCollapsePlan,
-    MergeTrainStackCollapsePlanRecord,
 )
 from control_plane.merge_train_structural_provenance import (
     evaluate_merge_train_structural_candidate,
@@ -34,22 +32,14 @@ from control_plane.merge_train_structural_provenance import (
 
 class MergeTrainStructuralProvenanceTests(unittest.TestCase):
     def test_single_candidate_is_exact_only_on_recorded_base(self) -> None:
-        candidate_record, landing_record = _records((_entry(1, 1, "head-1", "tree-head-1"),))
+        candidate_record, landing_record = _records((_entry(1, 1),))
 
-        exact = evaluate_merge_train_structural_candidate(
-            evaluation=_evaluation(candidate_record, landing_record, target_position=1),
-            candidate_record=candidate_record,
-            landing_plan_record=landing_record,
-        )
-        moved = evaluate_merge_train_structural_candidate(
-            evaluation=_evaluation(
-                candidate_record,
-                landing_record,
-                target_position=1,
-                base_sha="unrelated-base",
-            ),
-            candidate_record=candidate_record,
-            landing_plan_record=landing_record,
+        exact = _evaluate(candidate_record, landing_record, target_position=1)
+        moved = _evaluate(
+            candidate_record,
+            landing_record,
+            target_position=1,
+            base_sha="unrelated-base",
         )
 
         self.assertEqual(exact.status, "exact")
@@ -57,272 +47,249 @@ class MergeTrainStructuralProvenanceTests(unittest.TestCase):
         self.assertEqual(moved.status, "mismatch")
         self.assertIn("structural_base_sha_mismatch", moved.reason_codes)
 
-    def test_batch_allows_only_recorded_landed_rolling_base(self) -> None:
-        candidate_record, landing_record = _records(
-            (
-                _entry(1, 1, "head-1", "tree-head-1"),
-                _entry(2, 2, "head-2", "tree-head-2"),
-            )
+    def test_missing_impact_or_landing_evidence_is_unknown(self) -> None:
+        candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
+        missing_impact = _evaluation(
+            candidate_record,
+            landing_record,
+            target_position=1,
+            include_deltas=False,
         )
-        provenance = candidate_record.candidate.structural_provenance
-        self.assertIsNotNone(provenance)
-        assert provenance is not None
-        first_step = provenance.steps[0]
-        first = landing_record.landing_plan.entries[0].model_copy(
-            update={
-                "status": "merged",
-                "recorded_rolling_base_sha": "base-main",
-                "recorded_rolling_base_tree_sha": "tree-base",
-                "landed_head_sha": "head-1",
-                "landed_head_tree_sha": "tree-head-1",
-                "merge_commit_sha": "landed-1",
-                "merge_commit_tree_sha": first_step.result_tree_sha,
-            }
+        first = landing_record.landing_plan.entries[0]
+        incomplete_first = _landing_entry(
+            first,
+            status="merged",
+            merge_commit_sha="landed-1",
         )
-        landing_record = landing_record.model_copy(
-            update={
-                "landing_plan": landing_record.landing_plan.model_copy(
-                    update={"entries": (first, landing_record.landing_plan.entries[1])}
-                )
-            }
+        incomplete_record = _landing_record(
+            landing_record,
+            entries=(incomplete_first, landing_record.landing_plan.entries[1]),
         )
 
-        result = evaluate_merge_train_structural_candidate(
-            evaluation=_evaluation(
-                candidate_record,
-                landing_record,
-                target_position=2,
-                base_sha="landed-1",
-                base_tree_sha=first_step.result_tree_sha,
-            ),
+        impact_result = evaluate_merge_train_structural_candidate(
+            evaluation=missing_impact,
             candidate_record=candidate_record,
             landing_plan_record=landing_record,
+        )
+        landing_result = _evaluate(
+            candidate_record,
+            incomplete_record,
+            target_position=2,
+            base_sha="landed-1",
+            base_tree_sha="tree-candidate-1",
+        )
+
+        self.assertEqual(impact_result.status, "unknown")
+        self.assertIn("structural_impact_unknown", impact_result.reason_codes)
+        self.assertEqual(landing_result.status, "unknown")
+        self.assertIn("structural_landing_evidence_unavailable", landing_result.reason_codes)
+
+    def test_recorded_landing_and_no_op_support_later_rolling_evaluation(self) -> None:
+        candidate_record, landing_record = _records(
+            (_entry(1, 1), _entry(2, 2), _entry(3, 3)),
+            no_op_positions={2},
+        )
+        provenance = candidate_record.candidate.structural_provenance
+        assert provenance is not None
+        first = _landing_entry(
+            landing_record.landing_plan.entries[0],
+            status="merged",
+            recorded_rolling_base_sha="base-main",
+            recorded_rolling_base_tree_sha="tree-base",
+            landed_head_sha="head-1",
+            landed_head_tree_sha="tree-head-1",
+            merge_commit_sha="landed-1",
+            merge_commit_tree_sha=provenance.steps[0].result_tree_sha,
+        )
+        second = _landing_entry(
+            landing_record.landing_plan.entries[1],
+            status="skipped",
+            recorded_rolling_base_sha="landed-1",
+            recorded_rolling_base_tree_sha=provenance.steps[0].result_tree_sha,
+            landed_head_sha="head-2",
+            landed_head_tree_sha="tree-head-2",
+            merge_commit_sha="landed-1",
+            merge_commit_tree_sha=provenance.steps[0].result_tree_sha,
+        )
+        landing_record = _landing_record(
+            landing_record,
+            entries=(first, second, landing_record.landing_plan.entries[2]),
+        )
+
+        result = _evaluate(
+            candidate_record,
+            landing_record,
+            target_position=3,
+            base_sha="landed-1",
+            base_tree_sha=provenance.steps[0].result_tree_sha,
         )
 
         self.assertEqual(result.status, "recorded_rolling")
         self.assertIn("structural_rolling_chain_recorded", result.reason_codes)
 
-    def test_head_queue_plan_and_policy_drift_fail_closed(self) -> None:
-        candidate_record, landing_record = _records(
-            (
-                _entry(1, 1, "head-1", "tree-head-1"),
-                _entry(2, 2, "head-2", "tree-head-2"),
-            )
-        )
-        cases = (
-            ({"head_sha": "changed-head"}, "structural_head_sha_mismatch"),
-            ({"candidate_sha256": "changed-candidate"}, "structural_candidate_digest_mismatch"),
-            ({"landing_plan_sha256": "changed-plan"}, "structural_landing_plan_digest_mismatch"),
-            ({"policy_sha256": "changed-policy"}, "structural_policy_mismatch"),
-        )
-        for changes, reason in cases:
-            with self.subTest(reason=reason):
-                evaluation = _evaluation(candidate_record, landing_record, target_position=1)
-                payload = evaluation.model_dump(mode="json")
-                if "head_sha" in changes:
-                    payload["entries"][0]["head_sha"] = changes["head_sha"]
-                elif "candidate_sha256" in changes:
-                    payload["active_candidate_sha256"] = changes["candidate_sha256"]
-                elif "landing_plan_sha256" in changes:
-                    payload["active_landing_plan_sha256"] = changes["landing_plan_sha256"]
-                else:
-                    payload["policy_sha256"] = changes["policy_sha256"]
-                result = evaluate_merge_train_structural_candidate(
-                    evaluation=MergeTrainStructuralEvaluationInput.model_validate(payload),
-                    candidate_record=candidate_record,
-                    landing_plan_record=landing_record,
-                )
-                self.assertEqual(result.status, "mismatch")
-                self.assertIn(reason, result.reason_codes)
-
-    def test_same_subject_requires_exact_combined_candidate_review(self) -> None:
-        shared = MergeTrainStructuralSubject(product="video", system="verification")
-        candidate_record, landing_record = _records(
-            (
-                _entry(1, 1, "head-1", "tree-head-1", subjects=(shared,)),
-                _entry(2, 2, "head-2", "tree-head-2", subjects=(shared,)),
-            )
-        )
+    def test_mixed_case_repository_identity_normalizes_consistently(self) -> None:
+        candidate_record, landing_record = _records((_entry(1, 1),), repository="Example/Repo")
         evaluation = _evaluation(candidate_record, landing_record, target_position=1)
+        payload = evaluation.model_dump(mode="json")
+        payload["repository"] = "EXAMPLE/REPO"
+
+        result = evaluate_merge_train_structural_candidate(
+            evaluation=MergeTrainStructuralEvaluationInput.model_validate(payload),
+            candidate_record=candidate_record,
+            landing_plan_record=landing_record,
+        )
+
+        self.assertEqual(candidate_record.candidate.repository, "example/repo")
+        self.assertEqual(landing_record.landing_plan.repository, "example/repo")
+        self.assertEqual(result.status, "exact")
+
+    def test_evaluator_is_total_for_truncated_and_reordered_landing_plans(self) -> None:
+        candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
+        truncated_plan = landing_record.landing_plan.model_copy(
+            update={"entries": landing_record.landing_plan.entries[:1]}
+        )
+        reordered_plan = landing_record.landing_plan.model_copy(
+            update={"entries": tuple(reversed(landing_record.landing_plan.entries))}
+        )
+
+        truncated = evaluate_merge_train_structural_candidate(
+            evaluation=_evaluation(candidate_record, landing_record, target_position=1),
+            candidate_record=candidate_record,
+            landing_plan_record=landing_record.model_copy(update={"landing_plan": truncated_plan}),
+        )
+        reordered = evaluate_merge_train_structural_candidate(
+            evaluation=_evaluation(candidate_record, landing_record, target_position=1),
+            candidate_record=candidate_record,
+            landing_plan_record=landing_record.model_copy(update={"landing_plan": reordered_plan}),
+        )
+
+        self.assertEqual(truncated.status, "unknown")
+        self.assertIn("structural_landing_evidence_unavailable", truncated.reason_codes)
+        self.assertEqual(reordered.status, "mismatch")
+        self.assertIn("structural_position_mismatch", reordered.reason_codes)
+
+    def test_delta_drift_overlap_same_subject_and_expansion_require_bound_evidence(self) -> None:
+        candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
+        shared = MergeTrainStructuralSubject(product="video", system="verification")
+        evaluation = _evaluation(
+            candidate_record,
+            landing_record,
+            target_position=1,
+            current_paths={1: ("shared.py",), 2: ("shared.py",)},
+            reviewed_paths={1: ("old.py",), 2: ("shared.py",)},
+            current_subjects={1: (shared,), 2: (shared,)},
+            reviewed_subjects={1: (), 2: (shared,)},
+        )
 
         blocked = evaluate_merge_train_structural_candidate(
             evaluation=evaluation,
             candidate_record=candidate_record,
             landing_plan_record=landing_record,
         )
+        reviewed_evaluation = _with_owner_evidence(evaluation)
         reviewed = evaluate_merge_train_structural_candidate(
-            evaluation=evaluation.model_copy(
-                update={
-                    "combined_owner_review": MergeTrainCombinedCandidateOwnerReview(
-                        evidence_id="owner-review-1",
-                        candidate_sha256=evaluation.active_candidate_sha256,
-                        landing_plan_sha256=evaluation.active_landing_plan_sha256,
-                        policy_key=evaluation.policy_key,
-                        policy_sha256=evaluation.policy_sha256,
-                        entries=evaluation.entries,
-                    )
-                }
-            ),
+            evaluation=reviewed_evaluation,
             candidate_record=candidate_record,
             landing_plan_record=landing_record,
         )
 
         self.assertEqual(blocked.status, "mismatch")
-        self.assertIn("structural_same_subject_combined_review_required", blocked.reason_codes)
+        self.assertTrue(
+            {
+                "structural_delta_drift",
+                "structural_changed_path_overlap",
+                "structural_impact_expanded",
+                "structural_same_subject_combined_review_required",
+            }.issubset(blocked.reason_codes)
+        )
         self.assertEqual(reviewed.status, "exact")
         self.assertIn("structural_combined_owner_review_recorded", reviewed.reason_codes)
 
-    def test_legacy_missing_provenance_is_unknown(self) -> None:
-        candidate_record, landing_record = _records((_entry(1, 1, "head-1", "tree-head-1"),))
-        legacy = candidate_record.model_copy(
-            update={
-                "candidate": candidate_record.candidate.model_copy(
-                    update={
-                        "candidate_tree_sha": "",
-                        "candidate_sha256": "",
-                        "structural_provenance": None,
-                    }
-                )
+    def test_combined_owner_evidence_is_non_authoritative_and_digest_bound(self) -> None:
+        candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
+        evaluation = _evaluation(
+            candidate_record,
+            landing_record,
+            target_position=1,
+            current_paths={1: ("shared.py",), 2: ("shared.py",)},
+            reviewed_paths={1: ("shared.py",), 2: ("shared.py",)},
+        )
+        with self.assertRaisesRegex(ValidationError, "exact L1 event bindings"):
+            MergeTrainCombinedCandidateOwnerReview(
+                evidence_bindings=(),
+                candidate_sha256=evaluation.active_candidate_sha256,
+                landing_plan_sha256=evaluation.active_landing_plan_sha256,
+                policy_key=evaluation.policy_key,
+                policy_sha256=evaluation.policy_sha256,
+                entries=evaluation.entries,
+            )
+        review = _owner_evidence(evaluation)
+        round_tripped = MergeTrainCombinedCandidateOwnerReview.model_validate(
+            review.model_dump(mode="json")
+        )
+        tampered_payload = review.model_dump(mode="json")
+        tampered_payload["entries_sha256"] = "0" * 64
+
+        self.assertFalse(review.authoritative)
+        self.assertFalse(review.authorizes_merge)
+        self.assertEqual(round_tripped.review_sha256, review.review_sha256)
+        with self.assertRaisesRegex(ValidationError, "entry digest"):
+            MergeTrainCombinedCandidateOwnerReview.model_validate(tampered_payload)
+
+    def test_provenance_and_landing_digest_round_trip_after_progress(self) -> None:
+        candidate_record, landing_record = _records((_entry(1, 1),))
+        provenance = candidate_record.candidate.structural_provenance
+        assert provenance is not None
+        provenance_round_trip = MergeTrainStructuralProvenance.model_validate(
+            provenance.model_dump(mode="json")
+        )
+        entry = _landing_entry(
+            landing_record.landing_plan.entries[0],
+            status="merged",
+            recorded_rolling_base_sha="base-main",
+            recorded_rolling_base_tree_sha="tree-base",
+            landed_head_sha="head-1",
+            landed_head_tree_sha="tree-head-1",
+            merge_commit_sha="landed-1",
+            merge_commit_tree_sha="tree-candidate-1",
+        )
+        progressed = MergeTrainBatchLandingPlan.model_validate(
+            {
+                **landing_record.landing_plan.model_dump(mode="python"),
+                "entries": (entry,),
             }
         )
-
-        result = evaluate_merge_train_structural_candidate(
-            evaluation=_evaluation(candidate_record, landing_record, target_position=1),
-            candidate_record=legacy,
-            landing_plan_record=landing_record,
+        progressed_round_trip = MergeTrainBatchLandingPlan.model_validate(
+            progressed.model_dump(mode="json")
         )
 
-        self.assertEqual(result.status, "unknown")
-        self.assertNotEqual(result.status, "exact")
-
-    def test_no_op_step_and_digest_tamper_are_explicit(self) -> None:
-        entry = _entry(1, 1, "head-1", "tree-head-1")
-        provenance = _provenance((entry,), no_op=True)
-        self.assertEqual(provenance.steps[0].kind, "no_op_already_contained")
-        payload = provenance.model_dump(mode="json")
-        payload["provenance_sha256"] = "0" * 64
-        with self.assertRaisesRegex(ValidationError, "digest does not match"):
-            MergeTrainStructuralProvenance.model_validate(payload)
-
-    def test_proven_stack_collapse_root_is_recorded_rolling(self) -> None:
-        candidate_record, _ = _records((_entry(10, 1, "collapsed-root", "tree-collapsed-root"),))
-        proof = MergeTrainStackCollapseRootProof(
-            collapse_record_id="collapse-record",
-            collapse_id="collapse-id",
-            root_pull_request_number=10,
-            original_root_head_sha="root-original",
-            collapsed_root_head_sha="collapsed-root",
-            collapsed_root_tree_sha="tree-collapsed-root",
-        )
-        original = candidate_record.candidate.structural_provenance
-        assert original is not None
-        payload = original.model_dump(
-            mode="json", exclude={"provenance_sha256", "candidate_sha256"}
-        )
-        payload["stack_collapse_root"] = proof.model_dump(mode="json")
-        provenance = MergeTrainStructuralProvenance.model_validate(payload)
-        candidate = candidate_record.candidate.model_copy(
-            update={
-                "candidate_sha256": provenance.candidate_sha256,
-                "stack_collapse_root": proof,
-                "structural_provenance": provenance,
-            }
-        )
-        candidate_record = candidate_record.model_copy(update={"candidate": candidate})
-        landing_record = MergeTrainBatchLandingPlanRecord(
-            record_id="landing-record-stack",
-            source="test",
-            updated_at="2026-08-11T04:01:00Z",
-            landing_plan=build_merge_train_batch_landing_plan(
-                candidate=candidate,
-                merge_method="merge",
-                created_at="2026-08-11T04:01:00Z",
-            ),
-        )
-        collapse_record = MergeTrainStackCollapsePlanRecord(
-            record_id="collapse-record",
-            source="test",
-            updated_at="2026-08-11T03:59:00Z",
-            plan=MergeTrainStackCollapsePlan(
-                collapse_id="collapse-id",
-                repository="example/repo",
-                base_branch="main",
-                root_pull_request_number=10,
-                root_initial_head_sha="root-original",
-                root_head_ref="feature/root",
-                policy_key="example/repo:main",
-                policy_sha256="policy-digest",
-                status="waiting_for_root_checks",
-                entries=(
-                    MergeTrainStackCollapseEntry(
-                        pull_request_number=10,
-                        position=1,
-                        head_sha="root-original",
-                        head_ref="feature/root",
-                        base_sha="base-main",
-                        base_ref="main",
-                    ),
-                    MergeTrainStackCollapseEntry(
-                        pull_request_number=11,
-                        position=2,
-                        head_sha="child-head",
-                        head_ref="feature/child",
-                        base_sha="root-original",
-                        base_ref="feature/root",
-                    ),
-                ),
-                mutations=(
-                    MergeTrainStackCollapseMutation(
-                        child_pull_request_number=11,
-                        parent_pull_request_number=10,
-                        child_head_sha="child-head",
-                        expected_parent_head_sha="root-original",
-                        parent_head_ref="feature/root",
-                        status="mutated",
-                        merge_commit_sha="collapsed-root",
-                    ),
-                ),
-                created_at="2026-08-11T03:58:00Z",
-                updated_at="2026-08-11T03:59:00Z",
-            ),
+        self.assertEqual(provenance_round_trip.provenance_sha256, provenance.provenance_sha256)
+        self.assertEqual(
+            progressed_round_trip.landing_plan_sha256,
+            landing_record.landing_plan.landing_plan_sha256,
         )
 
-        result = evaluate_merge_train_structural_candidate(
-            evaluation=_evaluation(candidate_record, landing_record, target_position=1),
-            candidate_record=candidate_record,
-            landing_plan_record=landing_record,
-            stack_collapse_record=collapse_record,
-        )
 
-        self.assertEqual(result.status, "recorded_rolling")
-        self.assertIn("structural_stack_root_recorded", result.reason_codes)
-
-
-def _entry(
-    pull_request_number: int,
-    position: int,
-    head_sha: str,
-    head_tree_sha: str,
-    *,
-    subjects: tuple[MergeTrainStructuralSubject, ...] = (),
-) -> MergeTrainBatchEntry:
+def _entry(pull_request_number: int, position: int) -> MergeTrainBatchEntry:
     return MergeTrainBatchEntry(
         pull_request_number=pull_request_number,
         position=position,
-        head_sha=head_sha,
-        head_tree_sha=head_tree_sha,
-        impact_status="known",
-        affected_subjects=subjects,
+        head_sha=f"head-{pull_request_number}",
+        head_tree_sha=f"tree-head-{pull_request_number}",
     )
 
 
 def _provenance(
-    entries: tuple[MergeTrainBatchEntry, ...], *, no_op: bool = False
+    entries: tuple[MergeTrainBatchEntry, ...],
+    *,
+    repository: str,
+    no_op_positions: set[int],
 ) -> MergeTrainStructuralProvenance:
     parent_sha = "base-main"
     parent_tree = "tree-base"
     steps = []
     for entry in entries:
+        no_op = entry.position in no_op_positions
         result_sha = parent_sha if no_op else f"candidate-{entry.position}"
         result_tree = parent_tree if no_op else f"tree-candidate-{entry.position}"
         steps.append(
@@ -340,7 +307,7 @@ def _provenance(
         )
         parent_sha, parent_tree = result_sha, result_tree
     return MergeTrainStructuralProvenance(
-        repository="example/repo",
+        repository=repository,
         base_branch="main",
         base_sha="base-main",
         base_tree_sha="tree-base",
@@ -352,8 +319,6 @@ def _provenance(
                 pull_request_number=entry.pull_request_number,
                 head_sha=entry.head_sha,
                 head_tree_sha=entry.head_tree_sha,
-                impact_status=entry.impact_status,
-                affected_subjects=entry.affected_subjects,
             )
             for entry in entries
         ),
@@ -365,23 +330,32 @@ def _provenance(
 
 def _records(
     entries: tuple[MergeTrainBatchEntry, ...],
+    *,
+    repository: str = "example/repo",
+    no_op_positions: set[int] | None = None,
 ) -> tuple[MergeTrainBatchCandidateRecord, MergeTrainBatchLandingPlanRecord]:
-    provenance = _provenance(entries)
+    provenance = _provenance(
+        entries,
+        repository=repository,
+        no_op_positions=no_op_positions or set(),
+    )
     batch_id = build_merge_train_batch_id(
-        repository="example/repo",
+        repository=repository,
         base_branch="main",
         base_sha="base-main",
         entry_head_shas=tuple(entry.head_sha for entry in entries),
     )
     candidate = MergeTrainBatchCandidate(
         batch_id=batch_id,
-        repository="example/repo",
+        repository=repository,
         base_branch="main",
         base_sha="base-main",
         policy_key="example/repo:main",
         policy_sha256="policy-digest",
         candidate_ref=build_merge_train_batch_candidate_ref(
-            repository="example/repo", base_branch="main", batch_id=batch_id
+            repository=repository,
+            base_branch="main",
+            batch_id=batch_id,
         ),
         candidate_sha=provenance.candidate_sha,
         candidate_tree_sha=provenance.candidate_tree_sha,
@@ -411,6 +385,20 @@ def _records(
     )
 
 
+def _delta(
+    entry: MergeTrainBatchEntry,
+    *,
+    paths: tuple[str, ...],
+    subjects: tuple[MergeTrainStructuralSubject, ...],
+) -> MergeTrainStructuralDeltaFingerprint:
+    return MergeTrainStructuralDeltaFingerprint(
+        head_sha=entry.head_sha,
+        head_tree_sha=entry.head_tree_sha,
+        changed_paths=paths,
+        affected_subjects=subjects,
+    )
+
+
 def _evaluation(
     candidate_record: MergeTrainBatchCandidateRecord,
     landing_record: MergeTrainBatchLandingPlanRecord,
@@ -418,8 +406,48 @@ def _evaluation(
     target_position: int,
     base_sha: str = "base-main",
     base_tree_sha: str = "tree-base",
+    include_deltas: bool = True,
+    current_paths: dict[int, tuple[str, ...]] | None = None,
+    reviewed_paths: dict[int, tuple[str, ...]] | None = None,
+    current_subjects: dict[int, tuple[MergeTrainStructuralSubject, ...]] | None = None,
+    reviewed_subjects: dict[int, tuple[MergeTrainStructuralSubject, ...]] | None = None,
 ) -> MergeTrainStructuralEvaluationInput:
     candidate = candidate_record.candidate
+    current_paths = current_paths or {}
+    reviewed_paths = reviewed_paths or current_paths
+    current_subjects = current_subjects or {}
+    reviewed_subjects = reviewed_subjects or current_subjects
+    observations = []
+    for entry in candidate.entries:
+        default_paths = (f"src/pr-{entry.pull_request_number}.py",)
+        current_delta = (
+            _delta(
+                entry,
+                paths=current_paths.get(entry.pull_request_number, default_paths),
+                subjects=current_subjects.get(entry.pull_request_number, ()),
+            )
+            if include_deltas
+            else None
+        )
+        reviewed_delta = (
+            _delta(
+                entry,
+                paths=reviewed_paths.get(entry.pull_request_number, default_paths),
+                subjects=reviewed_subjects.get(entry.pull_request_number, ()),
+            )
+            if include_deltas
+            else None
+        )
+        observations.append(
+            MergeTrainStructuralEntryObservation(
+                position=entry.position,
+                pull_request_number=entry.pull_request_number,
+                head_sha=entry.head_sha,
+                head_tree_sha=entry.head_tree_sha,
+                reviewed_delta=reviewed_delta,
+                current_delta=current_delta,
+            )
+        )
     return MergeTrainStructuralEvaluationInput(
         repository=candidate.repository,
         base_branch=candidate.base_branch,
@@ -431,17 +459,76 @@ def _evaluation(
         policy_sha256=candidate.policy_sha256,
         active_candidate_sha256=candidate.candidate_sha256,
         active_landing_plan_sha256=landing_record.landing_plan.landing_plan_sha256,
-        entries=tuple(
-            MergeTrainStructuralEntryObservation(
-                position=entry.position,
-                pull_request_number=entry.pull_request_number,
-                head_sha=entry.head_sha,
-                head_tree_sha=entry.head_tree_sha,
-                impact_status=entry.impact_status,
-                affected_subjects=entry.affected_subjects,
-            )
-            for entry in candidate.entries
+        entries=tuple(observations),
+    )
+
+
+def _owner_evidence(
+    evaluation: MergeTrainStructuralEvaluationInput,
+) -> MergeTrainCombinedCandidateOwnerReview:
+    return MergeTrainCombinedCandidateOwnerReview(
+        evidence_bindings=(
+            MergeTrainOwnerEvidenceBinding(
+                event_id="owner-acceptance:l1:event-1",
+                binding_sha256="a" * 64,
+            ),
         ),
+        candidate_sha256=evaluation.active_candidate_sha256,
+        landing_plan_sha256=evaluation.active_landing_plan_sha256,
+        policy_key=evaluation.policy_key,
+        policy_sha256=evaluation.policy_sha256,
+        entries=evaluation.entries,
+    )
+
+
+def _with_owner_evidence(
+    evaluation: MergeTrainStructuralEvaluationInput,
+) -> MergeTrainStructuralEvaluationInput:
+    return MergeTrainStructuralEvaluationInput.model_validate(
+        {
+            **evaluation.model_dump(mode="python"),
+            "combined_owner_review": _owner_evidence(evaluation),
+        }
+    )
+
+
+def _landing_entry(
+    entry: MergeTrainBatchLandingEntry, **updates: object
+) -> MergeTrainBatchLandingEntry:
+    return type(entry).model_validate({**entry.model_dump(mode="python"), **updates})
+
+
+def _landing_record(
+    record: MergeTrainBatchLandingPlanRecord,
+    *,
+    entries: tuple[MergeTrainBatchLandingEntry, ...],
+) -> MergeTrainBatchLandingPlanRecord:
+    plan = MergeTrainBatchLandingPlan.model_validate(
+        {**record.landing_plan.model_dump(mode="python"), "entries": entries}
+    )
+    return MergeTrainBatchLandingPlanRecord.model_validate(
+        {**record.model_dump(mode="python"), "landing_plan": plan}
+    )
+
+
+def _evaluate(
+    candidate_record: MergeTrainBatchCandidateRecord,
+    landing_record: MergeTrainBatchLandingPlanRecord,
+    *,
+    target_position: int,
+    base_sha: str = "base-main",
+    base_tree_sha: str = "tree-base",
+) -> MergeTrainStructuralCandidateResult:
+    return evaluate_merge_train_structural_candidate(
+        evaluation=_evaluation(
+            candidate_record,
+            landing_record,
+            target_position=target_position,
+            base_sha=base_sha,
+            base_tree_sha=base_tree_sha,
+        ),
+        candidate_record=candidate_record,
+        landing_plan_record=landing_record,
     )
 
 

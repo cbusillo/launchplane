@@ -41,9 +41,12 @@ MergeTrainStructuralReasonCode = Literal[
     "structural_base_tree_mismatch",
     "structural_rolling_chain_broken",
     "structural_prior_entry_not_landed",
+    "structural_landing_evidence_unavailable",
     "structural_prior_entry_head_mismatch",
     "structural_prior_entry_tree_mismatch",
     "structural_impact_unknown",
+    "structural_delta_drift",
+    "structural_changed_path_overlap",
     "structural_impact_expanded",
     "structural_same_subject_combined_review_required",
     "structural_combined_owner_review_mismatch",
@@ -248,6 +251,37 @@ class MergeTrainStructuralProvenance(BaseModel):
         return len(self.steps) == len(self.entries)
 
 
+class MergeTrainStructuralDeltaFingerprint(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    head_sha: str
+    head_tree_sha: str
+    changed_paths: tuple[str, ...]
+    affected_subjects: tuple[MergeTrainStructuralSubject, ...]
+    fingerprint_sha256: str = ""
+
+    @model_validator(mode="after")
+    def _validate_fingerprint(self) -> "MergeTrainStructuralDeltaFingerprint":
+        object.__setattr__(self, "head_sha", _required_token(self.head_sha, "head_sha"))
+        object.__setattr__(
+            self,
+            "head_tree_sha",
+            _required_token(self.head_tree_sha, "head_tree_sha"),
+        )
+        paths = tuple(sorted({_normalize_changed_path(path) for path in self.changed_paths}))
+        subjects = tuple(
+            sorted(set(self.affected_subjects), key=lambda item: (item.product, item.system))
+        )
+        object.__setattr__(self, "changed_paths", paths)
+        object.__setattr__(self, "affected_subjects", subjects)
+        expected_digest = merge_train_structural_delta_fingerprint_sha256(self)
+        if self.fingerprint_sha256:
+            if self.fingerprint_sha256.strip().lower() != expected_digest:
+                raise ValueError("Structural delta fingerprint digest does not match payload")
+        object.__setattr__(self, "fingerprint_sha256", expected_digest)
+        return self
+
+
 class MergeTrainStructuralEntryObservation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -255,32 +289,59 @@ class MergeTrainStructuralEntryObservation(BaseModel):
     pull_request_number: int = Field(ge=1)
     head_sha: str
     head_tree_sha: str
-    impact_status: MergeTrainStructuralImpactStatus = "unknown"
-    affected_subjects: tuple[MergeTrainStructuralSubject, ...] = ()
+    reviewed_delta: MergeTrainStructuralDeltaFingerprint | None = None
+    current_delta: MergeTrainStructuralDeltaFingerprint | None = None
 
     @model_validator(mode="after")
     def _validate_observation(self) -> "MergeTrainStructuralEntryObservation":
-        binding = MergeTrainStructuralEntryBinding.model_validate(self.model_dump(mode="json"))
-        object.__setattr__(self, "head_sha", binding.head_sha)
-        object.__setattr__(self, "head_tree_sha", binding.head_tree_sha)
-        object.__setattr__(self, "affected_subjects", binding.affected_subjects)
+        object.__setattr__(self, "head_sha", _required_token(self.head_sha, "head_sha"))
+        object.__setattr__(
+            self,
+            "head_tree_sha",
+            _required_token(self.head_tree_sha, "head_tree_sha"),
+        )
+        if self.current_delta is not None and (
+            self.current_delta.head_sha != self.head_sha
+            or self.current_delta.head_tree_sha != self.head_tree_sha
+        ):
+            raise ValueError("Current structural delta must bind the observed exact head and tree")
+        return self
+
+
+class MergeTrainOwnerEvidenceBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    event_id: str
+    binding_sha256: str
+
+    @model_validator(mode="after")
+    def _validate_binding(self) -> "MergeTrainOwnerEvidenceBinding":
+        object.__setattr__(self, "event_id", _required_token(self.event_id, "event_id"))
+        object.__setattr__(
+            self,
+            "binding_sha256",
+            _required_sha256(self.binding_sha256, "binding_sha256"),
+        )
         return self
 
 
 class MergeTrainCombinedCandidateOwnerReview(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    evidence_id: str
+    authoritative: Literal[False] = False
+    authorizes_merge: Literal[False] = False
+    evidence_bindings: tuple[MergeTrainOwnerEvidenceBinding, ...]
     candidate_sha256: str
     landing_plan_sha256: str
     policy_key: str
     policy_sha256: str
     entries: tuple[MergeTrainStructuralEntryObservation, ...]
+    entries_sha256: str = ""
+    review_sha256: str = ""
 
     @model_validator(mode="after")
     def _validate_review(self) -> "MergeTrainCombinedCandidateOwnerReview":
         for field_name in (
-            "evidence_id",
             "candidate_sha256",
             "landing_plan_sha256",
             "policy_key",
@@ -291,9 +352,26 @@ class MergeTrainCombinedCandidateOwnerReview(BaseModel):
                 field_name,
                 _required_token(str(getattr(self, field_name)), field_name),
             )
+        if not self.evidence_bindings:
+            raise ValueError("Combined-candidate Owner evidence requires exact L1 event bindings")
+        event_ids = tuple(binding.event_id for binding in self.evidence_bindings)
+        if len(event_ids) != len(set(event_ids)):
+            raise ValueError("Combined-candidate Owner evidence event IDs must be unique")
         _validate_observation_positions(self.entries)
-        if any(entry.impact_status != "known" for entry in self.entries):
-            raise ValueError("Combined-candidate Owner review requires known impact subjects")
+        if any(
+            entry.reviewed_delta is None or entry.current_delta is None for entry in self.entries
+        ):
+            raise ValueError("Combined-candidate Owner evidence requires complete delta entries")
+        expected_entries_digest = merge_train_structural_evaluation_entries_sha256(self.entries)
+        if self.entries_sha256:
+            if self.entries_sha256.strip().lower() != expected_entries_digest:
+                raise ValueError("Combined-candidate Owner entry digest does not match payload")
+        object.__setattr__(self, "entries_sha256", expected_entries_digest)
+        expected_review_digest = merge_train_combined_owner_review_sha256(self)
+        if self.review_sha256:
+            if self.review_sha256.strip().lower() != expected_review_digest:
+                raise ValueError("Combined-candidate Owner evidence digest does not match payload")
+        object.__setattr__(self, "review_sha256", expected_review_digest)
         return self
 
 
@@ -397,6 +475,29 @@ def merge_train_structural_candidate_sha256(
     )
 
 
+def merge_train_structural_delta_fingerprint_sha256(
+    fingerprint: MergeTrainStructuralDeltaFingerprint,
+) -> str:
+    return _canonical_sha256(fingerprint.model_dump(mode="json", exclude={"fingerprint_sha256"}))
+
+
+def merge_train_structural_evaluation_entries_sha256(
+    entries: tuple[MergeTrainStructuralEntryObservation, ...],
+) -> str:
+    return _canonical_sha256(
+        {
+            "schema_version": 1,
+            "entries": [entry.model_dump(mode="json") for entry in entries],
+        }
+    )
+
+
+def merge_train_combined_owner_review_sha256(
+    review: MergeTrainCombinedCandidateOwnerReview,
+) -> str:
+    return _canonical_sha256(review.model_dump(mode="json", exclude={"review_sha256"}))
+
+
 def _validate_observation_positions(
     entries: tuple[MergeTrainStructuralEntryObservation, ...],
 ) -> None:
@@ -414,6 +515,25 @@ def _normalize_repository(value: str) -> str:
     normalized = _required_token(value, "repository").lower()
     if normalized.count("/") != 1 or not all(normalized.split("/", 1)):
         raise ValueError("repository must use owner/name")
+    return normalized
+
+
+def _normalize_changed_path(value: str) -> str:
+    normalized = _required_token(value, "changed_path").replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    parts = normalized.split("/")
+    if normalized.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("changed_path must be a normalized repository-relative path")
+    return normalized
+
+
+def _required_sha256(value: str, field_name: str) -> str:
+    normalized = _required_token(value, field_name).lower()
+    if len(normalized) != 64 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        raise ValueError(f"{field_name} must be a SHA-256 digest")
     return normalized
 
 

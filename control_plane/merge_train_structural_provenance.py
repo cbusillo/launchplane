@@ -13,7 +13,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralEntryObservation,
     MergeTrainStructuralEvaluationInput,
     MergeTrainStructuralReasonCode,
-    MergeTrainStructuralSubject,
+    merge_train_structural_evaluation_entries_sha256,
 )
 from control_plane.merge_train_stack_collapse import stack_collapse_expected_root_head_sha
 
@@ -55,6 +55,13 @@ def evaluate_merge_train_structural_candidate(
             provenance_sha256=provenance.provenance_sha256,
         )
     landing_plan = landing_plan_record.landing_plan
+    plan_shape_result = _landing_plan_shape_result(
+        evaluation=evaluation,
+        candidate_record=candidate_record,
+        landing_plan_record=landing_plan_record,
+    )
+    if plan_shape_result is not None:
+        return plan_shape_result
     common_mismatch = _common_identity_mismatch(
         evaluation=evaluation,
         candidate_record=candidate_record,
@@ -99,7 +106,7 @@ def evaluate_merge_train_structural_candidate(
             landing_plan_record,
             "structural_position_mismatch",
         )
-    impact_result = _impact_composition_result(
+    impact_result, combined_review_used = _impact_composition_result(
         evaluation=evaluation,
         candidate_record=candidate_record,
         landing_plan_record=landing_plan_record,
@@ -137,8 +144,8 @@ def evaluate_merge_train_structural_candidate(
             return _success_result(
                 status="recorded_rolling",
                 reason_codes=_success_reasons(
-                    evaluation,
                     "structural_stack_root_recorded",
+                    combined_review_used=combined_review_used,
                 ),
                 evaluation=evaluation,
                 candidate_record=candidate_record,
@@ -147,32 +154,30 @@ def evaluate_merge_train_structural_candidate(
         return _success_result(
             status="exact",
             reason_codes=_success_reasons(
-                evaluation,
                 (
                     "structural_single_entry_exact"
                     if len(candidate.entries) == 1
                     else "structural_batch_entry_exact"
                 ),
+                combined_review_used=combined_review_used,
             ),
             evaluation=evaluation,
             candidate_record=candidate_record,
             landing_plan_record=landing_plan_record,
         )
-    rolling_reason = _rolling_base_mismatch(
+    rolling_result = _rolling_base_result(
         evaluation=evaluation,
         candidate_record=candidate_record,
         landing_plan_record=landing_plan_record,
     )
-    if rolling_reason is not None:
-        return _bound_result(
-            evaluation,
-            candidate_record,
-            landing_plan_record,
-            rolling_reason,
-        )
+    if rolling_result is not None:
+        return rolling_result
     return _success_result(
         status="recorded_rolling",
-        reason_codes=_success_reasons(evaluation, "structural_rolling_chain_recorded"),
+        reason_codes=_success_reasons(
+            "structural_rolling_chain_recorded",
+            combined_review_used=combined_review_used,
+        ),
         evaluation=evaluation,
         candidate_record=candidate_record,
         landing_plan_record=landing_plan_record,
@@ -250,56 +255,114 @@ def _queue_identity_mismatch(
     return None
 
 
-def _impact_composition_result(
+def _landing_plan_shape_result(
     *,
     evaluation: MergeTrainStructuralEvaluationInput,
     candidate_record: MergeTrainBatchCandidateRecord,
     landing_plan_record: MergeTrainBatchLandingPlanRecord,
 ) -> MergeTrainStructuralCandidateResult | None:
-    candidate = candidate_record.candidate
-    if any(entry.impact_status != "known" for entry in candidate.entries) or any(
-        entry.impact_status != "known" for entry in evaluation.entries
-    ):
-        return _result(
-            "unknown",
-            "structural_impact_unknown",
-            candidate_sha256=candidate.candidate_sha256,
-            landing_plan_sha256=landing_plan_record.landing_plan.landing_plan_sha256,
-            provenance_sha256=candidate.structural_provenance.provenance_sha256
-            if candidate.structural_provenance is not None
-            else "",
-        )
-    impact_changed = any(
-        set(current.affected_subjects) != set(recorded.affected_subjects)
-        for current, recorded in zip(evaluation.entries, candidate.entries, strict=True)
-    )
-    subject_counts: dict[MergeTrainStructuralSubject, int] = {}
-    for entry in evaluation.entries:
-        for subject in entry.affected_subjects:
-            subject_counts[subject] = subject_counts.get(subject, 0) + 1
-    same_subject = any(count > 1 for count in subject_counts.values())
-    if not impact_changed and not same_subject:
-        return None
-    review = evaluation.combined_owner_review
-    if review is None:
+    candidate_entries = candidate_record.candidate.entries
+    landing_entries = landing_plan_record.landing_plan.entries
+    if len(landing_entries) < len(candidate_entries):
         return _bound_result(
             evaluation,
             candidate_record,
             landing_plan_record,
-            (
-                "structural_impact_expanded"
-                if impact_changed
-                else "structural_same_subject_combined_review_required"
-            ),
+            "structural_landing_evidence_unavailable",
+            status="unknown",
         )
-    if not _combined_review_matches(review=review, evaluation=evaluation):
+    if len(landing_entries) > len(candidate_entries):
         return _bound_result(
             evaluation,
             candidate_record,
             landing_plan_record,
-            "structural_combined_owner_review_mismatch",
+            "structural_position_mismatch",
+        )
+    expected = tuple((entry.position, entry.pull_request_number) for entry in candidate_entries)
+    observed = tuple((entry.position, entry.pull_request_number) for entry in landing_entries)
+    if observed != expected:
+        return _bound_result(
+            evaluation,
+            candidate_record,
+            landing_plan_record,
+            "structural_position_mismatch",
         )
     return None
+
+
+def _impact_composition_result(
+    *,
+    evaluation: MergeTrainStructuralEvaluationInput,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    landing_plan_record: MergeTrainBatchLandingPlanRecord,
+) -> tuple[MergeTrainStructuralCandidateResult | None, bool]:
+    if any(
+        entry.reviewed_delta is None or entry.current_delta is None for entry in evaluation.entries
+    ):
+        return (
+            _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_impact_unknown",
+                status="unknown",
+            ),
+            False,
+        )
+    reasons: list[MergeTrainStructuralReasonCode] = []
+    if any(
+        entry.reviewed_delta.fingerprint_sha256 != entry.current_delta.fingerprint_sha256
+        for entry in evaluation.entries
+        if entry.reviewed_delta is not None and entry.current_delta is not None
+    ):
+        reasons.append("structural_delta_drift")
+    if any(
+        not set(entry.current_delta.affected_subjects).issubset(
+            entry.reviewed_delta.affected_subjects
+        )
+        for entry in evaluation.entries
+        if entry.reviewed_delta is not None and entry.current_delta is not None
+    ):
+        reasons.append("structural_impact_expanded")
+    path_positions: dict[str, set[int]] = {}
+    subject_positions: dict[tuple[str, str], set[int]] = {}
+    for entry in evaluation.entries:
+        current_delta = entry.current_delta
+        assert current_delta is not None
+        for path in current_delta.changed_paths:
+            path_positions.setdefault(path, set()).add(entry.position)
+        for subject in current_delta.affected_subjects:
+            subject_positions.setdefault((subject.product, subject.system), set()).add(
+                entry.position
+            )
+    if any(len(positions) > 1 for positions in path_positions.values()):
+        reasons.append("structural_changed_path_overlap")
+    if any(len(positions) > 1 for positions in subject_positions.values()):
+        reasons.append("structural_same_subject_combined_review_required")
+    if not reasons:
+        return None, False
+    review = evaluation.combined_owner_review
+    if review is None:
+        return (
+            _bound_result_reasons(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                tuple(reasons),
+            ),
+            False,
+        )
+    if not _combined_review_matches(review=review, evaluation=evaluation):
+        return (
+            _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_combined_owner_review_mismatch",
+            ),
+            False,
+        )
+    return None, True
 
 
 def _combined_review_matches(
@@ -313,6 +376,11 @@ def _combined_review_matches(
         and review.policy_key == evaluation.policy_key
         and review.policy_sha256 == evaluation.policy_sha256
         and review.entries == evaluation.entries
+        and review.entries_sha256
+        == merge_train_structural_evaluation_entries_sha256(evaluation.entries)
+        and bool(review.evidence_bindings)
+        and review.authoritative is False
+        and review.authorizes_merge is False
     )
 
 
@@ -346,51 +414,154 @@ def _stack_root_reason(
     return "structural_stack_root_recorded"
 
 
-def _rolling_base_mismatch(
+def _rolling_base_result(
     *,
     evaluation: MergeTrainStructuralEvaluationInput,
     candidate_record: MergeTrainBatchCandidateRecord,
     landing_plan_record: MergeTrainBatchLandingPlanRecord,
-) -> MergeTrainStructuralReasonCode | None:
+) -> MergeTrainStructuralCandidateResult | None:
     candidate = candidate_record.candidate
     provenance = candidate.structural_provenance
     if provenance is None:
-        return "structural_provenance_missing"
+        return _bound_result(
+            evaluation,
+            candidate_record,
+            landing_plan_record,
+            "structural_provenance_missing",
+            status="unknown",
+        )
     plan = landing_plan_record.landing_plan
     expected_parent_sha = candidate.base_sha
     expected_parent_tree_sha = provenance.base_tree_sha
     for index in range(evaluation.target_queue_position - 1):
+        if (
+            index >= len(plan.entries)
+            or index >= len(candidate.entries)
+            or index >= len(provenance.steps)
+        ):
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_landing_evidence_unavailable",
+                status="unknown",
+            )
         landing_entry = plan.entries[index]
         candidate_entry = candidate.entries[index]
         candidate_step = provenance.steps[index]
-        if landing_entry.status != "merged" or not landing_entry.merge_commit_sha:
-            return "structural_prior_entry_not_landed"
+        if landing_entry.status not in {"merged", "skipped"}:
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_prior_entry_not_landed",
+                status="unknown",
+            )
+        if not all(
+            (
+                landing_entry.recorded_rolling_base_sha,
+                landing_entry.recorded_rolling_base_tree_sha,
+                landing_entry.landed_head_sha,
+                landing_entry.landed_head_tree_sha,
+                landing_entry.merge_commit_sha,
+                landing_entry.merge_commit_tree_sha,
+            )
+        ):
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_landing_evidence_unavailable",
+                status="unknown",
+            )
         if landing_entry.landed_head_sha != candidate_entry.head_sha:
-            return "structural_prior_entry_head_mismatch"
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_prior_entry_head_mismatch",
+            )
         if landing_entry.landed_head_tree_sha != candidate_entry.head_tree_sha:
-            return "structural_prior_entry_tree_mismatch"
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_prior_entry_tree_mismatch",
+            )
+        if (
+            landing_entry.recorded_candidate_parent_sha != candidate_step.parent_sha
+            or landing_entry.recorded_candidate_parent_tree_sha != candidate_step.parent_tree_sha
+            or landing_entry.recorded_candidate_result_sha != candidate_step.result_sha
+            or landing_entry.recorded_candidate_result_tree_sha != candidate_step.result_tree_sha
+        ):
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_rolling_chain_broken",
+            )
         if (
             landing_entry.recorded_rolling_base_sha != expected_parent_sha
             or landing_entry.recorded_rolling_base_tree_sha != expected_parent_tree_sha
         ):
-            return "structural_rolling_chain_broken"
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_rolling_chain_broken",
+            )
+        if landing_entry.status == "skipped":
+            if (
+                candidate_step.kind != "no_op_already_contained"
+                or landing_entry.merge_commit_sha != expected_parent_sha
+                or landing_entry.merge_commit_tree_sha != expected_parent_tree_sha
+            ):
+                return _bound_result(
+                    evaluation,
+                    candidate_record,
+                    landing_plan_record,
+                    "structural_rolling_chain_broken",
+                )
+        elif candidate_step.kind != "merge_commit":
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_rolling_chain_broken",
+            )
         if landing_entry.merge_commit_tree_sha != candidate_step.result_tree_sha:
-            return "structural_rolling_chain_broken"
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_rolling_chain_broken",
+            )
         expected_parent_sha = landing_entry.merge_commit_sha
         expected_parent_tree_sha = landing_entry.merge_commit_tree_sha
     if evaluation.observed_base_sha != expected_parent_sha:
-        return "structural_base_sha_mismatch"
+        return _bound_result(
+            evaluation,
+            candidate_record,
+            landing_plan_record,
+            "structural_base_sha_mismatch",
+        )
     if evaluation.observed_base_tree_sha != expected_parent_tree_sha:
-        return "structural_base_tree_mismatch"
+        return _bound_result(
+            evaluation,
+            candidate_record,
+            landing_plan_record,
+            "structural_base_tree_mismatch",
+        )
     return None
 
 
 def _success_reasons(
-    evaluation: MergeTrainStructuralEvaluationInput,
     primary_reason: MergeTrainStructuralReasonCode,
+    *,
+    combined_review_used: bool,
 ) -> tuple[MergeTrainStructuralReasonCode, ...]:
     reasons = [primary_reason]
-    if evaluation.combined_owner_review is not None:
+    if combined_review_used:
         reasons.append("structural_combined_owner_review_recorded")
     return tuple(reasons)
 
@@ -423,17 +594,38 @@ def _bound_result(
     candidate_record: MergeTrainBatchCandidateRecord,
     landing_plan_record: MergeTrainBatchLandingPlanRecord,
     reason: MergeTrainStructuralReasonCode,
+    *,
+    status: str = "mismatch",
+) -> MergeTrainStructuralCandidateResult:
+    return _bound_result_reasons(
+        evaluation,
+        candidate_record,
+        landing_plan_record,
+        (reason,),
+        status=status,
+    )
+
+
+def _bound_result_reasons(
+    evaluation: MergeTrainStructuralEvaluationInput,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    landing_plan_record: MergeTrainBatchLandingPlanRecord,
+    reasons: tuple[MergeTrainStructuralReasonCode, ...],
+    *,
+    status: str = "mismatch",
 ) -> MergeTrainStructuralCandidateResult:
     candidate = candidate_record.candidate
     provenance = candidate.structural_provenance
-    return _result(
-        "mismatch",
-        reason,
-        effective_base_sha=evaluation.observed_base_sha,
-        effective_base_tree_sha=evaluation.observed_base_tree_sha,
-        candidate_sha256=candidate.candidate_sha256,
-        landing_plan_sha256=landing_plan_record.landing_plan.landing_plan_sha256,
-        provenance_sha256=provenance.provenance_sha256 if provenance is not None else "",
+    return MergeTrainStructuralCandidateResult.model_validate(
+        {
+            "status": status,
+            "reason_codes": reasons,
+            "effective_base_sha": evaluation.observed_base_sha,
+            "effective_base_tree_sha": evaluation.observed_base_tree_sha,
+            "candidate_sha256": candidate.candidate_sha256,
+            "landing_plan_sha256": landing_plan_record.landing_plan.landing_plan_sha256,
+            "provenance_sha256": provenance.provenance_sha256 if provenance is not None else "",
+        }
     )
 
 

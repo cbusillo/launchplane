@@ -1827,15 +1827,14 @@ def _advance_from_live_snapshot(
 def stale_merge_train_landing_plan(
     landing_plan: MergeTrainBatchLandingPlan,
 ) -> MergeTrainBatchLandingPlan:
-    return landing_plan.model_copy(
-        update={
-            "entries": tuple(
-                entry.model_copy(update={"status": "stale"})
-                if entry.status in {"planned", "merging"}
-                else entry
-                for entry in landing_plan.entries
-            )
-        }
+    entries = tuple(
+        type(entry).model_validate({**entry.model_dump(mode="python"), "status": "stale"})
+        if entry.status in {"planned", "merging"}
+        else entry
+        for entry in landing_plan.entries
+    )
+    return MergeTrainBatchLandingPlan.model_validate(
+        {**landing_plan.model_dump(mode="python"), "entries": entries}
     )
 
 
@@ -1900,7 +1899,9 @@ def try_reflow_failed_merge_train_candidate(
             )
         except Exception:
             candidate_store.write_merge_train_batch_candidate_record(
-                candidate_record.model_copy(update={"status": "superseded"})
+                MergeTrainBatchCandidateRecord.model_validate(
+                    {**candidate_record.model_dump(mode="python"), "status": "superseded"}
+                )
             )
             raise
         result["merge_train_batch_candidate_record_id"] = candidate_record.record_id
@@ -2059,7 +2060,9 @@ def _supersede_active_merge_train_batch_candidate_records(
         if record.candidate.batch_id != batch_id:
             continue
         record_store.write_merge_train_batch_candidate_record(
-            record.model_copy(update={"status": "superseded"})
+            MergeTrainBatchCandidateRecord.model_validate(
+                {**record.model_dump(mode="python"), "status": "superseded"}
+            )
         )
 
 

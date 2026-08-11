@@ -198,6 +198,28 @@ class MergeTrainBatchLandingEntry(BaseModel):
             "merge_commit_tree_sha",
         ):
             setattr(self, field_name, str(getattr(self, field_name)).strip())
+        if self.status == "skipped":
+            required_evidence = (
+                self.recorded_rolling_base_sha,
+                self.recorded_rolling_base_tree_sha,
+                self.landed_head_sha,
+                self.landed_head_tree_sha,
+                self.merge_commit_sha,
+                self.merge_commit_tree_sha,
+            )
+            if not all(required_evidence):
+                raise ValueError("skipped batch landing entry requires complete Git evidence")
+            if (
+                self.merge_commit_sha != self.recorded_rolling_base_sha
+                or self.merge_commit_tree_sha != self.recorded_rolling_base_tree_sha
+            ):
+                raise ValueError("skipped batch landing entry must preserve its rolling parent")
+            if (
+                self.recorded_candidate_parent_sha != self.recorded_candidate_result_sha
+                or self.recorded_candidate_parent_tree_sha
+                != self.recorded_candidate_result_tree_sha
+            ):
+                raise ValueError("skipped batch landing entry requires a recorded candidate no-op")
         return self
 
 
@@ -320,8 +342,6 @@ def build_merge_train_batch_candidate(
     base_sha: str,
     policy_sha256: str,
     created_at: str,
-    affected_subjects_by_pull_request: dict[int, tuple[MergeTrainStructuralSubject, ...]]
-    | None = None,
     stack_collapse_root: MergeTrainStackCollapseRootProof | None = None,
 ) -> MergeTrainBatchCandidate:
     if dry_run_result.intended_next_action not in ("merge", "idle"):
@@ -337,17 +357,6 @@ def build_merge_train_batch_candidate(
                 pull_request_number=queue_entry.number,
                 position=len(entries) + 1,
                 head_sha=queue_entry.head_sha,
-                impact_status=(
-                    "known"
-                    if affected_subjects_by_pull_request is not None
-                    and queue_entry.number in affected_subjects_by_pull_request
-                    else "unknown"
-                ),
-                affected_subjects=(
-                    affected_subjects_by_pull_request.get(queue_entry.number, ())
-                    if affected_subjects_by_pull_request is not None
-                    else ()
-                ),
                 title=queue_entry.title,
                 url=queue_entry.url,
             )
@@ -395,8 +404,11 @@ def build_merge_train_batch_candidate_record(
         updated_at=updated_at,
         candidate=candidate,
     )
-    return record_without_id.model_copy(
-        update={"record_id": build_merge_train_batch_candidate_record_id(record_without_id)}
+    return MergeTrainBatchCandidateRecord.model_validate(
+        {
+            **record_without_id.model_dump(mode="python"),
+            "record_id": build_merge_train_batch_candidate_record_id(record_without_id),
+        }
     )
 
 
@@ -423,8 +435,11 @@ def build_merge_train_batch_landing_plan_record(
         updated_at=updated_at,
         landing_plan=landing_plan,
     )
-    return record_without_id.model_copy(
-        update={"record_id": build_merge_train_batch_landing_plan_record_id(record_without_id)}
+    return MergeTrainBatchLandingPlanRecord.model_validate(
+        {
+            **record_without_id.model_dump(mode="python"),
+            "record_id": build_merge_train_batch_landing_plan_record_id(record_without_id),
+        }
     )
 
 
@@ -533,8 +548,11 @@ def build_merge_train_batch_landing_plan(
         entries=entries,
         created_at=created_at,
     )
-    return plan_without_id.model_copy(
-        update={"plan_id": build_merge_train_batch_landing_plan_id(plan_without_id)}
+    return MergeTrainBatchLandingPlan.model_validate(
+        {
+            **plan_without_id.model_dump(mode="python"),
+            "plan_id": build_merge_train_batch_landing_plan_id(plan_without_id),
+        }
     )
 
 
@@ -590,8 +608,10 @@ def _normalize_entries(
 
 
 def _normalize_repository(repository: str) -> str:
-    normalized = _normalize_required_value(repository, "merge train batch requires repository")
-    if "/" not in normalized:
+    normalized = _normalize_required_value(
+        repository, "merge train batch requires repository"
+    ).lower()
+    if normalized.count("/") != 1 or not all(normalized.split("/", 1)):
         raise ValueError("merge train batch repository must be owner/name")
     return normalized
 
