@@ -1202,6 +1202,86 @@ class SchemaMigrationTests(unittest.TestCase):
             downgraded_tables,
         )
 
+    def test_owner_review_policy_migration_backfills_explicit_defaults(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = _alembic_config(database_url)
+            command.upgrade(config, "b5d7f9a1c3e6")
+            engine = create_engine(database_url)
+            legacy_payload = {
+                "schema_version": 1,
+                "product": "example-site",
+                "system": "web",
+                "policy_revision": 1,
+                "owners": [],
+                "quorum": 1,
+                "status": "active",
+                "effective_at": "2026-08-07T00:00:00Z",
+                "source": "test",
+                "reason": "Legacy Owner policy.",
+            }
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO launchplane_product_owner_policies (
+                            record_id, product, system, status, policy_revision, quorum,
+                            effective_at, source, supersedes_record_id, policy_digest, payload
+                        ) VALUES (
+                            'owner-policy-legacy', 'example-site', 'web', 'active', 1, 1,
+                            '2026-08-07T00:00:00Z', 'test', NULL, :policy_digest, :payload
+                        )
+                        """
+                    ),
+                    {
+                        "policy_digest": "a" * 64,
+                        "payload": json.dumps(legacy_payload, sort_keys=True),
+                    },
+                )
+            engine.dispose()
+
+            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                with engine.connect() as connection:
+                    payload, policy_digest = connection.execute(
+                        text(
+                            "SELECT payload, policy_digest "
+                            "FROM launchplane_product_owner_policies "
+                            "WHERE record_id = 'owner-policy-legacy'"
+                        )
+                    ).one()
+            finally:
+                engine.dispose()
+
+        decoded = json.loads(payload) if isinstance(payload, str) else payload
+        self.assertEqual(
+            decoded["review_age"],
+            {
+                "elevated_max_age_seconds": 604800,
+                "routine_max_age_seconds": 2592000,
+                "schema_version": 1,
+            },
+        )
+        self.assertEqual(
+            decoded["self_review"],
+            {
+                "exception_reason": "",
+                "exception_revision": 0,
+                "routine_exception_enabled": False,
+                "schema_version": 1,
+            },
+        )
+        self.assertEqual(
+            decoded["preview_trust"],
+            {
+                "minimum_isolation_class": "synthetic_seeded",
+                "schema_version": 1,
+            },
+        )
+        self.assertEqual(policy_digest, "a" * 64)
+
     def test_policy_schema_invariants_are_expected(self) -> None:
         column_types = {
             (column.table_name, column.column_name): column.accepted_type_tokens
@@ -1213,7 +1293,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "b5d7f9a1c3e6")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "b2d4f6a8c0e2")
         self.assertEqual(
             column_types[("launchplane_repository_human_role_policies", "payload")],
             ("jsonb",),

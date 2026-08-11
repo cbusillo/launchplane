@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "b5d7f9a1c3e6"
+EXPECTED_ALEMBIC_HEAD_REVISION = "b2d4f6a8c0e2"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -204,8 +204,18 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_owner_acceptance_events",
+        "review_max_age_seconds",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_events",
         "subject_sequence",
         ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_events",
+        "self_review",
+        ("boolean", "bool"),
     ),
     CriticalColumnType(
         "launchplane_owner_acceptance_events",

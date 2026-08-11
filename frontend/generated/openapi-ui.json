@@ -8748,6 +8748,17 @@
             "minimum": 1,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "self_review": {
+            "default": false,
+            "title": "Self Review",
+            "type": "boolean"
+          },
+          "self_review_exception_revision": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Self Review Exception Revision",
+            "type": "integer"
           }
         },
         "required": [
@@ -8761,7 +8772,9 @@
           "owner_requirement_digest",
           "owner_requirement_record_id",
           "owner_requirement_revision",
-          "schema_version"
+          "schema_version",
+          "self_review",
+          "self_review_exception_revision"
         ],
         "title": "OwnerAcceptanceAuthorization",
         "type": "object"
@@ -8856,6 +8869,16 @@
             "title": "Repository Owner Id",
             "type": "string"
           },
+          "review_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OwnerAcceptanceReviewContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1,
@@ -8891,11 +8914,65 @@
           "repository",
           "repository_id",
           "repository_owner_id",
+          "review_context",
           "schema_version",
           "system",
           "tree_sha"
         ],
         "title": "OwnerAcceptanceBinding",
+        "type": "object"
+      },
+      "OwnerAcceptanceContributionBinding": {
+        "additionalProperties": false,
+        "description": "Server-resolved numeric GitHub contributing identities for a reviewed range.\n\nLaunchplane resolves these from trusted pull-request and GitHub-linked commit\nevidence. Unresolved or conflicting evidence is recorded as ``unknown`` with no\nidentities so self-review and admissibility fail closed.",
+        "properties": {
+          "commit_count": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Commit Count",
+            "type": "integer"
+          },
+          "contributor_github_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Contributor Github Ids",
+            "type": "array"
+          },
+          "reason_code": {
+            "enum": [
+              "server_resolved",
+              "identity_evidence_unavailable",
+              "identity_evidence_conflicting",
+              "identity_evidence_incomplete"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "resolution": {
+            "enum": [
+              "resolved",
+              "unknown"
+            ],
+            "title": "Resolution",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "commit_count",
+          "contributor_github_ids",
+          "reason_code",
+          "resolution",
+          "schema_version"
+        ],
+        "title": "OwnerAcceptanceContributionBinding",
         "type": "object"
       },
       "OwnerAcceptanceCurrentItem": {
@@ -9087,11 +9164,24 @@
       "OwnerAcceptanceDecision": {
         "additionalProperties": false,
         "properties": {
+          "admissible": {
+            "default": false,
+            "title": "Admissible",
+            "type": "boolean"
+          },
           "authoritative": {
             "const": false,
             "default": false,
             "title": "Authoritative",
             "type": "boolean"
+          },
+          "authorizes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Authorizes",
+            "type": "array"
           },
           "binding": {
             "anyOf": [
@@ -9123,6 +9213,19 @@
             "title": "Evaluated At",
             "type": "string"
           },
+          "human_action_semantics": {
+            "default": "none",
+            "enum": [
+              "none",
+              "product_review_accepted",
+              "product_review_changes_requested",
+              "product_review_revoked",
+              "product_review_superseded",
+              "product_review_invalidated"
+            ],
+            "title": "Human Action Semantics",
+            "type": "string"
+          },
           "mode": {
             "const": "shadow",
             "default": "shadow",
@@ -9151,7 +9254,12 @@
               "owner_authority_unavailable",
               "owner_authority_denied",
               "preview_evidence_unavailable",
-              "preview_evidence_stale"
+              "preview_evidence_stale",
+              "owner_review_expired",
+              "preview_isolation_insufficient",
+              "contributing_identity_unknown",
+              "self_review_denied",
+              "review_context_missing"
             ],
             "title": "Reason Code",
             "type": "string"
@@ -9177,11 +9285,14 @@
           }
         },
         "required": [
+          "admissible",
           "authoritative",
+          "authorizes",
           "binding",
           "current_event",
           "enforcement_effect",
           "evaluated_at",
+          "human_action_semantics",
           "mode",
           "products",
           "reason_code",
@@ -9381,6 +9492,9 @@
           "record": {
             "$ref": "#/components/schemas/OwnerAcceptanceEventRecord"
           },
+          "semantics": {
+            "$ref": "#/components/schemas/OwnerAcceptanceEventSemantics"
+          },
           "status": {
             "const": "ok",
             "default": "ok",
@@ -9403,11 +9517,94 @@
         "required": [
           "decision",
           "record",
+          "semantics",
           "status",
           "trace_id",
           "write_status"
         ],
         "title": "OwnerAcceptanceEventResponse",
+        "type": "object"
+      },
+      "OwnerAcceptanceEventSemantics": {
+        "additionalProperties": false,
+        "description": "Machine-readable projection of a stored human product-review action.\n\nThe stored enum and every persisted digest stay unchanged. This projection\nexists so no API client can read Owner product review as merge readiness,\nlanded state, or production authorization.",
+        "properties": {
+          "authorizes": {
+            "default": [],
+            "description": "Always empty. Owner product review authorizes nothing on its own.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Authorizes",
+            "type": "array"
+          },
+          "human_action_semantics": {
+            "enum": [
+              "none",
+              "product_review_accepted",
+              "product_review_changes_requested",
+              "product_review_revoked",
+              "product_review_superseded",
+              "product_review_invalidated"
+            ],
+            "title": "Human Action Semantics",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorizes",
+          "human_action_semantics"
+        ],
+        "title": "OwnerAcceptanceEventSemantics",
+        "type": "object"
+      },
+      "OwnerAcceptancePolicyFingerprintBinding": {
+        "additionalProperties": false,
+        "description": "Product/action-scoped, explicitly versioned Owner policy fingerprints.",
+        "properties": {
+          "fingerprint_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Fingerprint Version",
+            "type": "integer"
+          },
+          "owner_membership_fingerprint": {
+            "title": "Owner Membership Fingerprint",
+            "type": "string"
+          },
+          "preview_trust_fingerprint": {
+            "title": "Preview Trust Fingerprint",
+            "type": "string"
+          },
+          "requirement_fingerprint": {
+            "title": "Requirement Fingerprint",
+            "type": "string"
+          },
+          "review_age_fingerprint": {
+            "title": "Review Age Fingerprint",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "self_review_fingerprint": {
+            "title": "Self Review Fingerprint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fingerprint_version",
+          "owner_membership_fingerprint",
+          "preview_trust_fingerprint",
+          "requirement_fingerprint",
+          "review_age_fingerprint",
+          "schema_version",
+          "self_review_fingerprint"
+        ],
+        "title": "OwnerAcceptancePolicyFingerprintBinding",
         "type": "object"
       },
       "OwnerAcceptancePreviewBinding": {
@@ -9465,12 +9662,69 @@
         "title": "OwnerAcceptancePreviewBinding",
         "type": "object"
       },
+      "OwnerAcceptancePreviewIsolationBinding": {
+        "additionalProperties": false,
+        "description": "Recorded preview data/credential isolation class for the reviewed evidence.\n\nL1 product judgment is never a security control. This binding exists so weak or\nunknown preview isolation makes the recorded review inadmissible rather than\nsilently trusted.",
+        "properties": {
+          "data_transport_mode": {
+            "default": "",
+            "title": "Data Transport Mode",
+            "type": "string"
+          },
+          "isolation_class": {
+            "enum": [
+              "not_applicable",
+              "no_product_data",
+              "synthetic_seeded",
+              "cloned_product_data",
+              "unknown"
+            ],
+            "title": "Isolation Class",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "enum": [
+              "product_preview_profile",
+              "no_preview_binding"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data_transport_mode",
+          "isolation_class",
+          "schema_version",
+          "source"
+        ],
+        "title": "OwnerAcceptancePreviewIsolationBinding",
+        "type": "object"
+      },
       "OwnerAcceptanceProductDecision": {
         "additionalProperties": false,
         "properties": {
           "action": {
             "title": "Action",
             "type": "string"
+          },
+          "admissible": {
+            "default": false,
+            "title": "Admissible",
+            "type": "boolean"
+          },
+          "authorizes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Authorizes",
+            "type": "array"
           },
           "binding": {
             "anyOf": [
@@ -9496,6 +9750,19 @@
             "title": "Environment",
             "type": "string"
           },
+          "human_action_semantics": {
+            "default": "none",
+            "enum": [
+              "none",
+              "product_review_accepted",
+              "product_review_changes_requested",
+              "product_review_revoked",
+              "product_review_superseded",
+              "product_review_invalidated"
+            ],
+            "title": "Human Action Semantics",
+            "type": "string"
+          },
           "product": {
             "title": "Product",
             "type": "string"
@@ -9514,7 +9781,12 @@
               "owner_authority_unavailable",
               "owner_authority_denied",
               "preview_evidence_unavailable",
-              "preview_evidence_stale"
+              "preview_evidence_stale",
+              "owner_review_expired",
+              "preview_isolation_insufficient",
+              "contributing_identity_unknown",
+              "self_review_denied",
+              "review_context_missing"
             ],
             "title": "Reason Code",
             "type": "string"
@@ -9545,9 +9817,12 @@
         },
         "required": [
           "action",
+          "admissible",
+          "authorizes",
           "binding",
           "current_event",
           "environment",
+          "human_action_semantics",
           "product",
           "reason_code",
           "schema_version",
@@ -9787,6 +10062,71 @@
         "title": "OwnerAcceptanceResolutionEvidence",
         "type": "object"
       },
+      "OwnerAcceptanceReviewContext": {
+        "additionalProperties": false,
+        "description": "Exact reviewed context bound to one Owner product-review event.\n\nThe context is entirely server-resolved. It never grants merge or release\nauthority; it exists so historical evidence can be judged currently admissible\nusing bound base identity, impact class, authorship, finite age, scoped policy\nfingerprints, and preview isolation.",
+        "properties": {
+          "base_ref": {
+            "title": "Base Ref",
+            "type": "string"
+          },
+          "base_sha": {
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "change_class": {
+            "enum": [
+              "routine",
+              "sensitive",
+              "unknown",
+              "production_affecting"
+            ],
+            "title": "Change Class",
+            "type": "string"
+          },
+          "contributions": {
+            "$ref": "#/components/schemas/OwnerAcceptanceContributionBinding"
+          },
+          "engineering_review_tier": {
+            "enum": [
+              "routine",
+              "sensitive"
+            ],
+            "title": "Engineering Review Tier",
+            "type": "string"
+          },
+          "policy_fingerprints": {
+            "$ref": "#/components/schemas/OwnerAcceptancePolicyFingerprintBinding"
+          },
+          "preview_isolation": {
+            "$ref": "#/components/schemas/OwnerAcceptancePreviewIsolationBinding"
+          },
+          "review_max_age_seconds": {
+            "minimum": 1,
+            "title": "Review Max Age Seconds",
+            "type": "integer"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "base_ref",
+          "base_sha",
+          "change_class",
+          "contributions",
+          "engineering_review_tier",
+          "policy_fingerprints",
+          "preview_isolation",
+          "review_max_age_seconds",
+          "schema_version"
+        ],
+        "title": "OwnerAcceptanceReviewContext",
+        "type": "object"
+      },
       "OwnerAcceptanceRuntimeIdentityBinding": {
         "additionalProperties": false,
         "properties": {
@@ -9876,6 +10216,18 @@
             "title": "Binding Sha256",
             "type": "string"
           },
+          "can_accept": {
+            "title": "Can Accept",
+            "type": "boolean"
+          },
+          "can_request_changes": {
+            "title": "Can Request Changes",
+            "type": "boolean"
+          },
+          "can_revoke": {
+            "title": "Can Revoke",
+            "type": "boolean"
+          },
           "can_submit_event": {
             "title": "Can Submit Event",
             "type": "boolean"
@@ -9893,7 +10245,8 @@
               "current_product_owner",
               "not_current_product_owner",
               "viewer_identity_unsupported",
-              "owner_authority_unavailable"
+              "owner_authority_unavailable",
+              "self_review_denied"
             ],
             "title": "Reason Code",
             "type": "string"
@@ -9912,6 +10265,9 @@
         "required": [
           "action",
           "binding_sha256",
+          "can_accept",
+          "can_request_changes",
+          "can_revoke",
           "can_submit_event",
           "environment",
           "product",

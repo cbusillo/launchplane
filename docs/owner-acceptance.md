@@ -36,6 +36,27 @@ change:
   fingerprint, canonical URL, and an explicit verified-runtime identity
   projection.
 
+Every current binding also carries a server-resolved `review_context`:
+
+- the reviewed base ref and base SHA the change was compared against;
+- the change class for this exact product subject: `routine`, `sensitive`,
+  `unknown`, or `production_affecting`;
+- the engineering review tier that produced it;
+- the finite `review_max_age_seconds` selected by the product Owner policy for
+  that change class;
+- server-resolved numeric GitHub contributing identities, or an explicit
+  `unknown` resolution with a closed reason code;
+- product/action-scoped, explicitly versioned Owner membership, self-review,
+  review-age, requirement, and preview-trust policy fingerprints;
+- the preview data isolation class derived from the product preview profile's
+  data transport mode, or `not_applicable` when no preview is bound.
+
+`review_context` is an optional bound field, exactly like preview evidence before
+it. A binding recorded before this contract existed still recomputes its original
+`binding_sha256` byte-for-byte, so history and replay digests are unchanged. A
+current server-derived binding legitimately differs because more evidence is now
+bound, which stales prior events until an Owner reviews the richer evidence.
+
 Preferred Owner routing affects notification order only; it does not grant or
 deny Owner authority and is intentionally excluded from the acceptance
 binding.
@@ -80,6 +101,65 @@ with ambiguous, incomplete, non-serving, or failed verification evidence is
 `unavailable`. If a preview-bound acceptance already exists, preview teardown
 evaluates as `preview_evidence_stale` and cannot be replaced by a weaker
 exact-change-only acceptance.
+
+## Admissibility
+
+A recorded event is immutable. Admissibility is a separate, recomputed judgment
+about whether that history is *currently* usable. `OwnerAcceptanceDecision` and
+each product decision expose `admissible`, which is true only when the status is
+`accepted` and every current check passes.
+
+A currently accepted review becomes inadmissible without any history rewrite
+when:
+
+- the binding carries no reviewed context (`review_context_missing`);
+- contributing GitHub identities are unresolved or conflicting
+  (`contributing_identity_unknown`);
+- bound preview isolation is weaker than the current product preview-trust
+  policy (`preview_isolation_insufficient`);
+- the event was recorded as a self-review that current policy no longer permits,
+  or under a superseded self-review exception revision (`self_review_denied`);
+- the event is older than the policy-scoped review age (`owner_review_expired`).
+
+Owner authority loss is already handled upstream: without a current Owner grant
+the subject has no binding and evaluates as `owner_authority_unavailable`. In
+every case the stored event remains readable and unchanged.
+
+## Self-Review
+
+Self-review is denied by default. Launchplane compares the acting human's
+immutable numeric GitHub ID against the bound contributing identities:
+
+- unresolved or conflicting contributing evidence denies every actor;
+- a contributor may record review only when the current product Owner policy
+  enables its explicitly revisioned routine self-review exception, and only for
+  a `routine` change;
+- `sensitive`, `unknown`, and `production_affecting` changes are always denied.
+
+`changes_requested` and `revoked` are never blocked by this rule. They withdraw
+or withhold product judgment rather than asserting it, so denying them would trap
+stale evidence instead of failing closed. Such an event still records that the
+actor was a bound contributor.
+
+A permitted self-review records `self_review` and the applied
+`self_review_exception_revision` on the event authorization, so a later exception
+revision makes the historical event inadmissible instead of silently valid.
+`POST /v1/owner-acceptance/events` returns
+`403 owner_acceptance_self_review_denied` when the rule denies the write, and
+viewer eligibility mirrors the same rule with reason code `self_review_denied`.
+
+## Non-Authority Semantics
+
+Stored human actions and their digests never change. API projections add
+machine-readable non-authority descriptors:
+
+- decisions expose `human_action_semantics` (for example
+  `product_review_accepted`) and `authorizes`, which is always empty;
+- event responses expose the same pair under `semantics`.
+
+The contract rejects any decision that claims authority or claims admissibility
+without a current acceptance, so a client cannot read Owner product review as
+merge readiness, landed state, or production authorization.
 
 For every successfully impact-resolved product change, the response includes a
 deterministic `products` entry for each affected product in change-impact order;
@@ -184,6 +264,13 @@ pre-migration current state, creates the subject counter table and uniqueness
 fence, and leaves semantic payload identities unchanged. It performs no
 backfill from GitHub comments, manager-preview approvals, technical waivers, or
 tenant-admission evidence.
+
+Migration `b2d4f6a8c0e2` adds queryable `base_ref`, `base_sha`, `change_class`,
+`review_max_age_seconds`, `contribution_resolution`, `preview_isolation_class`,
+and `self_review` columns projected from the bound reviewed context, and makes
+the fail-closed product Owner review-age, self-review, and preview-trust defaults
+explicit in stored policy payloads. It adds no authority, infers no identity, and
+cannot change `binding_sha256`, event, acceptance, or replay digests.
 
 ## Current Items
 
