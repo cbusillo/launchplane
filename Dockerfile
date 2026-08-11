@@ -56,7 +56,8 @@ RUN apt-get update \
 
 COPY --from=github-cli-build /go/bin/gh /usr/local/bin/gh
 
-RUN pip install --no-cache-dir uv
+RUN pip install --no-cache-dir uv \
+    && python -m pip uninstall --yes pip setuptools
 
 WORKDIR /app
 
