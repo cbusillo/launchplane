@@ -209,6 +209,11 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_owner_acceptance_events",
+        "subject_sequence",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_events",
         "self_review",
         ("boolean", "bool"),
     ),
@@ -216,6 +221,16 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "launchplane_owner_acceptance_events",
         "payload",
         ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_subject_sequences",
+        "pr_number",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_subject_sequences",
+        "last_sequence",
+        ("bigint", "int8"),
     ),
     CriticalColumnType(
         "launchplane_public_ingress_incident_reminders",
@@ -611,8 +626,23 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
             "product",
             "system",
             "owner_action",
-            "occurred_at",
+            "environment",
+            "subject_sequence",
         ),
+    ),
+    CriticalIndex(
+        "launchplane_owner_acceptance_events",
+        "launchplane_owner_acceptance_events_subject_sequence_uidx",
+        (
+            "repository_id",
+            "pr_number",
+            "product",
+            "system",
+            "owner_action",
+            "environment",
+            "subject_sequence",
+        ),
+        unique=True,
     ),
     CriticalIndex(
         "launchplane_owner_acceptance_events",
@@ -803,6 +833,17 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_owner_acceptance_events",
         ("event_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_owner_acceptance_subject_sequences",
+        (
+            "repository_id",
+            "pr_number",
+            "product",
+            "system",
+            "owner_action",
+            "environment",
+        ),
     ),
     CriticalPrimaryKey(
         "launchplane_tenant_repository_classifications",

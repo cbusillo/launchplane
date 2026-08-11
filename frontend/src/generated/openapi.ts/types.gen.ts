@@ -979,6 +979,7 @@ export type OwnerAcceptanceEventEnvelope = {
     action: 'accepted' | 'changes_requested' | 'revoked';
     expected_binding_sha256: string;
     reason?: string;
+    resolution?: OwnerAcceptanceResolutionEvidence | null;
     schema_version?: number;
     target: ChangeImpactTargetReference;
 };
@@ -991,9 +992,11 @@ export type OwnerAcceptanceEventRecord = {
     event_id: string;
     occurred_at: string;
     reason: string;
+    resolution: OwnerAcceptanceResolutionEvidence | null;
     schema_version: number;
     source_event_id: string;
     source_event_kind: 'browser_api' | 'system';
+    subject_sequence: number;
 };
 
 export type OwnerAcceptanceEventResponse = {
@@ -1088,6 +1091,12 @@ export type OwnerAcceptanceQueueResponse = {
     total: number;
     trace_id: string;
     truncated: boolean;
+};
+
+export type OwnerAcceptanceResolutionEvidence = {
+    resolved_evidence_references: Array<string>;
+    schema_version: number;
+    summary: string;
 };
 
 export type OwnerAcceptanceReviewContext = {

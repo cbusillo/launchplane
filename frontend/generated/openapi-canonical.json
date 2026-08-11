@@ -12066,6 +12066,16 @@
             "title": "Reason",
             "type": "string"
           },
+          "resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OwnerAcceptanceResolutionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -12159,6 +12169,16 @@
             "title": "Reason",
             "type": "string"
           },
+          "resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OwnerAcceptanceResolutionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -12178,6 +12198,12 @@
             ],
             "title": "Source Event Kind",
             "type": "string"
+          },
+          "subject_sequence": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Subject Sequence",
+            "type": "integer"
           }
         },
         "required": [
@@ -12758,6 +12784,38 @@
           "entries"
         ],
         "title": "OwnerAcceptanceQueueResponse",
+        "type": "object"
+      },
+      "OwnerAcceptanceResolutionEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "resolved_evidence_references": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Resolved Evidence References",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "summary": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary",
+          "resolved_evidence_references"
+        ],
+        "title": "OwnerAcceptanceResolutionEvidence",
         "type": "object"
       },
       "OwnerAcceptanceReviewContext": {

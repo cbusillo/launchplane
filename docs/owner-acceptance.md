@@ -204,7 +204,10 @@ acceptances stay visible.
 The `Idempotency-Key` is scoped by the exact binding because the immutable event
 ID includes both values. Reusing one key for different product-binding digests
 creates distinct product events; replaying it for the same binding remains
-idempotent.
+idempotent. Exact replay returns the already-persisted event and receives no new
+subject sequence. A different idempotency key cannot deliberately reaffirm the
+same human state on an identical binding; reaffirmation requires changed bound
+evidence and therefore a new binding.
 
 Human actions are:
 
@@ -220,24 +223,47 @@ System-only actions are:
 System actions cannot carry human authorization, and human routes cannot write
 system actions.
 
+Human transitions are validated atomically with append:
+
+- an initial `accepted` or `changes_requested` event is allowed;
+- `accepted -> changes_requested` is allowed on the identical binding;
+- `accepted -> revoked` and `changes_requested -> revoked` require a reason;
+- `changes_requested -> accepted` on the identical binding requires structured
+  `resolution.summary` plus one or more unique
+  `resolution.resolved_evidence_references`;
+- identical-state reaffirmation and any later human transition from `revoked`
+  on the identical binding are rejected;
+- a new exact binding starts a new review and cannot revoke a prior binding.
+
 ## Persistence
 
 Filesystem rehearsal records live under `launchplane_owner_acceptance_events/`.
 PostgreSQL stores the append-only ledger in
 `launchplane_owner_acceptance_events` with an event-id primary key, subject,
-binding, and acceptance indexes, and JSONB payload storage. Replaying an
-identical event is deterministic; replaying the same event ID with a changed
-payload is a conflict. Optional preview evidence lives inside the existing JSONB
-payload; non-preview bindings omit the field and preserve the original binding,
+binding, acceptance, and unique per-subject sequence indexes, and JSONB payload
+storage. `launchplane_owner_acceptance_subject_sequences` serializes sequence
+allocation for the full subject
+`(repository_id, pull_request_number, product, system, action, environment)` in
+the same transaction as transition validation and event insert. Filesystem
+rehearsal uses the existing cross-process authority lock and atomic file replace
+for equivalent append semantics. Replaying an identical event is deterministic;
+replaying the same event ID with a changed payload is a conflict. Sequence is
+storage metadata and is excluded from event IDs, binding digests, and replay
+digests. Optional preview and resolution evidence lives inside the JSON payload;
+records that omit those optional fields preserve the original binding,
 acceptance, event, and replay digests byte-for-byte.
 
 Multi-product aggregation uses the existing subject indexes and one PR-scoped
 event read followed by in-memory product grouping. It adds no table, column,
 index, backfill, or migration revision.
 
-Migration `f3a5c7e9b1d4` creates the empty table and indexes only. It performs
-no backfill from GitHub comments, manager-preview approvals, technical waivers,
-or tenant-admission evidence.
+Migration `f3a5c7e9b1d4` creates the empty event table. Migration
+`b5d7f9a1c3e6` adds sequence metadata, deterministically backfills existing
+subjects using the prior `(occurred_at, event_id)` order to preserve their
+pre-migration current state, creates the subject counter table and uniqueness
+fence, and leaves semantic payload identities unchanged. It performs no
+backfill from GitHub comments, manager-preview approvals, technical waivers, or
+tenant-admission evidence.
 
 Migration `b2d4f6a8c0e2` adds queryable `base_ref`, `base_sha`, `change_class`,
 `review_max_age_seconds`, `contribution_resolution`, `preview_isolation_class`,
@@ -276,8 +302,9 @@ the queue until an acceptance event exists for their exact subject.
 
 **Folding:** Events are folded by their full subject key:
 `(repository_id, pull_request_number, product, system, action, environment)`.
-For each unique subject, the latest event is selected deterministically by
-`(occurred_at, event_id)`.
+For each unique subject, the latest event is selected by `subject_sequence`
+only. `occurred_at` remains audit and display data and cannot change current
+state under clock skew.
 
 **Ledger status:** Each entry carries a `ledger_status` and `next_action`
 derived from the latest recorded event action:
@@ -343,6 +370,9 @@ require a reason, revoke requires explicit confirmation, replay preserves the
 same idempotency key, and `409 owner_acceptance_binding_changed` refreshes the
 Current item without auto-resubmitting. Every receipt remains shadow,
 non-authoritative, and has no merge or production enforcement effect.
+When the current identical-binding state is `changes_requested`, choosing
+accepted reveals required resolution-summary and evidence-reference fields; the
+browser cannot submit that reversal until both are present.
 Before submission, the UI labels the control as **Product review action** and
 states that recording it does not indicate technical checks passed, make the PR
 merge-ready, or authorize production. The stored API and ledger action remains

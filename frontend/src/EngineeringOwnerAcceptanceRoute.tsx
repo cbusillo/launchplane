@@ -746,6 +746,8 @@ function OwnerAcceptanceActionPanel({
   const defaultAction = ownerAcceptanceDefaultAction(eligibility);
   const [action, setAction] = useState<OwnerAcceptanceHumanAction>(defaultAction);
   const [reason, setReason] = useState("");
+  const [resolutionSummary, setResolutionSummary] = useState("");
+  const [resolutionReferences, setResolutionReferences] = useState("");
   const [confirmRevoke, setConfirmRevoke] = useState(false);
   const handledDriftFailureRef = useRef<object | null>(null);
   const operation = useBrowserOperationController<
@@ -769,12 +771,14 @@ function OwnerAcceptanceActionPanel({
         schema_version: 1,
         event_id: `fixture-${options.idempotencyKey}`,
         acceptance_id: `fixture-${binding.binding_sha256.slice(0, 32)}`,
+        subject_sequence: (decision.current_event?.subject_sequence ?? 0) + 1,
         binding,
         action: payload.action,
         occurred_at: occurredAt,
         source_event_kind: "browser_api" as const,
         source_event_id: options.idempotencyKey,
         reason: payload.reason ?? "",
+        resolution: payload.resolution ?? null,
         authorization: null,
       };
       return {
@@ -831,12 +835,31 @@ function OwnerAcceptanceActionPanel({
   useEffect(() => {
     setAction(defaultAction);
     setReason("");
+    setResolutionSummary("");
+    setResolutionReferences("");
     setConfirmRevoke(false);
   }, [binding.binding_sha256, defaultAction]);
   const reasonRequired = action !== "accepted";
+  const currentProductEvent = decision.products.find(
+    (product) => product.binding?.binding_sha256 === binding.binding_sha256,
+  )?.current_event;
+  const resolutionRequired =
+    action === "accepted" &&
+    currentProductEvent?.binding.binding_sha256 === binding.binding_sha256 &&
+    currentProductEvent.action === "changes_requested";
+  const resolvedEvidenceReferences = Array.from(
+    new Set(
+      resolutionReferences
+        .split(/\r?\n/)
+        .map((reference) => reference.trim())
+        .filter(Boolean),
+    ),
+  );
   const busy = ["queued", "submitting"].includes(operation.state.phase);
   const canSubmit =
     (!reasonRequired || reason.trim().length > 0) &&
+    (!resolutionRequired ||
+      (resolutionSummary.trim().length > 0 && resolvedEvidenceReferences.length > 0)) &&
     (action !== "revoked" || confirmRevoke) &&
     ownerAcceptanceActionAllowed(eligibility, action) &&
     !busy;
@@ -861,14 +884,28 @@ function OwnerAcceptanceActionPanel({
         </select>
       </label>
       {reasonRequired ? <label><span>Reason</span><textarea value={reason} maxLength={4000} disabled={operation.state.requiresIdempotencyContinuity} onChange={(event) => setReason(event.target.value)} /></label> : null}
+      {resolutionRequired ? <div className="engineering-owner-action-resolution"><p><strong>Resolution evidence required.</strong> Summarize how the requested changes were resolved and reference the exact records, tests, or review evidence.</p><label><span>Resolution summary</span><textarea value={resolutionSummary} maxLength={4000} disabled={operation.state.requiresIdempotencyContinuity} onChange={(event) => setResolutionSummary(event.target.value)} /></label><label><span>Resolved evidence references</span><textarea value={resolutionReferences} maxLength={10000} placeholder={"One reference per line\ntest:owner-flow\nrecord:product-spec-17"} disabled={operation.state.requiresIdempotencyContinuity} onChange={(event) => setResolutionReferences(event.target.value)} /></label></div> : null}
       {action === "revoked" ? <label className="engineering-owner-action-confirm"><input type="checkbox" checked={confirmRevoke} disabled={operation.state.requiresIdempotencyContinuity} onChange={(event) => setConfirmRevoke(event.target.checked)} /><span>I confirm this exact binding should be revoked.</span></label> : null}
       <div className="engineering-owner-action-buttons">
         <button className="button button-primary" type="button" disabled={!canSubmit} onClick={async () => {
-          const response = await operation.run(ownerAcceptanceRequest(binding, action, reason));
+          const response = await operation.run(ownerAcceptanceRequest(
+            binding,
+            action,
+            reason,
+            resolutionRequired
+              ? {
+                  schema_version: 1,
+                  summary: resolutionSummary.trim(),
+                  resolved_evidence_references: resolvedEvidenceReferences,
+                }
+              : null,
+          ));
           if (response) {
             onDecision(response.decision);
             setAction("accepted");
             setReason("");
+            setResolutionSummary("");
+            setResolutionReferences("");
             setConfirmRevoke(false);
           }
         }}>{busy ? "Recording…" : "Record product review"}</button>

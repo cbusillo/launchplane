@@ -1,7 +1,7 @@
 """bind owner review identity, age, policy, and preview trust context
 
 Revision ID: b2d4f6a8c0e2
-Revises: a4c6e8f0b2d5
+Revises: b5d7f9a1c3e6
 Create Date: 2026-08-10 00:00:00.000000+00:00
 """
 
@@ -15,7 +15,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = "b2d4f6a8c0e2"
-down_revision: str | None = "a4c6e8f0b2d5"
+down_revision: str | None = "b5d7f9a1c3e6"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -24,6 +24,7 @@ export function ownerAcceptanceRequest(
   binding: OwnerAcceptanceBinding,
   action: OwnerAcceptanceHumanAction,
   reason: string,
+  resolution: OwnerAcceptanceEventEnvelope["resolution"] = null,
 ): OwnerAcceptanceEventEnvelope {
   return {
     schema_version: 1,
@@ -34,6 +35,7 @@ export function ownerAcceptanceRequest(
     action,
     expected_binding_sha256: binding.binding_sha256,
     reason: reason.trim(),
+    resolution,
   };
 }
 
