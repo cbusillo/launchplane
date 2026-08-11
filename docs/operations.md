@@ -2567,26 +2567,22 @@ job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-product-retirem
 
 ## Detached Application Retirement
 
-Phase one provides **Reusable Detached Application Retirement** as a
-`workflow_call`-only worker. Phase two adds the thin
-**Detached Application Retirement** `workflow_dispatch` wrapper, pinned to the
-exact merged worker SHA below. The wrapper only defines the manual inputs,
+**Reusable Detached Application Retirement** is the `workflow_call` worker.
+The thin **Detached Application Retirement** `workflow_dispatch` wrapper is
+pinned to the exact worker SHA below. The wrapper only defines manual inputs,
 forwards them unchanged, and grants `contents: read` plus `id-token: write`; it
-does not define a runner, environment, steps, or concurrency. Do not configure
-the live authz managed-set secret, deploy this branch, or attempt a provider
-mutation as part of this code phase. The worker uses the protected
-`launchplane-authz-admin` environment, OIDC, target-digest concurrency, exact
-input validation, and redacted evidence.
+does not define a runner, environment, steps, or concurrency. The worker uses
+the protected `launchplane-authz-admin` environment, OIDC, target-digest
+concurrency, exact input validation, and redacted evidence.
 
-The protected identity pair to configure only after this wrapper is merged and
-deployed is:
+Any temporary authorization must bind this exact identity pair:
 
 ```text
 workflow_ref=cbusillo/launchplane/.github/workflows/detached-application-retirement.yml@refs/heads/main
 job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml@11d53d2840a6f1898785d7c8f1553c202caa3fbf
 ```
 
-The future operator sequence is plan then apply. Inputs are exact Dokploy
+The operator sequence is plan then apply. Inputs are exact Dokploy
 project/environment/application names, the candidate target SHA-256, a sorted
 non-empty JSON array of every other accessible application target SHA-256 whose
 provider payload has the same exact project name, including duplicate physical
@@ -2604,18 +2600,27 @@ either the candidate provider target ID is present or the deployment record
 lacks consistent application-typed target evidence and still names the
 candidate. Provider-target records use the same target-ID binding. Do not
 rewrite append-only deployment history or adopted target authority to bypass
-either gate.
-Apply repeats all proofs under a durable provider-operation lease before checkpointing the sole
-`application.delete`. Reconciliation and already-absent retries reuse the same
-apply idempotency key. Completion requires candidate absence, unchanged
-protected fingerprints, and zero authority writes.
+either gate. Apply repeats all proofs under a durable provider-operation lease
+before checkpointing the sole `application.delete`. Reconciliation and
+already-absent retries reuse the same apply idempotency key. Completion requires
+candidate absence, unchanged protected fingerprints, and zero authority writes.
 
 Managed authz routing is reserved through the
 `detached-application-retirement` selector, managed-set ID
 `operator.detached-application-retirement`, and secret name
-`LAUNCHPLANE_AUTHZ_DETACHED_APPLICATION_RETIREMENT_MANAGED_SET_JSON`. Neither
-phase creates or populates that secret or reconciles a live rule. The remaining
-sequence is: merge and deploy this wrapper, configure the exact caller and
-worker authz pair through the managed authz path, then run the reviewed plan and
-apply sequence. Never substitute a mutable ref, a checked-in target value, or a
-local CLI live-target fallback.
+`LAUNCHPLANE_AUTHZ_DETACHED_APPLICATION_RETIREMENT_MANAGED_SET_JSON`. The normal
+resting state is dormant: the managed set has no rules and the repository secret
+is absent. In that state the selector remains reusable but fails closed before
+reconciliation or retirement can mint authority.
+
+To re-arm for a reviewed one-shot operation, first verify the wrapper's current
+immutable worker pin, then provision a schema-v2 managed-set secret containing
+only the exact caller and that worker rule. Run managed authz dry-run then apply,
+and verify the active rule before retirement planning. After the retirement
+apply and independent provider verification, replace the secret payload with an
+empty desired policy, run authz dry-run then exact-plan apply, confirm a second
+dry run is unchanged with zero managed rules, and only then delete the secret.
+Verify live policy and secret state at every transition; this documentation is
+procedure, not runtime authority. Never substitute a different caller workflow
+ref, a mutable worker ref, a checked-in target value, or a local CLI live-target
+fallback.
