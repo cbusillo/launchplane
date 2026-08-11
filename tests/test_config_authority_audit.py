@@ -3617,6 +3617,98 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     "thin_connector_input",
                 )
 
+    def test_product_repo_gate_allows_conventional_pinned_preview_facade_inputs(self) -> None:
+        revision = "a" * 40
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-preview.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Launchplane Preview\n"
+                "jobs:\n"
+                "  preview:\n"
+                "    uses: cbusillo/launchplane/.github/workflows/"
+                f"reusable-generic-web-preview.yml@{revision}\n"
+                "    with:\n"
+                "      verification_command: curl --fail https://preview.example.test/healthz\n"
+                "      image_repository: ghcr.io/example/product-preview\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+            product_repo_gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        for key in (
+            "generic-web-preview.with[1].verification_command",
+            "generic-web-preview.with[1].image_repository",
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(findings_by_key[key]["allow_reason"], "thin_connector_input")
+        self.assertEqual(product_repo_gate["status"], "pass")
+
+    def test_product_repo_gate_rejects_preview_facade_inputs_outside_exact_boundary(self) -> None:
+        revision = "a" * 40
+        cases = (
+            (
+                "lookalike workflow path",
+                ".github/workflows/launchplane-preview-copy.yml",
+                f"reusable-generic-web-preview.yml@{revision}",
+                (
+                    "generic-web-preview.with[1].verification_command",
+                    "generic-web-preview.with[1].image_repository",
+                ),
+            ),
+            (
+                "mutable facade reference",
+                ".github/workflows/launchplane-preview.yml",
+                "reusable-generic-web-preview.yml@main",
+                ("verification_command", "image_repository"),
+            ),
+            (
+                "unrelated workflow caller",
+                ".github/workflows/launchplane-preview.yml",
+                f"reusable-generic-web-preview-verification.yml@{revision}",
+                ("verification_command", "image_repository"),
+            ),
+        )
+        for description, workflow_path, preview_reference, expected_rejected_keys in cases:
+            with self.subTest(description=description):
+                with TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    _init_repo(root)
+                    workflow = root / workflow_path
+                    workflow.parent.mkdir(parents=True)
+                    workflow.write_text(
+                        "name: Launchplane Preview\n"
+                        "jobs:\n"
+                        "  preview:\n"
+                        "    uses: cbusillo/launchplane/.github/workflows/"
+                        f"{preview_reference}\n"
+                        "    with:\n"
+                        "      verification_command: curl --fail https://preview.example.test/healthz\n"
+                        "      image_repository: ghcr.io/example/product-preview\n",
+                        encoding="utf-8",
+                    )
+                    _commit_all(root)
+
+                    payload = build_config_authority_audit(control_plane_root=root)
+                    product_repo_gate = evaluate_config_authority_gate(
+                        payload, profile="product-repo"
+                    )
+
+                rejected_keys = {
+                    finding["key"]
+                    for finding in cast(
+                        "list[dict[str, object]]", product_repo_gate["rejected_findings"]
+                    )
+                }
+                for key in expected_rejected_keys:
+                    self.assertIn(key, rejected_keys)
+                self.assertEqual(product_repo_gate["status"], "fail")
+
     def test_generic_web_rollback_and_stable_verification_defaults_are_thin_connector_inputs(
         self,
     ) -> None:

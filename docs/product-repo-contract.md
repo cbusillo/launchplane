@@ -506,6 +506,14 @@ such as Dockerfile path, build target, build arguments, or image repository; it
 must not pass provider targets, domains, lane topology, secret values, or
 Launchplane record IDs.
 
+The config-authority gate classifies `verification_command` and optional
+`image_repository` as thin connector inputs only when they are in the `with:`
+block directly attached to a full-SHA
+`reusable-generic-web-preview.yml` call in the conventional
+`.github/workflows/launchplane-preview.yml` workflow. Lookalike paths, mutable
+facade refs, unrelated reusable workflows, and other input names remain
+rejected.
+
 Same-repository cleanup, fork notices, and Dependabot notices stay in a
 separate trusted workflow so `pull_request_target` never reaches an untrusted
 checkout or preview refresh. Cleanup runs there because destructive authz
