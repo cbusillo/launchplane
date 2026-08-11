@@ -189,6 +189,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
         )
         self.assertEqual(github_api.last_token, "server-token")
         self.assertEqual(github_api.pull_request_reads, 2)
+        assert evidence.authorship is not None
         self.assertEqual(evidence.authorship.resolution, "resolved")
         self.assertEqual(
             evidence.authorship.contributor_github_ids,
@@ -218,6 +219,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
             )
         )
 
+        assert evidence.authorship is not None
         self.assertEqual(evidence.authorship.resolution, "unresolved")
         self.assertEqual(evidence.authorship.contributor_github_ids, ())
 
