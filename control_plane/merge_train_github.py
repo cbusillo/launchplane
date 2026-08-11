@@ -1,5 +1,5 @@
 import json
-from typing import Callable, Protocol
+from typing import Callable, Protocol, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -13,6 +13,11 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntr
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapseBranchClient
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
+from control_plane.contracts.merge_train_structural_provenance import (
+    MergeTrainRollingStep,
+    MergeTrainStructuralEntryBinding,
+    MergeTrainStructuralProvenance,
+)
 from control_plane.github_payload import json_object
 from control_plane.github_payload import required_positive_int
 from control_plane.github_payload import required_string_text
@@ -31,6 +36,9 @@ class MergeTrainGitHubError(RuntimeError):
 
 class MergeTrainGitHubStaleHeadError(MergeTrainGitHubError):
     """Raised when GitHub refuses a guarded merge because the head SHA changed."""
+
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 class MergeTrainGitHubTransport(Protocol):
@@ -99,10 +107,30 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
         if checkpoint is not None:
             checkpoint(candidate, None, "candidate_ref_ready")
-        candidate_sha = candidate.base_sha
+        base_identity = _git_commit_identity(
+            transport=self.transport,
+            repository_path=repository_path,
+            commit_sha=candidate.base_sha,
+        )
+        resolved_entries = tuple(
+            _validated_model_update(
+                entry,
+                head_tree_sha=_git_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=entry.head_sha,
+                )[1],
+            )
+            for entry in candidate.entries
+        )
+        candidate = _validated_model_update(candidate, entries=resolved_entries, status="building")
+        candidate_sha, candidate_tree_sha = base_identity
+        rolling_steps: list[MergeTrainRollingStep] = []
         for entry_index, entry in enumerate(candidate.entries, start=1):
             if checkpoint is not None:
                 checkpoint(candidate, entry, "merge_candidate_entry")
+            parent_sha = candidate_sha
+            parent_tree_sha = candidate_tree_sha
             payload = self.transport.request(
                 method="POST",
                 path=f"/repos/{repository_path}/merges",
@@ -116,27 +144,104 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 },
             )
             if payload is None:
+                observed_result_sha = _base_branch_sha(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    base_branch=candidate_branch,
+                )
+                observed_result_sha, observed_result_tree_sha = _git_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=observed_result_sha,
+                )
+                if observed_result_sha != parent_sha or observed_result_tree_sha != parent_tree_sha:
+                    raise MergeTrainGitHubStaleHeadError(
+                        "GitHub no-op merge moved the candidate ref outside the recorded parent.",
+                        status_code=409,
+                    )
+                if not self.branch_contains_commit(
+                    repository=candidate.repository,
+                    branch_ref=candidate_branch,
+                    commit_sha=entry.head_sha,
+                ):
+                    raise MergeTrainGitHubStaleHeadError(
+                        "GitHub no-op merge did not prove the recorded head is contained.",
+                        status_code=409,
+                    )
+                rolling_steps.append(
+                    MergeTrainRollingStep(
+                        position=entry.position,
+                        pull_request_number=entry.pull_request_number,
+                        parent_sha=parent_sha,
+                        parent_tree_sha=parent_tree_sha,
+                        head_sha=entry.head_sha,
+                        head_tree_sha=entry.head_tree_sha,
+                        result_sha=parent_sha,
+                        result_tree_sha=parent_tree_sha,
+                        kind="no_op_already_contained",
+                    )
+                )
+                progress_candidate = _candidate_with_structural_provenance(
+                    candidate=candidate,
+                    candidate_sha=candidate_sha,
+                    candidate_tree_sha=candidate_tree_sha,
+                    rolling_steps=tuple(rolling_steps),
+                )
                 if checkpoint is not None:
                     checkpoint(
-                        candidate.model_copy(update={"candidate_sha": candidate_sha}),
+                        progress_candidate,
                         entry,
                         f"candidate_entry_merged:{entry_index}",
                     )
+                candidate = progress_candidate
                 continue
             if not isinstance(payload, dict):
                 raise MergeTrainGitHubError("GitHub merge response must be a JSON object.")
-            candidate_sha = _required_text(
-                payload.get("sha"), "GitHub merge response requires sha."
+            response_sha = _required_text(payload.get("sha"), "GitHub merge response requires sha.")
+            observed_candidate_sha = _base_branch_sha(
+                transport=self.transport,
+                repository_path=repository_path,
+                base_branch=candidate_branch,
+            )
+            if observed_candidate_sha != response_sha:
+                raise MergeTrainGitHubStaleHeadError(
+                    "GitHub candidate ref did not resolve to the reported merge commit.",
+                    status_code=409,
+                )
+            candidate_sha, candidate_tree_sha = _validated_merge_commit_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                commit_sha=response_sha,
+                expected_parent_sha=parent_sha,
+                expected_head_sha=entry.head_sha,
+            )
+            rolling_steps.append(
+                MergeTrainRollingStep(
+                    position=entry.position,
+                    pull_request_number=entry.pull_request_number,
+                    parent_sha=parent_sha,
+                    parent_tree_sha=parent_tree_sha,
+                    head_sha=entry.head_sha,
+                    head_tree_sha=entry.head_tree_sha,
+                    result_sha=candidate_sha,
+                    result_tree_sha=candidate_tree_sha,
+                    kind="merge_commit",
+                )
+            )
+            progress_candidate = _candidate_with_structural_provenance(
+                candidate=candidate,
+                candidate_sha=candidate_sha,
+                candidate_tree_sha=candidate_tree_sha,
+                rolling_steps=tuple(rolling_steps),
             )
             if checkpoint is not None:
                 checkpoint(
-                    candidate.model_copy(update={"candidate_sha": candidate_sha}),
+                    progress_candidate,
                     entry,
                     f"candidate_entry_merged:{entry_index}",
                 )
-        return candidate.model_copy(
-            update={"candidate_sha": candidate_sha, "status": "ready_for_checks"}
-        )
+            candidate = progress_candidate
+        return _validated_model_update(candidate, status="ready_for_checks")
 
     def observe_batch_candidate_checks(
         self, *, candidate: MergeTrainBatchCandidate
@@ -156,8 +261,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             candidate_status = "passed"
         elif check_status == "fail":
             candidate_status = "failed"
-        return candidate.model_copy(
-            update={"required_checks_status": check_status, "status": candidate_status}
+        return _validated_model_update(
+            candidate,
+            required_checks_status=check_status,
+            status=candidate_status,
         )
 
     def land_batch_candidate(
@@ -170,50 +277,83 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     ) -> MergeTrainBatchLandingPlan:
         repository_path = _repository_path(landing_plan.repository)
         expected_base_sha = landing_plan.entries[0].expected_base_sha
-        merged_entries = []
+        expected_base_tree_sha = landing_plan.entries[0].recorded_candidate_parent_tree_sha
+        landed_entries: list[MergeTrainBatchLandingEntry] = []
         for entry_index, entry in enumerate(landing_plan.entries):
-            current_base_sha = _base_branch_sha(
+            current_base_sha, current_base_tree_sha = _base_branch_identity(
                 transport=self.transport,
                 repository_path=repository_path,
                 base_branch=landing_plan.base_branch,
             )
-            if entry.status == "merged":
-                merge_commit_sha = _required_value(
-                    entry.merge_commit_sha,
-                    "Merged batch landing entry requires merge_commit_sha.",
+            if not expected_base_tree_sha and current_base_sha == expected_base_sha:
+                expected_base_tree_sha = current_base_tree_sha
+            if (
+                current_base_sha == expected_base_sha
+                and current_base_tree_sha != expected_base_tree_sha
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Base branch tree does not match the rolling batch landing plan.",
+                    status_code=409,
                 )
-                if current_base_sha not in {expected_base_sha, merge_commit_sha}:
-                    already_merged_entry = self._already_merged_landing_entry(
-                        repository_path=repository_path,
-                        entry=entry,
-                        expected_base_ref=landing_plan.base_branch,
+            if entry.status == "merged":
+                recovered_entry = self._already_merged_landing_entry(
+                    repository_path=repository_path,
+                    entry=entry,
+                    expected_base_ref=landing_plan.base_branch,
+                    expected_rolling_base_sha=expected_base_sha,
+                    expected_rolling_base_tree_sha=expected_base_tree_sha,
+                )
+                if recovered_entry is None:
+                    raise MergeTrainGitHubStaleHeadError(
+                        "Persisted merged pull request is no longer merged.", status_code=409
                     )
-                    if already_merged_entry is None:
-                        raise MergeTrainGitHubStaleHeadError(
-                            "Base branch moved outside the batch landing plan.", status_code=409
-                        )
-                    if already_merged_entry.merge_commit_sha != merge_commit_sha:
-                        raise MergeTrainGitHubStaleHeadError(
-                            "Pull request merge commit does not match the batch landing plan.",
-                            status_code=409,
-                        )
-                    if not self.branch_contains_commit(
-                        repository=landing_plan.repository,
-                        branch_ref=landing_plan.base_branch,
-                        commit_sha=merge_commit_sha,
-                    ):
-                        raise MergeTrainGitHubStaleHeadError(
-                            "Merged pull request commit is not contained by the target branch.",
-                            status_code=409,
-                        )
-                merged_entries.append(entry)
-                expected_base_sha = merge_commit_sha
+                if entry.merge_commit_sha and (
+                    recovered_entry.merge_commit_sha != entry.merge_commit_sha
+                ):
+                    raise MergeTrainGitHubStaleHeadError(
+                        "Pull request merge commit does not match the batch landing plan.",
+                        status_code=409,
+                    )
+                if not self.branch_contains_commit(
+                    repository=landing_plan.repository,
+                    branch_ref=landing_plan.base_branch,
+                    commit_sha=recovered_entry.merge_commit_sha,
+                ):
+                    raise MergeTrainGitHubStaleHeadError(
+                        "Merged pull request commit is not contained by the target branch.",
+                        status_code=409,
+                    )
+                landed_entries.append(recovered_entry)
+                expected_base_sha = recovered_entry.merge_commit_sha
+                expected_base_tree_sha = recovered_entry.merge_commit_tree_sha
+                continue
+            if _recorded_candidate_step_is_no_op(entry):
+                skipped_entry = self._recover_no_op_landing_entry(
+                    repository=landing_plan.repository,
+                    repository_path=repository_path,
+                    entry=entry,
+                    expected_base_ref=landing_plan.base_branch,
+                    expected_rolling_base_sha=expected_base_sha,
+                    expected_rolling_base_tree_sha=expected_base_tree_sha,
+                )
+                landed_entries.append(skipped_entry)
+                if checkpoint is not None:
+                    checkpoint(
+                        _validated_model_update(
+                            landing_plan,
+                            entries=tuple(landed_entries) + landing_plan.entries[entry_index + 1 :],
+                        ),
+                        skipped_entry,
+                        "entry_skipped",
+                    )
                 continue
             if current_base_sha != expected_base_sha:
                 already_merged_entry = self._already_merged_landing_entry(
                     repository_path=repository_path,
                     entry=entry,
                     expected_base_ref=landing_plan.base_branch,
+                    expected_rolling_base_sha=expected_base_sha,
+                    expected_rolling_base_tree_sha=expected_base_tree_sha,
                 )
                 if already_merged_entry is None:
                     raise MergeTrainGitHubStaleHeadError(
@@ -228,20 +368,32 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                         "Merged pull request commit is not contained by the target branch.",
                         status_code=409,
                     )
-                merged_entries.append(already_merged_entry)
+                landed_entries.append(already_merged_entry)
                 expected_base_sha = already_merged_entry.merge_commit_sha
+                expected_base_tree_sha = already_merged_entry.merge_commit_tree_sha
                 if checkpoint is not None:
                     checkpoint(
-                        landing_plan.model_copy(
-                            update={
-                                "entries": tuple(merged_entries)
-                                + landing_plan.entries[entry_index + 1 :]
-                            }
+                        _validated_model_update(
+                            landing_plan,
+                            entries=tuple(landed_entries) + landing_plan.entries[entry_index + 1 :],
                         ),
                         already_merged_entry,
                         "entry_merged",
                     )
                 continue
+            landed_head_sha, landed_head_tree_sha = _git_commit_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                commit_sha=entry.expected_head_sha,
+            )
+            if (
+                entry.expected_head_tree_sha
+                and landed_head_tree_sha != entry.expected_head_tree_sha
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Pull request head tree moved outside the batch landing plan.",
+                    status_code=409,
+                )
             self._validate_open_landing_pull_request(
                 repository_path=repository_path,
                 entry=entry,
@@ -250,10 +402,9 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             )
             if checkpoint is not None:
                 checkpoint(
-                    landing_plan.model_copy(
-                        update={
-                            "entries": tuple(merged_entries) + landing_plan.entries[entry_index:]
-                        }
+                    _validated_model_update(
+                        landing_plan,
+                        entries=tuple(landed_entries) + landing_plan.entries[entry_index:],
                     ),
                     entry,
                     "merge_entry",
@@ -264,18 +415,32 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 head_sha=entry.expected_head_sha,
                 merge_method=entry.merge_method,
             )
-            merged_entry = entry.model_copy(
-                update={"status": "merged", "merge_commit_sha": merge_commit_sha}
+            merge_commit_sha, merge_commit_tree_sha = _validated_landing_commit_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                commit_sha=merge_commit_sha,
+                expected_parent_sha=current_base_sha,
+                expected_head_sha=landed_head_sha,
+                merge_method=entry.merge_method,
             )
-            merged_entries.append(merged_entry)
+            merged_entry = _validated_model_update(
+                entry,
+                status="merged",
+                recorded_rolling_base_sha=current_base_sha,
+                recorded_rolling_base_tree_sha=current_base_tree_sha,
+                landed_head_sha=landed_head_sha,
+                landed_head_tree_sha=landed_head_tree_sha,
+                merge_commit_sha=merge_commit_sha,
+                merge_commit_tree_sha=merge_commit_tree_sha,
+            )
+            landed_entries.append(merged_entry)
             expected_base_sha = merge_commit_sha
+            expected_base_tree_sha = merge_commit_tree_sha
             if checkpoint is not None:
                 checkpoint(
-                    landing_plan.model_copy(
-                        update={
-                            "entries": tuple(merged_entries)
-                            + landing_plan.entries[entry_index + 1 :]
-                        }
+                    _validated_model_update(
+                        landing_plan,
+                        entries=tuple(landed_entries) + landing_plan.entries[entry_index + 1 :],
                     ),
                     merged_entry,
                     "entry_merged",
@@ -294,7 +459,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 raise MergeTrainGitHubStaleHeadError(
                     "Base branch moved outside the batch landing plan.", status_code=409
                 )
-        return landing_plan.model_copy(update={"entries": tuple(merged_entries)})
+        return _validated_model_update(landing_plan, entries=tuple(landed_entries))
 
     def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
         repository_path = _repository_path(landing_plan.repository)
@@ -436,6 +601,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         repository_path: str,
         entry: MergeTrainBatchLandingEntry,
         expected_base_ref: str,
+        expected_rolling_base_sha: str,
+        expected_rolling_base_tree_sha: str,
     ) -> MergeTrainBatchLandingEntry | None:
         pull_request = _json_object(
             self.transport.request(
@@ -468,7 +635,146 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             pull_request.get("merge_commit_sha"),
             "Merged GitHub pull request requires merge_commit_sha.",
         )
-        return entry.model_copy(update={"status": "merged", "merge_commit_sha": merge_commit_sha})
+        landed_head_sha, landed_head_tree_sha = _git_commit_identity(
+            transport=self.transport,
+            repository_path=repository_path,
+            commit_sha=head_sha,
+        )
+        if entry.expected_head_tree_sha and landed_head_tree_sha != entry.expected_head_tree_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "Merged pull request head tree does not match the batch landing plan.",
+                status_code=409,
+            )
+        merge_commit_sha, merge_commit_tree_sha = _validated_landing_commit_identity(
+            transport=self.transport,
+            repository_path=repository_path,
+            commit_sha=merge_commit_sha,
+            expected_parent_sha=expected_rolling_base_sha,
+            expected_head_sha=landed_head_sha,
+            merge_method=entry.merge_method,
+        )
+        rolling_base_sha, rolling_base_tree_sha = _git_commit_identity(
+            transport=self.transport,
+            repository_path=repository_path,
+            commit_sha=expected_rolling_base_sha,
+        )
+        if (
+            expected_rolling_base_tree_sha
+            and rolling_base_tree_sha != expected_rolling_base_tree_sha
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Merged pull request rolling base tree does not match the batch landing plan.",
+                status_code=409,
+            )
+        return _validated_model_update(
+            entry,
+            status="merged",
+            recorded_rolling_base_sha=rolling_base_sha,
+            recorded_rolling_base_tree_sha=rolling_base_tree_sha,
+            landed_head_sha=landed_head_sha,
+            landed_head_tree_sha=landed_head_tree_sha,
+            merge_commit_sha=merge_commit_sha,
+            merge_commit_tree_sha=merge_commit_tree_sha,
+        )
+
+    def _validate_no_op_landing_pull_request(
+        self,
+        *,
+        repository_path: str,
+        entry: MergeTrainBatchLandingEntry,
+        expected_base_ref: str,
+    ) -> None:
+        pull_request = _json_object(
+            self.transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/pulls/{entry.pull_request_number}",
+            ),
+            "GitHub pull request detail response",
+        )
+        head = _json_object(pull_request.get("head"), "GitHub pull request head")
+        if _required_text(head.get("sha"), "GitHub pull request head requires sha.") != (
+            entry.expected_head_sha
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "No-op pull request head moved outside the batch landing plan.",
+                status_code=409,
+            )
+        base = _json_object(pull_request.get("base"), "GitHub pull request base")
+        if _required_text(base.get("ref"), "GitHub pull request base requires ref.") != (
+            _required_value(expected_base_ref, "Expected pull request base ref is required.")
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "No-op pull request targets a different base branch than the batch landing plan.",
+                status_code=409,
+            )
+
+    def _recover_no_op_landing_entry(
+        self,
+        *,
+        repository: str,
+        repository_path: str,
+        entry: MergeTrainBatchLandingEntry,
+        expected_base_ref: str,
+        expected_rolling_base_sha: str,
+        expected_rolling_base_tree_sha: str,
+    ) -> MergeTrainBatchLandingEntry:
+        self._validate_no_op_landing_pull_request(
+            repository_path=repository_path,
+            entry=entry,
+            expected_base_ref=expected_base_ref,
+        )
+        landed_head_sha, landed_head_tree_sha = _git_commit_identity(
+            transport=self.transport,
+            repository_path=repository_path,
+            commit_sha=entry.expected_head_sha,
+        )
+        if entry.expected_head_tree_sha and landed_head_tree_sha != entry.expected_head_tree_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "No-op pull request head tree does not match the batch landing plan.",
+                status_code=409,
+            )
+        rolling_base_sha, rolling_base_tree_sha = _git_commit_identity(
+            transport=self.transport,
+            repository_path=repository_path,
+            commit_sha=expected_rolling_base_sha,
+        )
+        if (
+            expected_rolling_base_tree_sha
+            and rolling_base_tree_sha != expected_rolling_base_tree_sha
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "No-op rolling base tree does not match the batch landing plan.",
+                status_code=409,
+            )
+        for commit_sha, label in (
+            (rolling_base_sha, "rolling base"),
+            (landed_head_sha, "head"),
+        ):
+            if not self.branch_contains_commit(
+                repository=repository,
+                branch_ref=expected_base_ref,
+                commit_sha=commit_sha,
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    f"Recorded candidate no-op {label} is not contained by the target branch.",
+                    status_code=409,
+                )
+        recovered_entry = _validated_model_update(
+            entry,
+            status="skipped",
+            recorded_rolling_base_sha=rolling_base_sha,
+            recorded_rolling_base_tree_sha=rolling_base_tree_sha,
+            landed_head_sha=landed_head_sha,
+            landed_head_tree_sha=landed_head_tree_sha,
+            merge_commit_sha=rolling_base_sha,
+            merge_commit_tree_sha=rolling_base_tree_sha,
+        )
+        if entry.status == "skipped" and entry != recovered_entry:
+            raise MergeTrainGitHubStaleHeadError(
+                "Persisted no-op landing evidence does not match the batch landing plan.",
+                status_code=409,
+            )
+        return recovered_entry
 
     def _validate_open_landing_pull_request(
         self,
@@ -952,8 +1258,171 @@ class RecordingMergeTrainGitHubTransport:
         return {}
 
 
+def _candidate_with_structural_provenance(
+    *,
+    candidate: MergeTrainBatchCandidate,
+    candidate_sha: str,
+    candidate_tree_sha: str,
+    rolling_steps: tuple[MergeTrainRollingStep, ...],
+) -> MergeTrainBatchCandidate:
+    stack_root = candidate.stack_collapse_root
+    if stack_root is not None and not stack_root.collapsed_root_tree_sha:
+        root_entry = next(
+            (
+                entry
+                for entry in candidate.entries
+                if entry.pull_request_number == stack_root.root_pull_request_number
+            ),
+            None,
+        )
+        if root_entry is not None:
+            stack_root = _validated_model_update(
+                stack_root,
+                collapsed_root_tree_sha=root_entry.head_tree_sha,
+            )
+    provenance = MergeTrainStructuralProvenance(
+        repository=candidate.repository,
+        base_branch=candidate.base_branch,
+        base_sha=candidate.base_sha,
+        base_tree_sha=rolling_steps[0].parent_tree_sha,
+        policy_key=candidate.policy_key,
+        policy_sha256=candidate.policy_sha256,
+        entries=tuple(
+            MergeTrainStructuralEntryBinding(
+                position=entry.position,
+                pull_request_number=entry.pull_request_number,
+                head_sha=entry.head_sha,
+                head_tree_sha=entry.head_tree_sha,
+                impact_status=entry.impact_status,
+                affected_subjects=entry.affected_subjects,
+            )
+            for entry in candidate.entries
+        ),
+        steps=rolling_steps,
+        candidate_sha=candidate_sha,
+        candidate_tree_sha=candidate_tree_sha,
+        stack_collapse_root=stack_root,
+    )
+    return _validated_model_update(
+        candidate,
+        candidate_sha=candidate_sha,
+        candidate_tree_sha=candidate_tree_sha,
+        candidate_sha256=provenance.candidate_sha256,
+        stack_collapse_root=stack_root,
+        structural_provenance=provenance,
+        status="building",
+    )
+
+
+def _git_commit_identity(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    commit_sha: str,
+) -> tuple[str, str]:
+    observed_sha, tree_sha, _ = _git_commit_proof(
+        transport=transport,
+        repository_path=repository_path,
+        commit_sha=commit_sha,
+    )
+    return observed_sha, tree_sha
+
+
+def _git_commit_proof(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    commit_sha: str,
+) -> tuple[str, str, tuple[str, ...]]:
+    encoded_sha = quote(_required_value(commit_sha, "GitHub commit SHA is required."), safe="")
+    payload = _json_object(
+        transport.request(
+            method="GET",
+            path=f"/repos/{repository_path}/git/commits/{encoded_sha}",
+        ),
+        "GitHub commit response",
+    )
+    observed_sha = _required_text(payload.get("sha"), "GitHub commit response requires sha.")
+    if observed_sha != commit_sha:
+        raise MergeTrainGitHubStaleHeadError(
+            "GitHub commit response did not match the requested SHA.", status_code=409
+        )
+    tree = _json_object(payload.get("tree"), "GitHub commit tree response")
+    tree_sha = _required_text(tree.get("sha"), "GitHub commit tree response requires sha.")
+    raw_parents = payload.get("parents", [])
+    if not isinstance(raw_parents, list):
+        raise MergeTrainGitHubError("GitHub commit response parents must be a JSON list.")
+    parents = tuple(
+        _required_text(
+            _json_object(parent, "GitHub commit parent").get("sha"),
+            "GitHub commit parent requires sha.",
+        )
+        for parent in raw_parents
+    )
+    return observed_sha, tree_sha, parents
+
+
+def _validated_merge_commit_identity(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    commit_sha: str,
+    expected_parent_sha: str,
+    expected_head_sha: str,
+) -> tuple[str, str]:
+    observed_sha, tree_sha, parents = _git_commit_proof(
+        transport=transport,
+        repository_path=repository_path,
+        commit_sha=commit_sha,
+    )
+    if parents != (expected_parent_sha, expected_head_sha):
+        raise MergeTrainGitHubStaleHeadError(
+            "GitHub merge commit parents do not exactly match the recorded parent and head.",
+            status_code=409,
+        )
+    return observed_sha, tree_sha
+
+
+def _validated_landing_commit_identity(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    commit_sha: str,
+    expected_parent_sha: str,
+    expected_head_sha: str,
+    merge_method: MergeTrainMergeMethod,
+) -> tuple[str, str]:
+    observed_sha, tree_sha, parents = _git_commit_proof(
+        transport=transport,
+        repository_path=repository_path,
+        commit_sha=commit_sha,
+    )
+    expected_parents = (
+        (expected_parent_sha, expected_head_sha)
+        if merge_method == "merge"
+        else (expected_parent_sha,)
+    )
+    if parents != expected_parents:
+        raise MergeTrainGitHubStaleHeadError(
+            "GitHub landing commit parents do not match the recorded rolling merge inputs.",
+            status_code=409,
+        )
+    return observed_sha, tree_sha
+
+
+def _recorded_candidate_step_is_no_op(entry: MergeTrainBatchLandingEntry) -> bool:
+    return bool(entry.recorded_candidate_parent_sha) and (
+        entry.recorded_candidate_parent_sha == entry.recorded_candidate_result_sha
+        and entry.recorded_candidate_parent_tree_sha == entry.recorded_candidate_result_tree_sha
+    )
+
+
+def _validated_model_update(model: ModelT, **updates: object) -> ModelT:
+    return type(model).model_validate({**model.model_dump(mode="python"), **updates})
+
+
 def _repository_path(repository: str) -> str:
-    normalized = _required_value(repository, "GitHub repository is required.")
+    normalized = _required_value(repository, "GitHub repository is required.").lower()
     parts = normalized.split("/")
     if len(parts) != 2 or not all(part.strip() for part in parts):
         raise ValueError("GitHub repository must be formatted as owner/name.")
@@ -982,7 +1451,7 @@ def _json_object(value: object, label: str) -> dict[str, object]:
 
 def _repository_full_name(value: object, label: str) -> str:
     repository = _json_object(value, label)
-    return _required_text(repository.get("full_name"), f"{label} requires full_name.")
+    return _required_text(repository.get("full_name"), f"{label} requires full_name.").lower()
 
 
 def _base_rooted_pull_requests(
@@ -991,6 +1460,7 @@ def _base_rooted_pull_requests(
     repository: str,
     base_branch: str,
 ) -> tuple[dict[str, object], ...]:
+    repository = _required_value(repository, "GitHub repository is required.").lower()
     by_base_ref: dict[str, list[dict[str, object]]] = {}
     relevant_numbers: set[int] = set()
     for pull_request in pull_requests:
@@ -1093,6 +1563,32 @@ def _base_branch_sha(
     return _required_text(commit.get("sha"), "GitHub branch commit requires sha.")
 
 
+def _base_branch_identity(
+    *, transport: MergeTrainGitHubTransport, repository_path: str, base_branch: str
+) -> tuple[str, str]:
+    branch = _json_object(
+        transport.request(
+            method="GET",
+            path=f"/repos/{repository_path}/branches/{quote(base_branch, safe='')}",
+        ),
+        "GitHub branch response",
+    )
+    commit = _json_object(branch.get("commit"), "GitHub branch commit")
+    branch_sha = _required_text(commit.get("sha"), "GitHub branch commit requires sha.")
+    commit_detail = commit.get("commit")
+    if isinstance(commit_detail, dict):
+        tree = commit_detail.get("tree")
+        if isinstance(tree, dict):
+            tree_sha = tree.get("sha")
+            if isinstance(tree_sha, str) and tree_sha.strip():
+                return branch_sha, tree_sha.strip()
+    return _git_commit_identity(
+        transport=transport,
+        repository_path=repository_path,
+        commit_sha=branch_sha,
+    )
+
+
 def _combined_status_state(payload: dict[str, object]) -> MergeTrainCheckStatus:
     raw_statuses = payload.get("statuses")
     if not isinstance(raw_statuses, list):
@@ -1101,14 +1597,9 @@ def _combined_status_state(payload: dict[str, object]) -> MergeTrainCheckStatus:
     seen_contexts: set[str] = set()
     for item in raw_statuses:
         status = _json_object(item, "GitHub commit status")
-        context = _required_text(
-            status.get("context"), "GitHub commit status requires context."
-        )
+        context = _required_text(status.get("context"), "GitHub commit status requires context.")
         normalized_context = context.casefold()
-        if (
-            is_launchplane_projected_check(context)
-            or normalized_context in seen_contexts
-        ):
+        if is_launchplane_projected_check(context) or normalized_context in seen_contexts:
             continue
         seen_contexts.add(normalized_context)
         statuses.append(_commit_status_state(status))
@@ -1124,9 +1615,7 @@ def _combined_status_state(payload: dict[str, object]) -> MergeTrainCheckStatus:
 
 
 def _commit_status_state(payload: dict[str, object]) -> MergeTrainCheckStatus:
-    state = _required_text(
-        payload.get("state"), "GitHub commit status requires state."
-    ).lower()
+    state = _required_text(payload.get("state"), "GitHub commit status requires state.").lower()
     if state == "success":
         return "pass"
     if state in {"failure", "error"}:
@@ -1196,16 +1685,12 @@ def _list_commit_statuses(
         )
         raw_statuses = payload.get("statuses")
         if not isinstance(raw_statuses, list):
-            raise MergeTrainGitHubError(
-                "GitHub combined status response must include statuses."
-            )
+            raise MergeTrainGitHubError("GitHub combined status response must include statuses.")
         raw_total_count = payload.get("total_count")
         if isinstance(raw_total_count, int):
             total_count = raw_total_count
         statuses.extend(raw_statuses)
-        if len(raw_statuses) < 100 or (
-            total_count is not None and len(statuses) >= total_count
-        ):
+        if len(raw_statuses) < 100 or (total_count is not None and len(statuses) >= total_count):
             break
         page += 1
     return {

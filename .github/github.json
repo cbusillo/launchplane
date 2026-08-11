@@ -22,6 +22,7 @@
     "workGraphReadModel": "docs/work-graph-read-model.md",
     "mergeTrainPolicy": "docs/merge-train-policy.md",
     "mergeReadiness": "docs/merge-readiness.md",
+    "mergeTrainStructuralProvenance": "docs/merge-train-structural-provenance.md",
     "agentContextBoundary": "docs/agent-context-boundary.md",
     "operations": "docs/operations.md",
     "records": "docs/records.md",

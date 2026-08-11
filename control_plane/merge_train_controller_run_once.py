@@ -33,6 +33,9 @@ from control_plane.contracts.merge_train_stack_collapse import (
     execute_merge_train_stack_collapse_plan,
     reconcile_merge_train_stack_children_after_root_landing,
 )
+from control_plane.contracts.merge_train_structural_provenance import (
+    MergeTrainStackCollapseRootProof,
+)
 from control_plane.merge_train import (
     MergeTrainDryRunResult,
     build_merge_train_dry_run_result,
@@ -1499,6 +1502,15 @@ def _advance_waiting_stack_collapse_record(
         base_sha=root_snapshot.base_sha,
         policy_sha256=policy_sha256,
         created_at=recorded_at,
+        stack_collapse_root=MergeTrainStackCollapseRootProof(
+            collapse_record_id=waiting_collapse_record.record_id,
+            collapse_id=waiting_collapse_record.plan.collapse_id,
+            root_pull_request_number=waiting_collapse_record.plan.root_pull_request_number,
+            original_root_head_sha=waiting_collapse_record.plan.root_initial_head_sha,
+            collapsed_root_head_sha=stack_collapse_expected_root_head_sha(
+                waiting_collapse_record.plan
+            ),
+        ),
     )
     candidate_record = build_merge_train_batch_candidate_record(
         candidate=candidate,
@@ -1815,15 +1827,14 @@ def _advance_from_live_snapshot(
 def stale_merge_train_landing_plan(
     landing_plan: MergeTrainBatchLandingPlan,
 ) -> MergeTrainBatchLandingPlan:
-    return landing_plan.model_copy(
-        update={
-            "entries": tuple(
-                entry.model_copy(update={"status": "stale"})
-                if entry.status in {"planned", "merging"}
-                else entry
-                for entry in landing_plan.entries
-            )
-        }
+    entries = tuple(
+        type(entry).model_validate({**entry.model_dump(mode="python"), "status": "stale"})
+        if entry.status in {"planned", "merging"}
+        else entry
+        for entry in landing_plan.entries
+    )
+    return MergeTrainBatchLandingPlan.model_validate(
+        {**landing_plan.model_dump(mode="python"), "entries": entries}
     )
 
 
@@ -1888,7 +1899,9 @@ def try_reflow_failed_merge_train_candidate(
             )
         except Exception:
             candidate_store.write_merge_train_batch_candidate_record(
-                candidate_record.model_copy(update={"status": "superseded"})
+                MergeTrainBatchCandidateRecord.model_validate(
+                    {**candidate_record.model_dump(mode="python"), "status": "superseded"}
+                )
             )
             raise
         result["merge_train_batch_candidate_record_id"] = candidate_record.record_id
@@ -2047,7 +2060,9 @@ def _supersede_active_merge_train_batch_candidate_records(
         if record.candidate.batch_id != batch_id:
             continue
         record_store.write_merge_train_batch_candidate_record(
-            record.model_copy(update={"status": "superseded"})
+            MergeTrainBatchCandidateRecord.model_validate(
+                {**record.model_dump(mode="python"), "status": "superseded"}
+            )
         )
 
 
