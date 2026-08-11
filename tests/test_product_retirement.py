@@ -260,10 +260,24 @@ class ProductRetirementTests(unittest.TestCase):
         )
         self.assertFalse(observation.retirable)
 
-    def test_provider_observation_allows_no_history_only_for_non_serving_application(self) -> None:
+    def test_provider_observation_preserves_present_history_running_application_compatibility(
+        self,
+    ) -> None:
         observation = build_provider_observation(
             target_id=TARGET_ID,
-            payload={"applicationId": TARGET_ID, "applicationStatus": "stopped"},
+            payload={"applicationId": TARGET_ID, "applicationStatus": "running"},
+            domains=(),
+            latest_deployment={"status": "success"},
+            deployment_history_state="present",
+            observed_at=NOW,
+        )
+
+        self.assertTrue(observation.retirable)
+
+    def test_provider_observation_allows_no_history_only_for_idle_application(self) -> None:
+        observation = build_provider_observation(
+            target_id=TARGET_ID,
+            payload={"applicationId": TARGET_ID, "applicationStatus": "idle"},
             domains=(),
             latest_deployment=None,
             deployment_history_state="no_history",
@@ -272,7 +286,7 @@ class ProductRetirementTests(unittest.TestCase):
         self.assertEqual(observation.deployment_status, "no_history")
         self.assertTrue(observation.retirable)
 
-        for application_state in ("running", "ready", "success", "deploying", "mystery"):
+        for application_state in ("done", "running", "ready", "success", "deploying", "unknown"):
             with self.subTest(application_state=application_state):
                 blocked = build_provider_observation(
                     target_id=TARGET_ID,
@@ -283,6 +297,17 @@ class ProductRetirementTests(unittest.TestCase):
                     observed_at=NOW,
                 )
                 self.assertFalse(blocked.retirable)
+
+    def test_provider_observation_rejects_no_history_with_latest_deployment(self) -> None:
+        with self.assertRaisesRegex(ProductRetirementBlockedError, "cannot include"):
+            build_provider_observation(
+                target_id=TARGET_ID,
+                payload={"applicationId": TARGET_ID, "applicationStatus": "idle"},
+                domains=(),
+                latest_deployment={"status": "done"},
+                deployment_history_state="no_history",
+                observed_at=NOW,
+            )
 
     def test_provider_observation_maps_recognized_empty_history_to_local_sentinel(self) -> None:
         with (

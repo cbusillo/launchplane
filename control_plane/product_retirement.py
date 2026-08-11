@@ -43,7 +43,10 @@ from control_plane.provider_operations import (
 
 _ACTIVE_PREVIEW_STATES = frozenset({"pending", "active", "paused", "teardown_pending"})
 _NO_DEPLOYMENT_HISTORY_STATUS = "no_history"
-_RETIRABLE_APPLICATION_STATES = frozenset({"completed", "done", "exited", "idle", "stopped"})
+_RETIRABLE_APPLICATION_STATES = frozenset(
+    {"completed", "done", "exited", "idle", "ready", "running", "stopped", "success"}
+)
+_RETIRABLE_NO_HISTORY_APPLICATION_STATES = frozenset({"idle"})
 _RETIRABLE_DEPLOYMENT_STATES = frozenset(
     {"cancelled", "canceled", "completed", "done", "failed", "idle", "skipped", "success"}
 )
@@ -339,16 +342,18 @@ def build_provider_observation(
                 "No deployment history cannot include a latest deployment."
             )
         deployment_status = _NO_DEPLOYMENT_HISTORY_STATUS
+        retirable = application_state in _RETIRABLE_NO_HISTORY_APPLICATION_STATES
     elif deployment_history_state == "present":
         deployment_status = dokploy_api.deployment_status(
             cast(dokploy_api.JsonObject | None, latest_deployment)
         )
+        retirable = (
+            application_state in _RETIRABLE_APPLICATION_STATES
+            and deployment_status in _RETIRABLE_DEPLOYMENT_STATES
+        )
     else:
         deployment_status = ""
-    retirable = application_state in _RETIRABLE_APPLICATION_STATES and (
-        deployment_status == _NO_DEPLOYMENT_HISTORY_STATUS
-        or deployment_status in _RETIRABLE_DEPLOYMENT_STATES
-    )
+        retirable = False
     core_payload = {
         "application_id": observed_target_id,
         "name": str(payload.get("name") or "").strip(),

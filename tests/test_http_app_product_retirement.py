@@ -42,12 +42,14 @@ def _observation(*, name: str = "example-site-prod") -> ProductRetirementProvide
     )
 
 
-def _no_history_observation() -> ProductRetirementProviderObservation:
+def _no_history_observation(
+    *, name: str = "example-site-prod"
+) -> ProductRetirementProviderObservation:
     return build_provider_observation(
         target_id=TARGET_ID,
         payload={
             "applicationId": TARGET_ID,
-            "name": "example-site-prod",
+            "name": name,
             "applicationStatus": "idle",
         },
         domains=(),
@@ -291,6 +293,47 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
             store.close()
         self.assertEqual(response.status_code, 202, response.text)
+
+    async def test_apply_rejects_no_history_plan_when_provider_evidence_changes(self) -> None:
+        changed_observations = {
+            "history becomes present": _observation(),
+            "application fingerprint changes": _no_history_observation(name="changed-name"),
+        }
+        for change_name, current_observation in changed_observations.items():
+            with (
+                self.subTest(change_name=change_name),
+                TemporaryDirectory() as temporary_directory_name,
+            ):
+                store = self._store(Path(temporary_directory_name))
+                app = self._app(
+                    store,
+                    actions=("product_retirement.plan", "product_retirement.apply"),
+                )
+                with patch(
+                    "control_plane.product_retirement.observe_tracked_dokploy_application",
+                    return_value=_no_history_observation(),
+                ):
+                    plan = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=_plan_payload(),
+                    )
+                self.assertEqual(plan.status_code, 202, plan.text)
+                with patch(
+                    "control_plane.product_retirement.observe_tracked_dokploy_application",
+                    return_value=current_observation,
+                ):
+                    apply = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=_apply_payload(plan.json()),
+                    )
+                store.close()
+                self.assertEqual(apply.status_code, 409, apply.text)
 
     async def test_provider_absent_apply_retires_and_replays_idempotently(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

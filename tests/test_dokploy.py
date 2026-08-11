@@ -194,7 +194,7 @@ class DokployConfigTests(unittest.TestCase):
         self.assertIsNone(raised.exception.status_code)
         self.assertIn("response read timed out", raised.exception.format_message())
 
-    def test_parse_deployment_history_accepts_only_unambiguous_list_shapes(self) -> None:
+    def test_parse_deployment_history_is_strict_without_changing_legacy_extraction(self) -> None:
         recognized_empty_payloads: tuple[dokploy_api.JsonValue, ...] = (
             [],
             {"data": []},
@@ -235,6 +235,37 @@ class DokployConfigTests(unittest.TestCase):
         self.assertEqual(
             dokploy_api.extract_deployments(legacy_payload), [{"deploymentId": "deployment-one"}]
         )
+
+    def test_deployment_history_request_uses_application_endpoint_and_query(self) -> None:
+        with patch("control_plane.dokploy.api.dokploy_request", return_value=[]) as request:
+            history = dokploy_api.deployment_history_for_target(
+                host="https://dokploy.example",
+                token="provider-token",
+                target_type="application",
+                target_id="application-one",
+            )
+
+        self.assertEqual(history.state, "no_history")
+        request.assert_called_once_with(
+            host="https://dokploy.example",
+            token="provider-token",
+            path="/api/deployment.all",
+            query={"applicationId": "application-one"},
+        )
+
+    def test_deployment_history_rejects_unsupported_target_type_without_request(self) -> None:
+        with patch("control_plane.dokploy.api.dokploy_request") as request:
+            with self.assertRaisesRegex(
+                click.ClickException, "Unsupported Dokploy deployment-history"
+            ):
+                dokploy_api.deployment_history_for_target(
+                    host="https://dokploy.example",
+                    token="provider-token",
+                    target_type="compose",
+                    target_id="compose-one",
+                )
+
+        request.assert_not_called()
 
     def test_deployment_history_request_errors_propagate(self) -> None:
         request_error = dokploy_api.DokployRequestFailed(
