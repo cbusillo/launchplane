@@ -253,6 +253,39 @@ class DokployConfigTests(unittest.TestCase):
             query={"applicationId": "application-one"},
         )
 
+    def test_application_search_uses_bounded_query_and_parses_envelope(self) -> None:
+        response: dokploy_api.JsonValue = {
+            "items": [{"applicationId": "application-one", "name": "example"}],
+            "total": 1,
+        }
+        with patch("control_plane.dokploy.api.dokploy_request", return_value=response) as request:
+            applications = dokploy_api.search_dokploy_applications(
+                host="https://dokploy.example",
+                token="provider-token",
+                name="example",
+                project_id="project-one",
+            )
+
+        self.assertEqual(applications, ({"applicationId": "application-one", "name": "example"},))
+        request.assert_called_once_with(
+            host="https://dokploy.example",
+            token="provider-token",
+            path="/api/application.search",
+            query={"name": "example", "projectId": "project-one", "limit": 100, "offset": 0},
+        )
+
+        with patch("control_plane.dokploy.api.dokploy_request", return_value=response) as request:
+            dokploy_api.search_dokploy_applications(
+                host="https://dokploy.example",
+                token="provider-token",
+            )
+        request.assert_called_once_with(
+            host="https://dokploy.example",
+            token="provider-token",
+            path="/api/application.search",
+            query={"limit": 100, "offset": 0},
+        )
+
     def test_deployment_history_rejects_unsupported_target_type_without_request(self) -> None:
         with patch("control_plane.dokploy.api.dokploy_request") as request:
             with self.assertRaisesRegex(

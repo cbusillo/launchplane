@@ -151,6 +151,11 @@ def _payloads() -> dict[str, dict[str, object]]:
             "projectId": "project-1",
             "environmentId": "environment-testing",
             "applicationStatus": "idle",
+            "environment": {
+                "environmentId": "environment-testing",
+                "name": "testing",
+                "project": {"projectId": "project-1", "name": "example-project"},
+            },
         },
         PROTECTED_IDS[0]: {
             "applicationId": PROTECTED_IDS[0],
@@ -158,6 +163,11 @@ def _payloads() -> dict[str, dict[str, object]]:
             "projectId": "project-1",
             "environmentId": "environment-production",
             "applicationStatus": "running",
+            "environment": {
+                "environmentId": "environment-production",
+                "name": "production",
+                "project": {"projectId": "project-1", "name": "example-project"},
+            },
         },
         PROTECTED_IDS[1]: {
             "applicationId": PROTECTED_IDS[1],
@@ -165,6 +175,11 @@ def _payloads() -> dict[str, dict[str, object]]:
             "projectId": "project-1",
             "environmentId": "environment-testing",
             "applicationStatus": "idle",
+            "environment": {
+                "environmentId": "environment-testing",
+                "name": "testing",
+                "project": {"projectId": "project-1", "name": "example-project"},
+            },
         },
     }
 
@@ -245,17 +260,45 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
         domains: Mapping[str, object] | None = None,
         history_state: str = "no_history",
         request: DetachedApplicationRetirementRequest | None = None,
+        absent: bool = False,
     ) -> DetachedApplicationDiscovery:
         payloads = _payloads()
         if payload_updates:
             payloads[CANDIDATE_ID].update(payload_updates)
 
         def fetch_payload(**kwargs: object) -> dict[str, object]:
-            return payloads[cast(str, kwargs["target_id"])]
+            target_id = cast(str, kwargs["target_id"])
+            if absent and target_id == CANDIDATE_ID:
+                raise dokploy_api.DokployRequestFailed(
+                    method="GET",
+                    path="/api/application.one",
+                    detail="not found",
+                    status_code=404,
+                )
+            return payloads[target_id]
 
         def domain_request(**kwargs: object) -> object:
             application_id = cast(dict[str, str], kwargs["query"])["applicationId"]
             return (domains or {}).get(application_id, [])
+
+        def search_applications(**kwargs: object) -> tuple[dict[str, object], ...]:
+            name = str(kwargs.get("name") or "")
+            selected = (
+                (() if absent else (CANDIDATE_ID,))
+                if name
+                else (
+                    (PROTECTED_IDS[0], PROTECTED_IDS[1])
+                    if absent
+                    else (CANDIDATE_ID, *PROTECTED_IDS)
+                )
+            )
+            return tuple(
+                {
+                    "applicationId": application_id,
+                    "name": payloads[application_id]["name"],
+                }
+                for application_id in selected
+            )
 
         history = dokploy_api.DeploymentHistory(
             state=cast(dokploy_api.DeploymentHistoryState, history_state),
@@ -275,6 +318,10 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
                 side_effect=fetch_payload,
             ),
             patch(
+                "control_plane.detached_application_retirement.dokploy_api.search_dokploy_applications",
+                side_effect=search_applications,
+            ),
+            patch(
                 "control_plane.detached_application_retirement.dokploy_api.dokploy_request",
                 side_effect=domain_request,
             ),
@@ -287,6 +334,9 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
                 control_plane_root=Path("."),
                 request=request or _request(),
                 observed_at=NOW,
+                absent_application_id=CANDIDATE_ID if absent else "",
+                absent_project_id="project-1" if absent else "",
+                absent_environment_id="environment-testing" if absent else "",
             )
 
     def test_request_requires_sorted_protected_set_and_excludes_candidate(self) -> None:
@@ -363,6 +413,22 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
             self._discover(projects=malformed)
         with self.assertRaisesRegex(DetachedApplicationRetirementBlockedError, "digest"):
             self._discover(request=_request(candidate_target_sha256="f" * 64))
+
+    def test_discovery_falls_back_to_service_search_when_project_listing_is_inaccessible(
+        self,
+    ) -> None:
+        discovery = self._discover(projects=())
+        self.assertEqual(discovery.candidate.application_id, CANDIDATE_ID)
+        self.assertEqual(
+            tuple(target.target_id_sha256 for target in discovery.protected_targets),
+            _request().expected_protected_target_sha256,
+        )
+
+    def test_service_search_reconciliation_proves_reviewed_target_absent(self) -> None:
+        discovery = self._discover(projects=(), absent=True)
+        self.assertEqual(discovery.candidate.state, "absent")
+        self.assertEqual(discovery.candidate.project_id, "project-1")
+        self.assertEqual(discovery.candidate.environment_id, "environment-testing")
 
     def test_authority_absence_scans_every_required_source_and_preserves_target_name_distinction(
         self,

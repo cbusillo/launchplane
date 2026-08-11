@@ -274,6 +274,49 @@ def fetch_dokploy_projects(*, host: str, token: str) -> tuple[JsonObject, ...]:
     return tuple(projects)
 
 
+def search_dokploy_applications(
+    *,
+    host: str,
+    token: str,
+    name: str = "",
+    project_id: str = "",
+    limit: int = 100,
+) -> tuple[JsonObject, ...]:
+    query: dict[str, str | int] = {"limit": limit, "offset": 0}
+    if name:
+        query["name"] = name
+    if project_id:
+        query["projectId"] = project_id
+    payload = dokploy_request(
+        host=host,
+        token=token,
+        path="/api/application.search",
+        query=query,
+    )
+    if not isinstance(payload, Mapping):
+        raise click.ClickException(
+            "Dokploy application.search returned an invalid response payload."
+        )
+    raw_items = payload.get("items")
+    total = payload.get("total")
+    if not isinstance(raw_items, list) or not isinstance(total, int):
+        raise click.ClickException("Dokploy application.search returned malformed search evidence.")
+    if total > len(raw_items):
+        raise click.ClickException(
+            "Dokploy application.search result exceeds the bounded inventory."
+        )
+    if total < len(raw_items):
+        raise click.ClickException("Dokploy application.search returned an inconsistent total.")
+    items: list[JsonObject] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            raise click.ClickException(
+                "Dokploy application.search returned a malformed application."
+            )
+        items.append(item)
+    return tuple(items)
+
+
 def fetch_dokploy_application_domains(
     *, host: str, token: str, application_id: str
 ) -> tuple[JsonObject, ...]:
