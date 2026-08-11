@@ -2588,8 +2588,11 @@ job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-detached-applic
 
 The future operator sequence is plan then apply. Inputs are exact Dokploy
 project/environment/application names, the candidate target SHA-256, a sorted
-non-empty JSON array of every other application target SHA-256 in the project,
-a stable idempotency key, reason, and issue. Apply additionally requires the
+non-empty JSON array of every other accessible application target SHA-256 whose
+provider payload has the same exact project name, including duplicate physical
+project IDs, a stable idempotency key, reason, and issue. Discovery is bounded
+to ten search pages of at most 100 applications each and fails closed rather
+than truncating. Apply additionally requires the
 persisted plan record/digest and the exact target-bound confirmation. Never pass
 or recover a raw target ID through workflow inputs, artifacts, summaries, issue
 comments, or local CLI fallbacks.

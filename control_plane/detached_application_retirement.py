@@ -350,6 +350,7 @@ def discover_detached_application(
             token=token,
             request=request,
             observed_at=observed_at,
+            project_applications=applications,
             absent_application_id=absent_application_id,
             absent_project_id=absent_project_id,
             absent_environment_id=absent_environment_id,
@@ -380,8 +381,32 @@ def discover_detached_application(
         if application.project_name == request.project_name
         and application.environment_name == request.environment_name
     )
+    inventory = _discover_service_application_inventory(host=host, token=token)
+    inventory_name_matches = tuple(
+        application
+        for application in inventory
+        if application.application_name == request.application_name
+    )
+    if len(inventory_name_matches) > 1:
+        raise DetachedApplicationRetirementBlockedError(
+            "Detached application retirement requires a globally unique accessible application name."
+        )
+    _require_project_inventory_convergence(
+        project_applications=applications,
+        inventory=inventory,
+        project_name=request.project_name,
+    )
     if len(exact_matches) == 1:
         candidate_reference = exact_matches[0]
+        inventory_candidate = tuple(
+            application
+            for application in inventory
+            if application.application_id == candidate_reference.application_id
+        )
+        if inventory_candidate != (candidate_reference,):
+            raise DetachedApplicationRetirementBlockedError(
+                "Dokploy project and application search evidence disagree on the reviewed candidate."
+            )
         if (
             absent_application_id.strip()
             and candidate_reference.application_id != absent_application_id.strip()
@@ -402,8 +427,8 @@ def discover_detached_application(
             )
         protected_references = tuple(
             application
-            for application in applications
-            if application.project_id == candidate_reference.project_id
+            for application in inventory
+            if application.project_name == request.project_name
             and application.application_id != candidate_reference.application_id
         )
     elif global_name_matches:
@@ -415,6 +440,14 @@ def discover_detached_application(
         if not normalized_absent_id:
             raise DetachedApplicationRetirementBlockedError(
                 "Detached application retirement candidate is absent during planning."
+            )
+        if inventory_name_matches:
+            raise DetachedApplicationRetirementBlockedError(
+                "Detached application name now resolves to a different provider target."
+            )
+        if any(application.application_id == normalized_absent_id for application in inventory):
+            raise DetachedApplicationRetirementBlockedError(
+                "Detached application search still contains the reviewed target."
             )
         if provider_identifier_sha256(normalized_absent_id) != request.candidate_target_sha256:
             raise DetachedApplicationRetirementBlockedError(
@@ -448,7 +481,9 @@ def discover_detached_application(
             state="absent",
         )
         protected_references = tuple(
-            application for application in applications if application.project_id == project_id
+            application
+            for application in inventory
+            if application.project_name == request.project_name
         )
     protected_target_sha256 = tuple(
         sorted(provider_identifier_sha256(item.application_id) for item in protected_references)
@@ -469,24 +504,71 @@ def discover_detached_application(
     return DetachedApplicationDiscovery(candidate=candidate, protected_targets=protected_targets)
 
 
+def _discover_service_application_inventory(
+    *, host: str, token: str
+) -> tuple[_DiscoveredApplication, ...]:
+    references: list[_DiscoveredApplication] = []
+    for item in dokploy_api.search_dokploy_applications(host=host, token=token):
+        application_id = _required_identifier(item, "applicationId", "id", label="application id")
+        application_name = _required_application_name(item)
+        payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="application",
+            target_id=application_id,
+        )
+        reference = _application_reference_from_payload(payload)
+        if (
+            reference.application_id != application_id
+            or reference.application_name != application_name
+        ):
+            raise DetachedApplicationRetirementBlockedError(
+                "Dokploy application.search disagrees with application.one evidence."
+            )
+        references.append(reference)
+    return tuple(references)
+
+
+def _require_project_inventory_convergence(
+    *,
+    project_applications: tuple[_DiscoveredApplication, ...],
+    inventory: tuple[_DiscoveredApplication, ...],
+    project_name: str,
+) -> None:
+    inventory_by_application_id = {
+        application.application_id: application for application in inventory
+    }
+    if any(
+        inventory_by_application_id.get(application.application_id) != application
+        for application in project_applications
+        if application.project_name == project_name
+    ):
+        raise DetachedApplicationRetirementBlockedError(
+            "Dokploy project listing contains application evidence missing from search inventory."
+        )
+
+
 def _discover_detached_application_with_service_search(
     *,
     host: str,
     token: str,
     request: DetachedApplicationRetirementRequest,
     observed_at: str,
+    project_applications: tuple[_DiscoveredApplication, ...],
     absent_application_id: str,
     absent_project_id: str,
     absent_environment_id: str,
 ) -> DetachedApplicationDiscovery:
+    inventory = _discover_service_application_inventory(host=host, token=token)
+    _require_project_inventory_convergence(
+        project_applications=project_applications,
+        inventory=inventory,
+        project_name=request.project_name,
+    )
     matches = tuple(
-        item
-        for item in dokploy_api.search_dokploy_applications(
-            host=host,
-            token=token,
-            name=request.application_name,
-        )
-        if _required_application_name(item) == request.application_name
+        reference
+        for reference in inventory
+        if reference.application_name == request.application_name
     )
     if len(matches) > 1:
         raise DetachedApplicationRetirementBlockedError(
@@ -494,29 +576,22 @@ def _discover_detached_application_with_service_search(
         )
     normalized_absent_id = absent_application_id.strip()
     if matches:
-        candidate_id = _required_identifier(
-            matches[0], "applicationId", "id", label="application id"
-        )
+        candidate_reference = matches[0]
+        candidate_id = candidate_reference.application_id
         if normalized_absent_id and candidate_id != normalized_absent_id:
             raise DetachedApplicationRetirementBlockedError(
                 "Detached application name now resolves to a different provider target."
             )
-        candidate_payload = dokploy_api.fetch_dokploy_target_payload(
-            host=host,
-            token=token,
-            target_type="application",
-            target_id=candidate_id,
-        )
-        candidate_reference = _application_reference_from_payload(candidate_payload)
-        project_items = dokploy_api.search_dokploy_applications(
-            host=host, token=token, project_id=candidate_reference.project_id
-        )
     elif normalized_absent_id:
         normalized_absent_project_id = absent_project_id.strip()
         normalized_absent_environment_id = absent_environment_id.strip()
         if not normalized_absent_project_id or not normalized_absent_environment_id:
             raise DetachedApplicationRetirementBlockedError(
                 "Detached application search requires reviewed absent project and environment identity."
+            )
+        if provider_identifier_sha256(normalized_absent_id) != request.candidate_target_sha256:
+            raise DetachedApplicationRetirementBlockedError(
+                "Stored detached application identifier does not match reviewed digest."
             )
         try:
             dokploy_api.fetch_dokploy_target_payload(
@@ -532,41 +607,20 @@ def _discover_detached_application_with_service_search(
             raise DetachedApplicationRetirementBlockedError(
                 "Detached application name disappeared but its reviewed target still exists."
             )
-        project_items = dokploy_api.search_dokploy_applications(
-            host=host,
-            token=token,
-            project_id=normalized_absent_project_id,
-        )
         candidate_reference = None
     else:
         raise DetachedApplicationRetirementBlockedError(
             "Detached application retirement candidate is absent during planning."
         )
-    project_references: list[_DiscoveredApplication] = []
-    for item in project_items:
-        application_id = _required_identifier(item, "applicationId", "id", label="application id")
-        if candidate_reference is None and application_id == normalized_absent_id:
-            raise DetachedApplicationRetirementBlockedError(
-                "Detached application search still contains the reviewed target."
-            )
-        payload = dokploy_api.fetch_dokploy_target_payload(
-            host=host,
-            token=token,
-            target_type="application",
-            target_id=application_id,
+    if candidate_reference is None and any(
+        reference.application_id == normalized_absent_id for reference in inventory
+    ):
+        raise DetachedApplicationRetirementBlockedError(
+            "Detached application search still contains the reviewed target."
         )
-        reference = _application_reference_from_payload(payload)
-        if (
-            candidate_reference is not None
-            and reference.project_id != candidate_reference.project_id
-        ):
-            raise DetachedApplicationRetirementBlockedError(
-                "Dokploy application.search returned cross-project evidence."
-            )
-        if reference.project_name == request.project_name and (
-            candidate_reference is not None or reference.project_id == normalized_absent_project_id
-        ):
-            project_references.append(reference)
+    protected_domain_references = tuple(
+        reference for reference in inventory if reference.project_name == request.project_name
+    )
     if candidate_reference is not None:
         if (
             candidate_reference.project_name != request.project_name
@@ -601,7 +655,7 @@ def _discover_detached_application_with_service_search(
         )
     protected_references = [
         reference
-        for reference in project_references
+        for reference in protected_domain_references
         if reference.application_id != candidate.application_id
     ]
     protected_target_sha256 = tuple(
@@ -609,7 +663,8 @@ def _discover_detached_application_with_service_search(
     )
     if protected_target_sha256 != request.expected_protected_target_sha256:
         raise DetachedApplicationRetirementBlockedError(
-            "Detached application protected target set changed or is incomplete."
+            "Detached application protected target set changed or is incomplete; observed "
+            f"target SHA-256 values: {','.join(protected_target_sha256) or 'none'}."
         )
     protected_targets = tuple(
         sorted(

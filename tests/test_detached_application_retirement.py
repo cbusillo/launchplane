@@ -261,10 +261,15 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
         history_state: str = "no_history",
         request: DetachedApplicationRetirementRequest | None = None,
         absent: bool = False,
+        payload_overrides: Mapping[str, Mapping[str, object]] | None = None,
+        search_name_overrides: Mapping[str, str] | None = None,
+        inventory_ids: tuple[str, ...] | None = None,
     ) -> DetachedApplicationDiscovery:
         payloads = _payloads()
         if payload_updates:
             payloads[CANDIDATE_ID].update(payload_updates)
+        for application_id, updates in (payload_overrides or {}).items():
+            payloads[application_id].update(updates)
 
         def fetch_payload(**kwargs: object) -> dict[str, object]:
             target_id = cast(str, kwargs["target_id"])
@@ -282,20 +287,15 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
             return (domains or {}).get(application_id, [])
 
         def search_applications(**kwargs: object) -> tuple[dict[str, object], ...]:
-            name = str(kwargs.get("name") or "")
-            selected = (
-                (() if absent else (CANDIDATE_ID,))
-                if name
-                else (
-                    (PROTECTED_IDS[0], PROTECTED_IDS[1])
-                    if absent
-                    else (CANDIDATE_ID, *PROTECTED_IDS)
-                )
+            selected = inventory_ids or (
+                (PROTECTED_IDS[0], PROTECTED_IDS[1]) if absent else (CANDIDATE_ID, *PROTECTED_IDS)
             )
             return tuple(
                 {
                     "applicationId": application_id,
-                    "name": payloads[application_id]["name"],
+                    "name": (search_name_overrides or {}).get(
+                        application_id, cast(str, payloads[application_id]["name"])
+                    ),
                 }
                 for application_id in selected
             )
@@ -443,8 +443,152 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
         self.assertEqual(discovery.candidate.application_id, CANDIDATE_ID)
         self.assertEqual(discovery.candidate.project_id, "project-1")
 
+    def test_service_search_protects_same_named_projects_across_distinct_ids(self) -> None:
+        discovery = self._discover(
+            projects=(),
+            payload_overrides={
+                PROTECTED_IDS[0]: {
+                    "projectId": "project-2",
+                    "environmentId": "environment-production",
+                    "environment": {
+                        "environmentId": "environment-production",
+                        "name": "production",
+                        "project": {"projectId": "project-2", "name": "example-project"},
+                    },
+                },
+                PROTECTED_IDS[1]: {
+                    "projectId": "project-3",
+                    "environmentId": "environment-testing-other",
+                    "environment": {
+                        "environmentId": "environment-testing-other",
+                        "name": "production",
+                        "project": {"projectId": "project-3", "name": "example-project"},
+                    },
+                },
+            },
+        )
+        self.assertEqual(
+            tuple(target.target_id_sha256 for target in discovery.protected_targets),
+            _request().expected_protected_target_sha256,
+        )
+
+    def test_project_listing_path_protects_same_named_projects_across_distinct_ids(self) -> None:
+        candidate_only_project = (
+            {
+                "projectId": "project-1",
+                "name": "example-project",
+                "environments": [
+                    {
+                        "environmentId": "environment-testing",
+                        "name": "testing",
+                        "applications": [
+                            {
+                                "applicationId": CANDIDATE_ID,
+                                "name": "detached-application",
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        discovery = self._discover(
+            projects=candidate_only_project,
+            payload_overrides={
+                PROTECTED_IDS[0]: {
+                    "projectId": "project-2",
+                    "environmentId": "environment-production",
+                    "environment": {
+                        "environmentId": "environment-production",
+                        "name": "production",
+                        "project": {"projectId": "project-2", "name": "example-project"},
+                    },
+                },
+                PROTECTED_IDS[1]: {
+                    "projectId": "project-3",
+                    "environmentId": "environment-testing-other",
+                    "environment": {
+                        "environmentId": "environment-testing-other",
+                        "name": "production",
+                        "project": {"projectId": "project-3", "name": "example-project"},
+                    },
+                },
+            },
+        )
+        self.assertEqual(
+            tuple(target.target_id_sha256 for target in discovery.protected_targets),
+            _request().expected_protected_target_sha256,
+        )
+
+    def test_project_listing_path_rejects_candidate_omitted_from_inventory(self) -> None:
+        with self.assertRaisesRegex(
+            DetachedApplicationRetirementBlockedError,
+            "project listing contains application evidence missing from search inventory",
+        ):
+            self._discover(inventory_ids=PROTECTED_IDS)
+
+    def test_project_listing_path_rejects_protected_target_omitted_from_inventory(self) -> None:
+        with self.assertRaisesRegex(
+            DetachedApplicationRetirementBlockedError,
+            "project listing contains application evidence missing from search inventory",
+        ):
+            self._discover(inventory_ids=(CANDIDATE_ID, PROTECTED_IDS[0]))
+
+    def test_project_listing_path_rejects_duplicate_name_in_inventory(self) -> None:
+        with self.assertRaisesRegex(
+            DetachedApplicationRetirementBlockedError,
+            "globally unique accessible application name",
+        ):
+            self._discover(
+                payload_overrides={PROTECTED_IDS[0]: {"name": "detached-application"}},
+            )
+
+    def test_service_search_rejects_search_payload_identity_drift(self) -> None:
+        with self.assertRaisesRegex(
+            DetachedApplicationRetirementBlockedError,
+            "application.search disagrees with application.one",
+        ):
+            self._discover(
+                projects=(),
+                search_name_overrides={PROTECTED_IDS[0]: "stale-application-name"},
+            )
+
+    def test_service_search_rejects_project_listing_target_omitted_from_inventory(self) -> None:
+        duplicate_projects = (
+            *_projects(),
+            {
+                "projectId": "project-2",
+                "name": "example-project",
+                "environments": [],
+            },
+        )
+        with self.assertRaisesRegex(
+            DetachedApplicationRetirementBlockedError,
+            "project listing contains application evidence missing from search inventory",
+        ):
+            self._discover(
+                projects=duplicate_projects,
+                inventory_ids=(CANDIDATE_ID, PROTECTED_IDS[0]),
+            )
+
     def test_service_search_reconciliation_proves_reviewed_target_absent(self) -> None:
         discovery = self._discover(projects=(), absent=True)
+        self.assertEqual(discovery.candidate.state, "absent")
+        self.assertEqual(discovery.candidate.project_id, "project-1")
+        self.assertEqual(discovery.candidate.environment_id, "environment-testing")
+
+    def test_service_search_reconciliation_binds_absent_identifier_digest(self) -> None:
+        with self.assertRaisesRegex(
+            DetachedApplicationRetirementBlockedError,
+            "Stored detached application identifier does not match reviewed digest",
+        ):
+            self._discover(
+                projects=(),
+                absent=True,
+                request=_request(candidate_target_sha256="f" * 64),
+            )
+
+    def test_project_listing_reconciliation_proves_reviewed_target_absent(self) -> None:
+        discovery = self._discover(projects=_projects(include_candidate=False), absent=True)
         self.assertEqual(discovery.candidate.state, "absent")
         self.assertEqual(discovery.candidate.project_id, "project-1")
         self.assertEqual(discovery.candidate.environment_id, "environment-testing")

@@ -262,8 +262,6 @@ class DokployConfigTests(unittest.TestCase):
             applications = dokploy_api.search_dokploy_applications(
                 host="https://dokploy.example",
                 token="provider-token",
-                name="example",
-                project_id="project-one",
             )
 
         self.assertEqual(applications, ({"applicationId": "application-one", "name": "example"},))
@@ -271,20 +269,134 @@ class DokployConfigTests(unittest.TestCase):
             host="https://dokploy.example",
             token="provider-token",
             path="/api/application.search",
-            query={"name": "example", "projectId": "project-one", "limit": 100, "offset": 0},
+            query={"limit": 100, "offset": 0},
         )
 
-        with patch("control_plane.dokploy.api.dokploy_request", return_value=response) as request:
+    def test_application_search_paginates_with_stable_total(self) -> None:
+        observed_offsets: list[object] = []
+
+        def request_page(**kwargs: object) -> dokploy_api.JsonValue:
+            query = cast(dict[str, object], kwargs["query"])
+            offset = query["offset"]
+            observed_offsets.append(offset)
+            application_id = "application-one" if offset == 0 else "application-two"
+            return {
+                "items": [{"applicationId": application_id, "name": application_id}],
+                "total": 2,
+            }
+
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=request_page):
+            applications = dokploy_api.search_dokploy_applications(
+                host="https://dokploy.example",
+                token="provider-token",
+                page_size=1,
+            )
+        self.assertEqual(
+            tuple(item["applicationId"] for item in applications),
+            ("application-one", "application-two"),
+        )
+        self.assertEqual(observed_offsets, [0, 1])
+
+    def test_application_search_rejects_total_drift(self) -> None:
+        responses: tuple[dokploy_api.JsonValue, ...] = (
+            {
+                "items": [{"applicationId": "application-one", "name": "application-one"}],
+                "total": 2,
+            },
+            {
+                "items": [{"applicationId": "application-two", "name": "application-two"}],
+                "total": 3,
+            },
+        )
+        with (
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=responses),
+            self.assertRaisesRegex(click.ClickException, "total changed"),
+        ):
+            dokploy_api.search_dokploy_applications(
+                host="https://dokploy.example",
+                token="provider-token",
+                page_size=1,
+            )
+
+    def test_application_search_rejects_duplicate_identity_across_pages(self) -> None:
+        response: dokploy_api.JsonValue = {
+            "items": [{"applicationId": "application-one", "name": "application-one"}],
+            "total": 2,
+        }
+        with (
+            patch("control_plane.dokploy.api.dokploy_request", return_value=response),
+            self.assertRaisesRegex(click.ClickException, "duplicate application identity"),
+        ):
+            dokploy_api.search_dokploy_applications(
+                host="https://dokploy.example",
+                token="provider-token",
+                page_size=1,
+            )
+
+    def test_application_search_rejects_early_empty_page(self) -> None:
+        response: dokploy_api.JsonValue = {"items": [], "total": 1}
+        with (
+            patch("control_plane.dokploy.api.dokploy_request", return_value=response),
+            self.assertRaisesRegex(click.ClickException, "ended before the declared total"),
+        ):
             dokploy_api.search_dokploy_applications(
                 host="https://dokploy.example",
                 token="provider-token",
             )
-        request.assert_called_once_with(
-            host="https://dokploy.example",
-            token="provider-token",
-            path="/api/application.search",
-            query={"limit": 100, "offset": 0},
-        )
+
+    def test_application_search_rejects_inconsistent_page_size(self) -> None:
+        response: dokploy_api.JsonValue = {
+            "items": [
+                {"applicationId": "application-one", "name": "application-one"},
+                {"applicationId": "application-two", "name": "application-two"},
+            ],
+            "total": 2,
+        }
+        with (
+            patch("control_plane.dokploy.api.dokploy_request", return_value=response),
+            self.assertRaisesRegex(click.ClickException, "inconsistent result page"),
+        ):
+            dokploy_api.search_dokploy_applications(
+                host="https://dokploy.example",
+                token="provider-token",
+                page_size=1,
+            )
+
+    def test_application_search_rejects_results_beyond_page_bound(self) -> None:
+        def request_page(**kwargs: object) -> dokploy_api.JsonValue:
+            query = cast(dict[str, object], kwargs["query"])
+            offset = cast(int, query["offset"])
+            return {
+                "items": [
+                    {
+                        "applicationId": f"application-{offset}",
+                        "name": f"application-{offset}",
+                    }
+                ],
+                "total": 11,
+            }
+
+        with (
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=request_page),
+            self.assertRaisesRegex(click.ClickException, "exceeded the bounded page limit"),
+        ):
+            dokploy_api.search_dokploy_applications(
+                host="https://dokploy.example",
+                token="provider-token",
+                page_size=1,
+            )
+
+    def test_application_search_rejects_page_size_outside_provider_bound(self) -> None:
+        with (
+            patch("control_plane.dokploy.api.dokploy_request") as request,
+            self.assertRaisesRegex(click.ClickException, "page size must be from 1 to 100"),
+        ):
+            dokploy_api.search_dokploy_applications(
+                host="https://dokploy.example",
+                token="provider-token",
+                page_size=101,
+            )
+        request.assert_not_called()
 
     def test_deployment_history_rejects_unsupported_target_type_without_request(self) -> None:
         with patch("control_plane.dokploy.api.dokploy_request") as request:
