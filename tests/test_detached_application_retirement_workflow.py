@@ -82,19 +82,22 @@ class DetachedApplicationRetirementWorkflowTests(unittest.TestCase):
             "detached-application-retirement-response.json",
         )
 
-    def test_no_mutable_dispatch_wrapper_exists(self) -> None:
-        for workflow_path in Path(".github/workflows").glob("*.yml"):
-            if workflow_path == self.path:
-                continue
-            workflow = load_workflow(workflow_path)
-            trigger = workflow.data.get("on")
-            if not isinstance(trigger, dict) or "workflow_dispatch" not in trigger:
-                continue
-            self.assertNotIn(
-                "reusable-detached-application-retirement.yml",
-                workflow_path.read_text(encoding="utf-8"),
-                workflow_path.as_posix(),
-            )
+    def test_dispatch_wrapper_is_pinned_to_the_merged_worker(self) -> None:
+        wrapper_path = Path(".github/workflows/detached-application-retirement.yml")
+        wrapper = load_workflow(wrapper_path)
+        trigger = wrapper.data["on"]
+        assert isinstance(trigger, dict)
+        self.assertEqual(set(trigger), {"workflow_dispatch"})
+        self.assertEqual(
+            wrapper.job_uses("retire"),
+            "cbusillo/launchplane/.github/workflows/"
+            "reusable-detached-application-retirement.yml@"
+            "11d53d2840a6f1898785d7c8f1553c202caa3fbf",
+        )
+        self.assertEqual(
+            wrapper.job_permissions("retire"),
+            {"contents": "read", "id-token": "write"},
+        )
 
 
 if __name__ == "__main__":
