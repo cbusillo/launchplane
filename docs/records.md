@@ -2490,3 +2490,29 @@ Product profiles include `lifecycle_state` with backward-compatible default
 owner-review context-binding migration. `retiring` and `retired` profiles
 remain directly readable and appear in complete profile listings as audit
 authority; active discovery and automation filter them explicitly.
+
+## Detached application retirement records
+
+Detached Dokploy application retirement evidence is stored append-only under
+`launchplane_detached_application_retirements` in PostgreSQL and
+`state/launchplane_detached_application_retirements/` for filesystem rehearsal.
+Migration `d8a0c2e4f6b8` follows the product-retirement migration and creates
+candidate, plan, and idempotency indexes plus a partial unique plan reservation.
+Database checks require at least one protected target and
+`authority_write_count = 0`.
+
+The plan digest covers intent continuity, the complete private candidate
+observation, the bounded Launchplane authority-absence proof, and the exact
+sorted protected-provider snapshot. Private records may retain provider IDs so
+apply and reconciliation can bind the same target, but service/workflow
+evidence exposes only hashes, counts, phases, booleans, and record references.
+The absence proof contains a sorted required-source tuple with record counts,
+digests, and literal zero matches; no matched record or mutable authority field
+exists in the contract.
+
+Apply records are terminal only and reference the exact reviewed plan. Mutation
+evidence records the provider-operation/reconciliation linkage, checkpoint
+phases, whether the sole application-delete effect was attempted/performed,
+candidate absence verification, protected-target stability, and the literal
+zero authority-write count. There are no profile lifecycle, authority deletion,
+secret mutation, target rewrite, or runtime mutation fields.

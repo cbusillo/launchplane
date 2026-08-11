@@ -54,6 +54,9 @@ from control_plane import (
 from control_plane import product_preview_tls as control_plane_product_preview_tls
 from control_plane import product_retirement as control_plane_product_retirement
 from control_plane import (
+    detached_application_retirement as control_plane_detached_application_retirement,
+)
+from control_plane import (
     route_binding_external_reconcile as control_plane_route_binding_external_reconcile,
 )
 from control_plane import route_binding_reconcile as control_plane_route_binding_reconcile
@@ -563,6 +566,10 @@ from control_plane.contracts.product_retirement import (
     ProductRetirementIdentity,
     ProductRetirementRequest,
 )
+from control_plane.contracts.detached_application_retirement import (
+    DetachedApplicationRetirementIdentity,
+    DetachedApplicationRetirementRequest,
+)
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_plan_record import (
@@ -952,6 +959,7 @@ _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/apply"
 _PRODUCT_PREVIEW_TLS_APPLY_ROUTE = "/v1/product-profiles/preview-tls/apply"
 _PRODUCT_RETIREMENT_ROUTE = "/v1/product-retirement"
+_DETACHED_APPLICATION_RETIREMENT_ROUTE = "/v1/detached-application-retirement"
 _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
 _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
 _PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
@@ -3111,6 +3119,36 @@ def product_retirement_identity(identity: LaunchplaneIdentity) -> ProductRetirem
             getattr(identity, "workflow_ref", "") or getattr(identity, "job_workflow_ref", "") or ""
         ),
         environment=str(getattr(identity, "environment", "") or ""),
+    )
+
+
+def detached_application_retirement_identity(
+    identity: LaunchplaneIdentity,
+) -> DetachedApplicationRetirementIdentity:
+    return DetachedApplicationRetirementIdentity(
+        actor=launchplane_identity_actor(identity),
+        identity_kind=type(identity).__name__,
+        subject=str(getattr(identity, "subject", "") or ""),
+        repository=str(getattr(identity, "repository", "") or ""),
+        workflow_ref=str(
+            getattr(identity, "job_workflow_ref", "") or getattr(identity, "workflow_ref", "") or ""
+        ),
+        environment=str(getattr(identity, "environment", "") or ""),
+    )
+
+
+def detached_application_retirement_identity_allowed(identity: LaunchplaneIdentity) -> bool:
+    if isinstance(identity, LocalAdminIdentity):
+        return True
+    if not isinstance(identity, GitHubActionsIdentity):
+        return False
+    return (
+        re.fullmatch(
+            r"cbusillo/launchplane/\.github/workflows/"
+            r"reusable-detached-application-retirement\.yml@[0-9a-f]{40}",
+            identity.job_workflow_ref.strip(),
+        )
+        is not None
     )
 
 
@@ -16615,6 +16653,267 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
 
+    async def execute_detached_application_retirement(
+        request: Request,
+        retirement_request: DetachedApplicationRetirementRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        normalized_key = idempotency_key.strip()
+        if not normalized_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Detached application retirement requires Idempotency-Key.",
+            )
+        action = (
+            "detached_application_retirement.plan"
+            if retirement_request.mode == "plan"
+            else "detached_application_retirement.apply"
+        )
+        if not detached_application_retirement_identity_allowed(identity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Detached application retirement requires the exact reusable worker "
+                    "or a local admin identity."
+                ),
+            )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=_LAUNCHPLANE_SERVICE_CONTEXT,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            target=AuthorizationTarget(scope="global"),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity is not authorized for detached application retirement.",
+                authz=_authz_diagnostic_payload(
+                    identity=identity,
+                    authz_policy_sha256_value=resolved_authz_policy_runtime.policy_sha256,
+                    authz_policy_source=resolved_authz_policy_runtime.source,
+                    action=action,
+                    product=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ),
+            )
+        try:
+            retirement_store = cast(
+                control_plane_detached_application_retirement.DetachedApplicationRetirementStore,
+                require_provider_operation_store(
+                    record_store=record_store,
+                    trace_id=trace_id,
+                ),
+            )
+            plan_record = None
+            if retirement_request.mode == "apply":
+                plan_record = retirement_store.read_detached_application_retirement_record(
+                    retirement_request.reviewed_plan_record_id
+                )
+                control_plane_detached_application_retirement.validate_reviewed_detached_application_retirement_plan(
+                    request=retirement_request,
+                    plan=plan_record,
+                )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="detached_application_retirement_plan_not_found",
+                message="Reviewed detached application retirement plan was not found.",
+            ) from error
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="detached_application_retirement_blocked",
+                message=str(error),
+            ) from error
+        actor_identity = detached_application_retirement_identity(identity)
+        requested_at = utc_now_timestamp()
+        if retirement_request.mode == "plan":
+            existing_plans = retirement_store.list_detached_application_retirement_records(
+                candidate_target_sha256=retirement_request.candidate_target_sha256,
+                actor=actor_identity.actor,
+                mode="plan",
+                idempotency_key=normalized_key,
+                limit=1,
+            )
+            if existing_plans:
+                existing_plan = existing_plans[0]
+                if existing_plan.continuity_sha256 != retirement_request.continuity_sha256:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different detached "
+                            "application retirement plan."
+                        ),
+                    )
+                return AcceptedEvidenceResponse.model_validate(
+                    control_plane_detached_application_retirement.redacted_detached_application_retirement_response(
+                        existing_plan
+                    )
+                )
+            try:
+                discovery = (
+                    control_plane_detached_application_retirement.discover_detached_application(
+                        control_plane_root=resolved_control_plane_root,
+                        request=retirement_request,
+                        observed_at=requested_at,
+                    )
+                )
+                absence_proof = control_plane_detached_application_retirement.prove_detached_application_authority_absence(
+                    record_store=retirement_store,
+                    candidate_target_id=discovery.candidate.application_id,
+                    candidate_application_name=retirement_request.application_name,
+                )
+                plan = control_plane_detached_application_retirement.build_detached_application_retirement_plan_record(
+                    request=retirement_request,
+                    identity=actor_identity,
+                    trace_id=trace_id,
+                    idempotency_key=normalized_key,
+                    requested_at=requested_at,
+                    discovery=discovery,
+                    authority_absence_proof=absence_proof,
+                )
+                retirement_store.write_detached_application_retirement_record(plan)
+                persisted_plans = retirement_store.list_detached_application_retirement_records(
+                    candidate_target_sha256=retirement_request.candidate_target_sha256,
+                    actor=actor_identity.actor,
+                    mode="plan",
+                    idempotency_key=normalized_key,
+                    limit=1,
+                )
+                if not persisted_plans:
+                    raise RuntimeError(
+                        "Detached application retirement plan reservation was not persisted."
+                    )
+                plan = persisted_plans[0]
+            except (
+                FileNotFoundError,
+                OSError,
+                TimeoutError,
+                ValueError,
+                click.ClickException,
+            ) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="detached_application_retirement_blocked",
+                    message=str(error),
+                ) from error
+            return AcceptedEvidenceResponse.model_validate(
+                control_plane_detached_application_retirement.redacted_detached_application_retirement_response(
+                    plan
+                )
+            )
+        if plan_record is None:
+            raise RuntimeError(
+                "Detached application retirement apply requires a reviewed plan record."
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=retirement_store,
+            identity=identity,
+            route_path=_DETACHED_APPLICATION_RETIREMENT_ROUTE,
+            idempotency_key=normalized_key,
+            trace_id=trace_id,
+            check_replay=True,
+            request_payload=retirement_request.model_dump(mode="json"),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        adapter = control_plane_detached_application_retirement.DokployDetachedApplicationRetirementAdapter(
+            control_plane_root=resolved_control_plane_root,
+            record_store=retirement_store,
+            request=retirement_request,
+            plan=plan_record,
+            identity=actor_identity,
+            trace_id=trace_id,
+            idempotency_key=normalized_key,
+            requested_at=requested_at,
+        )
+        provider_operation_key = adapter.provider_operation_key(
+            scope=idempotency_scope(identity),
+            route_path=_DETACHED_APPLICATION_RETIREMENT_ROUTE,
+            fingerprint=payload_fingerprint,
+        )
+        try:
+            return await run_provider_mutation(
+                record_store=retirement_store,
+                identity=identity,
+                route_path=_DETACHED_APPLICATION_RETIREMENT_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint=payload_fingerprint,
+                trace_id=trace_id,
+                adapter=adapter,
+                in_progress_message=(
+                    "A matching detached application retirement is already running. "
+                    "Retry with the same Idempotency-Key."
+                ),
+                reconcile_message=(
+                    "Detached application retirement requires reconciliation before retrying "
+                    "the same Idempotency-Key."
+                ),
+            )
+        except HTTPException as error:
+            if not adapter.started:
+                raise
+            detail = error.detail if isinstance(error.detail, Mapping) else {}
+            code = str(detail.get("code") or "detached_application_retirement_failed")
+            outcome: Literal["reconcile_required", "failed"] = (
+                "reconcile_required" if "reconciliation" in code else "failed"
+            )
+            terminal = adapter.terminal_record(
+                outcome=outcome,
+                provider_operation_key=provider_operation_key,
+                error_code=code,
+                error_message=str(detail.get("message") or ""),
+            )
+            retirement_store.write_detached_application_retirement_record(terminal)
+            raise
+        except (ValueError, click.ClickException) as error:
+            if not adapter.started:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="detached_application_retirement_blocked",
+                    message=str(error),
+                ) from error
+            terminal = adapter.terminal_record(
+                outcome="failed",
+                provider_operation_key=provider_operation_key,
+                error_code="detached_application_retirement_blocked",
+                error_message=str(error),
+            )
+            retirement_store.write_detached_application_retirement_record(terminal)
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="detached_application_retirement_blocked",
+                message=str(error),
+            ) from error
+
     async def remediate_preview_pr_feedback(
         request: Request,
         remediation_request: PreviewPrFeedbackRemediationRequest,
@@ -19057,6 +19356,25 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="execute_product_retirement",
         summary="Plan or apply audited generic-web product retirement",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _DETACHED_APPLICATION_RETIREMENT_ROUTE,
+        execute_detached_application_retirement,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="execute_detached_application_retirement",
+        summary="Plan or apply audited detached Dokploy application retirement",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

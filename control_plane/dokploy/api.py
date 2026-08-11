@@ -257,6 +257,23 @@ def fetch_dokploy_target_payload(
     return payload_as_object
 
 
+def fetch_dokploy_projects(*, host: str, token: str) -> tuple[JsonObject, ...]:
+    payload = dokploy_request(
+        host=host,
+        token=token,
+        path="/api/project.all",
+    )
+    if not isinstance(payload, list):
+        raise click.ClickException("Dokploy project.all returned an invalid response payload.")
+    projects: list[JsonObject] = []
+    for item in payload:
+        project = as_json_object(item)
+        if project is None:
+            raise click.ClickException("Dokploy project.all returned a malformed project entry.")
+        projects.append(project)
+    return tuple(projects)
+
+
 def fetch_dokploy_application_domains(
     *, host: str, token: str, application_id: str
 ) -> tuple[JsonObject, ...]:

@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "c6e8f1b3d5a7"
+EXPECTED_ALEMBIC_HEAD_REVISION = "d8a0c2e4f6b8"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -52,6 +52,11 @@ class CriticalPrimaryKey:
 
 
 CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
+    CriticalColumnType(
+        "launchplane_detached_application_retirements",
+        "payload",
+        ("jsonb",),
+    ),
     CriticalColumnType(
         "launchplane_product_retirements",
         "payload",
@@ -398,6 +403,13 @@ _ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
 )
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
+    CriticalIndex(
+        "launchplane_detached_application_retirements",
+        "launchplane_detached_app_retirements_plan_idempotency_unique",
+        ("candidate_target_sha256", "actor", "idempotency_key"),
+        unique=True,
+        predicate_expression="mode='plan'",
+    ),
     CriticalIndex(
         "launchplane_authz_policies",
         "launchplane_authz_policies_revision_uidx",
@@ -827,6 +839,10 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
+    CriticalPrimaryKey(
+        "launchplane_detached_application_retirements",
+        ("record_id",),
+    ),
     CriticalPrimaryKey(
         "launchplane_route_bindings",
         ("product", "context", "instance"),

@@ -2788,6 +2788,83 @@
         "title": "DeploymentRecordResponse",
         "type": "object"
       },
+      "DetachedApplicationRetirementRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "application_name": {
+            "title": "Application Name",
+            "type": "string"
+          },
+          "candidate_target_sha256": {
+            "title": "Candidate Target Sha256",
+            "type": "string"
+          },
+          "confirmation": {
+            "default": "",
+            "title": "Confirmation",
+            "type": "string"
+          },
+          "environment_name": {
+            "title": "Environment Name",
+            "type": "string"
+          },
+          "expected_protected_target_sha256": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Expected Protected Target Sha256",
+            "type": "array"
+          },
+          "mode": {
+            "default": "plan",
+            "enum": [
+              "plan",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "project_name": {
+            "title": "Project Name",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "related_issue": {
+            "title": "Related Issue",
+            "type": "string"
+          },
+          "reviewed_plan_record_id": {
+            "default": "",
+            "title": "Reviewed Plan Record Id",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project_name",
+          "environment_name",
+          "application_name",
+          "candidate_target_sha256",
+          "expected_protected_target_sha256",
+          "reason",
+          "related_issue"
+        ],
+        "title": "DetachedApplicationRetirementRequest",
+        "type": "object"
+      },
       "DokployTargetIdRecord": {
         "additionalProperties": false,
         "properties": {
@@ -34057,6 +34134,116 @@
           }
         },
         "summary": "Read one deployment record"
+      }
+    },
+    "/v1/detached-application-retirement": {
+      "post": {
+        "operationId": "execute_detached_application_retirement",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetachedApplicationRetirementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan or apply audited detached Dokploy application retirement"
       }
     },
     "/v1/dokploy-targets/inspect": {
