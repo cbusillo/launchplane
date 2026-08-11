@@ -282,18 +282,16 @@ def search_dokploy_applications(
     project_id: str = "",
     limit: int = 100,
 ) -> tuple[JsonObject, ...]:
-    query = urlencode(
-        {
-            "name": name,
-            "projectId": project_id,
-            "limit": limit,
-            "offset": 0,
-        }
-    )
+    query: dict[str, str | int] = {"limit": limit, "offset": 0}
+    if name:
+        query["name"] = name
+    if project_id:
+        query["projectId"] = project_id
     payload = dokploy_request(
         host=host,
         token=token,
-        path=f"/api/application.search?{query}",
+        path="/api/application.search",
+        query=query,
     )
     if not isinstance(payload, Mapping):
         raise click.ClickException(
@@ -303,10 +301,12 @@ def search_dokploy_applications(
     total = payload.get("total")
     if not isinstance(raw_items, list) or not isinstance(total, int):
         raise click.ClickException("Dokploy application.search returned malformed search evidence.")
-    if total != len(raw_items):
+    if total > len(raw_items):
         raise click.ClickException(
             "Dokploy application.search result exceeds the bounded inventory."
         )
+    if total < len(raw_items):
+        raise click.ClickException("Dokploy application.search returned an inconsistent total.")
     items: list[JsonObject] = []
     for item in raw_items:
         if not isinstance(item, dict):

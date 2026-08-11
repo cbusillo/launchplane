@@ -342,7 +342,11 @@ def discover_detached_application(
         for project_id, project_name in parsed.projects
         if project_name == request.project_name
     }
-    if len(matching_projects) != 1:
+    if len(matching_projects) > 1:
+        raise DetachedApplicationRetirementBlockedError(
+            "Detached application retirement requires exactly one project name match."
+        )
+    if not matching_projects:
         return _discover_detached_application_with_service_search(
             host=host,
             token=token,
@@ -506,6 +510,20 @@ def _discover_detached_application_with_service_search(
             host=host, token=token, project_id=candidate_reference.project_id
         )
     elif normalized_absent_id:
+        try:
+            dokploy_api.fetch_dokploy_target_payload(
+                host=host,
+                token=token,
+                target_type="application",
+                target_id=normalized_absent_id,
+            )
+        except dokploy_api.DokployRequestFailed as error:
+            if error.status_code != 404:
+                raise
+        else:
+            raise DetachedApplicationRetirementBlockedError(
+                "Detached application name disappeared but its reviewed target still exists."
+            )
         project_items = dokploy_api.search_dokploy_applications(host=host, token=token)
         candidate_reference = None
     else:
@@ -515,6 +533,10 @@ def _discover_detached_application_with_service_search(
     project_references: list[_DiscoveredApplication] = []
     for item in project_items:
         application_id = _required_identifier(item, "applicationId", "id", label="application id")
+        if candidate_reference is None and application_id == normalized_absent_id:
+            raise DetachedApplicationRetirementBlockedError(
+                "Detached application search still contains the reviewed target."
+            )
         payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
             token=token,
@@ -553,9 +575,9 @@ def _discover_detached_application_with_service_search(
             for reference in project_references
             if reference.environment_name == request.environment_name
         )
-        if not environment_matches:
+        if len(environment_matches) != 1:
             raise DetachedApplicationRetirementBlockedError(
-                "Detached application search cannot resolve the reviewed absent environment."
+                "Detached application search requires exactly one reviewed absent environment."
             )
         environment_reference = environment_matches[0]
         candidate = DetachedApplicationProviderObservation(
