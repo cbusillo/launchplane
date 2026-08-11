@@ -3698,9 +3698,13 @@ The candidate ID must also be absent from every bounded Launchplane authority
 source capable of carrying or resolving provider-target authority. The proof
 stores only source names, record counts, and source digests, has a literal zero
 match count, and cannot be built after an ID or exact provider-application-name
-match. A tracked Dokploy `target_name` is not treated as a provider application
-name by itself; exact provider IDs and provider application ownership fields
-remain authoritative.
+match. A deployment record with consistent application-typed target evidence is
+bound by that provider target ID, so a display-name collision with a different
+target does not claim the candidate. Deployment records without consistent
+application target evidence and all other authority sources retain exact
+provider-application-name matching. A tracked Dokploy `target_name` is not
+treated as a provider application name by itself; exact provider IDs and
+provider application ownership fields remain authoritative.
 
 Apply requires the exact stored plan and rederives candidate discovery,
 authority absence, and the protected snapshot under the same target-key

@@ -284,10 +284,11 @@ _AUTHORITATIVE_PROVIDER_NAME_KEYS = frozenset(
         "provider_application_name",
     }
 )
+_DEPLOYMENT_AUTHORITY_SOURCE = "deployment"
 _AUTHORITY_SOURCES: tuple[
     tuple[str, Callable[[DetachedApplicationRetirementStore], tuple[object, ...]]], ...
 ] = (
-    ("deployment", lambda store: store.list_deployment_records()),
+    (_DEPLOYMENT_AUTHORITY_SOURCE, lambda store: store.list_deployment_records()),
     ("dokploy_target", lambda store: store.list_dokploy_target_records()),
     ("dokploy_target_id", lambda store: store.list_dokploy_target_id_records()),
     ("edge_endpoint", lambda store: store.list_edge_endpoint_records()),
@@ -722,10 +723,18 @@ def prove_detached_application_authority_absence(
             )
         )
         for payload in payloads:
+            name_is_authority = not (
+                source_name == _DEPLOYMENT_AUTHORITY_SOURCE
+                and _deployment_record_proves_foreign_application_target(
+                    payload,
+                    candidate_target_id=normalized_target_id,
+                )
+            )
             if _payload_references_candidate(
                 payload,
                 candidate_target_id=normalized_target_id,
                 candidate_application_name=normalized_application_name,
+                name_is_authority=name_is_authority,
             ):
                 raise DetachedApplicationRetirementBlockedError(
                     f"Detached application remains referenced by Launchplane {source_name} authority."
@@ -1491,6 +1500,7 @@ def _payload_references_candidate(
     *,
     candidate_target_id: str,
     candidate_application_name: str,
+    name_is_authority: bool = True,
     key: str = "",
 ) -> bool:
     if isinstance(payload, Mapping):
@@ -1499,6 +1509,7 @@ def _payload_references_candidate(
                 value,
                 candidate_target_id=candidate_target_id,
                 candidate_application_name=candidate_application_name,
+                name_is_authority=name_is_authority,
                 key=str(raw_key),
             )
             for raw_key, value in payload.items()
@@ -1509,6 +1520,7 @@ def _payload_references_candidate(
                 value,
                 candidate_target_id=candidate_target_id,
                 candidate_application_name=candidate_application_name,
+                name_is_authority=name_is_authority,
                 key=key,
             )
             for value in payload
@@ -1520,9 +1532,62 @@ def _payload_references_candidate(
         return True
     normalized_key = re.sub(r"[^a-z0-9]+", "_", key.strip().lower()).strip("_")
     return (
-        normalized_key in _AUTHORITATIVE_PROVIDER_NAME_KEYS
+        name_is_authority
+        and normalized_key in _AUTHORITATIVE_PROVIDER_NAME_KEYS
         and normalized_value == candidate_application_name
     )
+
+
+def _deployment_record_proves_foreign_application_target(
+    payload: object,
+    *,
+    candidate_target_id: str,
+) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    application_target_ids: list[str] = []
+    resolved_target = payload.get("resolved_target")
+    if resolved_target is not None:
+        if (
+            not isinstance(resolved_target, Mapping)
+            or _normalized_lower_string(resolved_target.get("target_type")) != "application"
+        ):
+            return False
+        resolved_target_id = _normalized_string(resolved_target.get("target_id"))
+        if not resolved_target_id:
+            return False
+        application_target_ids.append(resolved_target_id)
+    deployed_target = payload.get("deployed_target")
+    if deployed_target is not None:
+        if not isinstance(deployed_target, Mapping):
+            return False
+        declared_target_types = {
+            target_type
+            for target_type in (
+                _normalized_lower_string(deployed_target.get("target_category")),
+                _normalized_lower_string(deployed_target.get("provider_target_type")),
+            )
+            if target_type
+        }
+        if declared_target_types != {"application"}:
+            return False
+        deployed_target_id = _normalized_string(deployed_target.get("target_id"))
+        if not deployed_target_id:
+            return False
+        application_target_ids.append(deployed_target_id)
+    return (
+        bool(application_target_ids)
+        and len(set(application_target_ids)) == 1
+        and (application_target_ids[0] != candidate_target_id)
+    )
+
+
+def _normalized_string(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _normalized_lower_string(value: object) -> str:
+    return _normalized_string(value).lower()
 
 
 def _same_candidate_evidence(
