@@ -599,7 +599,10 @@ writes a `launchplane_merge_train_batch_landing_plans` record, or `mode: land`
 with a landing-plan record id and merges the original pull requests in recorded
 queue order. Landing fails closed if the base branch head has moved from the
 candidate base SHA. Immediately before each merge, the PR must still be open at
-the recorded head SHA and target the recorded base ref and rolling base SHA;
+the recorded head SHA and target the recorded base ref. Rolling-base allowance
+comes only from the active unchanged landing plan plus structural provenance:
+every prior entry must be recorded landed at its exact head, and the observed
+base must equal the recorded prior landing result;
 the merge request also uses GitHub's head-SHA guard. Retried landing is
 idempotent across already-merged entries when GitHub shows the pull request was
 merged with the exact recorded head SHA into the recorded base ref and the

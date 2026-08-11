@@ -13,6 +13,11 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntr
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapseBranchClient
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
+from control_plane.contracts.merge_train_structural_provenance import (
+    MergeTrainRollingStep,
+    MergeTrainStructuralEntryBinding,
+    MergeTrainStructuralProvenance,
+)
 from control_plane.github_payload import json_object
 from control_plane.github_payload import required_positive_int
 from control_plane.github_payload import required_string_text
@@ -99,10 +104,31 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
         if checkpoint is not None:
             checkpoint(candidate, None, "candidate_ref_ready")
-        candidate_sha = candidate.base_sha
+        base_identity = _git_commit_identity(
+            transport=self.transport,
+            repository_path=repository_path,
+            commit_sha=candidate.base_sha,
+        )
+        resolved_entries = tuple(
+            entry.model_copy(
+                update={
+                    "head_tree_sha": _git_commit_identity(
+                        transport=self.transport,
+                        repository_path=repository_path,
+                        commit_sha=entry.head_sha,
+                    )[1]
+                }
+            )
+            for entry in candidate.entries
+        )
+        candidate = candidate.model_copy(update={"entries": resolved_entries, "status": "building"})
+        candidate_sha, candidate_tree_sha = base_identity
+        rolling_steps: list[MergeTrainRollingStep] = []
         for entry_index, entry in enumerate(candidate.entries, start=1):
             if checkpoint is not None:
                 checkpoint(candidate, entry, "merge_candidate_entry")
+            parent_sha = candidate_sha
+            parent_tree_sha = candidate_tree_sha
             payload = self.transport.request(
                 method="POST",
                 path=f"/repos/{repository_path}/merges",
@@ -116,27 +142,67 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 },
             )
             if payload is None:
+                rolling_steps.append(
+                    MergeTrainRollingStep(
+                        position=entry.position,
+                        pull_request_number=entry.pull_request_number,
+                        parent_sha=parent_sha,
+                        parent_tree_sha=parent_tree_sha,
+                        head_sha=entry.head_sha,
+                        head_tree_sha=entry.head_tree_sha,
+                        result_sha=parent_sha,
+                        result_tree_sha=parent_tree_sha,
+                        kind="no_op_already_contained",
+                    )
+                )
+                progress_candidate = _candidate_with_structural_provenance(
+                    candidate=candidate,
+                    candidate_sha=candidate_sha,
+                    candidate_tree_sha=candidate_tree_sha,
+                    rolling_steps=tuple(rolling_steps),
+                )
                 if checkpoint is not None:
                     checkpoint(
-                        candidate.model_copy(update={"candidate_sha": candidate_sha}),
+                        progress_candidate,
                         entry,
                         f"candidate_entry_merged:{entry_index}",
                     )
+                candidate = progress_candidate
                 continue
             if not isinstance(payload, dict):
                 raise MergeTrainGitHubError("GitHub merge response must be a JSON object.")
-            candidate_sha = _required_text(
-                payload.get("sha"), "GitHub merge response requires sha."
+            candidate_sha, candidate_tree_sha = _merge_result_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                payload=payload,
+            )
+            rolling_steps.append(
+                MergeTrainRollingStep(
+                    position=entry.position,
+                    pull_request_number=entry.pull_request_number,
+                    parent_sha=parent_sha,
+                    parent_tree_sha=parent_tree_sha,
+                    head_sha=entry.head_sha,
+                    head_tree_sha=entry.head_tree_sha,
+                    result_sha=candidate_sha,
+                    result_tree_sha=candidate_tree_sha,
+                    kind="merge_commit",
+                )
+            )
+            progress_candidate = _candidate_with_structural_provenance(
+                candidate=candidate,
+                candidate_sha=candidate_sha,
+                candidate_tree_sha=candidate_tree_sha,
+                rolling_steps=tuple(rolling_steps),
             )
             if checkpoint is not None:
                 checkpoint(
-                    candidate.model_copy(update={"candidate_sha": candidate_sha}),
+                    progress_candidate,
                     entry,
                     f"candidate_entry_merged:{entry_index}",
                 )
-        return candidate.model_copy(
-            update={"candidate_sha": candidate_sha, "status": "ready_for_checks"}
-        )
+            candidate = progress_candidate
+        return candidate.model_copy(update={"status": "ready_for_checks"})
 
     def observe_batch_candidate_checks(
         self, *, candidate: MergeTrainBatchCandidate
@@ -170,6 +236,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     ) -> MergeTrainBatchLandingPlan:
         repository_path = _repository_path(landing_plan.repository)
         expected_base_sha = landing_plan.entries[0].expected_base_sha
+        expected_base_tree_sha = landing_plan.entries[0].recorded_candidate_parent_tree_sha
         merged_entries = []
         for entry_index, entry in enumerate(landing_plan.entries):
             current_base_sha = _base_branch_sha(
@@ -208,6 +275,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                         )
                 merged_entries.append(entry)
                 expected_base_sha = merge_commit_sha
+                expected_base_tree_sha = entry.merge_commit_tree_sha
                 continue
             if current_base_sha != expected_base_sha:
                 already_merged_entry = self._already_merged_landing_entry(
@@ -230,6 +298,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     )
                 merged_entries.append(already_merged_entry)
                 expected_base_sha = already_merged_entry.merge_commit_sha
+                expected_base_tree_sha = already_merged_entry.merge_commit_tree_sha
                 if checkpoint is not None:
                     checkpoint(
                         landing_plan.model_copy(
@@ -264,11 +333,27 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 head_sha=entry.expected_head_sha,
                 merge_method=entry.merge_method,
             )
+            merge_commit_tree_sha = ""
+            if entry.expected_head_tree_sha:
+                _, merge_commit_tree_sha = _git_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=merge_commit_sha,
+                )
             merged_entry = entry.model_copy(
-                update={"status": "merged", "merge_commit_sha": merge_commit_sha}
+                update={
+                    "status": "merged",
+                    "recorded_rolling_base_sha": current_base_sha,
+                    "recorded_rolling_base_tree_sha": expected_base_tree_sha,
+                    "landed_head_sha": entry.expected_head_sha,
+                    "landed_head_tree_sha": entry.expected_head_tree_sha,
+                    "merge_commit_sha": merge_commit_sha,
+                    "merge_commit_tree_sha": merge_commit_tree_sha,
+                }
             )
             merged_entries.append(merged_entry)
             expected_base_sha = merge_commit_sha
+            expected_base_tree_sha = merge_commit_tree_sha
             if checkpoint is not None:
                 checkpoint(
                     landing_plan.model_copy(
@@ -952,6 +1037,107 @@ class RecordingMergeTrainGitHubTransport:
         return {}
 
 
+def _candidate_with_structural_provenance(
+    *,
+    candidate: MergeTrainBatchCandidate,
+    candidate_sha: str,
+    candidate_tree_sha: str,
+    rolling_steps: tuple[MergeTrainRollingStep, ...],
+) -> MergeTrainBatchCandidate:
+    stack_root = candidate.stack_collapse_root
+    if stack_root is not None and not stack_root.collapsed_root_tree_sha:
+        root_entry = next(
+            (
+                entry
+                for entry in candidate.entries
+                if entry.pull_request_number == stack_root.root_pull_request_number
+            ),
+            None,
+        )
+        if root_entry is not None:
+            stack_root = stack_root.model_copy(
+                update={"collapsed_root_tree_sha": root_entry.head_tree_sha}
+            )
+    provenance = MergeTrainStructuralProvenance(
+        repository=candidate.repository,
+        base_branch=candidate.base_branch,
+        base_sha=candidate.base_sha,
+        base_tree_sha=rolling_steps[0].parent_tree_sha,
+        policy_key=candidate.policy_key,
+        policy_sha256=candidate.policy_sha256,
+        entries=tuple(
+            MergeTrainStructuralEntryBinding(
+                position=entry.position,
+                pull_request_number=entry.pull_request_number,
+                head_sha=entry.head_sha,
+                head_tree_sha=entry.head_tree_sha,
+                impact_status=entry.impact_status,
+                affected_subjects=entry.affected_subjects,
+            )
+            for entry in candidate.entries
+        ),
+        steps=rolling_steps,
+        candidate_sha=candidate_sha,
+        candidate_tree_sha=candidate_tree_sha,
+        stack_collapse_root=stack_root,
+    )
+    return candidate.model_copy(
+        update={
+            "candidate_sha": candidate_sha,
+            "candidate_tree_sha": candidate_tree_sha,
+            "candidate_sha256": provenance.candidate_sha256,
+            "stack_collapse_root": stack_root,
+            "structural_provenance": provenance,
+            "status": "building",
+        }
+    )
+
+
+def _git_commit_identity(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    commit_sha: str,
+) -> tuple[str, str]:
+    encoded_sha = quote(_required_value(commit_sha, "GitHub commit SHA is required."), safe="")
+    payload = _json_object(
+        transport.request(
+            method="GET",
+            path=f"/repos/{repository_path}/git/commits/{encoded_sha}",
+        ),
+        "GitHub commit response",
+    )
+    observed_sha = _required_text(payload.get("sha"), "GitHub commit response requires sha.")
+    if observed_sha != commit_sha:
+        raise MergeTrainGitHubStaleHeadError(
+            "GitHub commit response did not match the requested SHA.", status_code=409
+        )
+    tree = _json_object(payload.get("tree"), "GitHub commit tree response")
+    tree_sha = _required_text(tree.get("sha"), "GitHub commit tree response requires sha.")
+    return observed_sha, tree_sha
+
+
+def _merge_result_identity(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    payload: dict[str, object],
+) -> tuple[str, str]:
+    commit_sha = _required_text(payload.get("sha"), "GitHub merge response requires sha.")
+    commit = payload.get("commit")
+    if isinstance(commit, dict):
+        tree = commit.get("tree")
+        if isinstance(tree, dict):
+            tree_sha = tree.get("sha")
+            if isinstance(tree_sha, str) and tree_sha.strip():
+                return commit_sha, tree_sha.strip()
+    return _git_commit_identity(
+        transport=transport,
+        repository_path=repository_path,
+        commit_sha=commit_sha,
+    )
+
+
 def _repository_path(repository: str) -> str:
     normalized = _required_value(repository, "GitHub repository is required.")
     parts = normalized.split("/")
@@ -1101,14 +1287,9 @@ def _combined_status_state(payload: dict[str, object]) -> MergeTrainCheckStatus:
     seen_contexts: set[str] = set()
     for item in raw_statuses:
         status = _json_object(item, "GitHub commit status")
-        context = _required_text(
-            status.get("context"), "GitHub commit status requires context."
-        )
+        context = _required_text(status.get("context"), "GitHub commit status requires context.")
         normalized_context = context.casefold()
-        if (
-            is_launchplane_projected_check(context)
-            or normalized_context in seen_contexts
-        ):
+        if is_launchplane_projected_check(context) or normalized_context in seen_contexts:
             continue
         seen_contexts.add(normalized_context)
         statuses.append(_commit_status_state(status))
@@ -1124,9 +1305,7 @@ def _combined_status_state(payload: dict[str, object]) -> MergeTrainCheckStatus:
 
 
 def _commit_status_state(payload: dict[str, object]) -> MergeTrainCheckStatus:
-    state = _required_text(
-        payload.get("state"), "GitHub commit status requires state."
-    ).lower()
+    state = _required_text(payload.get("state"), "GitHub commit status requires state.").lower()
     if state == "success":
         return "pass"
     if state in {"failure", "error"}:
@@ -1196,16 +1375,12 @@ def _list_commit_statuses(
         )
         raw_statuses = payload.get("statuses")
         if not isinstance(raw_statuses, list):
-            raise MergeTrainGitHubError(
-                "GitHub combined status response must include statuses."
-            )
+            raise MergeTrainGitHubError("GitHub combined status response must include statuses.")
         raw_total_count = payload.get("total_count")
         if isinstance(raw_total_count, int):
             total_count = raw_total_count
         statuses.extend(raw_statuses)
-        if len(raw_statuses) < 100 or (
-            total_count is not None and len(statuses) >= total_count
-        ):
+        if len(raw_statuses) < 100 or (total_count is not None and len(statuses) >= total_count):
             break
         page += 1
     return {

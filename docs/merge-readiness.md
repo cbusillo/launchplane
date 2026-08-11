@@ -23,8 +23,10 @@ The contract is intentionally limited to ephemeral readiness:
   proof, and durable L3 admission or landing effects remain outside this
   module.
 
-Structural candidate composition is supplied by the #2084 boundary as one of
-`exact`, `recorded_rolling`, `mismatch`, or `unknown`. L2 consumes that result;
+Structural candidate composition is produced by the pure, read-only
+`evaluate_merge_train_structural_candidate` boundary documented in
+`merge-train-structural-provenance.md` as one of `exact`, `recorded_rolling`,
+`mismatch`, or `unknown`. L2 consumes that result;
 it does not attempt to reproduce structural provenance.
 
 ## Canonical States

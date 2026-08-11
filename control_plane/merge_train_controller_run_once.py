@@ -33,6 +33,9 @@ from control_plane.contracts.merge_train_stack_collapse import (
     execute_merge_train_stack_collapse_plan,
     reconcile_merge_train_stack_children_after_root_landing,
 )
+from control_plane.contracts.merge_train_structural_provenance import (
+    MergeTrainStackCollapseRootProof,
+)
 from control_plane.merge_train import (
     MergeTrainDryRunResult,
     build_merge_train_dry_run_result,
@@ -1499,6 +1502,15 @@ def _advance_waiting_stack_collapse_record(
         base_sha=root_snapshot.base_sha,
         policy_sha256=policy_sha256,
         created_at=recorded_at,
+        stack_collapse_root=MergeTrainStackCollapseRootProof(
+            collapse_record_id=waiting_collapse_record.record_id,
+            collapse_id=waiting_collapse_record.plan.collapse_id,
+            root_pull_request_number=waiting_collapse_record.plan.root_pull_request_number,
+            original_root_head_sha=waiting_collapse_record.plan.root_initial_head_sha,
+            collapsed_root_head_sha=stack_collapse_expected_root_head_sha(
+                waiting_collapse_record.plan
+            ),
+        ),
     )
     candidate_record = build_merge_train_batch_candidate_record(
         candidate=candidate,

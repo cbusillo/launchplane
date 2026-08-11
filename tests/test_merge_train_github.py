@@ -449,8 +449,11 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
-                {"sha": "candidate-after-1"},
-                {"sha": "candidate-after-2"},
+                _git_commit("base-main", "tree-base"),
+                _git_commit("head-1", "tree-head-1"),
+                _git_commit("head-2", "tree-head-2"),
+                _merge_commit("candidate-after-1", "tree-candidate-1"),
+                _merge_commit("candidate-after-2", "tree-candidate-2"),
             )
         )
 
@@ -467,6 +470,21 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     "POST",
                     "/repos/example/merge-train-repo/git/refs",
                     {"ref": candidate.candidate_ref, "sha": "base-main"},
+                ),
+                (
+                    "GET",
+                    "/repos/example/merge-train-repo/git/commits/base-main",
+                    None,
+                ),
+                (
+                    "GET",
+                    "/repos/example/merge-train-repo/git/commits/head-1",
+                    None,
+                ),
+                (
+                    "GET",
+                    "/repos/example/merge-train-repo/git/commits/head-2",
+                    None,
                 ),
                 (
                     "POST",
@@ -497,8 +515,11 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             responses=(
                 MergeTrainGitHubError("reference exists", status_code=409),
                 {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
-                {"sha": "candidate-after-1"},
-                {"sha": "candidate-after-2"},
+                _git_commit("base-main", "tree-base"),
+                _git_commit("head-1", "tree-head-1"),
+                _git_commit("head-2", "tree-head-2"),
+                _merge_commit("candidate-after-1", "tree-candidate-1"),
+                _merge_commit("candidate-after-2", "tree-candidate-2"),
             )
         )
 
@@ -517,7 +538,10 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
-                {"sha": "candidate-after-1"},
+                _git_commit("base-main", "tree-base"),
+                _git_commit("head-1", "tree-head-1"),
+                _git_commit("head-2", "tree-head-2"),
+                _merge_commit("candidate-after-1", "tree-candidate-1"),
                 MergeTrainGitHubStaleHeadError("conflict", status_code=409),
             )
         )
@@ -526,8 +550,33 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             GitHubMergeTrainClient(transport=transport).build_batch_candidate(candidate=candidate)
 
         self.assertEqual(
-            [request.method for request in transport.requests], ["POST", "POST", "POST"]
+            [request.method for request in transport.requests],
+            ["POST", "GET", "GET", "GET", "POST", "POST"],
         )
+
+    def test_build_batch_candidate_records_github_204_as_no_op_step(self) -> None:
+        candidate = _batch_candidate()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
+                _git_commit("base-main", "tree-base"),
+                _git_commit("head-1", "tree-head-1"),
+                _git_commit("head-2", "tree-head-2"),
+                None,
+                _merge_commit("candidate-after-2", "tree-candidate-2"),
+            )
+        )
+
+        built = GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+            candidate=candidate
+        )
+
+        self.assertIsNotNone(built.structural_provenance)
+        assert built.structural_provenance is not None
+        first_step = built.structural_provenance.steps[0]
+        self.assertEqual(first_step.kind, "no_op_already_contained")
+        self.assertEqual(first_step.result_sha, first_step.parent_sha)
+        self.assertEqual(first_step.result_tree_sha, first_step.parent_tree_sha)
 
     def test_observe_batch_candidate_checks_marks_passed_candidate(self) -> None:
         candidate = _batch_candidate().model_copy(
@@ -1548,15 +1597,21 @@ def _github_branch(*, sha: str = "base-main-current") -> dict[str, object]:
     return {"commit": {"sha": sha}}
 
 
+def _git_commit(sha: str, tree_sha: str) -> dict[str, object]:
+    return {"sha": sha, "tree": {"sha": tree_sha}}
+
+
+def _merge_commit(sha: str, tree_sha: str) -> dict[str, object]:
+    return {"sha": sha, "commit": {"tree": {"sha": tree_sha}}}
+
+
 def _combined_status(
     *,
     state: str = "success",
     statuses: tuple[dict[str, object], ...] | None = None,
 ) -> dict[str, object]:
     resolved_statuses = (
-        statuses
-        if statuses is not None
-        else ({"context": "ci-status", "state": state},)
+        statuses if statuses is not None else ({"context": "ci-status", "state": state},)
     )
     return {
         "state": state if resolved_statuses else "pending",
