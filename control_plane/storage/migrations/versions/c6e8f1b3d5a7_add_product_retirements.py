@@ -1,7 +1,7 @@
 """add product retirement audit records
 
 Revision ID: c6e8f1b3d5a7
-Revises: b5d7f9a1c3e6
+Revises: b2d4f6a8c0e2
 Create Date: 2026-08-11 00:00:00.000000+00:00
 """
 
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision: str = "c6e8f1b3d5a7"
-down_revision: str | None = "b5d7f9a1c3e6"
+down_revision: str | None = "b2d4f6a8c0e2"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

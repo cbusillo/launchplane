@@ -209,8 +209,18 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     ),
     CriticalColumnType(
         "launchplane_owner_acceptance_events",
+        "review_max_age_seconds",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_events",
         "subject_sequence",
         ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_owner_acceptance_events",
+        "self_review",
+        ("boolean", "bool"),
     ),
     CriticalColumnType(
         "launchplane_owner_acceptance_events",

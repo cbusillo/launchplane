@@ -34,6 +34,36 @@ has Launchplane administration satisfies a shadow Owner action only when that
 human's immutable GitHub ID appears in the current product/system policy and
 matches the action's repository and environment scope.
 
+## Scoped Review Policy
+
+`ProductOwnerPolicyRecord` also carries three scoped policies that shape Owner
+product-review admissibility. They are fail-closed by default, so a policy
+written before they existed behaves exactly as if it declared the defaults:
+
+- `review_age` declares the finite Owner-review evidence age. Migration defaults
+  are 30 days for routine changes and 7 days for sensitive, unknown, and
+  production-affecting changes. A policy may only choose shorter values, and the
+  elevated value can never exceed the routine value.
+- `self_review` denies self-review by default. A routine-only exception requires
+  an explicit positive `exception_revision` and a reason, and it never applies to
+  sensitive, unknown, or production-affecting changes.
+- `preview_trust` declares the minimum provable preview isolation class. The
+  default is `synthetic_seeded`; `unknown` and `not_applicable` cannot be chosen
+  as a minimum, and `unknown` observed isolation never satisfies any minimum.
+
+These three policies are deliberately excluded from `policy_digest`, which
+remains the Owner *membership* fingerprint. Existing records therefore keep their
+exact digest, and every dimension is instead bound through separate
+`product_owner_scoped_policy_fingerprint` values.
+
+Each fingerprint is explicitly versioned by
+`PRODUCT_OWNER_POLICY_FINGERPRINT_VERSION` and scoped to one exact product,
+system, repository ID, environment, and action, alongside the source record ID
+and revision. Two products, or two actions on one product, can never share a
+fingerprint. Owner acceptance binds the membership, self-review, review-age,
+requirement, and preview-trust fingerprints; changing any of them changes the
+exact binding and stales prior evidence rather than silently reinterpreting it.
+
 ## Current-Policy Evaluation
 
 Shadow evaluation resolves only active records for the exact product/system
@@ -80,6 +110,11 @@ revision sequences and optimistic write conflicts are reported separately.
 Migration `c1d2e3f4a5b6` creates empty tables only. It performs no inference,
 owner mapping, or backfill. Real identities remain operator-supplied runtime
 records.
+
+Migration `b2d4f6a8c0e2` writes the fail-closed `review_age`, `self_review`, and
+`preview_trust` defaults into existing stored policy payloads so the records are
+self-describing. Because those fields are outside `policy_digest`, the backfill
+cannot change any persisted digest.
 
 ## HTTP API
 

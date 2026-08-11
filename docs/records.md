@@ -2462,6 +2462,6 @@ disabled secret records, bindings, and audit events produced by apply.
 
 Product profiles include `lifecycle_state` with backward-compatible default
 `active`. Migration `c6e8f1b3d5a7` creates the retirement ledger after the
-owner-acceptance sequence migration. `retiring` and `retired` profiles remain
-directly readable and appear in complete profile listings as audit authority;
-active discovery and automation filter them explicitly.
+owner-review context-binding migration. `retiring` and `retired` profiles
+remain directly readable and appear in complete profile listings as audit
+authority; active discovery and automation filter them explicitly.

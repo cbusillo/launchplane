@@ -24,6 +24,29 @@ ProductOwnerShadowDecision = Literal[
     "not_required",
     "unavailable",
 ]
+ProductOwnerReviewChangeClass = Literal[
+    "routine",
+    "sensitive",
+    "unknown",
+    "production_affecting",
+]
+ProductOwnerPreviewIsolationClass = Literal[
+    "not_applicable",
+    "no_product_data",
+    "synthetic_seeded",
+    "cloned_product_data",
+    "unknown",
+]
+
+PRODUCT_OWNER_POLICY_FINGERPRINT_VERSION = 1
+PRODUCT_OWNER_ROUTINE_REVIEW_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+PRODUCT_OWNER_ELEVATED_REVIEW_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+PRODUCT_OWNER_PREVIEW_ISOLATION_STRENGTH: dict[str, int] = {
+    "unknown": 0,
+    "cloned_product_data": 1,
+    "synthetic_seeded": 2,
+    "no_product_data": 3,
+}
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _ACTION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
@@ -235,6 +258,111 @@ class ProductOwnerGrant(BaseModel):
         return type(self).model_validate(payload)
 
 
+class ProductOwnerReviewAgePolicy(BaseModel):
+    """Finite Owner-review evidence age, scoped to one product Owner policy.
+
+    ``elevated_max_age_seconds`` covers sensitive, unknown, and
+    production-affecting changes. Policies may only choose values shorter than the
+    migration defaults, so an operator can tighten but never extend evidence life.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    routine_max_age_seconds: int = Field(
+        default=PRODUCT_OWNER_ROUTINE_REVIEW_MAX_AGE_SECONDS,
+        ge=1,
+    )
+    elevated_max_age_seconds: int = Field(
+        default=PRODUCT_OWNER_ELEVATED_REVIEW_MAX_AGE_SECONDS,
+        ge=1,
+    )
+
+    @model_validator(mode="after")
+    def _validate_review_age(self) -> "ProductOwnerReviewAgePolicy":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported product Owner review age policy schema version.")
+        if self.routine_max_age_seconds > PRODUCT_OWNER_ROUTINE_REVIEW_MAX_AGE_SECONDS:
+            raise ValueError(
+                "routine_max_age_seconds cannot exceed the 30-day product Owner review default"
+            )
+        if self.elevated_max_age_seconds > PRODUCT_OWNER_ELEVATED_REVIEW_MAX_AGE_SECONDS:
+            raise ValueError(
+                "elevated_max_age_seconds cannot exceed the 7-day product Owner review default"
+            )
+        if self.elevated_max_age_seconds > self.routine_max_age_seconds:
+            raise ValueError("elevated_max_age_seconds cannot exceed routine_max_age_seconds")
+        return self
+
+    def max_age_seconds(self, change_class: ProductOwnerReviewChangeClass) -> int:
+        if change_class == "routine":
+            return self.routine_max_age_seconds
+        return self.elevated_max_age_seconds
+
+
+class ProductOwnerSelfReviewPolicy(BaseModel):
+    """Self-review denial policy for one product Owner scope.
+
+    Self-review is denied by default. A product policy may permit it only for
+    routine changes, and only through an explicitly revisioned exception. Sensitive,
+    unknown, and production-affecting changes are always denied.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    routine_exception_enabled: bool = False
+    exception_revision: int = Field(default=0, ge=0)
+    exception_reason: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="after")
+    def _validate_self_review(self) -> "ProductOwnerSelfReviewPolicy":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported product Owner self-review policy schema version.")
+        self.exception_reason = self.exception_reason.strip()
+        if self.routine_exception_enabled:
+            if self.exception_revision < 1:
+                raise ValueError(
+                    "routine self-review exception requires a positive exception_revision"
+                )
+            if not self.exception_reason:
+                raise ValueError("routine self-review exception requires exception_reason")
+        elif self.exception_revision or self.exception_reason:
+            raise ValueError(
+                "disabled routine self-review exception cannot carry revision or reason"
+            )
+        return self
+
+    def allows(self, change_class: ProductOwnerReviewChangeClass) -> bool:
+        return self.routine_exception_enabled and change_class == "routine"
+
+
+class ProductOwnerPreviewTrustPolicy(BaseModel):
+    """Minimum provable preview isolation for admissible Owner review evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    minimum_isolation_class: ProductOwnerPreviewIsolationClass = "synthetic_seeded"
+
+    @model_validator(mode="after")
+    def _validate_preview_trust(self) -> "ProductOwnerPreviewTrustPolicy":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported product Owner preview trust policy schema version.")
+        if self.minimum_isolation_class in {"not_applicable", "unknown"}:
+            raise ValueError(
+                "preview trust policy minimum_isolation_class must name a provable class"
+            )
+        return self
+
+    def satisfied_by(self, isolation_class: ProductOwnerPreviewIsolationClass) -> bool:
+        if isolation_class == "not_applicable":
+            return True
+        required = PRODUCT_OWNER_PREVIEW_ISOLATION_STRENGTH[self.minimum_isolation_class]
+        observed = PRODUCT_OWNER_PREVIEW_ISOLATION_STRENGTH.get(isolation_class, 0)
+        return observed >= required
+
+
 class ProductOwnerPolicyRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -246,6 +374,11 @@ class ProductOwnerPolicyRecord(BaseModel):
     policy_revision: int = Field(ge=1)
     owners: tuple[ProductOwnerGrant, ...]
     quorum: Literal[1] = 1
+    review_age: ProductOwnerReviewAgePolicy = Field(default_factory=ProductOwnerReviewAgePolicy)
+    self_review: ProductOwnerSelfReviewPolicy = Field(default_factory=ProductOwnerSelfReviewPolicy)
+    preview_trust: ProductOwnerPreviewTrustPolicy = Field(
+        default_factory=ProductOwnerPreviewTrustPolicy
+    )
     effective_at: str
     source: str
     reason: str
@@ -567,7 +700,13 @@ def product_owner_policy_digest(record: ProductOwnerPolicyRecord) -> str:
     return _canonical_sha256(
         record.model_dump(
             mode="json",
-            exclude={"policy_digest", "status"},
+            exclude={
+                "policy_digest",
+                "status",
+                "review_age",
+                "self_review",
+                "preview_trust",
+            },
             exclude_none=True,
         )
     )
@@ -620,3 +759,43 @@ def _validate_or_assign_digest(*, current: str, computed: str, field_name: str, 
     if normalized != computed:
         raise ValueError(f"{label} digest does not match payload")
     return normalized
+
+
+def product_owner_scoped_policy_fingerprint(
+    *,
+    dimension: Literal[
+        "owner_membership",
+        "self_review",
+        "review_age",
+        "requirement",
+        "preview_trust",
+    ],
+    context: ProductOwnerActionContext,
+    record_id: str,
+    revision: int,
+    payload: object,
+) -> str:
+    """Return one explicitly versioned, product/action-scoped policy fingerprint.
+
+    Every fingerprint binds the exact evaluated product, system, repository,
+    environment, and action alongside the source record identity and revision, so
+    an unrelated product or action can never share a fingerprint.
+    """
+    if revision < 1:
+        raise ValueError("product Owner policy fingerprint requires a positive revision")
+    return _canonical_sha256(
+        {
+            "fingerprint_version": PRODUCT_OWNER_POLICY_FINGERPRINT_VERSION,
+            "dimension": dimension,
+            "scope": {
+                "product": _required_token(context.product, "product"),
+                "system": _required_token(context.system, "system"),
+                "repository_id": _normalize_decimal_id(context.repository_id, "repository_id"),
+                "environment": _required_token(context.environment, "environment"),
+                "action": _required_token(context.action, "action"),
+            },
+            "record_id": _required_token(record_id, "record_id"),
+            "revision": revision,
+            "payload": payload,
+        }
+    )

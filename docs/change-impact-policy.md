@@ -30,6 +30,12 @@ must bind the exact repository, pull request number, head SHA, tree SHA, policy
 revision, and policy digest. Stale head/tree or stale policy claims return
 `stale_head` or `stale_policy` and never produce a success result.
 
+A component rule may additionally declare `production_affecting`. It marks the
+affected product scopes whose changes reach a production surface, which raises
+their Owner review class to `production_affecting` regardless of review tier. The
+flag is normalized so that only an explicit `true` is stored, keeping existing
+rule IDs and policy digests byte-identical.
+
 ## Evidence Authority
 
 Launchplane resolves evaluation evidence through two server-owned boundaries:
@@ -38,6 +44,13 @@ Launchplane resolves evaluation evidence through two server-owned boundaries:
   the current pull-request head and tree, and the complete changed-file set. A
   second pull-request read rejects a head that changes during collection, and
   renamed files preserve both old and new paths for policy matching.
+- The same provider resolves the reviewed base ref and base SHA, plus numeric
+  GitHub contributing identities over the reviewed commit range from pull-request
+  authorship and GitHub-linked commit author/committer evidence. Bot or agent
+  work pushed under a human identity resolves to that human. A commit with no
+  linked numeric identity, a login that maps to two different numeric IDs, or a
+  range beyond the provider page bound resolves as `unresolved` or `conflicting`
+  and is never repaired.
 - The active DB-backed component policy is authoritative for the affected
   products it declares directly. Launchplane storage is the only source for
   additional dependency or reviewer evidence. Stored reviewer evidence may add

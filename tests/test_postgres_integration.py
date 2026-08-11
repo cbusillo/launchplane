@@ -39,6 +39,10 @@ from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalEventRecord,
 )
 from control_plane.contracts.owner_acceptance import (
+    OwnerAcceptanceContributionBinding,
+    OwnerAcceptancePolicyFingerprintBinding,
+    OwnerAcceptancePreviewIsolationBinding,
+    OwnerAcceptanceReviewContext,
     OwnerAcceptanceAuthorization,
     OwnerAcceptanceBinding,
     OwnerAcceptanceEventRecord,
@@ -93,6 +97,9 @@ from control_plane.contracts.repository_human_admission import (
     TenantTechnicalHumanWaiverEventRecord,
 )
 from control_plane.manager_preview_approval import ManagerPreviewApprovalEventConflictError
+from control_plane.contracts.product_owner import (
+    PRODUCT_OWNER_ROUTINE_REVIEW_MAX_AGE_SECONDS,
+)
 from control_plane.owner_acceptance import OwnerAcceptanceEventConflictError
 from control_plane.repository_human_admission import (
     RepositoryHumanRolePolicyConflictError,
@@ -897,6 +904,31 @@ def _owner_acceptance_event(
                 )
             ),
         ),
+        review_context=OwnerAcceptanceReviewContext(
+            base_ref="main",
+            base_sha="3" * 40,
+            change_class="routine",
+            engineering_review_tier="routine",
+            review_max_age_seconds=PRODUCT_OWNER_ROUTINE_REVIEW_MAX_AGE_SECONDS,
+            contributions=OwnerAcceptanceContributionBinding(
+                resolution="resolved",
+                reason_code="server_resolved",
+                contributor_github_ids=(4001,),
+                commit_count=2,
+            ),
+            policy_fingerprints=OwnerAcceptancePolicyFingerprintBinding(
+                owner_membership_fingerprint="1" * 64,
+                self_review_fingerprint="2" * 64,
+                review_age_fingerprint="3" * 64,
+                requirement_fingerprint="4" * 64,
+                preview_trust_fingerprint="5" * 64,
+            ),
+            preview_isolation=OwnerAcceptancePreviewIsolationBinding(
+                isolation_class="synthetic_seeded",
+                data_transport_mode="migrate_seed",
+                source="product_preview_profile",
+            ),
+        ),
     )
     return OwnerAcceptanceEventRecord(
         binding=binding,
@@ -1034,6 +1066,33 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             )
             with self.assertRaises(OwnerAcceptanceEventConflictError):
                 store.write_owner_acceptance_event_record(conflicting)
+
+    def test_owner_acceptance_events_project_bound_review_context_columns(self) -> None:
+        """The queryable columns mirror the bound reviewed context for audit and fencing."""
+        with _store_for_fresh_head_database() as store:
+            event = _owner_acceptance_event()
+            store.write_owner_acceptance_event_record(event)
+
+            with store._session_factory() as session:  # noqa: SLF001
+                row = session.execute(
+                    text(
+                        "SELECT base_ref, base_sha, change_class, review_max_age_seconds, "
+                        "contribution_resolution, preview_isolation_class, self_review "
+                        "FROM launchplane_owner_acceptance_events WHERE event_id = :event_id"
+                    ),
+                    {"event_id": event.event_id},
+                ).one()
+
+            self.assertEqual(row.base_ref, "main")
+            self.assertEqual(row.base_sha, "3" * 40)
+            self.assertEqual(row.change_class, "routine")
+            self.assertEqual(
+                row.review_max_age_seconds,
+                PRODUCT_OWNER_ROUTINE_REVIEW_MAX_AGE_SECONDS,
+            )
+            self.assertEqual(row.contribution_resolution, "resolved")
+            self.assertEqual(row.preview_isolation_class, "synthetic_seeded")
+            self.assertFalse(row.self_review)
 
     def test_owner_acceptance_subject_sequences_serialize_concurrent_appends_and_replay(
         self,
@@ -1185,6 +1244,66 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
         self.assertEqual(migrated_revision, EXPECTED_ALEMBIC_HEAD_REVISION)
         self.assertEqual(observed_revision, EXPECTED_ALEMBIC_HEAD_REVISION)
+
+    def test_owner_review_policy_defaults_backfill_on_postgres(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            alembic_command.upgrade(_alembic_config(database_url), "b5d7f9a1c3e6")
+            engine = create_engine(database_url)
+            legacy_payload = {
+                "schema_version": 1,
+                "product": "example-site",
+                "system": "web",
+                "policy_revision": 1,
+                "owners": [],
+                "quorum": 1,
+                "status": "active",
+                "effective_at": "2026-08-07T00:00:00Z",
+                "source": "test",
+                "reason": "Legacy Owner policy.",
+            }
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO launchplane_product_owner_policies (
+                            record_id, product, system, status, policy_revision, quorum,
+                            effective_at, source, supersedes_record_id, policy_digest, payload
+                        ) VALUES (
+                            'owner-policy-legacy', 'example-site', 'web', 'active', 1, 1,
+                            '2026-08-07T00:00:00Z', 'test', NULL, :policy_digest,
+                            CAST(:payload AS JSONB)
+                        )
+                        """
+                    ),
+                    {
+                        "policy_digest": "a" * 64,
+                        "payload": json.dumps(legacy_payload, sort_keys=True),
+                    },
+                )
+            engine.dispose()
+
+            migrate_schema(database_url=database_url)
+            engine = create_engine(database_url)
+            try:
+                with engine.connect() as connection:
+                    payload, policy_digest = connection.execute(
+                        text(
+                            "SELECT payload, policy_digest "
+                            "FROM launchplane_product_owner_policies "
+                            "WHERE record_id = 'owner-policy-legacy'"
+                        )
+                    ).one()
+            finally:
+                engine.dispose()
+
+        self.assertEqual(payload["review_age"]["routine_max_age_seconds"], 2592000)
+        self.assertEqual(payload["review_age"]["elevated_max_age_seconds"], 604800)
+        self.assertIs(payload["self_review"]["routine_exception_enabled"], False)
+        self.assertEqual(
+            payload["preview_trust"]["minimum_isolation_class"],
+            "synthetic_seeded",
+        )
+        self.assertEqual(policy_digest, "a" * 64)
 
     def test_f4_accepts_previous_writer_shape(self) -> None:
         with _isolated_postgres_database() as database_url:

@@ -10,6 +10,8 @@ import unittest
 from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
 from control_plane.change_impact_github import GitHubOpenPullRequest
 from control_plane.contracts.change_impact import (
+    ChangeImpactAuthorshipEvidence,
+    ChangeImpactBaseEvidence,
     ChangeImpactChangedFileEvidence,
     ChangeImpactComponentRule,
     ChangeImpactPolicyRecord,
@@ -20,6 +22,7 @@ from control_plane.contracts.change_impact import (
     ChangeImpactTargetReference,
 )
 from control_plane.contracts.owner_acceptance import (
+    OwnerAcceptanceBinding,
     OwnerAcceptanceEventRecord,
     OwnerAcceptanceResolutionEvidence,
     OwnerAcceptanceTransitionError,
@@ -67,8 +70,11 @@ SECOND_PRODUCT = "generic-web-b"
 SYSTEM = "web"
 PREVIEW_CONTEXT = "generic-web-a-preview"
 OWNER_GITHUB_ID = 3001
+CONTRIBUTOR_GITHUB_ID = 4001
 HEAD_SHA = "a" * 40
 TREE_SHA = "b" * 40
+BASE_SHA = "e" * 40
+BASE_REF = "main"
 
 
 class _EvidenceProvider(ChangeImpactRepositoryEvidenceProvider):
@@ -122,7 +128,11 @@ def _human(github_id: int = OWNER_GITHUB_ID) -> GitHubHumanIdentity:
 
 
 def _repository_evidence(
-    *, path: str = "src/runtime/app.py", head: str = HEAD_SHA
+    *,
+    path: str = "src/runtime/app.py",
+    head: str = HEAD_SHA,
+    base_sha: str = BASE_SHA,
+    authorship: ChangeImpactAuthorshipEvidence | None = None,
 ) -> ChangeImpactRepositoryEvidence:
     return ChangeImpactRepositoryEvidence(
         target=ChangeImpactTarget(
@@ -134,6 +144,13 @@ def _repository_evidence(
             tree_sha=TREE_SHA,
         ),
         changed_files=(ChangeImpactChangedFileEvidence(path=path),),
+        base=ChangeImpactBaseEvidence(base_ref=BASE_REF, base_sha=base_sha),
+        authorship=authorship
+        or ChangeImpactAuthorshipEvidence(
+            resolution="resolved",
+            contributor_github_ids=(CONTRIBUTOR_GITHUB_ID,),
+            commit_count=1,
+        ),
     )
 
 
@@ -239,6 +256,7 @@ def _store(
     shared_dependency_evidence: bool | list[bool] = False,
     include_second_product_authority: bool | None = None,
     invalid_product_profile: bool = False,
+    include_product_profile: bool = True,
     product_profile_read_limit: int | None = None,
 ) -> FilesystemRecordStore:
     class _OwnerAcceptanceStore(FilesystemRecordStore):
@@ -306,13 +324,28 @@ def _store(
     ):
         store.write_product_owner_policy_record(_owner_policy(product=SECOND_PRODUCT))
         store.write_product_owner_requirement_record(_owner_requirement(product=SECOND_PRODUCT))
+    if include_product_profile:
+        store.write_product_profile_record(_preview_profile(enabled=False))
+        if (
+            bool(shared_dependency_evidence)
+            if include_second_product_authority is None
+            else include_second_product_authority
+        ):
+            store.write_product_profile_record(
+                _preview_profile(product=SECOND_PRODUCT, enabled=False)
+            )
     return store
 
 
-def _preview_profile() -> LaunchplaneProductProfileRecord:
+def _preview_profile(
+    *,
+    product: str = PRODUCT,
+    enabled: bool = True,
+    data_transport_mode: str = "none",
+) -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
-        product=PRODUCT,
-        display_name="Generic Web A",
+        product=product,
+        display_name=product.replace("-", " ").title(),
         repository=REPOSITORY,
         driver_id="generic-web",
         image=ProductImageProfile(repository="ghcr.io/example/web"),
@@ -327,10 +360,11 @@ def _preview_profile() -> LaunchplaneProductProfileRecord:
             ),
         ),
         preview=ProductPreviewProfile(
-            enabled=True,
+            enabled=enabled,
             context=PREVIEW_CONTEXT,
             slug_template="pr-{number}",
             app_name_prefix="generic-web-a-preview",
+            data_transport_mode=data_transport_mode,  # type: ignore[arg-type]
         ),
         updated_at="2026-08-07T00:00:00Z",
         source="test",
@@ -349,6 +383,7 @@ def _write_preview_evidence(
     preview_state: str = "active",
     generation_state: str = "ready",
     verify_status: str = "pass",
+    data_transport_mode: str = "none",
 ) -> None:
     preview = PreviewRecord(
         preview_id=preview_id,
@@ -403,7 +438,7 @@ def _write_preview_evidence(
         overall_health_status="pass",
         runtime_identity=runtime_identity,
     )
-    store.write_product_profile_record(_preview_profile())
+    store.write_product_profile_record(_preview_profile(data_transport_mode=data_transport_mode))
     store.write_preview_generation_record(generation)
     store.write_preview_record(preview)
 
@@ -429,15 +464,46 @@ def _expected_binding_sha256(
 
 class OwnerAcceptanceTests(unittest.TestCase):
     def test_non_preview_binding_digest_remains_backward_compatible(self) -> None:
+        """A binding recorded before reviewed context existed keeps its exact digest.
+
+        Reviewed context, like preview evidence before it, is an optional bound
+        field. Historical events therefore replay byte-identically, while a current
+        server-derived binding legitimately differs because more evidence is bound.
+        """
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
+            historical = OwnerAcceptanceBinding(
+                repository_id=REPOSITORY_ID,
+                repository_owner_id=REPOSITORY_OWNER_ID,
+                repository=REPOSITORY,
+                pull_request_number=2022,
+                head_sha=HEAD_SHA,
+                tree_sha=TREE_SHA,
+                change_impact_policy_record_id=_impact_policy().record_id,
+                change_impact_policy_revision=1,
+                change_impact_policy_digest=_impact_policy().policy_digest,
+                product=PRODUCT,
+                system=SYSTEM,
+                action="pull_request.owner_acceptance",
+                environment="pull_request",
+                owner_policy_record_id=_owner_policy().record_id,
+                owner_policy_revision=1,
+                owner_policy_digest=_owner_policy().policy_digest,
+                owner_requirement_record_id=_owner_requirement().record_id,
+                owner_requirement_revision=1,
+                owner_requirement_digest=_owner_requirement().requirement_digest,
+            )
 
             self.assertEqual(
+                historical.binding_sha256,
+                "6f61c0b708961a549242c3ae7c97b599149648955c8bebd8fb540567c409c04a",
+            )
+            self.assertNotEqual(
                 _expected_binding_sha256(
                     store=store,
                     provider=_EvidenceProvider(_repository_evidence()),
                 ),
-                "6f61c0b708961a549242c3ae7c97b599149648955c8bebd8fb540567c409c04a",
+                historical.binding_sha256,
             )
 
     def test_preview_backed_acceptance_binds_verified_serving_runtime(self) -> None:
@@ -708,15 +774,15 @@ class OwnerAcceptanceTests(unittest.TestCase):
             self.assertEqual(result.record.subject_sequence, 1)
             self.assertEqual(
                 result.record.acceptance_id,
-                "owner-acceptance-6f61c0b708961a549242c3ae7c97b599",
+                "owner-acceptance-1cc2c18bea5c40c21cb1a9ba02ffe2a0",
             )
             self.assertEqual(
                 result.record.event_id,
-                "owner-acceptance-event-549255e3dcf45d08d49de4bc409f0fff",
+                "owner-acceptance-event-b961f97ffb3c028a1cd19c0f8b951f8e",
             )
             self.assertEqual(
                 owner_acceptance_event_replay_digest(result.record),
-                "f1ef1f87f252e928863af69740f5c55d8a49bfcfe2a302df877680035a1c708c",
+                "07145b7467300ec9d5bea196fed65f36315ca6dc867a21633396ecf657e1ca62",
             )
 
             replay = record_owner_acceptance_event(

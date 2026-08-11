@@ -11,7 +11,9 @@ from control_plane.change_impact_service import (
 )
 from control_plane.contracts.change_impact import (
     ChangeImpactAffectedProduct,
+    ChangeImpactAuthorshipEvidence,
     ChangeImpactEvaluation,
+    ChangeImpactRepositoryEvidence,
     ChangeImpactTargetReference,
 )
 from control_plane.contracts.owner_acceptance import (
@@ -19,17 +21,22 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceAction,
     OwnerAcceptanceAuthorization,
     OwnerAcceptanceBinding,
+    OwnerAcceptanceContributionBinding,
     OwnerAcceptanceDecision,
     OwnerAcceptanceDecisionStatus,
     OwnerAcceptanceEventRecord,
     OwnerAcceptanceEventWriteStatus,
+    OwnerAcceptancePolicyFingerprintBinding,
     OwnerAcceptancePreviewBinding,
+    OwnerAcceptancePreviewIsolationBinding,
     OwnerAcceptanceProductDecision,
     OwnerAcceptanceReasonCode,
+    OwnerAcceptanceReviewContext,
     OwnerAcceptanceResolutionEvidence,
     OwnerAcceptanceSourceEventKind,
     OwnerAcceptanceViewerBindingEligibility,
     OwnerAcceptanceViewerEligibilityReason,
+    owner_acceptance_human_action_semantics,
     owner_acceptance_runtime_identity_binding,
 )
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -39,7 +46,10 @@ from control_plane.contracts.product_owner import (
     ProductOwnerActionContext,
     ProductOwnerActorIdentity,
     ProductOwnerPolicyRecord,
+    ProductOwnerPreviewIsolationClass,
     ProductOwnerRequirementRecord,
+    ProductOwnerReviewChangeClass,
+    product_owner_scoped_policy_fingerprint,
 )
 from control_plane.product_owner_service import (
     evaluate_product_owner_shadow_authority,
@@ -66,6 +76,23 @@ class OwnerAcceptanceBindingConflictError(RuntimeError):
 
 class OwnerAcceptanceEvaluationUnavailableError(RuntimeError):
     """Raised when server-owned exact-change evidence cannot be resolved."""
+
+
+class OwnerAcceptanceSelfReviewDeniedError(PermissionError):
+    """Raised when the acting Owner contributed to the reviewed change."""
+
+
+class OwnerAcceptanceReviewContextUnavailableError(OwnerAcceptanceEvaluationUnavailableError):
+    """Raised when server-owned reviewed base/authorship context cannot be bound."""
+
+
+_PREVIEW_ISOLATION_BY_TRANSPORT_MODE: dict[str, ProductOwnerPreviewIsolationClass] = {
+    "none": "no_product_data",
+    "bootstrap": "synthetic_seeded",
+    "migrate_seed": "synthetic_seeded",
+    "clone": "cloned_product_data",
+    "driver": "unknown",
+}
 
 
 class OwnerAcceptanceEventStore(Protocol):
@@ -114,6 +141,21 @@ class OwnerAcceptanceWriteResult(NamedTuple):
     decision: OwnerAcceptanceDecision
 
 
+class OwnerAcceptanceImpactEvidence(NamedTuple):
+    repository_evidence: ChangeImpactRepositoryEvidence
+    impact: ChangeImpactEvaluation
+
+
+class OwnerAcceptanceBoundSubject(NamedTuple):
+    binding: OwnerAcceptanceBinding
+    policy: ProductOwnerPolicyRecord
+
+
+class OwnerAcceptancePreviewEvidence(NamedTuple):
+    preview: OwnerAcceptancePreviewBinding | None
+    isolation: OwnerAcceptancePreviewIsolationBinding
+
+
 def evaluate_owner_acceptance_viewer_eligibility(
     *,
     store: object,
@@ -152,6 +194,9 @@ def evaluate_owner_acceptance_viewer_eligibility(
                 continue
             seen_bindings.add(binding.binding_sha256)
             can_submit_event = False
+            can_accept = False
+            can_request_changes = False
+            can_revoke = False
             reason_code: OwnerAcceptanceViewerEligibilityReason = "viewer_identity_unsupported"
             if actor is not None and policy_store is not None and requirement_store is not None:
                 cache_key = (binding.product, binding.system)
@@ -188,7 +233,7 @@ def evaluate_owner_acceptance_viewer_eligibility(
                         claimed_requirement_digest=binding.owner_requirement_digest,
                         evaluated_at=decision.evaluated_at,
                     )
-                except (TypeError, ValueError):
+                except (FileNotFoundError, LookupError, TypeError, ValueError):
                     reason_code = "owner_authority_unavailable"
                 else:
                     if authority.decision == "authorized":
@@ -198,8 +243,22 @@ def evaluate_owner_acceptance_viewer_eligibility(
                         reason_code = "not_current_product_owner"
                     else:
                         reason_code = "owner_authority_unavailable"
+                    can_accept = can_submit_event
+                    can_request_changes = can_submit_event
+                    can_revoke = can_submit_event
+                    if can_accept and not _viewer_may_self_review(
+                        binding=binding,
+                        policies=policies,
+                        viewer_github_id=int(actor.provider_subject_id),
+                    ):
+                        can_accept = False
+                        reason_code = "self_review_denied"
             elif actor is not None:
                 reason_code = "owner_authority_unavailable"
+            if not can_submit_event:
+                can_accept = False
+                can_request_changes = False
+                can_revoke = False
             eligibility.append(
                 OwnerAcceptanceViewerBindingEligibility(
                     binding_sha256=binding.binding_sha256,
@@ -208,6 +267,9 @@ def evaluate_owner_acceptance_viewer_eligibility(
                     action=binding.action,
                     environment=binding.environment,
                     can_submit_event=can_submit_event,
+                    can_accept=can_accept,
+                    can_request_changes=can_request_changes,
+                    can_revoke=can_revoke,
                     reason_code=reason_code,
                 )
             )
@@ -222,12 +284,13 @@ def evaluate_owner_acceptance(
     evaluated_at: str = "",
 ) -> OwnerAcceptanceDecision:
     normalized_evaluated_at = _evaluation_timestamp(evaluated_at)
-    impact = _evaluate_change_impact_for_target(
+    evidence = _evaluate_change_impact_for_target(
         store=store,
         repository_evidence_provider=repository_evidence_provider,
         target=target,
         evaluated_at=normalized_evaluated_at,
     )
+    impact = evidence.impact
     if impact.status == "stale_head":
         return _decision(
             status="stale", reason_code="change_impact_stale", evaluated_at=normalized_evaluated_at
@@ -251,7 +314,7 @@ def evaluate_owner_acceptance(
             evaluated_at=normalized_evaluated_at,
         )
     return _evaluate_owner_acceptance_for_impact(
-        impact=impact,
+        evidence=evidence,
         store=store,
         evaluated_at=normalized_evaluated_at,
     )
@@ -276,12 +339,13 @@ def record_owner_acceptance_event(
     if not isinstance(identity, GitHubHumanIdentity):
         raise OwnerAcceptanceAuthorizationError("Owner acceptance requires a GitHub human session.")
     normalized_occurred_at = _evaluation_timestamp(occurred_at)
-    impact = _evaluate_change_impact_for_target(
+    evidence = _evaluate_change_impact_for_target(
         store=store,
         repository_evidence_provider=repository_evidence_provider,
         target=target,
         evaluated_at=normalized_occurred_at,
     )
+    impact = evidence.impact
     if impact.status != "success":
         raise OwnerAcceptanceEvaluationUnavailableError(
             "Owner acceptance requires current server-derived change-impact evidence."
@@ -300,7 +364,7 @@ def record_owner_acceptance_event(
         pull_request_number=impact.target.pull_request_number,
     )
     prewrite_decision = _evaluate_owner_acceptance_for_impact(
-        impact=impact,
+        evidence=evidence,
         store=store,
         evaluated_at=normalized_occurred_at,
         events=target_events,
@@ -345,18 +409,25 @@ def record_owner_acceptance_event(
         provider="github",
         provider_subject_id=str(identity.github_id),
     )
-    binding = _binding_from_impact(
-        impact=impact,
+    subject = _binding_from_impact(
+        evidence=evidence,
         product_index=selected_product_index,
         store=store,
         actor=actor,
         evaluated_at=normalized_occurred_at,
         expected_binding_sha256=expected_binding_sha256,
     )
-    if binding is None:
+    if subject is None:
         raise OwnerAcceptanceEvaluationUnavailableError(
             "Owner acceptance cannot bind unavailable Owner authority."
         )
+    binding = subject.binding
+    self_review = _resolve_self_review(
+        binding=binding,
+        policy=subject.policy,
+        acting_github_id=identity.github_id,
+        action=action,
+    )
     authorization = OwnerAcceptanceAuthorization(
         owner_identity_id=actor.identity_id,
         owner_github_id=identity.github_id,
@@ -368,6 +439,12 @@ def record_owner_acceptance_event(
         owner_requirement_revision=binding.owner_requirement_revision,
         owner_requirement_digest=binding.owner_requirement_digest,
         authorized_at=normalized_occurred_at,
+        self_review=self_review,
+        self_review_exception_revision=(
+            subject.policy.self_review.exception_revision
+            if self_review and action == "accepted"
+            else 0
+        ),
     )
     record = OwnerAcceptanceEventRecord(
         binding=binding,
@@ -405,6 +482,7 @@ def record_owner_acceptance_event(
         binding=binding,
         events=folded_events,
         evaluated_at=normalized_occurred_at,
+        policy=subject.policy,
     )
     product_decisions = list(prewrite_decision.products)
     product_decisions[selected_product_index] = _product_decision(
@@ -447,6 +525,7 @@ def evaluate_owner_acceptance_for_binding(
     binding: OwnerAcceptanceBinding,
     events: tuple[OwnerAcceptanceEventRecord, ...],
     evaluated_at: str = "",
+    policy: ProductOwnerPolicyRecord | None = None,
 ) -> OwnerAcceptanceDecision:
     normalized_evaluated_at = _evaluation_timestamp(evaluated_at)
     matching = tuple(
@@ -471,12 +550,28 @@ def evaluate_owner_acceptance_for_binding(
         )
     latest = _latest_owner_acceptance_event(matching)
     if latest.action == "accepted":
+        inadmissible_reason = _inadmissible_reason(
+            binding=binding,
+            event=latest,
+            policy=policy,
+            evaluated_at=normalized_evaluated_at,
+        )
+        if inadmissible_reason is not None:
+            status, reason_code = inadmissible_reason
+            return _decision(
+                status=status,
+                reason_code=reason_code,
+                binding=binding,
+                event=latest,
+                evaluated_at=normalized_evaluated_at,
+            )
         return _decision(
             status="accepted",
             reason_code="acceptance_valid",
             binding=binding,
             event=latest,
             evaluated_at=normalized_evaluated_at,
+            admissible=True,
         )
     if latest.action == "changes_requested":
         return _decision(
@@ -522,16 +617,18 @@ def aggregate_owner_acceptance_decision(
         event=governing.current_event,
         products=products,
         evaluated_at=evaluated_at,
+        admissible=all(product.admissible for product in products),
     )
 
 
 def _evaluate_owner_acceptance_for_impact(
     *,
-    impact: ChangeImpactEvaluation,
+    evidence: OwnerAcceptanceImpactEvidence,
     store: object,
     evaluated_at: str,
     events: tuple[OwnerAcceptanceEventRecord, ...] | None = None,
 ) -> OwnerAcceptanceDecision:
+    impact = evidence.impact
     resolved_events = events
     if resolved_events is None:
         resolved_events = require_owner_acceptance_event_store(
@@ -542,7 +639,7 @@ def _evaluate_owner_acceptance_for_impact(
         )
     products = tuple(
         _evaluate_owner_acceptance_product(
-            impact=impact,
+            evidence=evidence,
             affected_product=affected_product,
             product_index=product_index,
             store=store,
@@ -556,7 +653,7 @@ def _evaluate_owner_acceptance_for_impact(
 
 def _evaluate_owner_acceptance_product(
     *,
-    impact: ChangeImpactEvaluation,
+    evidence: OwnerAcceptanceImpactEvidence,
     affected_product: ChangeImpactAffectedProduct,
     product_index: int,
     store: object,
@@ -572,12 +669,21 @@ def _evaluate_owner_acceptance_product(
         and event.binding.environment == affected_product.owner_environment
     )
     try:
-        binding = _binding_from_impact(
-            impact=impact,
+        subject = _binding_from_impact(
+            evidence=evidence,
             product_index=product_index,
             store=store,
             actor=None,
             evaluated_at=evaluated_at,
+        )
+    except OwnerAcceptanceReviewContextUnavailableError:
+        return _product_decision(
+            affected_product=affected_product,
+            decision=_decision(
+                status="unavailable",
+                reason_code="review_context_missing",
+                evaluated_at=evaluated_at,
+            ),
         )
     except OwnerAcceptanceEvaluationUnavailableError:
         preview_events = tuple(
@@ -599,7 +705,7 @@ def _evaluate_owner_acceptance_product(
                 evaluated_at=evaluated_at,
             )
         return _product_decision(affected_product=affected_product, decision=decision)
-    if binding is None:
+    if subject is None:
         return _product_decision(
             affected_product=affected_product,
             decision=_decision(
@@ -608,6 +714,7 @@ def _evaluate_owner_acceptance_product(
                 evaluated_at=evaluated_at,
             ),
         )
+    binding = subject.binding
     effective_preview_events = tuple(
         event for event in product_events if event.binding.preview is not None
     )
@@ -624,6 +731,7 @@ def _evaluate_owner_acceptance_product(
             binding=binding,
             events=product_events,
             evaluated_at=evaluated_at,
+            policy=subject.policy,
         )
     return _product_decision(affected_product=affected_product, decision=decision)
 
@@ -642,6 +750,8 @@ def _product_decision(
         reason_code=decision.reason_code,
         binding=decision.binding,
         current_event=decision.current_event,
+        admissible=decision.admissible,
+        human_action_semantics=decision.human_action_semantics,
     )
 
 
@@ -672,7 +782,7 @@ def _evaluate_change_impact_for_target(
     repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider,
     target: ChangeImpactTargetReference,
     evaluated_at: str,
-) -> ChangeImpactEvaluation:
+) -> OwnerAcceptanceImpactEvidence:
     try:
         repository_evidence = repository_evidence_provider.resolve(target)
     except Exception as error:
@@ -682,26 +792,30 @@ def _evaluate_change_impact_for_target(
         store=store,
         target=repository_evidence.target,
     )
-    return evaluate_change_impact(
+    return OwnerAcceptanceImpactEvidence(
         repository_evidence=repository_evidence,
-        policies=policy_store.list_change_impact_policy_records(
-            repository_id=repository_evidence.target.repository_id,
-            status="active",
+        impact=evaluate_change_impact(
+            repository_evidence=repository_evidence,
+            policies=policy_store.list_change_impact_policy_records(
+                repository_id=repository_evidence.target.repository_id,
+                status="active",
+            ),
+            stored_evidence=stored_evidence,
+            evaluated_at=evaluated_at,
         ),
-        stored_evidence=stored_evidence,
-        evaluated_at=evaluated_at,
     )
 
 
 def _binding_from_impact(
     *,
-    impact: ChangeImpactEvaluation,
+    evidence: OwnerAcceptanceImpactEvidence,
     product_index: int,
     store: object,
     actor: ProductOwnerActorIdentity | None,
     evaluated_at: str,
     expected_binding_sha256: str = "",
-) -> OwnerAcceptanceBinding | None:
+) -> OwnerAcceptanceBoundSubject | None:
+    impact = evidence.impact
     if impact.policy_revision is None or not impact.policy_digest or not impact.policy_record_id:
         return None
     if product_index >= len(impact.affected_products):
@@ -777,12 +891,23 @@ def _binding_from_impact(
         or not authority.requirement_digest
     ):
         return None
-    preview = _resolve_owner_acceptance_preview_binding(
+    policy = active_policies[0]
+    requirement = active_requirements[0]
+    preview_evidence = _resolve_owner_acceptance_preview_binding(
         store=store,
         product=context.product,
         repository=impact.target.repository,
         pull_request_number=impact.target.pull_request_number,
         head_sha=impact.target.head_sha,
+    )
+    preview = preview_evidence.preview
+    review_context = _review_context(
+        evidence=evidence,
+        context=context,
+        affected_product=affected_product,
+        policy=policy,
+        requirement=requirement,
+        preview_isolation=preview_evidence.isolation,
     )
     binding = OwnerAcceptanceBinding(
         repository_id=impact.target.repository_id,
@@ -805,6 +930,7 @@ def _binding_from_impact(
         owner_requirement_revision=authority.requirement_revision,
         owner_requirement_digest=authority.requirement_digest,
         preview=preview,
+        review_context=review_context,
     )
     if (
         expected_binding_sha256
@@ -828,7 +954,245 @@ def _binding_from_impact(
         )
         if actor_authority.decision != "authorized":
             raise OwnerAcceptanceAuthorizationError("Caller is not a current product Owner.")
-    return binding
+    return OwnerAcceptanceBoundSubject(binding=binding, policy=policy)
+
+
+def _viewer_may_self_review(
+    *,
+    binding: OwnerAcceptanceBinding,
+    policies: tuple[ProductOwnerPolicyRecord, ...],
+    viewer_github_id: int,
+) -> bool:
+    """Advisory viewer check mirroring the fail-closed write-time self-review rule."""
+    review_context = binding.review_context
+    if review_context is None:
+        return False
+    contributions = review_context.contributions
+    if contributions.resolution != "resolved":
+        return False
+    if not contributions.includes(viewer_github_id):
+        return True
+    active = tuple(record for record in policies if record.status == "active")
+    if len(active) != 1:
+        return False
+    return active[0].self_review.allows(review_context.change_class)
+
+
+def _resolve_self_review(
+    *,
+    binding: OwnerAcceptanceBinding,
+    policy: ProductOwnerPolicyRecord,
+    acting_github_id: int,
+    action: OwnerAcceptanceAction,
+) -> bool:
+    """Decide whether this human may record review of a change they contributed to.
+
+    Self-review is denied by default for ``accepted``. A revisioned product policy
+    exception may permit it for routine changes only; sensitive, unknown, and
+    production-affecting changes are always denied, and unresolved or conflicting
+    contributing-identity evidence denies every actor.
+
+    ``changes_requested`` and ``revoked`` are never blocked. They withdraw or
+    withhold product judgment rather than asserting it, so denying them would trap
+    stale evidence instead of failing closed.
+    """
+    review_context = binding.review_context
+    if review_context is None:
+        raise OwnerAcceptanceEvaluationUnavailableError(
+            "Owner acceptance requires bound reviewed context before recording an event."
+        )
+    contributions = review_context.contributions
+    if contributions.resolution != "resolved":
+        if action == "accepted":
+            raise OwnerAcceptanceSelfReviewDeniedError(
+                "Owner acceptance cannot resolve contributing GitHub identities for this change."
+            )
+        return False
+    if not contributions.includes(acting_github_id):
+        return False
+    if action == "accepted" and not policy.self_review.allows(review_context.change_class):
+        raise OwnerAcceptanceSelfReviewDeniedError(
+            "Owner acceptance denies self-review for this product change."
+        )
+    return True
+
+
+def _no_preview_evidence() -> "OwnerAcceptancePreviewEvidence":
+    return OwnerAcceptancePreviewEvidence(
+        preview=None,
+        isolation=OwnerAcceptancePreviewIsolationBinding(
+            isolation_class="not_applicable",
+            source="no_preview_binding",
+        ),
+    )
+
+
+def _change_class(
+    *,
+    impact: ChangeImpactEvaluation,
+    affected_product: ChangeImpactAffectedProduct,
+) -> ProductOwnerReviewChangeClass:
+    """Classify one affected product subject for review-age and self-review policy."""
+    if impact.status != "success" or impact.unknown_evidence:
+        return "unknown"
+    subject = (
+        affected_product.product,
+        affected_product.system,
+        affected_product.owner_action,
+        affected_product.owner_environment,
+    )
+    for scope in impact.production_affecting_products:
+        if (scope.product, scope.system, scope.owner_action, scope.owner_environment) == subject:
+            return "production_affecting"
+    if impact.engineering_review_tier == "sensitive":
+        return "sensitive"
+    return "routine"
+
+
+def _contribution_binding(
+    authorship: ChangeImpactAuthorshipEvidence | None,
+) -> OwnerAcceptanceContributionBinding:
+    if authorship is None:
+        return OwnerAcceptanceContributionBinding(
+            resolution="unknown",
+            reason_code="identity_evidence_unavailable",
+        )
+    if authorship.resolution == "resolved":
+        return OwnerAcceptanceContributionBinding(
+            resolution="resolved",
+            reason_code="server_resolved",
+            contributor_github_ids=authorship.contributor_github_ids,
+            commit_count=authorship.commit_count,
+        )
+    if authorship.resolution == "conflicting":
+        return OwnerAcceptanceContributionBinding(
+            resolution="unknown",
+            reason_code="identity_evidence_conflicting",
+            commit_count=authorship.commit_count,
+        )
+    return OwnerAcceptanceContributionBinding(
+        resolution="unknown",
+        reason_code="identity_evidence_incomplete",
+        commit_count=authorship.commit_count,
+    )
+
+
+def _policy_fingerprints(
+    *,
+    context: ProductOwnerActionContext,
+    policy: ProductOwnerPolicyRecord,
+    requirement: ProductOwnerRequirementRecord,
+) -> OwnerAcceptancePolicyFingerprintBinding:
+    return OwnerAcceptancePolicyFingerprintBinding(
+        owner_membership_fingerprint=product_owner_scoped_policy_fingerprint(
+            dimension="owner_membership",
+            context=context,
+            record_id=policy.record_id,
+            revision=policy.policy_revision,
+            payload=policy.policy_digest,
+        ),
+        self_review_fingerprint=product_owner_scoped_policy_fingerprint(
+            dimension="self_review",
+            context=context,
+            record_id=policy.record_id,
+            revision=policy.policy_revision,
+            payload=policy.self_review.model_dump(mode="json"),
+        ),
+        review_age_fingerprint=product_owner_scoped_policy_fingerprint(
+            dimension="review_age",
+            context=context,
+            record_id=policy.record_id,
+            revision=policy.policy_revision,
+            payload=policy.review_age.model_dump(mode="json"),
+        ),
+        requirement_fingerprint=product_owner_scoped_policy_fingerprint(
+            dimension="requirement",
+            context=context,
+            record_id=requirement.record_id,
+            revision=requirement.requirement_revision,
+            payload=requirement.requirement_digest,
+        ),
+        preview_trust_fingerprint=product_owner_scoped_policy_fingerprint(
+            dimension="preview_trust",
+            context=context,
+            record_id=policy.record_id,
+            revision=policy.policy_revision,
+            payload=policy.preview_trust.model_dump(mode="json"),
+        ),
+    )
+
+
+def _review_context(
+    *,
+    evidence: OwnerAcceptanceImpactEvidence,
+    context: ProductOwnerActionContext,
+    affected_product: ChangeImpactAffectedProduct,
+    policy: ProductOwnerPolicyRecord,
+    requirement: ProductOwnerRequirementRecord,
+    preview_isolation: OwnerAcceptancePreviewIsolationBinding,
+) -> OwnerAcceptanceReviewContext:
+    base = evidence.repository_evidence.base
+    if base is None:
+        raise OwnerAcceptanceReviewContextUnavailableError(
+            "Owner acceptance requires server-resolved reviewed base evidence."
+        )
+    change_class = _change_class(impact=evidence.impact, affected_product=affected_product)
+    return OwnerAcceptanceReviewContext(
+        base_ref=base.base_ref,
+        base_sha=base.base_sha,
+        change_class=change_class,
+        engineering_review_tier=evidence.impact.engineering_review_tier,
+        review_max_age_seconds=policy.review_age.max_age_seconds(change_class),
+        contributions=_contribution_binding(evidence.repository_evidence.authorship),
+        policy_fingerprints=_policy_fingerprints(
+            context=context,
+            policy=policy,
+            requirement=requirement,
+        ),
+        preview_isolation=preview_isolation,
+    )
+
+
+def _inadmissible_reason(
+    *,
+    binding: OwnerAcceptanceBinding,
+    event: OwnerAcceptanceEventRecord,
+    policy: ProductOwnerPolicyRecord | None,
+    evaluated_at: str,
+) -> tuple[OwnerAcceptanceDecisionStatus, OwnerAcceptanceReasonCode] | None:
+    """Return why a historical accepted event is not currently admissible, if it is not.
+
+    History is never rewritten here. An expired, weakly isolated, or
+    unknown-authorship review stays recorded and simply stops being current.
+    """
+    review_context = binding.review_context
+    if review_context is None:
+        return "unavailable", "review_context_missing"
+    if review_context.contributions.resolution != "resolved":
+        return "unavailable", "contributing_identity_unknown"
+    if policy is not None and not policy.preview_trust.satisfied_by(
+        review_context.preview_isolation.isolation_class
+    ):
+        return "unavailable", "preview_isolation_insufficient"
+    if policy is not None and event.authorization is not None:
+        authorization = event.authorization
+        if authorization.self_review and not policy.self_review.allows(review_context.change_class):
+            return "unavailable", "self_review_denied"
+        if (
+            authorization.self_review
+            and authorization.self_review_exception_revision
+            != policy.self_review.exception_revision
+        ):
+            return "unavailable", "self_review_denied"
+    if _elapsed_seconds(event.occurred_at, evaluated_at) > review_context.review_max_age_seconds:
+        return "stale", "owner_review_expired"
+    return None
+
+
+def _elapsed_seconds(start: str, end: str) -> float:
+    started = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    ended = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    return (ended - started).total_seconds()
 
 
 def _resolve_owner_acceptance_preview_binding(
@@ -838,18 +1202,20 @@ def _resolve_owner_acceptance_preview_binding(
     repository: str,
     pull_request_number: int,
     head_sha: str,
-) -> OwnerAcceptancePreviewBinding | None:
+) -> OwnerAcceptancePreviewEvidence:
     preview_store = require_owner_acceptance_preview_read_store(store)
     try:
         profile = preview_store.read_product_profile_record(product)
-    except (FileNotFoundError, LookupError):
-        return None
+    except (FileNotFoundError, LookupError) as error:
+        raise OwnerAcceptanceEvaluationUnavailableError(
+            "Owner acceptance product profile is unavailable."
+        ) from error
     except ValueError as error:
         raise OwnerAcceptanceEvaluationUnavailableError(
             "Owner acceptance product profile is unavailable or invalid."
         ) from error
     if not profile.preview.enabled:
-        return None
+        return _no_preview_evidence()
     if profile.repository.strip().casefold() != repository.strip().casefold():
         raise OwnerAcceptanceEvaluationUnavailableError(
             "Preview product profile does not match the exact-change repository."
@@ -889,15 +1255,28 @@ def _resolve_owner_acceptance_preview_binding(
             raise OwnerAcceptanceEvaluationUnavailableError(
                 "Owner acceptance preview does not serve the current pull request head."
             )
-        return OwnerAcceptancePreviewBinding(
-            context=evidence.context,
-            preview_id=evidence.preview_id,
-            serving_generation_id=evidence.serving_generation_id,
-            artifact_id=evidence.artifact_id,
-            artifact_image_digest=evidence.artifact_image_digest,
-            manifest_fingerprint=evidence.manifest_fingerprint,
-            preview_url=evidence.preview_url,
-            runtime_identity=owner_acceptance_runtime_identity_binding(evidence.runtime_identity),
+        transport_mode = profile.preview.data_transport_mode
+        return OwnerAcceptancePreviewEvidence(
+            preview=OwnerAcceptancePreviewBinding(
+                context=evidence.context,
+                preview_id=evidence.preview_id,
+                serving_generation_id=evidence.serving_generation_id,
+                artifact_id=evidence.artifact_id,
+                artifact_image_digest=evidence.artifact_image_digest,
+                manifest_fingerprint=evidence.manifest_fingerprint,
+                preview_url=evidence.preview_url,
+                runtime_identity=owner_acceptance_runtime_identity_binding(
+                    evidence.runtime_identity
+                ),
+            ),
+            isolation=OwnerAcceptancePreviewIsolationBinding(
+                isolation_class=_PREVIEW_ISOLATION_BY_TRANSPORT_MODE.get(
+                    transport_mode,
+                    "unknown",
+                ),
+                data_transport_mode=transport_mode,
+                source="product_preview_profile",
+            ),
         )
     except (FileNotFoundError, LookupError, ValueError) as error:
         raise OwnerAcceptanceEvaluationUnavailableError(
@@ -913,6 +1292,7 @@ def _decision(
     binding: OwnerAcceptanceBinding | None = None,
     event: OwnerAcceptanceEventRecord | None = None,
     products: tuple[OwnerAcceptanceProductDecision, ...] = (),
+    admissible: bool = False,
 ) -> OwnerAcceptanceDecision:
     return OwnerAcceptanceDecision(
         status=status,
@@ -921,6 +1301,10 @@ def _decision(
         current_event=event,
         products=products,
         evaluated_at=evaluated_at,
+        admissible=admissible,
+        human_action_semantics=owner_acceptance_human_action_semantics(
+            event.action if event is not None else None
+        ),
     )
 
 

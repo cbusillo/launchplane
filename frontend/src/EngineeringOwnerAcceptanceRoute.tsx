@@ -596,6 +596,7 @@ function OwnerAcceptanceDecisionDetails({
                     key={`${product.product}:${product.system}:${product.action}:${product.environment}`}
                     binding={product.binding}
                     decision={decision}
+                    eligibility={eligibility}
                     fixtureMode={fixtureMode}
                     onBindingChanged={onBindingChanged}
                     onDecision={onDecision}
@@ -626,6 +627,12 @@ function OwnerAcceptanceIneligibleNotice({
   eligibility: OwnerAcceptanceViewerBindingEligibility | undefined;
 }) {
   const notOwner = eligibility?.reason_code === "not_current_product_owner";
+  const selfReviewDenied = eligibility?.reason_code === "self_review_denied";
+  const heading = selfReviewDenied
+    ? "Self-review denied for this change"
+    : notOwner
+      ? "Not a current product Owner"
+      : "Owner eligibility unavailable";
   return (
     <section
       className="engineering-owner-acceptance-read-only"
@@ -633,12 +640,14 @@ function OwnerAcceptanceIneligibleNotice({
     >
       <header>
         <ShieldOff size={16} aria-hidden="true" />
-        <strong>{notOwner ? "Not a current product Owner" : "Owner eligibility unavailable"}</strong>
+        <strong>{heading}</strong>
       </header>
       <p>
-        {notOwner
-          ? `You can inspect this exact ${binding.product} change, but only a current product Owner can record its product review.`
-          : `You can inspect this exact ${binding.product} change, but Launchplane could not verify that this session may record its product review.`}{" "}
+        {selfReviewDenied
+          ? `You contributed to this exact ${binding.product} change, so product policy does not let you record its product review. A different current product Owner must review it.`
+          : notOwner
+            ? `You can inspect this exact ${binding.product} change, but only a current product Owner can record its product review.`
+            : `You can inspect this exact ${binding.product} change, but Launchplane could not verify that this session may record its product review.`}{" "}
         Owner authority is revalidated for every submission.
       </p>
     </section>
@@ -705,6 +714,9 @@ function ownerAcceptanceFixtureViewerCapabilities(
                   action: product.action,
                   environment: product.environment,
                   can_submit_event: currentOwner,
+                  can_accept: currentOwner,
+                  can_request_changes: currentOwner,
+                  can_revoke: currentOwner,
                   reason_code: currentOwner
                     ? "current_product_owner"
                     : "not_current_product_owner",
@@ -719,17 +731,20 @@ function ownerAcceptanceFixtureViewerCapabilities(
 function OwnerAcceptanceActionPanel({
   binding,
   decision,
+  eligibility,
   fixtureMode,
   onBindingChanged,
   onDecision,
 }: {
   binding: OwnerAcceptanceBinding;
   decision: OwnerAcceptanceDecision;
+  eligibility: OwnerAcceptanceViewerBindingEligibility;
   fixtureMode: DevFixtureMode;
   onBindingChanged: (binding: OwnerAcceptanceBinding) => Promise<void>;
   onDecision: (decision: OwnerAcceptanceDecision) => void;
 }) {
-  const [action, setAction] = useState<OwnerAcceptanceHumanAction>("accepted");
+  const defaultAction = ownerAcceptanceDefaultAction(eligibility);
+  const [action, setAction] = useState<OwnerAcceptanceHumanAction>(defaultAction);
   const [reason, setReason] = useState("");
   const [resolutionSummary, setResolutionSummary] = useState("");
   const [resolutionReferences, setResolutionReferences] = useState("");
@@ -771,9 +786,24 @@ function OwnerAcceptanceActionPanel({
         trace_id: "fixture-owner-acceptance-write",
         write_status: "written" as const,
         record,
+        semantics: {
+          human_action_semantics:
+            payload.action === "accepted"
+              ? ("product_review_accepted" as const)
+              : payload.action === "revoked"
+                ? ("product_review_revoked" as const)
+                : ("product_review_changes_requested" as const),
+          authorizes: [],
+        },
         decision: {
           ...decision,
           status: payload.action === "accepted" ? "accepted" : payload.action,
+          human_action_semantics:
+            payload.action === "accepted"
+              ? ("product_review_accepted" as const)
+              : payload.action === "revoked"
+                ? ("product_review_revoked" as const)
+                : ("product_review_changes_requested" as const),
           products: decision.products.map((product) =>
             product.binding?.binding_sha256 === binding.binding_sha256
               ? {
@@ -803,12 +833,12 @@ function OwnerAcceptanceActionPanel({
     }
   }, [binding, failure, onBindingChanged]);
   useEffect(() => {
-    setAction("accepted");
+    setAction(defaultAction);
     setReason("");
     setResolutionSummary("");
     setResolutionReferences("");
     setConfirmRevoke(false);
-  }, [binding.binding_sha256]);
+  }, [binding.binding_sha256, defaultAction]);
   const reasonRequired = action !== "accepted";
   const currentProductEvent = decision.products.find(
     (product) => product.binding?.binding_sha256 === binding.binding_sha256,
@@ -831,6 +861,7 @@ function OwnerAcceptanceActionPanel({
     (!resolutionRequired ||
       (resolutionSummary.trim().length > 0 && resolvedEvidenceReferences.length > 0)) &&
     (action !== "revoked" || confirmRevoke) &&
+    ownerAcceptanceActionAllowed(eligibility, action) &&
     !busy;
 
   return (
@@ -840,15 +871,16 @@ function OwnerAcceptanceActionPanel({
         <code>{binding.binding_sha256.slice(0, 12)}</code>
       </header>
       <p><strong>Product review only.</strong> Record your judgment of this exact change. This does not indicate that technical checks passed, make the pull request merge-ready, or authorize production. Launchplane revalidates the exact change and your Owner authority at write time.</p>
+      {!eligibility.can_accept ? <p className="engineering-owner-action-message" role="status">You contributed to this exact change, so product policy prevents you from accepting it. You may still request changes or revoke prior acceptance.</p> : null}
       <label>
         <span>Product review action</span>
         <select value={action} disabled={operation.state.requiresIdempotencyContinuity} onChange={(event) => {
           setAction(event.target.value as OwnerAcceptanceHumanAction);
           setConfirmRevoke(false);
         }}>
-          <option value="accepted">Accept product change</option>
-          <option value="changes_requested">Request product changes</option>
-          <option value="revoked">Revoke prior product acceptance</option>
+          {eligibility.can_accept ? <option value="accepted">Accept product change</option> : null}
+          {eligibility.can_request_changes ? <option value="changes_requested">Request product changes</option> : null}
+          {eligibility.can_revoke ? <option value="revoked">Revoke prior product acceptance</option> : null}
         </select>
       </label>
       {reasonRequired ? <label><span>Reason</span><textarea value={reason} maxLength={4000} disabled={operation.state.requiresIdempotencyContinuity} onChange={(event) => setReason(event.target.value)} /></label> : null}
@@ -884,6 +916,23 @@ function OwnerAcceptanceActionPanel({
       {operation.state.requiresIdempotencyContinuity ? <p className="engineering-owner-action-message" role="status">Outcome uncertain. Retry only this unchanged action; the idempotency key is preserved.</p> : null}
     </section>
   );
+}
+
+function ownerAcceptanceDefaultAction(
+  eligibility: OwnerAcceptanceViewerBindingEligibility,
+): OwnerAcceptanceHumanAction {
+  if (eligibility.can_accept) return "accepted";
+  if (eligibility.can_request_changes) return "changes_requested";
+  return "revoked";
+}
+
+function ownerAcceptanceActionAllowed(
+  eligibility: OwnerAcceptanceViewerBindingEligibility,
+  action: OwnerAcceptanceHumanAction,
+): boolean {
+  if (action === "accepted") return eligibility.can_accept;
+  if (action === "changes_requested") return eligibility.can_request_changes;
+  return eligibility.can_revoke;
 }
 
 function OwnerAcceptanceContent({
