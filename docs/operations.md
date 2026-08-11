@@ -2526,6 +2526,7 @@ blocked instead of guessing source inputs.
   the first implementation still lives inside this repo.
 - The stable Launchplane contract should be service ingress plus Launchplane-owned
   drivers, not repo-local shell wrappers around file writes.
+
 ## Product Retirement
 
 Use the protected **Product Retirement** workflow; never delete a Dokploy
@@ -2548,4 +2549,11 @@ profile.
 Authorization rollout uses the `product-retirement` selector in **Manage
 Launchplane Authorization**, backed by managed set
 `operator.product-retirement` and secret
-`LAUNCHPLANE_AUTHZ_PRODUCT_RETIREMENT_MANAGED_SET_JSON`.
+`LAUNCHPLANE_AUTHZ_PRODUCT_RETIREMENT_MANAGED_SET_JSON`. The dispatch wrapper
+is pinned to an immutable reusable worker. Authorization must bind both the
+caller `workflow_ref` and the exact immutable `job_workflow_ref`:
+
+```text
+workflow_ref=cbusillo/launchplane/.github/workflows/product-retirement.yml@refs/heads/main
+job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml@c922d5f1a0bf3ab17a829196042a96ba89d7b693
+```

@@ -107,6 +107,9 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/tracked-target-logs.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-tracked-target-logs.yml"}
     ),
+    Path(".github/workflows/product-retirement.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml"}
+    ),
 }
 
 
@@ -269,6 +272,12 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
         ActionClassification(
             "First-party same-repository",
             "exact-instance redacted target-log diagnostics",
+        )
+    ),
+    "cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "protected immutable product retirement",
         )
     ),
     "docker/build-push-action": ActionClassification(
@@ -516,6 +525,7 @@ class GitHubActionsSecurityTests(TestCase):
         self.assertIn("Third-party publisher", policy)
         self.assertIn("First-party cross-repository", policy)
         self.assertIn("High-privilege", policy)
+        self.assertIn("protected immutable product retirement", policy)
         self.assertIn("container image", policy)
         self.assertIn("MUTABLE_REFERENCE_ALLOWLIST", policy)
         self.assertIn("Dependabot", policy)
