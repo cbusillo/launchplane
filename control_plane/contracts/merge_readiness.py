@@ -457,7 +457,17 @@ class MergeReadinessTechnicalChecksFacet(BaseModel):
     @model_validator(mode="after")
     def _validate_facet(self) -> "MergeReadinessTechnicalChecksFacet":
         object.__setattr__(self, "head_sha", _normalize_git_sha(self.head_sha, "head_sha"))
-        object.__setattr__(self, "required_checks", tuple(sorted(set(self.required_checks))))
+        normalized_checks = tuple(
+            sorted({_required_token(check, "required_checks") for check in self.required_checks})
+        )
+        if any(is_launchplane_projected_check(check) for check in normalized_checks):
+            raise ValueError("Launchplane advisory checks cannot be required technical checks")
+        object.__setattr__(self, "required_checks", normalized_checks)
+        if any(
+            not is_launchplane_projected_check(observation.name)
+            for observation in self.advisory_observations
+        ):
+            raise ValueError("Advisory observations must use reserved Launchplane check names")
         object.__setattr__(
             self,
             "advisory_observations",

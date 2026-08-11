@@ -83,6 +83,8 @@ _POLICY_REASON_CODES: dict[
     ),
 }
 
+_NO_OWNER_PRODUCT_SUBJECT = "__not_applicable__"
+
 
 def evaluate_merge_readiness(
     *,
@@ -202,27 +204,52 @@ def _owner_facets(
 ) -> tuple[MergeReadinessOwnerFacet, ...]:
     products = decision.products
     if not products:
-        if decision.binding is None:
-            raise ValueError("Current Owner acceptance decision lacks per-product evidence")
-        products = (
-            OwnerAcceptanceProductDecision(
-                product=decision.binding.product,
-                system=decision.binding.system,
-                action=decision.binding.action,
-                environment=decision.binding.environment,
-                status=decision.status,
-                reason_code=decision.reason_code,
-                binding=decision.binding,
-                current_event=decision.current_event,
-                admissible=decision.admissible,
-                human_action_semantics=decision.human_action_semantics,
-            ),
-        )
+        if decision.binding is not None:
+            products = (
+                OwnerAcceptanceProductDecision(
+                    product=decision.binding.product,
+                    system=decision.binding.system,
+                    action=decision.binding.action,
+                    environment=decision.binding.environment,
+                    status=decision.status,
+                    reason_code=decision.reason_code,
+                    binding=decision.binding,
+                    current_event=decision.current_event,
+                    admissible=decision.admissible,
+                    human_action_semantics=decision.human_action_semantics,
+                ),
+            )
+        else:
+            return (_owner_unscoped_facet(decision),)
     return tuple(
         sorted(
             (_owner_facet(target=target, product=product) for product in products),
             key=lambda item: (item.product, item.system, item.action, item.environment),
         )
+    )
+
+
+def _owner_unscoped_facet(decision: OwnerAcceptanceDecision) -> MergeReadinessOwnerFacet:
+    reason = _OWNER_REASON_CODES[decision.reason_code]
+    reasons: tuple[MergeReadinessReasonCode, ...]
+    if decision.status == "not_required":
+        state: MergeReadinessState = "ready"
+        reasons = ("owner_not_required",)
+    elif decision.status == "unavailable":
+        state = "unknown"
+        reasons = tuple(sorted({reason, "owner_evidence_unavailable"}))
+    else:
+        state = "blocked_owner_evidence"
+        reasons = (reason,)
+    return MergeReadinessOwnerFacet(
+        product=_NO_OWNER_PRODUCT_SUBJECT,
+        system=_NO_OWNER_PRODUCT_SUBJECT,
+        action=_NO_OWNER_PRODUCT_SUBJECT,
+        environment=_NO_OWNER_PRODUCT_SUBJECT,
+        owner_status=decision.status,
+        owner_reason_code=decision.reason_code,
+        state=state,
+        reason_codes=reasons,
     )
 
 

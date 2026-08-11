@@ -326,6 +326,34 @@ class MergeReadinessScenarioTests(unittest.TestCase):
         self.assertEqual(result.mode, "ephemeral")
         self.assertEqual(result.authorizes, ())
 
+    def test_engineering_only_owner_decision_without_products_is_ready(self) -> None:
+        owner_decision = OwnerAcceptanceDecision(
+            status="not_required",
+            reason_code="engineering_only",
+            evaluated_at=EVALUATED_AT,
+        )
+
+        result = _evaluate(owner_decision=owner_decision)
+
+        self.assertEqual(result.state, "ready")
+        self.assertEqual(len(result.owner_facets), 1)
+        self.assertEqual(result.owner_facets[0].product, "__not_applicable__")
+        self.assertEqual(result.owner_facets[0].state, "ready")
+        self.assertEqual(result.owner_facets[0].reason_codes, ("owner_not_required",))
+
+    def test_unavailable_owner_decision_without_products_fails_closed(self) -> None:
+        owner_decision = OwnerAcceptanceDecision(
+            status="unavailable",
+            reason_code="change_impact_unavailable",
+            evaluated_at=EVALUATED_AT,
+        )
+
+        result = _evaluate(owner_decision=owner_decision)
+
+        self.assertEqual(result.state, "unknown")
+        self.assertEqual(result.owner_facets[0].state, "unknown")
+        self.assertIn("owner_evidence_unavailable", result.reason_codes)
+
     def test_scenario_3_failed_or_unknown_checks_cannot_be_ready(self) -> None:
         cases = (
             ("fail", "blocked_checks", "checks_failed"),
@@ -745,6 +773,34 @@ class MergeReadinessLiveAdapterTests(unittest.TestCase):
         self.assertNotIn("checks_failed", result.reason_codes)
         self.assertEqual(result.authorizes, ())
 
+    def test_missing_live_evidence_returns_unknown_without_authority(self) -> None:
+        result = evaluate_merge_readiness_from_live_evidence(
+            target=_target(),
+            owner_decision=OwnerAcceptanceDecision(
+                status="not_required",
+                reason_code="engineering_only",
+                evaluated_at=EVALUATED_AT,
+            ),
+            engineering_decision=None,
+            engineering_runs=(),
+            technical_checks=None,
+            policy_fingerprints=_all_missing_policy_fingerprints(),
+            candidate_record=None,
+            structural_candidate_status="unknown",
+            controller_state=None,
+            expected_lease_owner="controller-run-1",
+            observed_effect_sha="",
+            evaluated_at=EVALUATED_AT,
+        )
+
+        self.assertEqual(result.state, "unknown")
+        self.assertFalse(result.authoritative)
+        self.assertEqual(result.authorizes, ())
+        self.assertEqual(result.technical_checks.state, "unknown")
+        self.assertEqual(result.engineering_review.state, "unknown")
+        self.assertEqual(result.candidate.state, "unknown")
+        self.assertEqual(result.fence.state, "blocked_candidate_identity")
+
 
 class MergeReadinessModelValidationTests(unittest.TestCase):
     def test_contract_is_frozen_and_forbids_extra_fields(self) -> None:
@@ -803,6 +859,18 @@ class MergeReadinessModelValidationTests(unittest.TestCase):
                     ),
                 ),
             )
+
+        payload = _evaluate().model_dump(mode="json")
+        payload["technical_checks"]["required_checks"] = ["launchplane/owner-acceptance"]
+        with self.assertRaises(ValidationError):
+            MergeReadinessResult.model_validate(payload)
+
+        payload = _evaluate().model_dump(mode="json")
+        payload["technical_checks"]["advisory_observations"] = [
+            {"name": "ci-gate", "state": "pass"}
+        ]
+        with self.assertRaises(ValidationError):
+            MergeReadinessResult.model_validate(payload)
 
 
 if __name__ == "__main__":

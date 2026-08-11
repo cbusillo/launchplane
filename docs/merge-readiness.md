@@ -106,6 +106,11 @@ and blocking facet detail without changing the canonical state vocabulary.
 Owner `not_required` is a passing product facet, not missing evidence. Current
 authority loss, review expiry, self-review denial, and changed human outcomes
 remain distinguishable blockers without rewriting historical L1 evidence.
+When current impact evidence proves that Owner review is not required and has no
+affected-product subjects, the adapter emits one canonical
+`__not_applicable__` facet so the passing Owner outcome remains explicit. If
+impact evidence is unavailable before subjects can be resolved, that same
+unscoped facet is `unknown` and fails closed.
 
 ## Advisory Checks
 
