@@ -151,6 +151,11 @@ def _payloads() -> dict[str, dict[str, object]]:
             "projectId": "project-1",
             "environmentId": "environment-testing",
             "applicationStatus": "idle",
+            "environment": {
+                "environmentId": "environment-testing",
+                "name": "testing",
+                "project": {"projectId": "project-1", "name": "example-project"},
+            },
         },
         PROTECTED_IDS[0]: {
             "applicationId": PROTECTED_IDS[0],
@@ -158,6 +163,11 @@ def _payloads() -> dict[str, dict[str, object]]:
             "projectId": "project-1",
             "environmentId": "environment-production",
             "applicationStatus": "running",
+            "environment": {
+                "environmentId": "environment-production",
+                "name": "production",
+                "project": {"projectId": "project-1", "name": "example-project"},
+            },
         },
         PROTECTED_IDS[1]: {
             "applicationId": PROTECTED_IDS[1],
@@ -165,6 +175,11 @@ def _payloads() -> dict[str, dict[str, object]]:
             "projectId": "project-1",
             "environmentId": "environment-testing",
             "applicationStatus": "idle",
+            "environment": {
+                "environmentId": "environment-testing",
+                "name": "testing",
+                "project": {"projectId": "project-1", "name": "example-project"},
+            },
         },
     }
 
@@ -257,6 +272,19 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
             application_id = cast(dict[str, str], kwargs["query"])["applicationId"]
             return (domains or {}).get(application_id, [])
 
+        def search_applications(**kwargs: object) -> tuple[dict[str, object], ...]:
+            name = str(kwargs.get("name") or "")
+            selected = (
+                (CANDIDATE_ID,) if name else (CANDIDATE_ID, PROTECTED_IDS[0], PROTECTED_IDS[1])
+            )
+            return tuple(
+                {
+                    "applicationId": application_id,
+                    "name": payloads[application_id]["name"],
+                }
+                for application_id in selected
+            )
+
         history = dokploy_api.DeploymentHistory(
             state=cast(dokploy_api.DeploymentHistoryState, history_state),
             latest_deployment=None,
@@ -273,6 +301,10 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
             patch(
                 "control_plane.detached_application_retirement.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=fetch_payload,
+            ),
+            patch(
+                "control_plane.detached_application_retirement.dokploy_api.search_dokploy_applications",
+                side_effect=search_applications,
             ),
             patch(
                 "control_plane.detached_application_retirement.dokploy_api.dokploy_request",
@@ -363,6 +395,16 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
             self._discover(projects=malformed)
         with self.assertRaisesRegex(DetachedApplicationRetirementBlockedError, "digest"):
             self._discover(request=_request(candidate_target_sha256="f" * 64))
+
+    def test_discovery_falls_back_to_service_search_when_project_listing_is_inaccessible(
+        self,
+    ) -> None:
+        discovery = self._discover(projects=())
+        self.assertEqual(discovery.candidate.application_id, CANDIDATE_ID)
+        self.assertEqual(
+            tuple(target.target_id_sha256 for target in discovery.protected_targets),
+            _request().expected_protected_target_sha256,
+        )
 
     def test_authority_absence_scans_every_required_source_and_preserves_target_name_distinction(
         self,
