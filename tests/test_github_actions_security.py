@@ -107,6 +107,9 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/tracked-target-logs.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-tracked-target-logs.yml"}
     ),
+    Path(".github/workflows/product-retirement.yml"): frozenset(
+        {"cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml"}
+    ),
 }
 
 
@@ -271,6 +274,12 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
             "exact-instance redacted target-log diagnostics",
         )
     ),
+    "cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml": (
+        ActionClassification(
+            "First-party same-repository",
+            "protected immutable product retirement",
+        )
+    ),
     "docker/build-push-action": ActionClassification(
         "Third-party publisher", "container build and publication"
     ),
@@ -333,6 +342,15 @@ def _container_references() -> Iterator[ContainerReference]:
 
 
 class GitHubActionsSecurityTests(TestCase):
+    def test_product_retirement_wrapper_uses_the_approved_immutable_worker(self) -> None:
+        workflow = load_workflow(".github/workflows/product-retirement.yml")
+
+        self.assertEqual(
+            workflow.job_uses("retire"),
+            "cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml"
+            "@c922d5f1a0bf3ab17a829196042a96ba89d7b693",
+        )
+
     def test_product_repo_config_authority_uses_called_workflow_revision(self) -> None:
         workflow = Path(".github/workflows/reusable-product-repo-config-authority.yml").read_text(
             encoding="utf-8"
