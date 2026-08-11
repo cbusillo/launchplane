@@ -2508,10 +2508,10 @@ apply and reconciliation can bind the same target, but service/workflow
 evidence exposes only hashes, counts, phases, booleans, and record references.
 The absence proof contains a sorted required-source tuple with record counts,
 digests, and literal zero matches; no matched record or mutable authority field
-exists in the contract. Deployment records suppress name-only matching only
-when their own consistent application-typed target evidence proves one different
-provider target ID; legacy, malformed, compose-typed, or conflicting deployment
-evidence retains name matching and fails closed.
+exists in the contract. Deployment and provider-target records suppress
+name-only matching only when their own consistent application-typed target
+evidence proves one different provider target ID; legacy, malformed,
+compose-typed, or conflicting evidence retains name matching and fails closed.
 
 Apply records are terminal only and reference the exact reviewed plan. Mutation
 evidence records the provider-operation/reconciliation linkage, checkpoint

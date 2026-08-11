@@ -285,6 +285,7 @@ _AUTHORITATIVE_PROVIDER_NAME_KEYS = frozenset(
     }
 )
 _DEPLOYMENT_AUTHORITY_SOURCE = "deployment"
+_PROVIDER_TARGET_AUTHORITY_SOURCE = "provider_target"
 _AUTHORITY_SOURCES: tuple[
     tuple[str, Callable[[DetachedApplicationRetirementStore], tuple[object, ...]]], ...
 ] = (
@@ -299,7 +300,7 @@ _AUTHORITY_SOURCES: tuple[
     ),
     ("product_profile", lambda store: store.list_product_profile_records()),
     ("product_retirement", lambda store: store.list_product_retirement_records()),
-    ("provider_target", lambda store: store.list_provider_target_records()),
+    (_PROVIDER_TARGET_AUTHORITY_SOURCE, lambda store: store.list_provider_target_records()),
     ("preview", lambda store: store.list_preview_records()),
     ("preview_desired_state", lambda store: store.list_preview_desired_state_records()),
     ("preview_enablement", lambda store: store.list_preview_enablement_records()),
@@ -724,9 +725,10 @@ def prove_detached_application_authority_absence(
         )
         for payload in payloads:
             name_is_authority = not (
-                source_name == _DEPLOYMENT_AUTHORITY_SOURCE
-                and _deployment_record_proves_foreign_application_target(
+                source_name in {_DEPLOYMENT_AUTHORITY_SOURCE, _PROVIDER_TARGET_AUTHORITY_SOURCE}
+                and _authority_record_proves_foreign_application_target(
                     payload,
+                    source_name=source_name,
                     candidate_target_id=normalized_target_id,
                 )
             )
@@ -1580,6 +1582,43 @@ def _deployment_record_proves_foreign_application_target(
         and len(set(application_target_ids)) == 1
         and (application_target_ids[0] != candidate_target_id)
     )
+
+
+def _provider_target_record_proves_foreign_application_target(
+    payload: object,
+    *,
+    candidate_target_id: str,
+) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    target_category = _normalized_lower_string(payload.get("target_category"))
+    provider_target_type = _normalized_lower_string(payload.get("provider_target_type"))
+    target_id = _normalized_string(payload.get("target_id"))
+    return (
+        target_category == "application"
+        and provider_target_type == "application"
+        and bool(target_id)
+        and target_id != candidate_target_id
+    )
+
+
+def _authority_record_proves_foreign_application_target(
+    payload: object,
+    *,
+    source_name: str,
+    candidate_target_id: str,
+) -> bool:
+    if source_name == _DEPLOYMENT_AUTHORITY_SOURCE:
+        return _deployment_record_proves_foreign_application_target(
+            payload,
+            candidate_target_id=candidate_target_id,
+        )
+    if source_name == _PROVIDER_TARGET_AUTHORITY_SOURCE:
+        return _provider_target_record_proves_foreign_application_target(
+            payload,
+            candidate_target_id=candidate_target_id,
+        )
+    return False
 
 
 def _normalized_string(value: object) -> str:

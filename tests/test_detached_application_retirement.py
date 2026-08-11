@@ -727,6 +727,58 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
                         candidate_application_name="detached-application",
                     )
 
+    def test_provider_target_authority_uses_application_target_identity(self) -> None:
+        store = _Store()
+        store.sources["provider_target"] = (
+            {
+                "provider_id": "dokploy",
+                "target_category": "application",
+                "provider_target_type": "application",
+                "target_id": PROTECTED_IDS[0],
+                "display_name": "detached-application",
+            },
+        )
+        proof = prove_detached_application_authority_absence(
+            record_store=cast(DetachedApplicationRetirementStore, store),
+            candidate_target_id=CANDIDATE_ID,
+            candidate_application_name="detached-application",
+        )
+        self.assertEqual(proof.match_count, 0)
+
+    def test_provider_target_authority_retains_candidate_and_weak_evidence_blocks(self) -> None:
+        payloads = (
+            {
+                "target_category": "application",
+                "provider_target_type": "application",
+                "target_id": CANDIDATE_ID,
+                "display_name": "detached-application",
+            },
+            {
+                "target_category": "unknown",
+                "provider_target_type": "application",
+                "target_id": PROTECTED_IDS[0],
+                "display_name": "detached-application",
+            },
+            {
+                "target_category": "application",
+                "provider_target_type": "",
+                "target_id": PROTECTED_IDS[0],
+                "display_name": "detached-application",
+            },
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                store = _Store()
+                store.sources["provider_target"] = (payload,)
+                with self.assertRaisesRegex(
+                    DetachedApplicationRetirementBlockedError, "provider_target"
+                ):
+                    prove_detached_application_authority_absence(
+                        record_store=cast(DetachedApplicationRetirementStore, store),
+                        candidate_target_id=CANDIDATE_ID,
+                        candidate_application_name="detached-application",
+                    )
+
     def test_non_deployment_sources_retain_provider_name_authority(self) -> None:
         source_names = tuple(
             source.source
@@ -737,7 +789,7 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
             ).sources
         )
         for source_name in source_names:
-            if source_name == "deployment":
+            if source_name in {"deployment", "provider_target"}:
                 continue
             with self.subTest(source=source_name):
                 store = _Store()
