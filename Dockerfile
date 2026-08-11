@@ -56,7 +56,10 @@ RUN apt-get update \
 
 COPY --from=github-cli-build /go/bin/gh /usr/local/bin/gh
 
-RUN pip install --no-cache-dir uv
+RUN pip install --no-cache-dir --upgrade \
+    "msgpack==1.2.1" \
+    "setuptools==78.1.1" \
+    uv
 
 WORKDIR /app
 
