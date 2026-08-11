@@ -572,6 +572,7 @@ def build_product_site_overviews(
             action_allowed=action_allowed,
         )
         for profile in record_store.list_product_profile_records()
+        if profile.is_active
     )
 
 

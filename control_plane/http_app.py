@@ -52,6 +52,7 @@ from control_plane import (
     product_prelaunch_rebuild_policy as control_plane_product_prelaunch_rebuild_policy,
 )
 from control_plane import product_preview_tls as control_plane_product_preview_tls
+from control_plane import product_retirement as control_plane_product_retirement
 from control_plane import (
     route_binding_external_reconcile as control_plane_route_binding_external_reconcile,
 )
@@ -558,6 +559,10 @@ from control_plane.contracts.product_profile_record import (
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
 )
+from control_plane.contracts.product_retirement import (
+    ProductRetirementIdentity,
+    ProductRetirementRequest,
+)
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_plan_record import (
@@ -946,6 +951,7 @@ _ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT = 25
 _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/apply"
 _PRODUCT_PREVIEW_TLS_APPLY_ROUTE = "/v1/product-profiles/preview-tls/apply"
+_PRODUCT_RETIREMENT_ROUTE = "/v1/product-retirement"
 _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
 _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
 _PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
@@ -3092,6 +3098,19 @@ def launchplane_identity_actor(identity: LaunchplaneIdentity) -> str:
         return f"terminal-agent:{identity.subject}"
     return (
         f"github-actions:{identity.repository}:{identity.workflow_ref or identity.job_workflow_ref}"
+    )
+
+
+def product_retirement_identity(identity: LaunchplaneIdentity) -> ProductRetirementIdentity:
+    return ProductRetirementIdentity(
+        actor=launchplane_identity_actor(identity),
+        identity_kind=type(identity).__name__,
+        subject=str(getattr(identity, "subject", "") or ""),
+        repository=str(getattr(identity, "repository", "") or ""),
+        workflow_ref=str(
+            getattr(identity, "workflow_ref", "") or getattr(identity, "job_workflow_ref", "") or ""
+        ),
+        environment=str(getattr(identity, "environment", "") or ""),
     )
 
 
@@ -16318,6 +16337,247 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def execute_product_retirement(
+        request: Request,
+        retirement_request: ProductRetirementRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        normalized_key = idempotency_key.strip()
+        if not normalized_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Product retirement requires Idempotency-Key.",
+            )
+        try:
+            retirement_store = cast(
+                control_plane_product_retirement.ProductRetirementStore,
+                require_provider_operation_store(
+                    record_store=record_store,
+                    trace_id=trace_id,
+                ),
+            )
+            if retirement_request.mode == "apply":
+                plan_record = retirement_store.read_product_retirement_record(
+                    retirement_request.reviewed_plan_record_id
+                )
+                control_plane_product_retirement.validate_reviewed_product_retirement_plan(
+                    request=retirement_request,
+                    plan=plan_record,
+                )
+                effective_context = plan_record.context
+            else:
+                bound = control_plane_product_retirement.bind_product_retirement_authority(
+                    record_store=retirement_store,
+                    request=retirement_request,
+                )
+                effective_context = bound.context
+                plan_record = None
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="product_retirement_authority_not_found",
+                message=str(error),
+            ) from error
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_retirement_blocked",
+                message=str(error),
+            ) from error
+
+        action = (
+            "product_retirement.plan"
+            if retirement_request.mode == "plan"
+            else "product_retirement.apply"
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=retirement_request.product,
+            context=effective_context,
+            target=AuthorizationTarget(
+                scope="instance",
+                instances=(retirement_request.instance,),
+            ),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity is not authorized for exact product retirement.",
+                authz=_authz_diagnostic_payload(
+                    identity=identity,
+                    authz_policy_sha256_value=resolved_authz_policy_runtime.policy_sha256,
+                    authz_policy_source=resolved_authz_policy_runtime.source,
+                    action=action,
+                    product=retirement_request.product,
+                    context=effective_context,
+                ),
+            )
+
+        actor_identity = product_retirement_identity(identity)
+        requested_at = utc_now_timestamp()
+        if retirement_request.mode == "plan":
+            existing_plans = retirement_store.list_product_retirement_records(
+                product=retirement_request.product,
+                actor=actor_identity.actor,
+                mode="plan",
+                idempotency_key=normalized_key,
+                limit=1,
+            )
+            if existing_plans:
+                existing_plan = existing_plans[0]
+                if existing_plan.continuity_sha256 != retirement_request.continuity_sha256:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different product "
+                            "retirement plan."
+                        ),
+                    )
+                return AcceptedEvidenceResponse.model_validate(
+                    control_plane_product_retirement.redacted_product_retirement_response(
+                        existing_plan
+                    )
+                )
+            try:
+                observation = control_plane_product_retirement.observe_tracked_dokploy_application(
+                    control_plane_root=resolved_control_plane_root,
+                    target_id=bound.provider_target.target_id,
+                    observed_at=requested_at,
+                )
+                plan = control_plane_product_retirement.build_product_retirement_plan_record(
+                    request=retirement_request,
+                    identity=actor_identity,
+                    trace_id=trace_id,
+                    idempotency_key=normalized_key,
+                    requested_at=requested_at,
+                    bound=bound,
+                    observation=observation,
+                )
+                retirement_store.write_product_retirement_record(plan)
+            except FileNotFoundError as error:
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="product_retirement_authority_not_found",
+                    message=str(error),
+                ) from error
+            except (ValueError, click.ClickException) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_retirement_blocked",
+                    message=str(error),
+                ) from error
+            return AcceptedEvidenceResponse.model_validate(
+                control_plane_product_retirement.redacted_product_retirement_response(plan)
+            )
+
+        if plan_record is None:
+            raise RuntimeError("Product retirement apply requires a reviewed plan record.")
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=retirement_store,
+            identity=identity,
+            route_path=_PRODUCT_RETIREMENT_ROUTE,
+            idempotency_key=normalized_key,
+            trace_id=trace_id,
+            check_replay=True,
+            request_payload=retirement_request.model_dump(mode="json"),
+        )
+        if replayed_response is not None:
+            return replayed_response
+        adapter = control_plane_product_retirement.DokployProductRetirementAdapter(
+            control_plane_root=resolved_control_plane_root,
+            record_store=retirement_store,
+            request=retirement_request,
+            plan=plan_record,
+            identity=actor_identity,
+            trace_id=trace_id,
+            idempotency_key=normalized_key,
+            requested_at=requested_at,
+        )
+        provider_operation_key = adapter.provider_operation_key(
+            scope=idempotency_scope(identity),
+            route_path=_PRODUCT_RETIREMENT_ROUTE,
+            fingerprint=payload_fingerprint,
+        )
+        started_record = control_plane_product_retirement.build_started_product_retirement_record(
+            request=retirement_request,
+            plan=plan_record,
+            identity=actor_identity,
+            trace_id=trace_id,
+            idempotency_key=normalized_key,
+            requested_at=requested_at,
+            provider_operation_key=provider_operation_key,
+        )
+        retirement_store.write_product_retirement_record(started_record)
+        try:
+            return await run_provider_mutation(
+                record_store=retirement_store,
+                identity=identity,
+                route_path=_PRODUCT_RETIREMENT_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint=payload_fingerprint,
+                trace_id=trace_id,
+                adapter=adapter,
+                in_progress_message=(
+                    "A matching product retirement is already running. Retry with the same "
+                    "Idempotency-Key."
+                ),
+                reconcile_message=(
+                    "Product retirement requires reconciliation before retrying the same "
+                    "Idempotency-Key."
+                ),
+            )
+        except HTTPException as error:
+            detail = error.detail if isinstance(error.detail, Mapping) else {}
+            code = str(detail.get("code") or "product_retirement_failed")
+            outcome = "reconcile_required" if "reconciliation" in code else "failed"
+            terminal = adapter.terminal_record(
+                outcome=outcome,
+                provider_operation_key=provider_operation_key,
+                error_code=code,
+                error_message=str(detail.get("message") or ""),
+            )
+            retirement_store.write_product_retirement_record(terminal)
+            raise
+        except (ValueError, click.ClickException) as error:
+            terminal = adapter.terminal_record(
+                outcome="failed",
+                provider_operation_key=provider_operation_key,
+                error_code="product_retirement_blocked",
+                error_message=str(error),
+            )
+            retirement_store.write_product_retirement_record(terminal)
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_retirement_blocked",
+                message=str(error),
+            ) from error
+
     async def remediate_preview_pr_feedback(
         request: Request,
         remediation_request: PreviewPrFeedbackRemediationRequest,
@@ -18746,6 +19006,25 @@ def create_launchplane_fastapi_app(
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_RETIREMENT_ROUTE,
+        execute_product_retirement,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="execute_product_retirement",
+        summary="Plan or apply audited generic-web product retirement",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },

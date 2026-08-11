@@ -84,7 +84,8 @@ def build_manager_preview_approval_projection(
     profiles = tuple(
         profile
         for profile in record_store.list_product_profile_records()
-        if profile.repository.strip().casefold() == normalized_repository.casefold()
+        if profile.is_active
+        and profile.repository.strip().casefold() == normalized_repository.casefold()
     )
     if len(profiles) != 1:
         return _unavailable_projection(

@@ -337,7 +337,11 @@ def discover_public_ingress_monitor_targets(
     profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
 ) -> tuple[PublicIngressMonitorTarget, ...]:
     targets: list[PublicIngressMonitorTarget] = []
-    product_profiles = profiles or record_store.list_product_profile_records()
+    product_profiles = tuple(
+        profile
+        for profile in (profiles or record_store.list_product_profile_records())
+        if profile.is_active
+    )
     for profile in product_profiles:
         for lane in profile.lanes:
             for check in lane.health_monitoring.checks:
@@ -534,7 +538,9 @@ def run_public_ingress_monitor_once(
     public_get = http_get or fetch_public_ingress_url
     private_get = private_http_get or fetch_private_health_url
     tls_probe = tls_get or fetch_public_tls
-    profiles = record_store.list_product_profile_records()
+    profiles = tuple(
+        profile for profile in record_store.list_product_profile_records() if profile.is_active
+    )
     targets = discover_public_ingress_monitor_targets(record_store, profiles=profiles)
     eligible_target_keys = {
         _monitor_target_key(target) for target in targets if target.incident_eligible

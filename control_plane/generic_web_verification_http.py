@@ -166,6 +166,10 @@ def _read_generic_web_verification_profile(
         raise GenericWebVerificationRouteDependencyError from error
     if not isinstance(profile, LaunchplaneProductProfileRecord):
         profile = LaunchplaneProductProfileRecord.model_validate(profile)
+    if not profile.is_active:
+        raise click.ClickException(
+            f"Product {profile.product!r} is {profile.lifecycle_state} and cannot verify runtime."
+        )
     if not product_profile_uses_generic_web_base(profile):
         raise GenericWebVerificationProductMismatchError(
             "Product profile is not compatible with the requested driver route."

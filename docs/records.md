@@ -2432,3 +2432,24 @@ preflights.
   Launchplane becomes the runtime executor for that product. Local
   `inventory write-from-deployment` and `inventory write-from-promotion` remain
   file-backed rehearsal helpers only.
+## Product retirement records
+
+Product retirement evidence is stored append-only under
+`launchplane_product_retirements` in PostgreSQL and
+`state/launchplane_product_retirements/` for filesystem rehearsal. Plan and
+apply events have distinct record IDs and retain actor identity, reason and
+issue, continuity and plan digests, profile/target/runtime/secret snapshots,
+provider observation fingerprints, provider-operation linkage, lifecycle
+transitions, timestamps, outcomes, and mutation evidence. Apply events always
+reference the persisted reviewed plan record and digest.
+
+Provider application/domain identifiers and provider-operation keys are
+internal record evidence. Service and workflow responses expose only SHA-256
+identifiers, counts, phases, and record references. Runtime deletion uses the
+existing append-only runtime-environment delete-event contract. Managed secret
+records and versions are preserved; the retirement record captures the exact
+secret record references and digests reviewed by the plan.
+
+Product profiles include `lifecycle_state` with backward-compatible default
+`active`. `retiring` and `retired` profiles remain directly readable as audit
+authority but are omitted from normal profile listing and active automation.
