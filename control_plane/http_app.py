@@ -46,7 +46,7 @@ from control_plane.generic_web_onboarding import (
 from control_plane.generic_web_preview_authz import (
     GenericWebPreviewAuthzPlanResult,
     GenericWebPreviewAuthzPlanRequest,
-    build_generic_web_preview_authz_reconcile_request,
+    plan_generic_web_preview_authz_reconcile,
 )
 from control_plane import (
     product_prelaunch_rebuild_policy as control_plane_product_prelaunch_rebuild_policy,
@@ -13558,10 +13558,21 @@ def create_launchplane_fastapi_app(
             )
         observed_record = active_records[0]
         try:
-            reconcile_request = build_generic_web_preview_authz_reconcile_request(
+            profile = None
+            if planning_request.operation == "retire":
+                profile_store = require_product_profile_read_store(database_store)
+                try:
+                    profile = profile_store.read_product_profile_record(
+                        planning_request.target_product
+                    )
+                except (FileNotFoundError, KeyError):
+                    profile = None
+            reconcile_plan = plan_generic_web_preview_authz_reconcile(
                 current_policy=observed_record.policy,
                 request=planning_request,
+                profile=profile,
             )
+            reconcile_request = reconcile_plan.reconcile_request
             (
                 _,
                 current_record,
@@ -13604,6 +13615,11 @@ def create_launchplane_fastapi_app(
             plan_sha256=diff.plan_sha256,
             configuration=reconcile_request.model_dump(mode="json"),
             diff=diff.model_dump(mode="json"),
+            retirement_authority=(
+                reconcile_plan.retirement_authority.evidence
+                if reconcile_plan.retirement_authority is not None
+                else None
+            ),
         )
         return accepted_evidence_response(
             trace_id=trace_id,

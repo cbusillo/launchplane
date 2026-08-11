@@ -81,6 +81,10 @@ from control_plane.contracts.runner_lane_registration import (
     plan_runner_lane_registration,
 )
 from control_plane.every_code_github_webhook import handle_every_code_github_webhook_request
+from control_plane.generic_web_preview_authz import (
+    GenericWebPreviewAuthzPlanRequest,
+    generic_web_preview_rules,
+)
 from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_app import idempotency_request_fingerprint
@@ -5442,6 +5446,86 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 headers={"Idempotency-Key": "generic-web-preview-demo-web"},
             )
+            other_plan_status, other_plan_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/generic-web-preview/plan",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "operation": "onboard",
+                    "target_product": "other-web",
+                    "repository": "example/other-web",
+                    "repository_id": "789",
+                    "repository_owner_id": "456",
+                    "default_branch": "main",
+                    "preview_context": "other-web-preview",
+                    "launchplane_sha": "a" * 40,
+                    "reason": "Onboard other web.",
+                    "related_issue": "#1971",
+                },
+            )
+            other_configuration = other_plan_payload["result"]["configuration"]
+            other_reconcile_status, other_reconcile_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload={
+                    **other_configuration,
+                    "mode": "apply",
+                    "reviewed_plan_sha256": other_plan_payload["result"]["plan_sha256"],
+                },
+                headers={"Idempotency-Key": "generic-web-preview-other-web"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        {
+                            "product": "demo-web",
+                            "display_name": "Demo Web",
+                            "repository": "example/demo-web",
+                            "repository_id": "123",
+                            "repository_owner_id": "456",
+                            "driver_id": "generic-web",
+                            "image": {},
+                            "updated_at": "2026-08-11T00:00:00Z",
+                            "source": "test",
+                        }
+                    )
+                )
+            finally:
+                store.close()
+            retire_status, retire_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/generic-web-preview/plan",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "operation": "retire",
+                    "target_product": "demo-web",
+                    "repository": "",
+                    "repository_id": "",
+                    "repository_owner_id": "",
+                    "default_branch": "",
+                    "preview_context": "",
+                    "launchplane_sha": "a" * 40,
+                    "reason": "Retire demo web.",
+                    "related_issue": "#2097",
+                },
+            )
+            retire_reconcile_status, retire_reconcile_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/reconcile",
+                payload={
+                    **retire_payload["result"]["configuration"],
+                    "mode": "apply",
+                    "reviewed_plan_sha256": retire_payload["result"]["plan_sha256"],
+                },
+                headers={"Idempotency-Key": "generic-web-preview-retire-demo-web"},
+            )
             store = PostgresRecordStore(database_url=database_url)
             try:
                 active_record = store.list_authz_policy_records(status="active", limit=1)[0]
@@ -5449,6 +5533,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 store.close()
 
         self.assertEqual(plan_status, 202)
+        self.assertIsNone(plan_payload["result"]["retirement_authority"])
         self.assertEqual(plan_payload["records"]["target_rule_count"], "6")
         self.assertEqual(plan_payload["result"]["diff"]["added_rule_count"], 6)
         self.assertEqual(
@@ -5457,13 +5542,147 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(reconcile_status, 202)
         self.assertEqual(reconcile_payload["result"]["diff"]["plan_sha256"], plan_sha256)
+        self.assertEqual(other_plan_status, 202)
+        self.assertEqual(other_reconcile_status, 202)
+        self.assertEqual(
+            other_reconcile_payload["result"]["diff"]["added_rule_count"],
+            6,
+        )
         managed_rules = tuple(
             rule
             for rule in active_record.policy.github_actions
             if rule.managed_set_id == "operator.generic-web-preview"
         )
         self.assertEqual(len(managed_rules), 6)
-        self.assertEqual({rule.products for rule in managed_rules}, {("demo-web",)})
+        self.assertEqual({rule.products for rule in managed_rules}, {("other-web",)})
+        self.assertEqual(retire_status, 202)
+        self.assertEqual(retire_payload["result"]["target_rule_count"], 0)
+        self.assertEqual(retire_reconcile_status, 202)
+        self.assertEqual(
+            retire_reconcile_payload["result"]["diff"]["removed_rule_count"],
+            6,
+        )
+        retirement_authority = retire_payload["result"]["retirement_authority"]
+        self.assertEqual(
+            retirement_authority["authority_sources"],
+            ["current_product_rules", "product_profile"],
+        )
+        self.assertEqual(retirement_authority["managed_rule_count"], 6)
+        self.assertEqual(len(retirement_authority["repository_identity_sha256"]), 64)
+        self.assertNotIn('"123"', json.dumps(retirement_authority))
+        self.assertNotIn('"456"', json.dumps(retirement_authority))
+
+    def test_generic_web_preview_authz_plan_rejects_non_exact_retirement_product_selectors(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
+            )
+            planner_policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [
+                                "authz_policy_grant.write",
+                                "generic_web_preview_authz.plan",
+                            ],
+                        }
+                    ],
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=planner_policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            generated_rules = generic_web_preview_rules(
+                GenericWebPreviewAuthzPlanRequest.model_validate(
+                    {
+                        "schema_version": 1,
+                        "product": "launchplane",
+                        "target_product": "demo-web",
+                        "repository": "example/demo-web",
+                        "repository_id": "123",
+                        "repository_owner_id": "456",
+                        "default_branch": "main",
+                        "preview_context": "demo-web-preview",
+                        "launchplane_sha": "a" * 40,
+                        "reason": "Onboard demo web.",
+                        "related_issue": "#1970",
+                    }
+                )
+            )
+            retire_payload = {
+                "schema_version": 1,
+                "product": "launchplane",
+                "operation": "retire",
+                "target_product": "demo-web",
+                "repository": "",
+                "repository_id": "",
+                "repository_owner_id": "",
+                "default_branch": "",
+                "preview_context": "",
+                "launchplane_sha": "a" * 40,
+                "reason": "Retire demo web.",
+                "related_issue": "#2097",
+            }
+            store = _HostedAuthzPolicyStore(database_url=database_url)
+            try:
+                for label, products in (
+                    ("multi-product", ("demo-web", "other-web")),
+                    ("wildcard", ("demo-*",)),
+                ):
+                    with self.subTest(selector=label):
+                        unsafe_rule = generated_rules[0].model_copy(update={"products": products})
+                        store.write_authz_policy_record(
+                            LaunchplaneAuthzPolicyRecord(
+                                record_id=f"seed-{label}",
+                                source=f"test:{label}",
+                                updated_at="2026-08-11T00:00:00Z",
+                                policy=LaunchplaneAuthzPolicy(
+                                    schema_version=2,
+                                    github_actions=(
+                                        *planner_policy.github_actions,
+                                        *generated_rules[1:],
+                                        unsafe_rule,
+                                    ),
+                                ),
+                            )
+                        )
+                        status_code, payload = _invoke_app(
+                            app,
+                            method="POST",
+                            path="/v1/authz-policies/managed-rule-sets/generic-web-preview/plan",
+                            payload=retire_payload,
+                        )
+                        self.assertEqual(status_code, 400)
+                        self.assertEqual(
+                            payload["error"]["code"],
+                            "invalid_generic_web_preview_authz_plan",
+                        )
+                        self.assertIn(
+                            "exact singleton target product selector",
+                            payload["error"]["message"],
+                        )
+            finally:
+                store.close()
 
     def test_generic_web_preview_authz_plan_denies_missing_planner_authority(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

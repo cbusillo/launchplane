@@ -19,6 +19,18 @@ def _assert_no_workflow_violations(
 
 
 class DocsContractsTests(TestCase):
+    def test_generic_web_preview_retirement_authority_is_documented(self) -> None:
+        operations = Path("docs/operations.md").read_text(encoding="utf-8")
+        service_boundary = Path("docs/service-boundary.md").read_text(encoding="utf-8")
+        records = Path("docs/records.md").read_text(encoding="utf-8")
+        new_product_repo = Path("docs/new-product-repo.md").read_text(encoding="utf-8")
+
+        self.assertIn("without querying GitHub", new_product_repo)
+        self.assertIn("mints no repository-scoped", service_boundary)
+        self.assertIn("Caller repository values are optional assertions", service_boundary)
+        self.assertIn("SHA-256 digest of the", records)
+        self.assertIn("after archival or GitHub App offboarding", operations)
+
     def test_protected_operator_workflows_require_exact_run_babysitter(self) -> None:
         agents = Path("AGENTS.md").read_text(encoding="utf-8")
         operations = Path("docs/operations.md").read_text(encoding="utf-8")

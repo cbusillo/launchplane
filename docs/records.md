@@ -488,6 +488,10 @@ an ORM column/table or remains only in the evidence payload.
   authorization, but it reports `job_workflow_refs_not_singleton`. Readiness-safe
   expansion uses two separately identified exact rules, one immutable worker SHA
   per rule, followed by reviewed contraction of the old rule.
+  Generic-web preview retirement plan evidence additionally records bounded
+  authority sources, target managed rule IDs/count, and a SHA-256 digest of the
+  resolved repository identity. It never records or returns raw numeric
+  repository or owner IDs in that evidence.
   Production tracked-log reads and website-bootstrap writes use separate exact
   caller/worker rule identities. Their workflow artifacts are scoped by run and
   attempt so retries preserve distinct evidence without turning observation or

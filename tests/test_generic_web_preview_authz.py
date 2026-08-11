@@ -1,12 +1,17 @@
 import unittest
 from pathlib import Path
 
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+)
 from control_plane.generic_web_preview_authz import (
     GENERIC_WEB_PREVIEW_MANAGED_SET_ID,
     GenericWebPreviewAuthzPlanRequest,
     build_generic_web_preview_authz_reconcile_request,
     generic_web_preview_ingress_operator_rules,
     generic_web_preview_rules,
+    resolve_generic_web_preview_retirement_authority,
 )
 from control_plane.service_auth import GitHubActionsPolicyRule, LaunchplaneAuthzPolicy
 
@@ -61,6 +66,25 @@ def _ingress_templates() -> tuple[GitHubActionsPolicyRule, ...]:
             contexts=("template",),
             actions=("ingress_route.apply",),
         ),
+    )
+
+
+def _profile(
+    *,
+    repository: str = "example/demo-web",
+    repository_id: str = "123",
+    repository_owner_id: str = "456",
+) -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product="demo-web",
+        display_name="Demo Web",
+        repository=repository,
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        driver_id="generic-web",
+        image=ProductImageProfile(),
+        updated_at="2026-08-11T00:00:00Z",
+        source="test",
     )
 
 
@@ -263,6 +287,203 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             {rule.products[0] for rule in retired.desired_policy.github_actions},
             {"other-web"},
         )
+
+    def test_retire_derives_complete_rule_identity_without_profile(self) -> None:
+        target_rules = generic_web_preview_rules(_request())
+
+        authority = resolve_generic_web_preview_retirement_authority(
+            current_target_rules=target_rules,
+            profile=None,
+        )
+
+        self.assertEqual(authority.repository, "example/demo-web")
+        self.assertEqual(authority.evidence.authority_sources, ("current_product_rules",))
+        self.assertEqual(authority.evidence.managed_rule_count, 6)
+        self.assertEqual(len(authority.evidence.repository_identity_sha256), 64)
+        evidence = authority.evidence.model_dump_json()
+        self.assertNotIn('"123"', evidence)
+        self.assertNotIn('"456"', evidence)
+
+    def test_retire_ignores_ingress_identity_but_removes_ingress_rules(self) -> None:
+        request = _request()
+        target_rules = generic_web_preview_rules(request)
+        ingress_rules = generic_web_preview_ingress_operator_rules(
+            current_policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(*target_rules, *_ingress_templates()),
+            ),
+            request=_request(include_ingress_operator=True),
+        )
+        other_rules = generic_web_preview_rules(
+            _request(
+                target_product="other-web",
+                repository="example/other-web",
+                repository_id="789",
+                preview_context="other-web-preview",
+            )
+        )
+        current_policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(*target_rules, *ingress_rules, *other_rules),
+        )
+
+        retired = build_generic_web_preview_authz_reconcile_request(
+            current_policy=current_policy,
+            request=_request(
+                operation="retire", repository="", repository_id="", repository_owner_id=""
+            ),
+        )
+
+        self.assertEqual(len(retired.desired_policy.github_actions), 6)
+        self.assertEqual(
+            {rule.products for rule in retired.desired_policy.github_actions}, {("other-web",)}
+        )
+
+    def test_retire_legacy_name_only_rules_require_matching_complete_profile(self) -> None:
+        target_rules = tuple(
+            GitHubActionsPolicyRule.model_validate(
+                {
+                    **rule.model_dump(mode="json"),
+                    "repository_id": "",
+                    "repository_owner_id": "",
+                }
+            )
+            for rule in generic_web_preview_rules(_request())
+        )
+        with self.assertRaisesRegex(ValueError, "matching product profile with complete"):
+            resolve_generic_web_preview_retirement_authority(
+                current_target_rules=target_rules,
+                profile=None,
+            )
+
+        authority = resolve_generic_web_preview_retirement_authority(
+            current_target_rules=target_rules,
+            profile=_profile(),
+        )
+
+        self.assertEqual(authority.repository_id, "123")
+        self.assertEqual(
+            authority.evidence.authority_sources,
+            ("current_product_rules", "product_profile"),
+        )
+
+    def test_retire_rejects_ambiguous_or_incomplete_rule_identity(self) -> None:
+        target_rules = generic_web_preview_rules(_request())
+        mismatched_rule = GitHubActionsPolicyRule.model_validate(
+            {
+                **target_rules[0].model_dump(mode="json"),
+                "repository": "example/other-web",
+                "repository_id": "789",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "ambiguous repository identities"):
+            resolve_generic_web_preview_retirement_authority(
+                current_target_rules=(*target_rules[1:], mismatched_rule),
+                profile=None,
+            )
+        with self.assertRaisesRegex(ValueError, "after excluding ingress-operator"):
+            resolve_generic_web_preview_retirement_authority(
+                current_target_rules=generic_web_preview_ingress_operator_rules(
+                    current_policy=LaunchplaneAuthzPolicy(
+                        schema_version=2,
+                        github_actions=(*target_rules, *_ingress_templates()),
+                    ),
+                    request=_request(include_ingress_operator=True),
+                ),
+                profile=None,
+            )
+
+    def test_retire_does_not_mistake_a_product_rule_for_ingress_operator_authority(self) -> None:
+        target_rules = generic_web_preview_rules(_request())
+        ingress_trap = GitHubActionsPolicyRule.model_validate(
+            {
+                **target_rules[0].model_dump(mode="json"),
+                "repository": "cbusillo/launchplane",
+                "repository_id": "999",
+                "actions": ["ingress_route.plan"],
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "ambiguous repository identities"):
+            resolve_generic_web_preview_retirement_authority(
+                current_target_rules=(*target_rules[1:], ingress_trap),
+                profile=None,
+            )
+
+    def test_retire_rejects_profile_or_caller_assertion_disagreement(self) -> None:
+        target_rules = generic_web_preview_rules(_request())
+
+        with self.assertRaisesRegex(ValueError, "profile and rule identity disagreement"):
+            resolve_generic_web_preview_retirement_authority(
+                current_target_rules=target_rules,
+                profile=_profile(repository_id="789"),
+            )
+        with self.assertRaisesRegex(ValueError, "assertion does not match authority"):
+            build_generic_web_preview_authz_reconcile_request(
+                current_policy=LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    github_actions=target_rules,
+                ),
+                request=_request(operation="retire", repository="example/other-web"),
+            )
+        with self.assertRaisesRegex(ValueError, "identity assertion does not match authority"):
+            build_generic_web_preview_authz_reconcile_request(
+                current_policy=LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    github_actions=target_rules,
+                ),
+                request=_request(
+                    operation="retire", repository_id="789", repository_owner_id="456"
+                ),
+            )
+
+    def test_retire_rejects_multi_product_current_rule(self) -> None:
+        target_rules = generic_web_preview_rules(_request())
+        multi_product_rule = GitHubActionsPolicyRule.model_validate(
+            {
+                **target_rules[0].model_dump(mode="json"),
+                "products": ["demo-web", "other-web"],
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "exact singleton target product selector"):
+            build_generic_web_preview_authz_reconcile_request(
+                current_policy=LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    github_actions=(*target_rules[1:], multi_product_rule),
+                ),
+                request=_request(operation="retire"),
+            )
+
+    def test_retire_rejects_wildcard_current_rule(self) -> None:
+        target_rules = generic_web_preview_rules(_request())
+        wildcard_rule = GitHubActionsPolicyRule.model_validate(
+            {
+                **target_rules[0].model_dump(mode="json"),
+                "products": ["demo-*"],
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "exact singleton target product selector"):
+            build_generic_web_preview_authz_reconcile_request(
+                current_policy=LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    github_actions=(*target_rules[1:], wildcard_rule),
+                ),
+                request=_request(operation="retire"),
+            )
+
+    def test_retire_request_rejects_partial_assertions_and_ingress_expansion(self) -> None:
+        with self.assertRaisesRegex(ValueError, "require both repository_id"):
+            _request(operation="retire", repository_id="123", repository_owner_id="")
+        with self.assertRaisesRegex(ValueError, "rejects include_ingress_operator=true"):
+            _request(operation="retire", include_ingress_operator=True)
+
+    def test_non_retire_requires_live_repository_identity(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires repository"):
+            _request(operation="onboard", repository="")
+        with self.assertRaisesRegex(ValueError, "requires immutable repository identity"):
+            _request(operation="expand", repository_id="", repository_owner_id="")
 
 
 if __name__ == "__main__":

@@ -88,6 +88,14 @@ ingress workflow identity from the active policy and fails closed when no single
 template exists; operators do not hand-author authz JSON or edit a per-product
 policy secret.
 
+When retiring a product after its repository has been archived or its onboarding
+GitHub App installation is gone, use `Generic Web Preview Authorization` with
+`operation=retire`. Repository input is optional assertion-only for retirement;
+Launchplane resolves immutable authority from the active product preview rules
+and cross-checks the product profile when available. Retirement cannot include
+the ingress operator and removes all target-product preview rules, including
+scoped ingress rules, without querying GitHub.
+
 The conventional product-repo caller files are
 `.github/workflows/launchplane-preview.yml` for pull-request refresh,
 verification, and feedback, and

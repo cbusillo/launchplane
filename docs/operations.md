@@ -399,6 +399,13 @@ Current implementation scope:
 - `POST /v1/drivers/odoo/prod-promotion`
 - `POST /v1/drivers/odoo/prod-rollback`
 
+`Generic Web Preview Authorization` preserves live GitHub App metadata lookup
+for onboarding and rule rotation. Retirement is different: it can remove a
+product's preview authorization after archival or GitHub App offboarding without
+minting a product-repository token or calling the GitHub API. The service derives
+and verifies the retired repository authority from active Launchplane records;
+the caller's optional repository fields only assert that derived identity.
+
 Privileged product rollback routes should stay behind narrow delegated-worker
 contracts rather than being absorbed into the main API host. Product-private
 runtime memos belong in product repos; this repo keeps only the shared driver
