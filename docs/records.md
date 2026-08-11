@@ -286,7 +286,7 @@ holds the equivalent cross-process lock while it checks replay, validates the
 transition, allocates sequence, and atomically replaces the new event file.
 
 Migration `f3a5c7e9b1d4` creates the empty event table. Migration
-`c6e8f1b3d5a7` backfills existing rows in their prior deterministic
+`b5d7f9a1c3e6` backfills existing rows in their prior deterministic
 `(occurred_at, event_id)` order, creates the counter and uniqueness fence, and
 does not change semantic payload identity. Sequence metadata is excluded from
 event IDs, binding digests, and replay digests. Optional preview and structured
@@ -2440,6 +2440,7 @@ preflights.
   Launchplane becomes the runtime executor for that product. Local
   `inventory write-from-deployment` and `inventory write-from-promotion` remain
   file-backed rehearsal helpers only.
+
 ## Product retirement records
 
 Product retirement evidence is stored append-only under
@@ -2456,8 +2457,11 @@ internal record evidence. Service and workflow responses expose only SHA-256
 identifiers, counts, phases, and record references. Runtime deletion uses the
 existing append-only runtime-environment delete-event contract. Managed secret
 records and versions are preserved; the retirement record captures the exact
-secret record references and digests reviewed by the plan.
+secret record references and digests reviewed by the plan, then records the
+disabled secret records, bindings, and audit events produced by apply.
 
 Product profiles include `lifecycle_state` with backward-compatible default
-`active`. `retiring` and `retired` profiles remain directly readable as audit
-authority but are omitted from normal profile listing and active automation.
+`active`. Migration `c6e8f1b3d5a7` creates the retirement ledger after the
+owner-acceptance sequence migration. `retiring` and `retired` profiles remain
+directly readable and appear in complete profile listings as audit authority;
+active discovery and automation filter them explicitly.
