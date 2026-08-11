@@ -1,0 +1,197 @@
+---
+name: Reusable Product Retirement
+
+"on":
+  workflow_call:
+    inputs:
+      mode:
+        description: Persist a reviewed plan or apply that exact persisted plan.
+        required: true
+        type: string
+      product:
+        description: Exact generic-web product profile key.
+        required: true
+        type: string
+      instance:
+        description: Exact profile-owned stable instance; context is derived by Launchplane.
+        required: true
+        type: string
+      expected_target_sha256:
+        description: SHA-256 of the exact tracked provider target identifier.
+        required: true
+        type: string
+      operator_idempotency_key:
+        description: Stable operator-selected key reused for retries of this retirement intent.
+        required: true
+        type: string
+      reason:
+        description: Required single-line operator reason bound into plan continuity.
+        required: true
+        type: string
+      related_issue:
+        description: Required issue or change reference bound into plan continuity.
+        required: true
+        type: string
+      reviewed_plan_record_id:
+        description: Persisted plan record id returned by the reviewed plan; required for apply.
+        required: false
+        default: ""
+        type: string
+      reviewed_plan_sha256:
+        description: Plan SHA-256 returned by the reviewed plan; required for apply.
+        required: false
+        default: ""
+        type: string
+      confirmation:
+        description: >-
+          Exact apply phrase: retire product PRODUCT instance INSTANCE target TARGET_SHA256
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: >-
+    launchplane-product-retirement-${{ inputs.product }}-${{ inputs.instance }}
+  cancel-in-progress: false
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    environment: launchplane-authz-admin
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      MODE: ${{ inputs.mode }}
+      PRODUCT: ${{ inputs.product }}
+      INSTANCE: ${{ inputs.instance }}
+      EXPECTED_TARGET_SHA256: ${{ inputs.expected_target_sha256 }}
+      OPERATOR_IDEMPOTENCY_KEY: ${{ inputs.operator_idempotency_key }}
+      REASON: ${{ inputs.reason }}
+      RELATED_ISSUE: ${{ inputs.related_issue }}
+      REVIEWED_PLAN_RECORD_ID: ${{ inputs.reviewed_plan_record_id }}
+      REVIEWED_PLAN_SHA256: ${{ inputs.reviewed_plan_sha256 }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - name: Validate exact retirement intent
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
+          : "${PRODUCT:?Missing product input}"
+          : "${INSTANCE:?Missing instance input}"
+          : "${EXPECTED_TARGET_SHA256:?Missing expected_target_sha256 input}"
+          : "${OPERATOR_IDEMPOTENCY_KEY:?Missing operator_idempotency_key input}"
+          : "${REASON:?Missing reason input}"
+          : "${RELATED_ISSUE:?Missing related_issue input}"
+          if ! [[ "$EXPECTED_TARGET_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "expected_target_sha256 must be lowercase SHA-256." >&2
+            exit 1
+          fi
+          if [[ "$REASON" == *$'\n'* || "$RELATED_ISSUE" == *$'\n'* ]]; then
+            echo "reason and related_issue must be single-line values." >&2
+            exit 1
+          fi
+          if [ "$MODE" = "apply" ]; then
+            : "${REVIEWED_PLAN_RECORD_ID:?Apply requires reviewed_plan_record_id}"
+            : "${REVIEWED_PLAN_SHA256:?Apply requires reviewed_plan_sha256}"
+            expected_confirmation="retire product ${PRODUCT} instance ${INSTANCE} target ${EXPECTED_TARGET_SHA256}"
+            if [ "$CONFIRMATION" != "$expected_confirmation" ]; then
+              echo "Apply confirmation does not exactly bind product, instance, and target digest." >&2
+              exit 1
+            fi
+          elif [ -n "$REVIEWED_PLAN_RECORD_ID$REVIEWED_PLAN_SHA256$CONFIRMATION" ]; then
+            echo "Plan mode rejects apply-only review and confirmation inputs." >&2
+            exit 1
+          fi
+
+      - name: Build retirement request
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg mode "$MODE" \
+            --arg product "$PRODUCT" \
+            --arg instance "$INSTANCE" \
+            --arg target_sha256 "$EXPECTED_TARGET_SHA256" \
+            --arg reason "$REASON" \
+            --arg related_issue "$RELATED_ISSUE" \
+            --arg reviewed_plan_record_id "$REVIEWED_PLAN_RECORD_ID" \
+            --arg reviewed_plan_sha256 "$REVIEWED_PLAN_SHA256" \
+            --arg confirmation "$CONFIRMATION" \
+            '{
+              mode: $mode,
+              product: $product,
+              instance: $instance,
+              expected_target_sha256: $target_sha256,
+              reason: $reason,
+              related_issue: $related_issue,
+              reviewed_plan_record_id: $reviewed_plan_record_id,
+              reviewed_plan_sha256: $reviewed_plan_sha256,
+              confirmation: $confirmation
+            }' > product-retirement-request.json
+
+      - name: Request audited product retirement
+        id: request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@3f063c09bab63836d2b1c880ecb995786f045893 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          route-path: /v1/product-retirement
+          payload-file: product-retirement-request.json
+          idempotency-key: ${{ env.OPERATOR_IDEMPOTENCY_KEY }}
+          response-output-file: product-retirement-response.json
+
+      - name: Verify redacted retirement evidence
+        shell: bash
+        env:
+          STATUS_CODE: ${{ steps.request.outputs.status-code }}
+        run: |
+          set -euo pipefail
+          if [ "$STATUS_CODE" != "202" ]; then
+            jq '{trace_id, error}' product-retirement-response.json >&2
+            exit 1
+          fi
+          test "$(jq -r '.result.mode' product-retirement-response.json)" = "$MODE"
+          test "$(jq -r '.result.product' product-retirement-response.json)" = "$PRODUCT"
+          test "$(jq -r '.result.instance' product-retirement-response.json)" = "$INSTANCE"
+          test "$(jq -r '.result.target_id_sha256' product-retirement-response.json)" = "$EXPECTED_TARGET_SHA256"
+          if jq -e '.. | objects | has("target_id") or has("domain_ids") or has("provider_operation_key")' product-retirement-response.json >/dev/null; then
+            echo "Retirement response exposed an internal provider identifier." >&2
+            exit 1
+          fi
+          if [ "$MODE" = "plan" ]; then
+            test "$(jq -r '.result.outcome' product-retirement-response.json)" = "planned"
+          else
+            outcome="$(jq -r '.result.outcome' product-retirement-response.json)"
+            case "$outcome" in
+              retired|already_absent) ;;
+              *) echo "Apply did not reach a terminal retired outcome: $outcome" >&2; exit 1 ;;
+            esac
+          fi
+
+      - name: Upload redacted retirement evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: product-retirement-${{ inputs.product }}-${{ inputs.instance }}-${{ inputs.mode }}
+          path: product-retirement-response.json
+          if-no-files-found: error
+
+      - name: Summarize review evidence
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Product Retirement'
+            echo
+            echo "- Mode: ${MODE}"
+            echo "- Product: ${PRODUCT}"
+            echo "- Instance: ${INSTANCE}"
+            echo "- Target SHA-256: ${EXPECTED_TARGET_SHA256}"
+            echo "- Plan record: $(jq -r '.records.product_retirement_plan_id' product-retirement-response.json)"
+            echo "- Plan SHA-256: $(jq -r '.result.plan_sha256' product-retirement-response.json)"
+            echo "- Outcome: $(jq -r '.result.outcome' product-retirement-response.json)"
+          } >> "$GITHUB_STEP_SUMMARY"
