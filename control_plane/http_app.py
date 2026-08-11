@@ -3130,9 +3130,8 @@ def detached_application_retirement_identity(
         identity_kind=type(identity).__name__,
         subject=str(getattr(identity, "subject", "") or ""),
         repository=str(getattr(identity, "repository", "") or ""),
-        workflow_ref=str(
-            getattr(identity, "job_workflow_ref", "") or getattr(identity, "workflow_ref", "") or ""
-        ),
+        workflow_ref=str(getattr(identity, "workflow_ref", "") or ""),
+        job_workflow_ref=str(getattr(identity, "job_workflow_ref", "") or ""),
         environment=str(getattr(identity, "environment", "") or ""),
     )
 
@@ -3143,7 +3142,8 @@ def detached_application_retirement_identity_allowed(identity: LaunchplaneIdenti
     if not isinstance(identity, GitHubActionsIdentity):
         return False
     return (
-        re.fullmatch(
+        identity.repository == "cbusillo/launchplane"
+        and re.fullmatch(
             r"cbusillo/launchplane/\.github/workflows/"
             r"reusable-detached-application-retirement\.yml@[0-9a-f]{40}",
             identity.job_workflow_ref.strip(),
@@ -16737,11 +16737,14 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         except (ValueError, click.ClickException) as error:
+            safe_message = control_plane_detached_application_retirement.redacted_detached_application_retirement_error(
+                error
+            )
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="detached_application_retirement_blocked",
-                message=str(error),
+                message=safe_message,
             ) from error
         actor_identity = detached_application_retirement_identity(identity)
         requested_at = utc_now_timestamp()
@@ -16812,11 +16815,14 @@ def create_launchplane_fastapi_app(
                 ValueError,
                 click.ClickException,
             ) as error:
+                safe_message = control_plane_detached_application_retirement.redacted_detached_application_retirement_error(
+                    error
+                )
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
                     code="detached_application_retirement_blocked",
-                    message=str(error),
+                    message=safe_message,
                 ) from error
             return AcceptedEvidenceResponse.model_validate(
                 control_plane_detached_application_retirement.redacted_detached_application_retirement_response(
@@ -16893,25 +16899,28 @@ def create_launchplane_fastapi_app(
             retirement_store.write_detached_application_retirement_record(terminal)
             raise
         except (ValueError, click.ClickException) as error:
+            safe_message = control_plane_detached_application_retirement.redacted_detached_application_retirement_error(
+                error
+            )
             if not adapter.started:
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
                     code="detached_application_retirement_blocked",
-                    message=str(error),
+                    message=safe_message,
                 ) from error
             terminal = adapter.terminal_record(
                 outcome="failed",
                 provider_operation_key=provider_operation_key,
                 error_code="detached_application_retirement_blocked",
-                error_message=str(error),
+                error_message=safe_message,
             )
             retirement_store.write_detached_application_retirement_record(terminal)
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="detached_application_retirement_blocked",
-                message=str(error),
+                message=safe_message,
             ) from error
 
     async def remediate_preview_pr_feedback(

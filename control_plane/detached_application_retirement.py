@@ -187,6 +187,67 @@ class DetachedApplicationRetirementStore(Protocol):
 
     def list_product_profile_records(self, *, driver_id: str = "") -> tuple[object, ...]: ...
 
+    def list_product_retirement_records(
+        self,
+        *,
+        product: str = "",
+        actor: str = "",
+        mode: str = "",
+        idempotency_key: str = "",
+        limit: int | None = None,
+    ) -> tuple[object, ...]: ...
+
+    def list_odoo_stable_target_replacement_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        idempotency_scope: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[object, ...]: ...
+
+    def list_runtime_environment_delete_events(
+        self,
+        *,
+        scope: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+    ) -> tuple[object, ...]: ...
+
+    def list_odoo_stable_bootstrap_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[object, ...]: ...
+
+    def list_verireel_prod_backup_gate_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        backup_record_id: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[object, ...]: ...
+
+    def list_promotion_records(
+        self,
+        *,
+        context_name: str = "",
+        from_instance_name: str = "",
+        to_instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[object, ...]: ...
+
 
 @dataclass(frozen=True)
 class _DiscoveredApplication:
@@ -231,7 +292,12 @@ _AUTHORITY_SOURCES: tuple[
     ("dokploy_target_id", lambda store: store.list_dokploy_target_id_records()),
     ("edge_endpoint", lambda store: store.list_edge_endpoint_records()),
     ("environment_inventory", lambda store: store.list_environment_inventory()),
+    (
+        "odoo_stable_bootstrap",
+        lambda store: store.list_odoo_stable_bootstrap_operation_records(),
+    ),
     ("product_profile", lambda store: store.list_product_profile_records()),
+    ("product_retirement", lambda store: store.list_product_retirement_records()),
     ("provider_target", lambda store: store.list_provider_target_records()),
     ("preview", lambda store: store.list_preview_records()),
     ("preview_desired_state", lambda store: store.list_preview_desired_state_records()),
@@ -240,10 +306,23 @@ _AUTHORITY_SOURCES: tuple[
     ("preview_inventory", lambda store: store.list_preview_inventory_scan_records()),
     ("preview_lifecycle_cleanup", lambda store: store.list_preview_lifecycle_cleanup_records()),
     ("preview_lifecycle_plan", lambda store: store.list_preview_lifecycle_plan_records()),
+    ("promotion", lambda store: store.list_promotion_records()),
     ("route_binding", lambda store: store.list_route_binding_records()),
     ("runtime_environment", lambda store: store.list_runtime_environment_records()),
+    (
+        "runtime_environment_delete",
+        lambda store: store.list_runtime_environment_delete_events(),
+    ),
+    (
+        "stable_target_replacement",
+        lambda store: store.list_odoo_stable_target_replacement_operation_records(),
+    ),
     ("secret", lambda store: store.list_secret_records()),
     ("secret_binding", lambda store: store.list_secret_bindings()),
+    (
+        "verireel_prod_backup_gate",
+        lambda store: store.list_verireel_prod_backup_gate_operation_records(),
+    ),
 )
 
 
@@ -563,7 +642,7 @@ class DokployDetachedApplicationRetirementAdapter:
         provider_effect_phase: str,
         reconciliation_key: str,
     ) -> ProviderObservation:
-        del provider_operation_key, provider_effect_phase, reconciliation_key
+        del reconciliation_key
         try:
             discovery, proof = self._rediscover()
         except (click.ClickException, OSError, TimeoutError, ValueError):
@@ -571,6 +650,21 @@ class DokployDetachedApplicationRetirementAdapter:
         if not self._protected_and_authority_unchanged(discovery=discovery, proof=proof):
             return ProviderObservation(outcome="unknown")
         if discovery.candidate.state == "absent":
+            if provider_effect_phase == "delete_application":
+                self._phases = [provider_effect_phase]
+                self._provider_effect_attempted = True
+                self._provider_effect_performed = True
+                terminal = self._write_terminal_record(
+                    outcome="retired",
+                    provider_operation_key=provider_operation_key,
+                    provider_absence_verified=True,
+                    protected_targets_unchanged=True,
+                )
+                return ProviderObservation(
+                    outcome="present",
+                    response_status_code=202,
+                    response_payload=redacted_detached_application_retirement_response(terminal),
+                )
             return ProviderObservation(outcome="absent", retry_safe=True)
         if _same_candidate_evidence(
             planned=self._plan.candidate_observation,
@@ -716,7 +810,10 @@ class DokployDetachedApplicationRetirementAdapter:
     ) -> bool:
         return (
             discovery.protected_targets == self._plan.protected_targets
-            and proof == self._plan.authority_absence_proof
+            and _authority_absence_proof_allows_reconciliation(
+                planned=self._plan.authority_absence_proof,
+                current=proof,
+            )
         )
 
     def _checkpoint(self, lease: ProviderOperationLease, phase: str) -> None:
@@ -1177,7 +1274,7 @@ def _payload_references_candidate(
     if not isinstance(payload, str):
         return False
     normalized_value = payload.strip()
-    if normalized_value == candidate_target_id:
+    if candidate_target_id in normalized_value:
         return True
     normalized_key = re.sub(r"[^a-z0-9]+", "_", key.strip().lower()).strip("_")
     return (
@@ -1194,6 +1291,20 @@ def _same_candidate_evidence(
     if current.state != "present" or not current.safe_to_retire:
         return False
     return planned.model_copy(update={"observed_at": current.observed_at}) == current
+
+
+def _authority_absence_proof_allows_reconciliation(
+    *,
+    planned: DetachedApplicationAuthorityAbsenceProof,
+    current: DetachedApplicationAuthorityAbsenceProof,
+) -> bool:
+    return (
+        current.match_count == 0
+        and current.candidate_target_sha256 == planned.candidate_target_sha256
+        and current.candidate_application_name_sha256 == planned.candidate_application_name_sha256
+        and tuple(source.source for source in current.sources)
+        == tuple(source.source for source in planned.sources)
+    )
 
 
 def _required_identifier(
@@ -1266,3 +1377,14 @@ def _redacted_error_message(value: str) -> str:
     if not normalized:
         return ""
     return normalized[:MAX_DETACHED_APPLICATION_RETIREMENT_ERROR_MESSAGE_LENGTH]
+
+
+def redacted_detached_application_retirement_error(error: BaseException) -> str:
+    if isinstance(error, dokploy_api.DokployRequestFailed):
+        status = f" ({error.status_code})" if error.status_code is not None else ""
+        return _redacted_error_message(
+            f"Dokploy API {error.method.strip().upper()} request failed{status}."
+        )
+    if isinstance(error, DetachedApplicationRetirementBlockedError):
+        return _redacted_error_message(str(error))
+    return "Detached application retirement provider request failed."

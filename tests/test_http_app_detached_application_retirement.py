@@ -7,7 +7,11 @@ from unittest.mock import patch
 from fastapi import FastAPI
 
 from control_plane.contracts.product_retirement import provider_identifier_sha256
-from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.http_app import (
+    create_launchplane_fastapi_app,
+    detached_application_retirement_identity,
+    detached_application_retirement_identity_allowed,
+)
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
@@ -136,6 +140,37 @@ class DetachedApplicationRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         schema = response.json()["components"]["schemas"]["DetachedApplicationRetirementRequest"]
         self.assertNotIn("target_id", schema["properties"])
         self.assertIn("candidate_target_sha256", schema["properties"])
+
+    def test_github_identity_requires_exact_repository_and_preserves_provenance(self) -> None:
+        worker = (
+            "cbusillo/launchplane/.github/workflows/"
+            f"reusable-detached-application-retirement.yml@{'a' * 40}"
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/caller.yml@refs/heads/task",
+            job_workflow_ref=worker,
+        )
+        self.assertTrue(detached_application_retirement_identity_allowed(identity))
+        durable = detached_application_retirement_identity(identity)
+        self.assertEqual(durable.workflow_ref, identity.workflow_ref)
+        self.assertEqual(durable.job_workflow_ref, worker)
+        self.assertFalse(
+            detached_application_retirement_identity_allowed(
+                _identity(repository="fork/launchplane", job_workflow_ref=worker)
+            )
+        )
+        self.assertFalse(
+            detached_application_retirement_identity_allowed(
+                _identity(
+                    repository="cbusillo/launchplane",
+                    job_workflow_ref=(
+                        "cbusillo/launchplane/.github/workflows/"
+                        "reusable-detached-application-retirement.yml@refs/heads/main"
+                    ),
+                )
+            )
+        )
 
 
 if __name__ == "__main__":

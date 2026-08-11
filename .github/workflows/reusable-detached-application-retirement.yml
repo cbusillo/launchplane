@@ -89,6 +89,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ "${{ github.repository }}" != "cbusillo/launchplane" ]; then
+            echo "Caller repository must be cbusillo/launchplane." >&2
+            exit 1
+          fi
           : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
           : "${PROJECT_NAME:?Missing project_name input}"
           : "${ENVIRONMENT_NAME:?Missing environment_name input}"

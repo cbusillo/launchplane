@@ -40,6 +40,7 @@ class DetachedApplicationRetirementWorkflowTests(unittest.TestCase):
         self.assertIn("protected targets must be sorted unique", validate.run)
         self.assertIn("candidate target cannot be protected", validate.run)
         self.assertIn("retire detached Dokploy application", validate.run)
+        self.assertIn("Caller repository must be cbusillo/launchplane", validate.run)
 
         request = self.workflow.step_named(
             "retire", "Request audited detached application retirement"

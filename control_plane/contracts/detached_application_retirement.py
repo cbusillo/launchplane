@@ -116,6 +116,7 @@ class DetachedApplicationRetirementIdentity(BaseModel):
     subject: str = ""
     repository: str = ""
     workflow_ref: str = ""
+    job_workflow_ref: str = ""
     environment: str = ""
 
     @model_validator(mode="after")
@@ -126,6 +127,7 @@ class DetachedApplicationRetirementIdentity(BaseModel):
             "subject",
             "repository",
             "workflow_ref",
+            "job_workflow_ref",
             "environment",
         ):
             setattr(self, field_name, str(getattr(self, field_name)).strip())

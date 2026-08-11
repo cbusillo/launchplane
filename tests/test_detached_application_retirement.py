@@ -24,6 +24,7 @@ from control_plane.detached_application_retirement import (
     build_detached_application_retirement_plan_record,
     discover_detached_application,
     prove_detached_application_authority_absence,
+    redacted_detached_application_retirement_error,
     redacted_detached_application_retirement_response,
 )
 from control_plane.dokploy import api as dokploy_api
@@ -66,6 +67,14 @@ class _Store:
                 source = "secret_binding"
             if source == "preview_inventory_scan":
                 source = "preview_inventory"
+            if source == "runtime_environment_delete_events":
+                source = "runtime_environment_delete"
+            if source == "odoo_stable_target_replacement_operation":
+                source = "stable_target_replacement"
+            if source == "odoo_stable_bootstrap_operation":
+                source = "odoo_stable_bootstrap"
+            if source == "verireel_prod_backup_gate_operation":
+                source = "verireel_prod_backup_gate"
             return lambda **_kwargs: self.sources.get(source, ())
         raise AttributeError(name)
 
@@ -554,6 +563,130 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
         ):
             with self.assertRaises(ProviderMutationUnknownError):
                 adapter.apply("operation", _Lease())
+
+    def test_reconciliation_adopts_verified_absence_after_delete_checkpoint(self) -> None:
+        store = _Store()
+        plan = _plan()
+        request = _request(
+            mode="apply",
+            reviewed_plan_record_id=plan.record_id,
+            reviewed_plan_sha256=plan.plan_sha256,
+            confirmation=_request().expected_confirmation,
+        )
+        absent = DetachedApplicationDiscovery(
+            candidate=plan.candidate_observation.model_copy(
+                update={"state": "absent", "safe_to_retire": False}
+            ),
+            protected_targets=plan.protected_targets,
+        )
+        adapter = DokployDetachedApplicationRetirementAdapter(
+            control_plane_root=Path("."),
+            record_store=cast(DetachedApplicationRetirementStore, store),
+            request=request,
+            plan=plan,
+            identity=DetachedApplicationRetirementIdentity(actor="test", identity_kind="test"),
+            trace_id="reconcile-trace",
+            idempotency_key="reconcile-key",
+            requested_at=NOW,
+        )
+        with (
+            patch(
+                "control_plane.detached_application_retirement.discover_detached_application",
+                return_value=absent,
+            ),
+            patch(
+                "control_plane.detached_application_retirement.prove_detached_application_authority_absence",
+                return_value=plan.authority_absence_proof,
+            ),
+        ):
+            observation = adapter.observe(
+                "provider-operation", "delete_application", adapter.reconciliation_key()
+            )
+        self.assertEqual(observation.outcome, "present")
+        self.assertEqual(observation.response_payload["result"]["outcome"], "retired")
+        terminal = next(iter(store.records.values()))
+        self.assertTrue(terminal.mutation_evidence.provider_effect_attempted)
+        self.assertTrue(terminal.mutation_evidence.provider_effect_performed)
+        self.assertEqual(terminal.mutation_evidence.provider_effect_phases, ("delete_application",))
+
+    def test_reconciliation_retries_present_candidate_and_tolerates_unrelated_authority_churn(
+        self,
+    ) -> None:
+        plan = _plan()
+        request = _request(
+            mode="apply",
+            reviewed_plan_record_id=plan.record_id,
+            reviewed_plan_sha256=plan.plan_sha256,
+            confirmation=_request().expected_confirmation,
+        )
+        changed_proof = plan.authority_absence_proof.model_copy(
+            update={
+                "record_count": plan.authority_absence_proof.record_count + 1,
+                "sources": tuple(
+                    source.model_copy(update={"record_count": source.record_count + 1})
+                    for source in plan.authority_absence_proof.sources
+                ),
+            }
+        )
+        adapter = DokployDetachedApplicationRetirementAdapter(
+            control_plane_root=Path("."),
+            record_store=cast(DetachedApplicationRetirementStore, _Store()),
+            request=request,
+            plan=plan,
+            identity=DetachedApplicationRetirementIdentity(actor="test", identity_kind="test"),
+            trace_id="retry-trace",
+            idempotency_key="retry-key",
+            requested_at=NOW,
+        )
+        with (
+            patch(
+                "control_plane.detached_application_retirement.discover_detached_application",
+                return_value=_discovery(),
+            ),
+            patch(
+                "control_plane.detached_application_retirement.prove_detached_application_authority_absence",
+                return_value=changed_proof,
+            ),
+        ):
+            observation = adapter.observe(
+                "provider-operation", "delete_application", adapter.reconciliation_key()
+            )
+        self.assertEqual(observation.outcome, "absent")
+        self.assertTrue(observation.retry_safe)
+
+    def test_provider_error_redaction_excludes_raw_identifiers_and_detail(self) -> None:
+        raw_identifier = "provider-secret-identifier"
+        error = dokploy_api.DokployRequestFailed(
+            method="POST",
+            path=f"/api/application.delete?applicationId={raw_identifier}",
+            detail=f"failed for {raw_identifier}",
+            status_code=500,
+        )
+        message = redacted_detached_application_retirement_error(error)
+        self.assertNotIn(raw_identifier, message)
+        self.assertNotIn("applicationId", message)
+        self.assertEqual(message, "Dokploy API POST request failed (500).")
+
+    def test_authority_absence_detects_embedded_target_id_but_not_embedded_name(self) -> None:
+        store = _Store()
+        store.sources["product_retirement"] = (
+            {"evidence": f"provider target was {CANDIDATE_ID} during retirement"},
+        )
+        with self.assertRaisesRegex(
+            DetachedApplicationRetirementBlockedError, "product_retirement"
+        ):
+            prove_detached_application_authority_absence(
+                record_store=cast(DetachedApplicationRetirementStore, store),
+                candidate_target_id=CANDIDATE_ID,
+                candidate_application_name="detached-application",
+            )
+        store.sources["product_retirement"] = ({"note": "prefix-detached-application-suffix"},)
+        proof = prove_detached_application_authority_absence(
+            record_store=cast(DetachedApplicationRetirementStore, store),
+            candidate_target_id=CANDIDATE_ID,
+            candidate_application_name="detached-application",
+        )
+        self.assertEqual(proof.match_count, 0)
 
     def test_filesystem_and_postgres_append_only_parity(self) -> None:
         plan = _plan()
