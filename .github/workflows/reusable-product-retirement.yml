@@ -94,6 +94,10 @@ jobs:
             echo "reason and related_issue must be single-line values." >&2
             exit 1
           fi
+          case "$MODE" in
+            plan|apply) ;;
+            *) echo "mode must be plan or apply." >&2; exit 1 ;;
+          esac
           if [ "$MODE" = "apply" ]; then
             : "${REVIEWED_PLAN_RECORD_ID:?Apply requires reviewed_plan_record_id}"
             : "${REVIEWED_PLAN_SHA256:?Apply requires reviewed_plan_sha256}"

@@ -557,12 +557,13 @@ workers resolve the Launchplane service URL and OIDC audience only from protecte
 repository configuration, not caller inputs. Land and validate worker behavior
 first, then advance the wrapper pin, reconcile the exact managed rule, and run
 the bounded action. Both workers retain attempt-scoped redacted evidence for 30
-days. `Product Retirement` uses the same worker-first sequence: land `Reusable
-Product Retirement` without changing the protected dispatch wrapper, then pin the
-wrapper to its merged full SHA in a separate change before authorizing or using
-that immutable worker for an operator action.
 days; the website-bootstrap worker never uploads the literal bootstrap payload
 and fails unless the service confirms that typed bootstrap intent was persisted.
+
+`Product Retirement` uses the same worker-first sequence: land `Reusable
+Product Retirement` without changing the protected dispatch wrapper, then pin
+the wrapper to its merged full SHA in a separate change before authorizing or
+using that immutable worker for an operator action.
 
 `Ingress Route Dry Run` and `Ingress Route Apply` accept an optional exact
 instance. When present, the service authorizes `ingress_route.plan` or

@@ -144,6 +144,8 @@ class ProductRetirementOperatorWorkflowTests(unittest.TestCase):
         )
         self.assertIsNotNone(validation)
         assert validation is not None
+        self.assertIn('case "$MODE" in', validation.run)
+        self.assertIn('plan|apply)', validation.run)
         self.assertIn("exactly bind product, instance, and target digest", validation.run)
 
         evidence = self.reusable_workflow.step_named(
