@@ -424,6 +424,25 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
             _request().expected_protected_target_sha256,
         )
 
+    def test_discovery_uses_candidate_payload_to_disambiguate_duplicate_project_names(self) -> None:
+        duplicate_projects = (
+            *_projects(),
+            {
+                "projectId": "project-2",
+                "name": "example-project",
+                "environments": [
+                    {
+                        "environmentId": "environment-other",
+                        "name": "production",
+                        "applications": [],
+                    }
+                ],
+            },
+        )
+        discovery = self._discover(projects=duplicate_projects)
+        self.assertEqual(discovery.candidate.application_id, CANDIDATE_ID)
+        self.assertEqual(discovery.candidate.project_id, "project-1")
+
     def test_service_search_reconciliation_proves_reviewed_target_absent(self) -> None:
         discovery = self._discover(projects=(), absent=True)
         self.assertEqual(discovery.candidate.state, "absent")
