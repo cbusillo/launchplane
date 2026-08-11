@@ -256,6 +256,7 @@ def _store(
     shared_dependency_evidence: bool | list[bool] = False,
     include_second_product_authority: bool | None = None,
     invalid_product_profile: bool = False,
+    include_product_profile: bool = True,
     product_profile_read_limit: int | None = None,
 ) -> FilesystemRecordStore:
     class _OwnerAcceptanceStore(FilesystemRecordStore):
@@ -323,16 +324,28 @@ def _store(
     ):
         store.write_product_owner_policy_record(_owner_policy(product=SECOND_PRODUCT))
         store.write_product_owner_requirement_record(_owner_requirement(product=SECOND_PRODUCT))
+    if include_product_profile:
+        store.write_product_profile_record(_preview_profile(enabled=False))
+        if (
+            bool(shared_dependency_evidence)
+            if include_second_product_authority is None
+            else include_second_product_authority
+        ):
+            store.write_product_profile_record(
+                _preview_profile(product=SECOND_PRODUCT, enabled=False)
+            )
     return store
 
 
 def _preview_profile(
     *,
+    product: str = PRODUCT,
+    enabled: bool = True,
     data_transport_mode: str = "none",
 ) -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
-        product=PRODUCT,
-        display_name="Generic Web A",
+        product=product,
+        display_name=product.replace("-", " ").title(),
         repository=REPOSITORY,
         driver_id="generic-web",
         image=ProductImageProfile(repository="ghcr.io/example/web"),
@@ -347,7 +360,7 @@ def _preview_profile(
             ),
         ),
         preview=ProductPreviewProfile(
-            enabled=True,
+            enabled=enabled,
             context=PREVIEW_CONTEXT,
             slug_template="pr-{number}",
             app_name_prefix="generic-web-a-preview",

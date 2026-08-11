@@ -2,7 +2,7 @@
 
 Revision ID: b2d4f6a8c0e2
 Revises: b5d7f9a1c3e6
-Create Date: 2026-08-10 00:00:00.000000+00:00
+Create Date: 2026-08-11 00:00:00.000000+00:00
 """
 
 from __future__ import annotations
@@ -103,6 +103,11 @@ def _backfill_owner_policy_defaults() -> None:
     if not _table_exists(_POLICY_TABLE):
         return
     connection = op.get_bind()
+    policies = sa.table(
+        _POLICY_TABLE,
+        sa.column("record_id", sa.String()),
+        sa.column("payload", sa.JSON()),
+    )
     rows = connection.execute(sa.text(f"SELECT record_id, payload FROM {_POLICY_TABLE}")).fetchall()
     for record_id, payload in rows:
         decoded = json.loads(payload) if isinstance(payload, str) else payload
@@ -121,13 +126,9 @@ def _backfill_owner_policy_defaults() -> None:
         if not changed:
             continue
         connection.execute(
-            sa.text(f"UPDATE {_POLICY_TABLE} SET payload = :payload WHERE record_id = :record_id"),
-            {
-                "payload": (
-                    json.dumps(updated, sort_keys=True) if isinstance(payload, str) else updated
-                ),
-                "record_id": record_id,
-            },
+            sa.update(policies)
+            .where(policies.c.record_id == str(record_id))
+            .values(payload=updated)
         )
 
 

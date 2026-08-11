@@ -1242,6 +1242,66 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertEqual(migrated_revision, EXPECTED_ALEMBIC_HEAD_REVISION)
         self.assertEqual(observed_revision, EXPECTED_ALEMBIC_HEAD_REVISION)
 
+    def test_owner_review_policy_defaults_backfill_on_postgres(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            alembic_command.upgrade(_alembic_config(database_url), "b5d7f9a1c3e6")
+            engine = create_engine(database_url)
+            legacy_payload = {
+                "schema_version": 1,
+                "product": "example-site",
+                "system": "web",
+                "policy_revision": 1,
+                "owners": [],
+                "quorum": 1,
+                "status": "active",
+                "effective_at": "2026-08-07T00:00:00Z",
+                "source": "test",
+                "reason": "Legacy Owner policy.",
+            }
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO launchplane_product_owner_policies (
+                            record_id, product, system, status, policy_revision, quorum,
+                            effective_at, source, supersedes_record_id, policy_digest, payload
+                        ) VALUES (
+                            'owner-policy-legacy', 'example-site', 'web', 'active', 1, 1,
+                            '2026-08-07T00:00:00Z', 'test', NULL, :policy_digest,
+                            CAST(:payload AS JSONB)
+                        )
+                        """
+                    ),
+                    {
+                        "policy_digest": "a" * 64,
+                        "payload": json.dumps(legacy_payload, sort_keys=True),
+                    },
+                )
+            engine.dispose()
+
+            migrate_schema(database_url=database_url)
+            engine = create_engine(database_url)
+            try:
+                with engine.connect() as connection:
+                    payload, policy_digest = connection.execute(
+                        text(
+                            "SELECT payload, policy_digest "
+                            "FROM launchplane_product_owner_policies "
+                            "WHERE record_id = 'owner-policy-legacy'"
+                        )
+                    ).one()
+            finally:
+                engine.dispose()
+
+        self.assertEqual(payload["review_age"]["routine_max_age_seconds"], 2592000)
+        self.assertEqual(payload["review_age"]["elevated_max_age_seconds"], 604800)
+        self.assertIs(payload["self_review"]["routine_exception_enabled"], False)
+        self.assertEqual(
+            payload["preview_trust"]["minimum_isolation_class"],
+            "synthetic_seeded",
+        )
+        self.assertEqual(policy_digest, "a" * 64)
+
     def test_f4_accepts_previous_writer_shape(self) -> None:
         with _isolated_postgres_database() as database_url:
             _upgrade_empty_database_to_head(database_url)

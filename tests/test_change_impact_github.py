@@ -36,6 +36,7 @@ def _pull_request_payload(
     base_sha: str = BASE_SHA,
     merge_commit_sha: str = MERGE_SHA,
     updated_at: str = UPDATED_AT,
+    author_type: str = "User",
 ) -> dict[str, object]:
     return {
         "base": {
@@ -49,7 +50,7 @@ def _pull_request_payload(
         "user": {
             "id": PULL_REQUEST_AUTHOR_GITHUB_ID,
             "login": "review-author",
-            "type": "User",
+            "type": author_type,
         },
     }
 
@@ -84,12 +85,14 @@ class _GitHubApi:
         confirmed_base_sha: str = BASE_SHA,
         confirmed_merge_commit_sha: str = MERGE_SHA,
         confirmed_updated_at: str = UPDATED_AT,
+        pull_request_author_type: str = "User",
         commits: tuple[dict[str, object], ...] | None = None,
     ) -> None:
         self.confirmed_head_sha = confirmed_head_sha
         self.confirmed_base_sha = confirmed_base_sha
         self.confirmed_merge_commit_sha = confirmed_merge_commit_sha
         self.confirmed_updated_at = confirmed_updated_at
+        self.pull_request_author_type = pull_request_author_type
         self.commits = commits if commits is not None else (_commit_payload(),)
         self.pull_request_reads = 0
         self.paths: list[str] = []
@@ -102,12 +105,13 @@ class _GitHubApi:
         if path == "/repos/example/shared-addons/pulls/2000":
             self.pull_request_reads += 1
             if self.pull_request_reads == 1:
-                return _pull_request_payload()
+                return _pull_request_payload(author_type=self.pull_request_author_type)
             return _pull_request_payload(
                 self.confirmed_head_sha,
                 base_sha=self.confirmed_base_sha,
                 merge_commit_sha=self.confirmed_merge_commit_sha,
                 updated_at=self.confirmed_updated_at,
+                author_type=self.pull_request_author_type,
             )
         if (
             path == "/repos/example/shared-addons/pulls?state=open&sort=updated&direction=desc"
@@ -222,6 +226,56 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
         assert evidence.authorship is not None
         self.assertEqual(evidence.authorship.resolution, "unresolved")
         self.assertEqual(evidence.authorship.contributor_github_ids, ())
+
+    def test_non_human_pull_request_author_keeps_authorship_unresolved(self) -> None:
+        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+            control_plane_root=Path("."),
+            github_token=lambda **_: "server-token",
+            github_api=_GitHubApi(pull_request_author_type="Bot"),
+            token_context="launchplane",
+        )
+
+        evidence = provider.resolve(
+            ChangeImpactTargetReference(
+                repository=REPOSITORY,
+                pull_request_number=2000,
+            )
+        )
+
+        assert evidence.authorship is not None
+        self.assertEqual(evidence.authorship.resolution, "unresolved")
+        self.assertEqual(evidence.authorship.contributor_github_ids, ())
+
+    def test_bot_authored_commit_pushed_by_human_resolves_to_human(self) -> None:
+        provider = GitHubChangeImpactRepositoryEvidenceProvider(
+            control_plane_root=Path("."),
+            github_token=lambda **_: "server-token",
+            github_api=_GitHubApi(
+                commits=(
+                    _commit_payload(
+                        author_type="Bot",
+                        committer_id=COMMIT_AUTHOR_GITHUB_ID,
+                        committer_login="commit-author",
+                        committer_type="User",
+                    ),
+                )
+            ),
+            token_context="launchplane",
+        )
+
+        evidence = provider.resolve(
+            ChangeImpactTargetReference(
+                repository=REPOSITORY,
+                pull_request_number=2000,
+            )
+        )
+
+        assert evidence.authorship is not None
+        self.assertEqual(evidence.authorship.resolution, "resolved")
+        self.assertEqual(
+            evidence.authorship.contributor_github_ids,
+            (PULL_REQUEST_AUTHOR_GITHUB_ID, COMMIT_AUTHOR_GITHUB_ID),
+        )
 
     def test_head_change_during_resolution_is_stale(self) -> None:
         provider = GitHubChangeImpactRepositoryEvidenceProvider(

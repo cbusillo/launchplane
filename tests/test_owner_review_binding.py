@@ -169,6 +169,16 @@ def _component_impact_policy(
 
 
 class OwnerReviewContextBindingTests(unittest.TestCase):
+    def test_missing_product_profile_fails_closed(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory), include_product_profile=False)
+
+            decision = _evaluate(store, _EvidenceProvider(_repository_evidence()))
+
+            self.assertFalse(decision.admissible)
+            self.assertEqual(decision.status, "unavailable")
+            self.assertEqual(decision.reason_code, "preview_evidence_unavailable")
+
     def test_binding_carries_reviewed_base_impact_identity_and_policy_fingerprints(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
@@ -350,6 +360,31 @@ class OwnerReviewSelfReviewTests(unittest.TestCase):
             self.assertTrue(written.record.authorization.self_review)
             self.assertEqual(written.record.authorization.self_review_exception_revision, 7)
             self.assertTrue(written.decision.admissible)
+
+    def test_self_review_exception_revision_drift_is_inadmissible(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._contributor_store(directory, routine_exception_enabled=True)
+            provider = _EvidenceProvider(_repository_evidence())
+            written = _accept(store=store, provider=provider, github_id=CONTRIBUTOR_GITHUB_ID)
+            assert written.record.authorization is not None
+            drifted_event = written.record.model_copy(
+                update={
+                    "authorization": written.record.authorization.model_copy(
+                        update={"self_review_exception_revision": 8}
+                    )
+                }
+            )
+
+            decision = evaluate_owner_acceptance_for_binding(
+                binding=written.record.binding,
+                events=(drifted_event,),
+                policy=_self_review_policy(routine_exception_enabled=True),
+                evaluated_at=REVIEWED_AT,
+            )
+
+            self.assertFalse(decision.admissible)
+            self.assertEqual(decision.status, "unavailable")
+            self.assertEqual(decision.reason_code, "self_review_denied")
 
     def test_production_affecting_change_denies_self_review_despite_exception(self) -> None:
         with TemporaryDirectory() as directory:

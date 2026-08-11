@@ -233,7 +233,7 @@ def evaluate_owner_acceptance_viewer_eligibility(
                         claimed_requirement_digest=binding.owner_requirement_digest,
                         evaluated_at=decision.evaluated_at,
                     )
-                except (TypeError, ValueError):
+                except (FileNotFoundError, LookupError, TypeError, ValueError):
                     reason_code = "owner_authority_unavailable"
                 else:
                     if authority.decision == "authorized":
@@ -1206,8 +1206,10 @@ def _resolve_owner_acceptance_preview_binding(
     preview_store = require_owner_acceptance_preview_read_store(store)
     try:
         profile = preview_store.read_product_profile_record(product)
-    except (FileNotFoundError, LookupError):
-        return _no_preview_evidence()
+    except (FileNotFoundError, LookupError) as error:
+        raise OwnerAcceptanceEvaluationUnavailableError(
+            "Owner acceptance product profile is unavailable."
+        ) from error
     except ValueError as error:
         raise OwnerAcceptanceEvaluationUnavailableError(
             "Owner acceptance product profile is unavailable or invalid."
