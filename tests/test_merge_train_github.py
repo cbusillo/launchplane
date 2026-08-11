@@ -885,9 +885,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(sha="base-main"),
-                _git_commit("head-1", "tree-head-1"),
-                _landing_pull_request(1, base_sha="base-main"),
-                {"status": "identical"},
+                *_no_op_landing_responses(1, "base-main", "identical"),
                 _github_branch(sha="base-main"),
                 *_normal_landing_responses(2, "base-main", "merge-sha-2"),
                 _github_branch(sha="merge-sha-2"),
@@ -905,6 +903,84 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             "/pulls/1/merge",
             "\n".join(request.path for request in transport.requests),
         )
+
+    def test_land_batch_candidate_recovers_planned_no_op_after_later_merge(self) -> None:
+        landing_plan = _landing_plan()
+        first = type(landing_plan.entries[0]).model_validate(
+            {
+                **landing_plan.entries[0].model_dump(mode="python"),
+                "recorded_candidate_parent_sha": "base-main",
+                "recorded_candidate_parent_tree_sha": "tree-base",
+                "recorded_candidate_result_sha": "base-main",
+                "recorded_candidate_result_tree_sha": "tree-base",
+            }
+        )
+        landing_plan = MergeTrainBatchLandingPlan.model_validate(
+            {
+                **landing_plan.model_dump(mode="python"),
+                "entries": (first, landing_plan.entries[1]),
+                "landing_plan_sha256": "",
+            }
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="merge-sha-2"),
+                *_no_op_landing_responses(1, "base-main", "ahead"),
+                _github_branch(sha="merge-sha-2"),
+                *_already_merged_responses(2, "base-main", "merge-sha-2", "identical"),
+                _github_branch(sha="merge-sha-2"),
+            )
+        )
+
+        landed = GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+            landing_plan=landing_plan
+        )
+
+        self.assertEqual([entry.status for entry in landed.entries], ["skipped", "merged"])
+        self.assertEqual(landed.entries[0].merge_commit_sha, "base-main")
+        self.assertEqual(landed.entries[1].merge_commit_sha, "merge-sha-2")
+
+    def test_land_batch_candidate_revalidates_persisted_no_op_on_retry(self) -> None:
+        landing_plan = _landing_plan()
+        first = type(landing_plan.entries[0]).model_validate(
+            {
+                **landing_plan.entries[0].model_dump(mode="python"),
+                "status": "skipped",
+                "recorded_candidate_parent_sha": "base-main",
+                "recorded_candidate_parent_tree_sha": "tree-base",
+                "recorded_candidate_result_sha": "base-main",
+                "recorded_candidate_result_tree_sha": "tree-base",
+                "recorded_rolling_base_sha": "base-main",
+                "recorded_rolling_base_tree_sha": "tree-base",
+                "landed_head_sha": "head-1",
+                "landed_head_tree_sha": "tree-head-1",
+                "merge_commit_sha": "base-main",
+                "merge_commit_tree_sha": "tree-base",
+            }
+        )
+        landing_plan = MergeTrainBatchLandingPlan.model_validate(
+            {
+                **landing_plan.model_dump(mode="python"),
+                "entries": (first, landing_plan.entries[1]),
+                "landing_plan_sha256": "",
+            }
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="merge-sha-2"),
+                *_no_op_landing_responses(1, "base-main", "ahead"),
+                _github_branch(sha="merge-sha-2"),
+                *_already_merged_responses(2, "base-main", "merge-sha-2", "identical"),
+                _github_branch(sha="merge-sha-2"),
+            )
+        )
+
+        landed = GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+            landing_plan=landing_plan
+        )
+
+        self.assertEqual(landed.entries[0], first)
+        self.assertEqual([entry.status for entry in landed.entries], ["skipped", "merged"])
 
     def test_actual_landing_evidence_drives_recorded_rolling_evaluator(self) -> None:
         candidate = _batch_candidate()
@@ -1810,6 +1886,19 @@ def _already_merged_responses(
             parents=(parent_sha, f"head-{number}"),
         ),
         _git_commit(parent_sha, parent_tree_sha),
+        {"status": compare_status},
+    )
+
+
+def _no_op_landing_responses(
+    number: int, parent_sha: str, compare_status: str
+) -> tuple[object, ...]:
+    parent_tree_sha = "tree-base" if parent_sha == "base-main" else f"tree-{parent_sha}"
+    return (
+        _landing_pull_request(number, base_sha=parent_sha),
+        _git_commit(f"head-{number}", f"tree-head-{number}"),
+        _git_commit(parent_sha, parent_tree_sha),
+        {"status": compare_status},
         {"status": compare_status},
     )
 

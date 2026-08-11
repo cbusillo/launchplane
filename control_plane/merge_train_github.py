@@ -327,6 +327,26 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 expected_base_sha = recovered_entry.merge_commit_sha
                 expected_base_tree_sha = recovered_entry.merge_commit_tree_sha
                 continue
+            if _recorded_candidate_step_is_no_op(entry):
+                skipped_entry = self._recover_no_op_landing_entry(
+                    repository=landing_plan.repository,
+                    repository_path=repository_path,
+                    entry=entry,
+                    expected_base_ref=landing_plan.base_branch,
+                    expected_rolling_base_sha=expected_base_sha,
+                    expected_rolling_base_tree_sha=expected_base_tree_sha,
+                )
+                landed_entries.append(skipped_entry)
+                if checkpoint is not None:
+                    checkpoint(
+                        _validated_model_update(
+                            landing_plan,
+                            entries=tuple(landed_entries) + landing_plan.entries[entry_index + 1 :],
+                        ),
+                        skipped_entry,
+                        "entry_skipped",
+                    )
+                continue
             if current_base_sha != expected_base_sha:
                 already_merged_entry = self._already_merged_landing_entry(
                     repository_path=repository_path,
@@ -374,42 +394,6 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     "Pull request head tree moved outside the batch landing plan.",
                     status_code=409,
                 )
-            if _recorded_candidate_step_is_no_op(entry):
-                self._validate_no_op_landing_pull_request(
-                    repository_path=repository_path,
-                    entry=entry,
-                    expected_base_ref=landing_plan.base_branch,
-                )
-                if not self.branch_contains_commit(
-                    repository=landing_plan.repository,
-                    branch_ref=landing_plan.base_branch,
-                    commit_sha=landed_head_sha,
-                ):
-                    raise MergeTrainGitHubStaleHeadError(
-                        "Recorded candidate no-op head is not contained by the rolling base.",
-                        status_code=409,
-                    )
-                skipped_entry = _validated_model_update(
-                    entry,
-                    status="skipped",
-                    recorded_rolling_base_sha=current_base_sha,
-                    recorded_rolling_base_tree_sha=current_base_tree_sha,
-                    landed_head_sha=landed_head_sha,
-                    landed_head_tree_sha=landed_head_tree_sha,
-                    merge_commit_sha=current_base_sha,
-                    merge_commit_tree_sha=current_base_tree_sha,
-                )
-                landed_entries.append(skipped_entry)
-                if checkpoint is not None:
-                    checkpoint(
-                        _validated_model_update(
-                            landing_plan,
-                            entries=tuple(landed_entries) + landing_plan.entries[entry_index + 1 :],
-                        ),
-                        skipped_entry,
-                        "entry_skipped",
-                    )
-                continue
             self._validate_open_landing_pull_request(
                 repository_path=repository_path,
                 entry=entry,
@@ -723,6 +707,74 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 "No-op pull request targets a different base branch than the batch landing plan.",
                 status_code=409,
             )
+
+    def _recover_no_op_landing_entry(
+        self,
+        *,
+        repository: str,
+        repository_path: str,
+        entry: MergeTrainBatchLandingEntry,
+        expected_base_ref: str,
+        expected_rolling_base_sha: str,
+        expected_rolling_base_tree_sha: str,
+    ) -> MergeTrainBatchLandingEntry:
+        self._validate_no_op_landing_pull_request(
+            repository_path=repository_path,
+            entry=entry,
+            expected_base_ref=expected_base_ref,
+        )
+        landed_head_sha, landed_head_tree_sha = _git_commit_identity(
+            transport=self.transport,
+            repository_path=repository_path,
+            commit_sha=entry.expected_head_sha,
+        )
+        if entry.expected_head_tree_sha and landed_head_tree_sha != entry.expected_head_tree_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "No-op pull request head tree does not match the batch landing plan.",
+                status_code=409,
+            )
+        rolling_base_sha, rolling_base_tree_sha = _git_commit_identity(
+            transport=self.transport,
+            repository_path=repository_path,
+            commit_sha=expected_rolling_base_sha,
+        )
+        if (
+            expected_rolling_base_tree_sha
+            and rolling_base_tree_sha != expected_rolling_base_tree_sha
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "No-op rolling base tree does not match the batch landing plan.",
+                status_code=409,
+            )
+        for commit_sha, label in (
+            (rolling_base_sha, "rolling base"),
+            (landed_head_sha, "head"),
+        ):
+            if not self.branch_contains_commit(
+                repository=repository,
+                branch_ref=expected_base_ref,
+                commit_sha=commit_sha,
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    f"Recorded candidate no-op {label} is not contained by the target branch.",
+                    status_code=409,
+                )
+        recovered_entry = _validated_model_update(
+            entry,
+            status="skipped",
+            recorded_rolling_base_sha=rolling_base_sha,
+            recorded_rolling_base_tree_sha=rolling_base_tree_sha,
+            landed_head_sha=landed_head_sha,
+            landed_head_tree_sha=landed_head_tree_sha,
+            merge_commit_sha=rolling_base_sha,
+            merge_commit_tree_sha=rolling_base_tree_sha,
+        )
+        if entry.status == "skipped" and entry != recovered_entry:
+            raise MergeTrainGitHubStaleHeadError(
+                "Persisted no-op landing evidence does not match the batch landing plan.",
+                status_code=409,
+            )
+        return recovered_entry
 
     def _validate_open_landing_pull_request(
         self,

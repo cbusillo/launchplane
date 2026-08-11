@@ -168,6 +168,46 @@ class MergeTrainStructuralProvenanceTests(unittest.TestCase):
         self.assertEqual(reordered.status, "mismatch")
         self.assertIn("structural_position_mismatch", reordered.reason_codes)
 
+    def test_landing_entry_identity_must_match_candidate_provenance(self) -> None:
+        candidate_record, landing_record = _records((_entry(1, 1),))
+        cases = (
+            ({"expected_head_sha": "different-head"}, "structural_head_sha_mismatch"),
+            (
+                {"expected_head_tree_sha": "different-head-tree"},
+                "structural_head_tree_mismatch",
+            ),
+            ({"expected_base_sha": "different-base"}, "structural_base_sha_mismatch"),
+            (
+                {"recorded_candidate_result_sha": "different-result"},
+                "structural_rolling_chain_broken",
+            ),
+        )
+
+        for updates, reason in cases:
+            with self.subTest(reason=reason):
+                landing_entry = _landing_entry(
+                    landing_record.landing_plan.entries[0],
+                    **updates,
+                )
+                plan = MergeTrainBatchLandingPlan.model_validate(
+                    {
+                        **landing_record.landing_plan.model_dump(mode="python"),
+                        "entries": (landing_entry,),
+                        "landing_plan_sha256": "",
+                    }
+                )
+                record = MergeTrainBatchLandingPlanRecord.model_validate(
+                    {
+                        **landing_record.model_dump(mode="python"),
+                        "landing_plan": plan,
+                    }
+                )
+
+                result = _evaluate(candidate_record, record, target_position=1)
+
+                self.assertEqual(result.status, "mismatch")
+                self.assertIn(reason, result.reason_codes)
+
     def test_delta_drift_overlap_same_subject_and_expansion_require_bound_evidence(self) -> None:
         candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
         shared = MergeTrainStructuralSubject(product="video", system="verification")

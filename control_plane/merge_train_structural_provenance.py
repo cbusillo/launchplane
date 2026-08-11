@@ -287,6 +287,54 @@ def _landing_plan_shape_result(
             landing_plan_record,
             "structural_position_mismatch",
         )
+    provenance = candidate_record.candidate.structural_provenance
+    assert provenance is not None
+    for candidate_entry, landing_entry, provenance_step in zip(
+        candidate_entries,
+        landing_entries,
+        provenance.steps,
+        strict=True,
+    ):
+        if landing_entry.expected_head_sha != candidate_entry.head_sha:
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_head_sha_mismatch",
+            )
+        if landing_entry.expected_head_tree_sha != candidate_entry.head_tree_sha:
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_head_tree_mismatch",
+            )
+        if landing_entry.expected_base_sha != candidate_record.candidate.base_sha:
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_base_sha_mismatch",
+            )
+        recorded_step = (
+            landing_entry.recorded_candidate_parent_sha,
+            landing_entry.recorded_candidate_parent_tree_sha,
+            landing_entry.recorded_candidate_result_sha,
+            landing_entry.recorded_candidate_result_tree_sha,
+        )
+        expected_step = (
+            provenance_step.parent_sha,
+            provenance_step.parent_tree_sha,
+            provenance_step.result_sha,
+            provenance_step.result_tree_sha,
+        )
+        if recorded_step != expected_step:
+            return _bound_result(
+                evaluation,
+                candidate_record,
+                landing_plan_record,
+                "structural_rolling_chain_broken",
+            )
     return None
 
 
