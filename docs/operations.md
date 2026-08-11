@@ -388,6 +388,7 @@ Current implementation scope:
 - `POST /v1/previews/lifecycle-plan`
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-destroy`
+
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/testing-verification`
 - `POST /v1/drivers/verireel/prod-deploy`
@@ -398,6 +399,13 @@ Current implementation scope:
 - `POST /v1/drivers/odoo/prod-backup-gate`
 - `POST /v1/drivers/odoo/prod-promotion`
 - `POST /v1/drivers/odoo/prod-rollback`
+
+`Generic Web Preview Authorization` preserves live GitHub App metadata lookup
+for onboarding and rule rotation. Retirement is different: it can remove a
+product's preview authorization after archival or GitHub App offboarding without
+minting a product-repository token or calling the GitHub API. The service derives
+and verifies the retired repository authority from active Launchplane records;
+the caller's optional repository fields only assert that derived identity.
 
 Privileged product rollback routes should stay behind narrow delegated-worker
 contracts rather than being absorbed into the main API host. Product-private

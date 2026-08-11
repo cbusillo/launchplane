@@ -39,10 +39,7 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
         {"cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml"}
     ),
     Path(".github/workflows/generic-web-preview-authorization.yml"): frozenset(
-        {
-            "cbusillo/launchplane/.github/workflows/"
-            "reusable-generic-web-preview-authz-apply.yml"
-        }
+        {"cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml"}
     ),
     Path(".github/workflows/authz-policy-reconcile.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml"}
@@ -513,6 +510,23 @@ class GitHubActionsSecurityTests(TestCase):
         _assert_no_workflow_violations(
             self,
             check_security_policy_runs_for_all_pull_requests(security_workflow),
+        )
+
+    def test_retirement_skips_repository_app_token_and_github_metadata_calls(self) -> None:
+        workflow = load_workflow(".github/workflows/generic-web-preview-authorization.yml")
+
+        for step_name in (
+            "Mint repository metadata token",
+            "Resolve immutable repository identity",
+        ):
+            step = workflow.step_named("plan", step_name)
+            self.assertIsNotNone(step)
+            assert step is not None
+            self.assertEqual(step.data.get("if"), "${{ inputs.operation != 'retire' }}")
+        token_step = workflow.step_named("plan", "Mint repository metadata token")
+        assert token_step is not None
+        self.assertEqual(
+            token_step.uses.split("@", maxsplit=1)[0], "actions/create-github-app-token"
         )
 
     def test_documentation_and_dependabot_preserve_reviewable_pin_updates(self) -> None:

@@ -2378,11 +2378,12 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("Generic Web Preview Authorization", workflow_text)
         for operation in ("onboard", "expand", "contract", "retire"):
             self.assertIn(f"- {operation}", workflow_text)
-        self.assertIn(
-            "operation must be onboard, expand, contract, or retire.", workflow_text
-        )
+        self.assertIn("operation must be onboard, expand, contract, or retire.", workflow_text)
         self.assertIn("actions/create-github-app-token@", workflow_text)
         self.assertIn("permission-contents: read", workflow_text)
+        self.assertIn("Optional owner/name assertion when retiring", workflow_text)
+        self.assertIn("repository_match.group(1) if repository_match else ''", workflow_text)
+        self.assertIn("repository_match.group(2) if repository_match else ''", workflow_text)
         self.assertIn(
             "/v1/authz-policies/managed-rule-sets/generic-web-preview/plan",
             workflow_text,

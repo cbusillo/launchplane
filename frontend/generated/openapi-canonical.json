@@ -6526,14 +6526,17 @@
             "type": "string"
           },
           "repository": {
+            "default": "",
             "title": "Repository",
             "type": "string"
           },
           "repository_id": {
+            "default": "",
             "title": "Repository Id",
             "type": "string"
           },
           "repository_owner_id": {
+            "default": "",
             "title": "Repository Owner Id",
             "type": "string"
           },
@@ -6550,9 +6553,6 @@
         },
         "required": [
           "target_product",
-          "repository",
-          "repository_id",
-          "repository_owner_id",
           "launchplane_sha",
           "reason",
           "related_issue"

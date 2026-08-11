@@ -26,8 +26,9 @@ name: Generic Web Preview Authorization
         required: true
         type: string
       repository:
-        description: Product repository in owner/name form.
-        required: true
+        description: >-
+          Optional owner/name assertion when retiring; required for onboard, expand, and contract.
+        required: false
         type: string
       preview_context:
         description: Optional preview context; defaults to <product>-preview.
@@ -122,9 +123,11 @@ jobs:
           product = required("PRODUCT", 63).lower()
           if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", product) is None:
               raise SystemExit("product must use lowercase letters, numbers, and hyphens.")
-          repository = required("REPOSITORY")
+          repository = optional("REPOSITORY")
           repository_match = re.fullmatch(r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", repository)
-          if repository_match is None:
+          if operation != "retire" and repository_match is None:
+              raise SystemExit("repository must use owner/name form.")
+          if repository and repository_match is None:
               raise SystemExit("repository must use owner/name form.")
           preview_context = optional("PREVIEW_CONTEXT") or f"{product}-preview"
           launchplane_sha = (optional("LAUNCHPLANE_SHA", 40) or os.environ["GITHUB_SHA"]).lower()
@@ -137,14 +140,15 @@ jobs:
           required("RELATED_ISSUE")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
               handle.write(f"product={product}\n")
-              handle.write(f"repository_owner={repository_match.group(1)}\n")
-              handle.write(f"repository_name={repository_match.group(2)}\n")
+              handle.write(f"repository_owner={repository_match.group(1) if repository_match else ''}\n")
+              handle.write(f"repository_name={repository_match.group(2) if repository_match else ''}\n")
               handle.write(f"preview_context={preview_context}\n")
               handle.write(f"launchplane_sha={launchplane_sha}\n")
           PY
 
       - name: Mint repository metadata token
         id: repository-token
+        if: ${{ inputs.operation != 'retire' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID }}
@@ -155,6 +159,7 @@ jobs:
 
       - name: Resolve immutable repository identity
         id: repository
+        if: ${{ inputs.operation != 'retire' }}
         shell: bash
         env:
           GH_TOKEN: ${{ steps.repository-token.outputs.token }}

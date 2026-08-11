@@ -2034,6 +2034,22 @@ The manual `Generic Web Preview Authorization` workflow is the operator surface
 for reviewed onboarding, expand/contract rotations, and product-rule retirement
 through this same planner and writer contract.
 
+For `onboard`, `expand`, and `contract`, that workflow retains its live GitHub
+App repository metadata resolution. For `retire`, it mints no repository-scoped
+App token and makes no GitHub API request: the service derives one immutable
+repository authority from the current target product's
+`operator.generic-web-preview` rules. Launchplane-owned ingress-operator rules
+are excluded only from that identity derivation and are still removed with every
+other target-product rule. A matching product profile is cross-checked when it
+exists; legacy name-only rules require that profile to supply both immutable
+IDs. Caller repository values are optional assertions for retirement, never
+authority. Missing target/product-repository rules, ambiguity, incomplete
+identity, profile disagreement, partial or mismatched assertions, and
+`include_ingress_operator=true` fail closed. The plan returns bounded authority
+sources, managed rule IDs/count, and a SHA-256 identity digest, never raw numeric
+repository IDs; the existing plan digest, policy CAS, protected apply, and
+idempotency boundaries remain unchanged.
+
 Product context audit, cutover, and legacy cleanup routes expose copied or
 deleted runtime identity records under neutral `provider_targets` and
 `provider_target_ids` response groups. Dokploy target records remain

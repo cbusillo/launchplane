@@ -5445,8 +5445,42 @@ class LaunchplaneServiceTests(unittest.TestCase):
             store = PostgresRecordStore(database_url=database_url)
             try:
                 active_record = store.list_authz_policy_records(status="active", limit=1)[0]
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        {
+                            "product": "demo-web",
+                            "display_name": "Demo Web",
+                            "repository": "example/demo-web",
+                            "repository_id": "123",
+                            "repository_owner_id": "456",
+                            "driver_id": "generic-web",
+                            "image": {},
+                            "updated_at": "2026-08-11T00:00:00Z",
+                            "source": "test",
+                        }
+                    )
+                )
             finally:
                 store.close()
+            retire_status, retire_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/managed-rule-sets/generic-web-preview/plan",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "operation": "retire",
+                    "target_product": "demo-web",
+                    "repository": "",
+                    "repository_id": "",
+                    "repository_owner_id": "",
+                    "default_branch": "",
+                    "preview_context": "",
+                    "launchplane_sha": "a" * 40,
+                    "reason": "Retire demo web.",
+                    "related_issue": "#2097",
+                },
+            )
 
         self.assertEqual(plan_status, 202)
         self.assertEqual(plan_payload["records"]["target_rule_count"], "6")
@@ -5464,6 +5498,17 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(len(managed_rules), 6)
         self.assertEqual({rule.products for rule in managed_rules}, {("demo-web",)})
+        self.assertEqual(retire_status, 202)
+        self.assertEqual(retire_payload["result"]["target_rule_count"], 0)
+        retirement_authority = retire_payload["result"]["retirement_authority"]
+        self.assertEqual(
+            retirement_authority["authority_sources"],
+            ["current_product_rules", "product_profile"],
+        )
+        self.assertEqual(retirement_authority["managed_rule_count"], 6)
+        self.assertEqual(len(retirement_authority["repository_identity_sha256"]), 64)
+        self.assertNotIn('"123"', json.dumps(retirement_authority))
+        self.assertNotIn('"456"', json.dumps(retirement_authority))
 
     def test_generic_web_preview_authz_plan_denies_missing_planner_authority(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
