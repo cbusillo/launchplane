@@ -412,7 +412,11 @@ def _launchplane_preview_profile_rows(
 ) -> tuple[tuple[str, str], ...]:
     rows: list[tuple[str, str]] = []
     for profile in record_store.list_product_profile_records():
-        if not profile.preview.enabled or not profile.preview.context.strip():
+        if (
+            not profile.is_active
+            or not profile.preview.enabled
+            or not profile.preview.context.strip()
+        ):
             continue
         rows.append(
             (profile.repository.strip().rsplit("/", maxsplit=1)[-1], profile.preview.context)

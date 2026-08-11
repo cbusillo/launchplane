@@ -127,6 +127,8 @@ def launchplane_anchor_repo_profile(
     if not repo_name:
         return None
     for profile in record_store.list_product_profile_records():
+        if not profile.is_active:
+            continue
         if not profile.preview.enabled or not profile.preview.context.strip():
             continue
         repository = profile.repository.strip()

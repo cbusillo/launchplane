@@ -532,7 +532,9 @@ def reconcile_all_manager_preview_approvals_best_effort(
     succeeded = 0
     seen: set[tuple[str, int]] = set()
     try:
-        profiles = store.list_product_profile_records()
+        profiles = tuple(
+            profile for profile in store.list_product_profile_records() if profile.is_active
+        )
     except (AttributeError, TypeError, ValueError):
         return attempted, succeeded
     for profile in profiles:
@@ -854,7 +856,8 @@ def _product_profile(
     matches = tuple(
         profile
         for profile in record_store.list_product_profile_records()
-        if profile.repository.strip().casefold() == repository.strip().casefold()
+        if profile.is_active
+        and profile.repository.strip().casefold() == repository.strip().casefold()
     )
     if len(matches) != 1:
         raise LookupError("Launchplane requires one product profile for the GitHub repository.")

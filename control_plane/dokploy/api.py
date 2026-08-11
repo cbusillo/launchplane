@@ -232,6 +232,51 @@ def fetch_dokploy_target_payload(
     return payload_as_object
 
 
+def fetch_dokploy_application_domains(
+    *, host: str, token: str, application_id: str
+) -> tuple[JsonObject, ...]:
+    normalized_application_id = application_id.strip()
+    if not normalized_application_id:
+        raise click.ClickException("Dokploy application domain lookup requires an application id.")
+    payload = dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.byApplicationId",
+        query={"applicationId": normalized_application_id},
+    )
+    if not isinstance(payload, list):
+        raise click.ClickException(
+            "Dokploy application domain lookup returned an invalid response."
+        )
+    return tuple(domain for item in payload if (domain := as_json_object(item)) is not None)
+
+
+def delete_dokploy_domain(*, host: str, token: str, domain_id: str) -> None:
+    normalized_domain_id = domain_id.strip()
+    if not normalized_domain_id:
+        raise click.ClickException("Dokploy domain deletion requires a domain id.")
+    dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.delete",
+        method="POST",
+        payload={"domainId": normalized_domain_id},
+    )
+
+
+def delete_dokploy_application(*, host: str, token: str, application_id: str) -> None:
+    normalized_application_id = application_id.strip()
+    if not normalized_application_id:
+        raise click.ClickException("Dokploy application deletion requires an application id.")
+    dokploy_request(
+        host=host,
+        token=token,
+        path="/api/application.delete",
+        method="POST",
+        payload={"applicationId": normalized_application_id},
+    )
+
+
 def normalize_dokploy_log_line_count(line_count: int) -> int:
     if line_count < 1:
         raise click.ClickException("Dokploy log line count must be at least 1.")
@@ -1023,7 +1068,15 @@ def dokploy_request(
         with urlopen(request, timeout=timeout_seconds) as response:
             raw_payload = response.read()
     except HTTPError as error:
-        error_body = error.read().decode(errors="replace").strip()
+        try:
+            error_body = error.read().decode(errors="replace").strip()
+        except TimeoutError as read_error:
+            raise DokployRequestFailed(
+                method=method,
+                path=normalized_path,
+                status_code=error.code,
+                detail="response read timed out",
+            ) from read_error
         redacted_error_body = redact_dokploy_log_line(error_body).strip()
         raise DokployRequestFailed(
             method=method,
@@ -1039,6 +1092,12 @@ def dokploy_request(
             detail=redact_dokploy_log_line(str(error.reason)).strip()[
                 :_MAX_DOKPLOY_ERROR_DETAIL_LENGTH
             ],
+        ) from error
+    except TimeoutError as error:
+        raise DokployRequestFailed(
+            method=method,
+            path=normalized_path,
+            detail="response read timed out",
         ) from error
 
     if not raw_payload:

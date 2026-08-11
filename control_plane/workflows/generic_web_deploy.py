@@ -189,6 +189,10 @@ def resolve_generic_web_profile_lane(
     *, record_store: GenericWebDeployStore, request: GenericWebDeployRequest
 ) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile]:
     profile = record_store.read_product_profile_record(request.product)
+    if not profile.is_active:
+        raise click.ClickException(
+            f"Product {profile.product!r} is {profile.lifecycle_state} and cannot deploy."
+        )
     if not product_profile_uses_generic_web_base(profile):
         raise click.ClickException(
             f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "

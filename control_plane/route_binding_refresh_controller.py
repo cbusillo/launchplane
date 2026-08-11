@@ -84,6 +84,8 @@ def discover_active_odoo_testing_route_bindings(
         raise ValueError("Route binding refresh target_limit must be positive.")
     targets: dict[tuple[str, str, str], RouteBindingRefreshTarget] = {}
     for profile in record_store.list_product_profile_records(driver_id="odoo"):
+        if not profile.is_active:
+            continue
         for lane in profile.lanes:
             if lane.instance.strip().lower() != "testing":
                 continue

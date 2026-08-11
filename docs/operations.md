@@ -2521,3 +2521,26 @@ blocked instead of guessing source inputs.
   the first implementation still lives inside this repo.
 - The stable Launchplane contract should be service ingress plus Launchplane-owned
   drivers, not repo-local shell wrappers around file writes.
+## Product Retirement
+
+Use the protected **Product Retirement** workflow; never delete a Dokploy
+application directly. Run `mode=plan` with the exact product, profile-owned
+instance, tracked target SHA-256, stable operator idempotency key, reason, and
+issue. Review the persisted plan record ID and `plan_sha256` in the redacted
+artifact and job summary. Run `mode=apply` with the same intent and idempotency
+key, the reviewed record ID/digest, and the exact confirmation shown by the
+workflow input contract.
+
+An apply that returns reconciliation-required must be retried with the same
+idempotency key after the provider can be observed. A `retiring` profile is an
+intentional fail-closed state: deploys, monitoring, previews, onboarding,
+discovery, and work-graph automation must leave it untouched while the durable
+operation reconciles. Completion verifies provider absence, removes mutable
+runtime/target authority, preserves secret and deletion evidence, disables
+preview configuration, and marks the profile `retired`. Do not delete the
+profile.
+
+Authorization rollout uses the `product-retirement` selector in **Manage
+Launchplane Authorization**, backed by managed set
+`operator.product-retirement` and secret
+`LAUNCHPLANE_AUTHZ_PRODUCT_RETIREMENT_MANAGED_SET_JSON`.

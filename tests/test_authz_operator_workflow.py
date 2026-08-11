@@ -37,6 +37,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 "owner-acceptance",
                 "product-owner-policy-admin",
                 "product-health-monitoring",
+                "product-retirement",
                 "preview-feedback-remediation",
                 "odoo-route-binding",
                 "odoo-external-route-binding",
@@ -78,6 +79,10 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             "reconcile-product-health-monitoring": (
                 "${{ inputs.managed_set == 'product-health-monitoring' }}",
                 "${{ secrets.LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-product-retirement": (
+                "${{ inputs.managed_set == 'product-retirement' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_PRODUCT_RETIREMENT_MANAGED_SET_JSON }}",
             ),
             "reconcile-preview-feedback-remediation": (
                 "${{ inputs.managed_set == 'preview-feedback-remediation' }}",
@@ -147,6 +152,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                     "reconcile-manager-preview-approval": "operator.manager-preview-approval",
                     "reconcile-owner-acceptance": "operator.owner-acceptance",
                     "reconcile-product-owner-policy-admin": "operator.product-owner-policy-admin",
+                    "reconcile-product-retirement": "operator.product-retirement",
                     "reconcile-preview-feedback-remediation": (
                         "operator.preview-feedback-remediation"
                     ),

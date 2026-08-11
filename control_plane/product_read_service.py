@@ -78,7 +78,11 @@ def is_product_environment_detail_request(params: Mapping[str, str]) -> bool:
 def build_product_profile_list_service_payload(
     *, record_store: ProductReadModelStore, driver_id: str
 ) -> dict[str, object]:
-    profiles = record_store.list_product_profile_records(driver_id=driver_id)
+    profiles = tuple(
+        profile
+        for profile in record_store.list_product_profile_records(driver_id=driver_id)
+        if profile.is_active
+    )
     return {
         "driver_id": driver_id,
         "profiles": [profile.model_dump(mode="json") for profile in profiles],

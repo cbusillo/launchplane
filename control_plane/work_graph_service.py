@@ -102,7 +102,8 @@ def build_work_graph_snapshot_service_payload(
     readable_product_profiles = tuple(
         profile
         for profile in product_store.list_product_profile_records()
-        if action_allowed("product_environment.read", profile.product, "launchplane", ())
+        if profile.is_active
+        and action_allowed("product_environment.read", profile.product, "launchplane", ())
     )
     planning_issue_facts = planning_facts_provider() if planning_facts_provider is not None else ()
     repo_mapping = build_repo_product_mapping_from_records(
@@ -132,7 +133,9 @@ def build_repo_product_mapping_service_payload(
     product_store: RepoProductMappingProductStore,
     work_request_store: RepoProductMappingWorkRequestStore,
 ) -> dict[str, object]:
-    product_profiles = product_store.list_product_profile_records()
+    product_profiles = tuple(
+        profile for profile in product_store.list_product_profile_records() if profile.is_active
+    )
     work_requests = work_request_store.list_every_code_work_request_records(limit=None)
     mapping = build_repo_product_mapping_from_records(
         generated_at=generated_at,

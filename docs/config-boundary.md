@@ -299,3 +299,9 @@ The mutation commands in that family edit the shared
 require `--allow-direct-db-mutation` and are explicit local/bootstrap repair
 only. Routine shared/live target setup should use the deployed service route or
 operator workflow.
+Product retirement does not add checked-in product or provider authority. The
+workflow accepts operator-supplied product, instance, target digest, reason,
+issue, reviewed plan, and idempotency values; the service resolves all real
+context, provider target, runtime, and secret authority from DB-backed records.
+The authorization managed-set secret routes policy material through the
+existing protected authz reconciliation workflow and is not a product catalog.

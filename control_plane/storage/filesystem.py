@@ -143,7 +143,11 @@ from control_plane.contracts.product_health_monitoring_migration import (
 from control_plane.contracts.product_monitoring_intent_migration import (
     migrate_product_profile_monitoring_intent_payload,
 )
+from control_plane.contracts.product_profile_lifecycle_migration import (
+    migrate_product_profile_lifecycle_payload,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_retirement import ProductRetirementRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEventRecord,
     PublicIngressIncidentReminderStateRecord,
@@ -3706,8 +3710,10 @@ class FilesystemRecordStore:
         self, record_path: Path
     ) -> LaunchplaneProductProfileRecord:
         payload = json.loads(record_path.read_text(encoding="utf-8"))
-        migrated_payload = migrate_product_profile_monitoring_intent_payload(
-            migrate_product_profile_health_monitoring_payload(payload)
+        migrated_payload = migrate_product_profile_lifecycle_payload(
+            migrate_product_profile_monitoring_intent_payload(
+                migrate_product_profile_health_monitoring_payload(payload)
+            )
         )
         record = LaunchplaneProductProfileRecord.model_validate(migrated_payload)
         if migrated_payload != payload:
@@ -3718,6 +3724,75 @@ class FilesystemRecordStore:
                 encoding="utf-8",
             )
         return record
+
+    def compare_and_write_product_profile_record(
+        self,
+        *,
+        expected_record: LaunchplaneProductProfileRecord,
+        replacement_record: LaunchplaneProductProfileRecord,
+    ) -> None:
+        if expected_record.product != replacement_record.product:
+            raise ValueError("Product profile compare-and-write requires matching products.")
+        with self._product_authority_bundle_lock():
+            record_path = self._record_path("launchplane_product_profiles", expected_record.product)
+            current_record = self._read_product_profile_record_path(record_path)
+            if current_record != expected_record:
+                raise ValueError("Product profile changed before compare-and-write.")
+            self._write_model_locked(
+                "launchplane_product_profiles",
+                replacement_record.product,
+                replacement_record,
+            )
+
+    def write_product_retirement_record(self, record: ProductRetirementRecord) -> Path:
+        if not self._create_model_if_absent(
+            "launchplane_product_retirements",
+            record.record_id,
+            record,
+        ):
+            existing = self.read_product_retirement_record(record.record_id)
+            if existing != record and not (
+                record.mode == "plan"
+                and existing.mode == "plan"
+                and existing.product == record.product
+                and existing.identity.actor == record.identity.actor
+                and existing.idempotency_key == record.idempotency_key
+                and existing.continuity_sha256 == record.continuity_sha256
+            ):
+                raise ValueError("Product retirement records are append-only.")
+        return self._record_path("launchplane_product_retirements", record.record_id)
+
+    def read_product_retirement_record(self, record_id: str) -> ProductRetirementRecord:
+        return self._read_model(
+            ProductRetirementRecord,
+            "launchplane_product_retirements",
+            record_id,
+        )
+
+    def list_product_retirement_records(
+        self,
+        *,
+        product: str = "",
+        actor: str = "",
+        mode: str = "",
+        idempotency_key: str = "",
+        limit: int | None = None,
+    ) -> tuple[ProductRetirementRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                ProductRetirementRecord,
+                "launchplane_product_retirements",
+            )
+            if (not product or record.product == product)
+            and (not actor or record.identity.actor == actor)
+            and (not mode or record.mode == mode)
+            and (not idempotency_key or record.idempotency_key == idempotency_key)
+        ]
+        records.sort(key=lambda record: (record.recorded_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def list_authz_policy_records(
         self,

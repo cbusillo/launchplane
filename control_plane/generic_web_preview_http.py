@@ -93,6 +93,8 @@ def resolve_generic_web_preview_desired_state_profile(
         raise FileNotFoundError(
             "Generic web preview desired-state requires an existing product profile."
         ) from error
+    if not profile.is_active:
+        raise ValueError("Product profile is not active for preview automation.")
     if not product_profile_uses_generic_web_base(profile):
         raise ValueError(
             "Product profile is not compatible with the generic-web preview desired-state route."
@@ -118,6 +120,10 @@ def resolve_generic_web_preview_profile(
         raise GenericWebPreviewRouteDependencyError from error
     if not isinstance(profile, LaunchplaneProductProfileRecord):
         profile = LaunchplaneProductProfileRecord.model_validate(profile)
+    if not profile.is_active:
+        raise click.ClickException(
+            f"Product {profile.product!r} is {profile.lifecycle_state} and cannot run previews."
+        )
     if not product_profile_uses_generic_web_base(profile):
         raise GenericWebPreviewProductMismatchError(
             "Product profile is not compatible with the requested driver route."

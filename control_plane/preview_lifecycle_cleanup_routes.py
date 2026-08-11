@@ -257,6 +257,8 @@ def preview_lifecycle_sweep_profiles(
     requested_product = product.strip()
     profiles: list[LaunchplaneProductProfileRecord] = []
     for record in profiles_store.list_product_profile_records():
+        if not record.is_active:
+            continue
         profile = LaunchplaneProductProfileRecord.model_validate(record)
         if requested_product and profile.product != requested_product:
             continue

@@ -139,6 +139,9 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
 )
 from tests.support.durable_operations import durable_operation_cancellation_payload
+from tests.test_product_retirement import _Store as _RetirementStore
+from tests.test_product_retirement import _observation as _retirement_observation
+from tests.test_product_retirement import _plan as _retirement_plan
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
@@ -2306,6 +2309,29 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_concurrent_product_retirement_plan_writes_reuse_one_scoped_reservation(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            second_store = PostgresRecordStore(database_url=store.database_url)
+            barrier = threading.Barrier(2)
+
+            def write_plan(active_store: PostgresRecordStore, trace_id: str) -> None:
+                plan = _retirement_plan(_RetirementStore(), _retirement_observation()).model_copy(
+                    update={"trace_id": trace_id, "recorded_at": f"2026-08-11T02:00:0{trace_id[-1]}Z"}
+                )
+                barrier.wait(timeout=10)
+                active_store.write_product_retirement_record(plan)
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    tuple(executor.map(write_plan, (store, second_store), ("plan-trace-1", "plan-trace-2")))
+                plans = store.list_product_retirement_records(
+                    product="example-site", actor="test", mode="plan", idempotency_key="retire-example-site"
+                )
+            finally:
+                second_store.close()
+
+        self.assertEqual(len(plans), 1)
+
     def test_concurrent_public_ingress_failures_open_one_incident_and_keep_both_observations(
         self,
     ) -> None:

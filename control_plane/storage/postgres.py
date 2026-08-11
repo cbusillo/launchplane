@@ -190,10 +190,14 @@ from control_plane.contracts.product_health_monitoring_migration import (
 from control_plane.contracts.product_monitoring_intent_migration import (
     migrate_product_profile_monitoring_intent_payload,
 )
+from control_plane.contracts.product_profile_lifecycle_migration import (
+    migrate_product_profile_lifecycle_payload,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     product_profile_record_sha256,
 )
+from control_plane.contracts.product_retirement import ProductRetirementRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEventRecord,
     PublicIngressIncidentReminderStateRecord,
@@ -1617,6 +1621,48 @@ class LaunchplanePreviewPrFeedbackRemediationRow(Base):
     requested_at: Mapped[str] = mapped_column(String, nullable=False)
     mode: Mapped[str] = mapped_column(String, nullable=False)
     outcome: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneProductRetirementRow(Base):
+    __tablename__ = "launchplane_product_retirements"
+    __table_args__ = (
+        Index(
+            "launchplane_product_retirements_product_idx",
+            "product",
+            desc("recorded_at"),
+        ),
+        Index(
+            "launchplane_product_retirements_plan_idx",
+            "plan_record_id",
+            desc("recorded_at"),
+        ),
+        Index(
+            "launchplane_product_retirements_idempotency_idx",
+            "idempotency_key",
+            desc("recorded_at"),
+        ),
+        Index(
+            "launchplane_product_retirements_plan_idempotency_unique",
+            "product",
+            "actor",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("mode = 'plan'"),
+            sqlite_where=text("mode = 'plan'"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    plan_record_id: Mapped[str] = mapped_column(String, nullable=False)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    actor: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    outcome: Mapped[str] = mapped_column(String, nullable=False)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -13333,8 +13379,10 @@ class PostgresRecordStore(HumanSessionStore):
         self, payload: PayloadDict
     ) -> LaunchplaneProductProfileRecord:
         return LaunchplaneProductProfileRecord.model_validate(
-            migrate_product_profile_monitoring_intent_payload(
-                migrate_product_profile_health_monitoring_payload(payload)
+            migrate_product_profile_lifecycle_payload(
+                migrate_product_profile_monitoring_intent_payload(
+                    migrate_product_profile_health_monitoring_payload(payload)
+                )
             )
         )
 
@@ -13368,6 +13416,112 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             rows = session.scalars(statement).all()
             return tuple(self._read_product_profile_payload(row.payload) for row in rows)
+
+    def write_product_retirement_record(self, record: ProductRetirementRecord) -> None:
+        with self._session_factory() as session:
+            existing = session.get(LaunchplaneProductRetirementRow, record.record_id)
+            if existing is not None:
+                stored = self._read_payload(
+                    model_type=ProductRetirementRecord,
+                    payload=existing.payload,
+                )
+                if stored != record and not (
+                    record.mode == "plan"
+                    and stored.mode == "plan"
+                    and stored.product == record.product
+                    and stored.identity.actor == record.identity.actor
+                    and stored.idempotency_key == record.idempotency_key
+                    and stored.continuity_sha256 == record.continuity_sha256
+                ):
+                    raise ValueError("Product retirement records are append-only.")
+                return
+            session.add(
+                LaunchplaneProductRetirementRow(
+                    record_id=record.record_id,
+                    plan_record_id=record.plan_record_id,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                    actor=record.identity.actor,
+                    idempotency_key=record.idempotency_key,
+                    mode=record.mode,
+                    outcome=record.outcome,
+                    recorded_at=record.recorded_at,
+                    payload=self._payload_dict(record),
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError as error:
+                session.rollback()
+                if record.mode != "plan":
+                    raise
+                existing_plan = session.scalar(
+                    select(LaunchplaneProductRetirementRow).where(
+                        LaunchplaneProductRetirementRow.product == record.product,
+                        LaunchplaneProductRetirementRow.actor == record.identity.actor,
+                        LaunchplaneProductRetirementRow.idempotency_key == record.idempotency_key,
+                        LaunchplaneProductRetirementRow.mode == "plan",
+                    )
+                )
+                if existing_plan is None:
+                    raise error
+                stored = self._read_payload(
+                    model_type=ProductRetirementRecord,
+                    payload=existing_plan.payload,
+                )
+                if stored.continuity_sha256 != record.continuity_sha256:
+                    raise ValueError(
+                        "Product retirement plan idempotency key was reused."
+                    ) from error
+
+    def read_product_retirement_record(self, record_id: str) -> ProductRetirementRecord:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneProductRetirementRow, record_id)
+            if row is None:
+                raise FileNotFoundError(
+                    f"No Launchplane product retirement record found for record_id={record_id!r}."
+                )
+            return self._read_payload(
+                model_type=ProductRetirementRecord,
+                payload=row.payload,
+            )
+
+    def list_product_retirement_records(
+        self,
+        *,
+        product: str = "",
+        actor: str = "",
+        mode: str = "",
+        idempotency_key: str = "",
+        limit: int | None = None,
+    ) -> tuple[ProductRetirementRecord, ...]:
+        statement = select(LaunchplaneProductRetirementRow)
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneProductRetirementRow.product == product)
+        if actor:
+            filters.append(LaunchplaneProductRetirementRow.actor == actor)
+        if mode:
+            filters.append(LaunchplaneProductRetirementRow.mode == mode)
+        if idempotency_key:
+            filters.append(LaunchplaneProductRetirementRow.idempotency_key == idempotency_key)
+        if filters:
+            statement = statement.where(*cast(Any, filters))
+        statement = statement.order_by(
+            desc(LaunchplaneProductRetirementRow.recorded_at),
+            desc(LaunchplaneProductRetirementRow.record_id),
+        )
+        if limit is not None:
+            statement = statement.limit(max(limit, 0))
+        with self._session_factory() as session:
+            return tuple(
+                self._read_payload(
+                    model_type=ProductRetirementRecord,
+                    payload=row.payload,
+                )
+                for row in session.scalars(statement)
+            )
 
     def write_public_ingress_observation_record(
         self, record: PublicIngressObservationRecord

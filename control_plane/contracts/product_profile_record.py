@@ -10,6 +10,7 @@ from control_plane.contracts.product_health_monitoring_migration import (
 from control_plane.contracts.product_health_monitoring_migration import health_check_record_token
 
 
+ProductLifecycleState = Literal["active", "retiring", "retired"]
 PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL = "launchplane-preview"
 OdooDataAuthority = Literal["unknown", "resettable", "restorable", "authoritative"]
 OdooRebuildSourceMode = Literal["empty", "upstream_restore"]
@@ -491,6 +492,7 @@ class LaunchplaneProductProfileRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
+    lifecycle_state: ProductLifecycleState = "active"
     product: str
     display_name: str
     repository: str
@@ -553,6 +555,8 @@ class LaunchplaneProductProfileRecord(BaseModel):
                 raise ValueError("enabled product preview requires runtime_port")
             if not self.health_path:
                 raise ValueError("enabled product preview requires health_path")
+        if self.lifecycle_state != "active" and self.preview.enabled:
+            raise ValueError("non-active product profiles cannot retain enabled previews")
         lane_instances = [lane.instance.strip().lower() for lane in self.lanes]
         if len(lane_instances) != len(set(lane_instances)):
             raise ValueError("product profile lane instances must be unique")
@@ -569,6 +573,10 @@ class LaunchplaneProductProfileRecord(BaseModel):
                 normalized_historical_contexts.append(context)
         self.historical_contexts = tuple(normalized_historical_contexts)
         return self
+
+    @property
+    def is_active(self) -> bool:
+        return self.lifecycle_state == "active"
 
     def validate_write_contract(self) -> "LaunchplaneProductProfileRecord":
         for lane in self.lanes:

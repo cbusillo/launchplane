@@ -594,6 +594,7 @@ export type LaunchplaneProductProfileRecord = {
     historical_contexts: Array<string>;
     image: ProductImageProfile;
     lanes: Array<ProductLaneProfile>;
+    lifecycle_state: 'active' | 'retiring' | 'retired';
     preview: ProductPreviewProfile;
     product: string;
     promotion_workflow: ProductPromotionWorkflowProfile;
