@@ -344,11 +344,7 @@ def discover_detached_application(
         for project_id, project_name in parsed.projects
         if project_name == request.project_name
     }
-    if len(matching_projects) > 1:
-        raise DetachedApplicationRetirementBlockedError(
-            "Detached application retirement requires exactly one project name match."
-        )
-    if not matching_projects:
+    if len(matching_projects) != 1:
         return _discover_detached_application_with_service_search(
             host=host,
             token=token,
