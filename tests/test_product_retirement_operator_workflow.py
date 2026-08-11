@@ -1,14 +1,35 @@
 import re
+import subprocess
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from tests.support.workflows import Workflow
 from tests.support.workflows import load_workflow
 
 
-class ProductRetirementOperatorWorkflowTests(unittest.TestCase):
-    WORKER_REFERENCE = (
-        "cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml"
-        "@c922d5f1a0bf3ab17a829196042a96ba89d7b693"
+def _load_pinned_workflow(reference: str) -> Workflow:
+    source, separator, revision = reference.partition("@")
+    if not separator:
+        raise AssertionError(f"pinned workflow reference is missing a revision: {reference}")
+    relative_path = Path(source).relative_to("cbusillo/launchplane")
+    result = subprocess.run(
+        ["git", "show", f"{revision}:{relative_path.as_posix()}"],
+        check=False,
+        capture_output=True,
+        text=True,
     )
+    if result.returncode:
+        raise AssertionError(
+            f"could not read {relative_path} at pinned revision {revision}: {result.stderr}"
+        )
+    with TemporaryDirectory() as temporary_directory_name:
+        workflow_path = Path(temporary_directory_name) / relative_path.name
+        workflow_path.write_text(result.stdout, encoding="utf-8")
+        return load_workflow(workflow_path)
+
+
+class ProductRetirementOperatorWorkflowTests(unittest.TestCase):
     INPUT_NAMES = (
         "mode",
         "product",
@@ -24,9 +45,8 @@ class ProductRetirementOperatorWorkflowTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.workflow = load_workflow(".github/workflows/product-retirement.yml")
-        self.reusable_workflow = load_workflow(
-            ".github/workflows/reusable-product-retirement.yml"
-        )
+        self.worker_reference = self.workflow.job_uses("retire")
+        self.reusable_workflow = _load_pinned_workflow(self.worker_reference)
 
     def test_wrapper_is_an_immutable_thin_dispatch_contract(self) -> None:
         trigger = self.workflow.data["on"]
@@ -55,7 +75,11 @@ class ProductRetirementOperatorWorkflowTests(unittest.TestCase):
         self.assertNotIn("concurrency", self.workflow.data)
 
         job = self.workflow.job("retire")
-        self.assertEqual(job["uses"], self.WORKER_REFERENCE)
+        self.assertEqual(
+            self.worker_reference.partition("@")[0],
+            "cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml",
+        )
+        self.assertRegex(self.worker_reference.partition("@")[2], r"^[0-9a-f]{40}$")
         self.assertEqual(
             set(job),
             {"uses", "permissions", "with"},
@@ -73,6 +97,13 @@ class ProductRetirementOperatorWorkflowTests(unittest.TestCase):
             wrapper_inputs,
             {name: f"${{{{ inputs.{name} }}}}" for name in self.INPUT_NAMES},
         )
+
+    def test_operations_documentation_binds_wrapper_and_pinned_worker(self) -> None:
+        operations = Path("docs/operations.md").read_text(encoding="utf-8")
+        wrapper_reference = f"cbusillo/launchplane/{self.workflow.path.as_posix()}@refs/heads/main"
+
+        self.assertIn(f"workflow_ref={wrapper_reference}", operations)
+        self.assertIn(f"job_workflow_ref={self.worker_reference}", operations)
 
     def test_reusable_worker_matches_protected_dispatch_contract(self) -> None:
         trigger = self.reusable_workflow.data["on"]

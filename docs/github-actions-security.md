@@ -12,14 +12,18 @@ an immutable `sha256` manifest digest.
 
 ## Reference Classes
 
-| Reference class | Trust | Typical privilege | Required form |
-| --- | --- | --- | --- |
-| Same-repository local action or reusable workflow | Same reviewed workflow commit | Depends on the caller workflow | `./.github/actions/...` or `./.github/workflows/...` |
-| Same-repository privileged reusable worker | First-party immutable trust anchor | Authz administration, route-authority reconciliation, or exact-instance reviewed product-policy mutation | Repository-qualified path at a full reviewed SHA, limited to the approved dispatch wrappers |
-| GitHub-maintained action | GitHub-maintained | Checkout, artifacts, cache, runtime setup, GitHub API, CodeQL | Full SHA plus a release-tag provenance comment |
-| Third-party publisher | Third-party publisher | Python bootstrap, registry authentication, image build and publication | Full SHA plus a release-tag provenance comment |
-| First-party cross-repository Launchplane action | First-party cross-repository | OIDC-authenticated Launchplane requests and preview-client setup | Full SHA plus `# main` provenance |
-| Static workflow container image | Official or third-party publisher | Workflow linting, secret/vulnerability scanning, integration services | Release tag plus `@sha256:<manifest-digest>` |
+<!-- markdownlint-disable MD013 -->
+
+| Reference class                                   | Trust                              | Typical privilege                                                                                        | Required form                                                                               |
+| ------------------------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Same-repository local action or reusable workflow | Same reviewed workflow commit      | Depends on the caller workflow                                                                           | `./.github/actions/...` or `./.github/workflows/...`                                        |
+| Same-repository privileged reusable worker        | First-party immutable trust anchor | Authz administration, route-authority reconciliation, or exact-instance reviewed product-policy mutation | Repository-qualified path at a full reviewed SHA, limited to the approved dispatch wrappers |
+| GitHub-maintained action                          | GitHub-maintained                  | Checkout, artifacts, cache, runtime setup, GitHub API, CodeQL                                            | Full SHA plus a release-tag provenance comment                                              |
+| Third-party publisher                             | Third-party publisher              | Python bootstrap, registry authentication, image build and publication                                   | Full SHA plus a release-tag provenance comment                                              |
+| First-party cross-repository Launchplane action   | First-party cross-repository       | OIDC-authenticated Launchplane requests and preview-client setup                                         | Full SHA plus `# main` provenance                                                           |
+| Static workflow container image                   | Official or third-party publisher  | Workflow linting, secret/vulnerability scanning, integration services                                    | Release tag plus `@sha256:<manifest-digest>`                                                |
+
+<!-- markdownlint-enable MD013 -->
 
 Relative reusable-workflow references are preferred for same-repository workflow
 composition. Reusable workflows retain a SHA-pinned Launchplane composite-action
@@ -70,6 +74,7 @@ written to the workflow log by the upstream implementation.
   boundary. The approved set is limited to managed authz administration,
   generic-web onboarding/preview-authz protected apply, route-binding
   reconciliation, exact-instance product health-policy mutation,
+  protected immutable product retirement,
   exact-instance immutable Odoo artifact publication, and exact-instance Odoo
   target-replacement plan/apply workers whose actions are separately authorized.
   It also includes exact-instance redacted target-log diagnostics and Odoo

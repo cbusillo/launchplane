@@ -342,15 +342,6 @@ def _container_references() -> Iterator[ContainerReference]:
 
 
 class GitHubActionsSecurityTests(TestCase):
-    def test_product_retirement_wrapper_uses_the_approved_immutable_worker(self) -> None:
-        workflow = load_workflow(".github/workflows/product-retirement.yml")
-
-        self.assertEqual(
-            workflow.job_uses("retire"),
-            "cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml"
-            "@c922d5f1a0bf3ab17a829196042a96ba89d7b693",
-        )
-
     def test_product_repo_config_authority_uses_called_workflow_revision(self) -> None:
         workflow = Path(".github/workflows/reusable-product-repo-config-authority.yml").read_text(
             encoding="utf-8"
@@ -534,6 +525,7 @@ class GitHubActionsSecurityTests(TestCase):
         self.assertIn("Third-party publisher", policy)
         self.assertIn("First-party cross-repository", policy)
         self.assertIn("High-privilege", policy)
+        self.assertIn("protected immutable product retirement", policy)
         self.assertIn("container image", policy)
         self.assertIn("MUTABLE_REFERENCE_ALLOWLIST", policy)
         self.assertIn("Dependabot", policy)
