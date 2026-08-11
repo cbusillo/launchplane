@@ -7,6 +7,12 @@ from pydantic import ValidationError
 from control_plane.contracts.change_impact import ChangeImpactTarget
 from control_plane.contracts.engineering_review_decision import EngineeringReviewDecisionRecord
 from control_plane.contracts.engineering_review_run import EngineeringReviewRunRecord
+from control_plane.contracts.merge_admission_record import (
+    MergeAdmissionRecord,
+    MergeLandingOutcomeRecord,
+    build_merge_effect_attempt_id,
+    validate_merge_landing_outcome_for_admission,
+)
 from control_plane.contracts.merge_readiness import (
     MERGE_READINESS_POLICY_DIMENSIONS,
     MergeReadinessAdvisoryObservation,
@@ -27,6 +33,9 @@ from control_plane.contracts.merge_train_batch import (
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerStateRecord,
     build_merge_train_controller_key,
+)
+from control_plane.contracts.merge_train_structural_provenance import (
+    MergeTrainStructuralCandidateResult,
 )
 from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceBinding,
@@ -300,6 +309,62 @@ def _evaluate(**updates: object) -> MergeReadinessResult:
     }
     payload.update(updates)
     return evaluate_merge_readiness(**payload)  # type: ignore[arg-type]
+
+
+def _merge_admission(**updates: object) -> MergeAdmissionRecord:
+    readiness = _evaluate()
+    attempt_id = build_merge_effect_attempt_id(
+        controller_key=readiness.fence.evidence.controller_key,
+        lease_owner=readiness.fence.evidence.observed_lease_owner,
+        lease_acquired_at="2026-08-11T03:00:00Z",
+        landing_plan_id="landing-plan-1",
+        pull_request_number=2083,
+        queue_position=2,
+        attempt_sequence=1,
+        expected_effect_sha=CANDIDATE_SHA,
+    )
+    payload: dict[str, object] = {
+        "attempt_id": attempt_id,
+        "attempt_sequence": 1,
+        "source": "test:merge-admission",
+        "repository": REPOSITORY,
+        "base_branch": "main",
+        "pull_request_number": 2083,
+        "queue_position": 2,
+        "batch_id": "batch-1",
+        "candidate_record_id": "candidate-record-1",
+        "landing_plan_record_id": "landing-record-1",
+        "landing_plan_id": "landing-plan-1",
+        "merge_method": "merge",
+        "effective_base_sha": BASE_SHA,
+        "effective_base_tree_sha": OTHER_SHA,
+        "pull_request_head_sha": HEAD_SHA,
+        "pull_request_head_tree_sha": TREE_SHA,
+        "candidate_sha": CANDIDATE_SHA,
+        "candidate_tree_sha": "6" * 40,
+        "expected_effect_sha": CANDIDATE_SHA,
+        "candidate_sha256": POLICY_SHA,
+        "structural_provenance_sha256": EVIDENCE_SHA,
+        "landing_plan_sha256": OTHER_POLICY_SHA,
+        "readiness": readiness,
+        "structural_result": MergeTrainStructuralCandidateResult(
+            status="exact",
+            reason_codes=("structural_single_entry_exact",),
+            effective_base_sha=BASE_SHA,
+            effective_base_tree_sha=OTHER_SHA,
+            candidate_sha256=POLICY_SHA,
+            landing_plan_sha256=OTHER_POLICY_SHA,
+            provenance_sha256=EVIDENCE_SHA,
+        ),
+        "admission_algorithm_version": "merge-admission-v1",
+        "controller_key": readiness.fence.evidence.controller_key,
+        "lease_owner": readiness.fence.evidence.observed_lease_owner,
+        "lease_acquired_at": "2026-08-11T03:00:00Z",
+        "lease_expires_at": readiness.fence.evidence.lease_expires_at,
+        "created_at": "2026-08-11T03:01:00Z",
+    }
+    payload.update(updates)
+    return MergeAdmissionRecord.model_validate(payload)
 
 
 class MergeReadinessScenarioTests(unittest.TestCase):
@@ -812,6 +877,87 @@ class MergeReadinessModelValidationTests(unittest.TestCase):
         payload["unexpected"] = True
         with self.assertRaises(ValidationError):
             MergeReadinessResult.model_validate(payload)
+
+
+class MergeAdmissionRecordTests(unittest.TestCase):
+    def test_ready_evidence_builds_deterministic_admission(self) -> None:
+        first = _merge_admission()
+        second = _merge_admission()
+
+        self.assertEqual(first, second)
+        self.assertTrue(first.admission_id.startswith("merge-admission-"))
+        self.assertEqual(len(first.admission_binding_sha256), 64)
+        self.assertEqual(first.readiness.state, "ready")
+
+    def test_admission_contract_rejects_non_deterministic_attempt_id(self) -> None:
+        admission = _merge_admission()
+        payload = admission.model_dump(mode="json")
+        payload.update(
+            {
+                "admission_id": "",
+                "admission_binding_sha256": "",
+                "attempt_id": "merge-effect-attempt-not-deterministic",
+            }
+        )
+
+        with self.assertRaisesRegex(ValidationError, "deterministic identity"):
+            MergeAdmissionRecord.model_validate(payload)
+
+    def test_non_ready_evidence_cannot_be_admitted(self) -> None:
+        with self.assertRaises(ValidationError):
+            _merge_admission(readiness=_evaluate(technical_checks=_checks(status="pending")))
+
+    def test_landed_outcome_requires_exact_matching_git_evidence(self) -> None:
+        admission = _merge_admission()
+        outcome = MergeLandingOutcomeRecord(
+            admission_id=admission.admission_id,
+            admission_binding_sha256=admission.admission_binding_sha256,
+            attempt_id=admission.attempt_id,
+            observation_sequence=1,
+            source="test:landed",
+            repository=admission.repository,
+            base_branch=admission.base_branch,
+            pull_request_number=admission.pull_request_number,
+            status="landed",
+            reason="provider_and_git_confirmed",
+            provider_effect_attempted=True,
+            observed_pull_request_head_sha=admission.pull_request_head_sha,
+            observed_pull_request_head_tree_sha=admission.pull_request_head_tree_sha,
+            observed_base_sha="7" * 40,
+            observed_base_tree_sha="8" * 40,
+            merge_commit_sha="9" * 40,
+            merge_commit_tree_sha="a" * 40,
+            base_contains_merge_commit=True,
+            exact_landing_confirmed=True,
+            observed_at="2026-08-11T03:02:00Z",
+        )
+
+        validate_merge_landing_outcome_for_admission(
+            admission=admission,
+            outcome=outcome,
+        )
+        self.assertEqual(outcome.status, "landed")
+
+    def test_ambiguous_transport_is_never_rejected(self) -> None:
+        admission = _merge_admission()
+        outcome = MergeLandingOutcomeRecord(
+            admission_id=admission.admission_id,
+            admission_binding_sha256=admission.admission_binding_sha256,
+            attempt_id=admission.attempt_id,
+            observation_sequence=1,
+            source="test:ambiguous",
+            repository=admission.repository,
+            base_branch=admission.base_branch,
+            pull_request_number=admission.pull_request_number,
+            status="reconcile_required",
+            reason="provider_transport_ambiguous",
+            provider_effect_attempted=True,
+            provider_message="connection reset after request send",
+            observed_at="2026-08-11T03:02:00Z",
+        )
+
+        self.assertFalse(outcome.provider_conclusive_rejection)
+        self.assertFalse(outcome.exact_landing_confirmed)
 
     def test_contract_rejects_authority_state_reason_and_digest_forgery(self) -> None:
         result = _evaluate()

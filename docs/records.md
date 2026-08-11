@@ -2519,3 +2519,37 @@ phases, whether the sole application-delete effect was attempted/performed,
 candidate absence verification, protected-target stability, and the literal
 zero authority-write count. There are no profile lifecycle, authority deletion,
 secret mutation, target rewrite, or runtime mutation fields.
+
+## Merge admission and landing outcome records
+
+Guarded merge authorization is persisted separately from mutable batch landing
+progress. `MergeAdmissionRecord` is append-only evidence written immediately
+before one exact provider merge attempt. It binds the current L2 readiness
+result and digest, structural result and provenance digest, Owner and
+engineering evidence carried by L2, all seven policy fingerprints, repository,
+base branch, PR and queue position, candidate and landing-plan identity,
+rolling base/head/tree identity, algorithm version, controller lease, expected
+effect SHA, attempt sequence, and actual creation time. Each admission carries
+the stable landing-plan lineage ID plus the exact persisted progress-record ID.
+Its deterministic attempt ID is contract-validated, and guarded creation
+atomically rechecks persisted lease acquisition/expiry, policy, active PR, plan,
+and expected effect fences.
+
+`MergeLandingOutcomeRecord` is a separate append-only observation for that
+admission. Its status is `landed`, `rejected`, or `reconcile_required`.
+Admissions without outcomes and latest `reconcile_required` observations remain
+effect-unknown and block provider replay. Reconciliation appends a successor
+observation after fresh GitHub reads; terminal `landed` and `rejected` outcomes
+cannot be superseded. `landed` requires the actual observed base SHA/tree and
+containment proof. Observed no-effect reconciliation records exact open PR,
+head/tree, and unchanged base evidence without setting provider-rejection
+fields. Observation sequence, not wall-clock timestamp, is chain authority for
+listing and filesystem import.
+
+Filesystem rehearsal uses `launchplane_merge_admissions/` and
+`launchplane_merge_landing_outcomes/`. PostgreSQL uses
+`launchplane_merge_admissions` and `launchplane_merge_landing_outcomes` with
+unique attempt, binding, and per-admission observation-sequence indexes.
+Migration `e9b1d3f5a7c0` creates both tables after the detached application
+retirement migration. Historical landing plans are not backfilled into L3
+authority.

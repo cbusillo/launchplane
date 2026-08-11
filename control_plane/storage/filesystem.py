@@ -46,6 +46,14 @@ from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalEventRecord,
     ManagerPreviewApprovalEventWriteStatus,
 )
+from control_plane.contracts.merge_admission_record import (
+    MergeAdmissionFenceRejectedError,
+    MergeAdmissionRecord,
+    MergeLandingOutcomeRecord,
+    validate_merge_admission_controller_fence,
+    validate_merge_landing_outcome_for_admission,
+    validate_merge_landing_outcome_successor,
+)
 from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceEventRecord,
     OwnerAcceptanceEventWriteStatus,
@@ -1985,6 +1993,209 @@ class FilesystemRecordStore:
             and (not status or record.status == status)
         ]
         records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def create_merge_admission_record_if_absent(
+        self, record: MergeAdmissionRecord
+    ) -> tuple[MergeAdmissionRecord, bool]:
+        record_type = "launchplane_merge_admissions"
+        with self._exclusive_record_lock(record_type, record.attempt_id):
+            existing_attempts = self.list_merge_admission_records(
+                attempt_id=record.attempt_id,
+                limit=2,
+            )
+            if existing_attempts:
+                existing = existing_attempts[0]
+                if existing != record:
+                    raise ValueError("Merge admission attempts are append-only.")
+                return existing, False
+            created = self._create_model_if_absent(record_type, record.admission_id, record)
+            if created:
+                return record, True
+            existing = self.read_merge_admission_record(record.admission_id)
+            if existing != record:
+                raise ValueError("Merge admission records are append-only.")
+            return existing, False
+
+    def create_guarded_merge_admission_record_if_absent(
+        self,
+        record: MergeAdmissionRecord,
+        *,
+        admitted_at: str,
+    ) -> tuple[MergeAdmissionRecord, bool]:
+        controller_record_type = "launchplane_merge_train_controller_states"
+        controller_storage_id = _merge_train_controller_storage_id(record.controller_key)
+        with self._exclusive_record_lock(controller_record_type, record.controller_key):
+            controller_path = self._record_path(
+                controller_record_type,
+                controller_storage_id,
+            )
+            if not controller_path.exists():
+                raise MergeAdmissionFenceRejectedError(
+                    "Persisted merge controller state is missing at admission creation."
+                )
+            controller_state = self._read_model_locked(
+                MergeTrainControllerStateRecord,
+                controller_record_type,
+                controller_storage_id,
+            )
+            validate_merge_admission_controller_fence(
+                admission=record,
+                controller_state=controller_state,
+                admitted_at=admitted_at,
+            )
+            return self.create_merge_admission_record_if_absent(record)
+
+    def read_merge_admission_record(self, admission_id: str) -> MergeAdmissionRecord:
+        return self._read_model(
+            MergeAdmissionRecord,
+            "launchplane_merge_admissions",
+            admission_id,
+        )
+
+    def list_merge_admission_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        pull_request_number: int | None = None,
+        landing_plan_record_id: str = "",
+        landing_plan_id: str = "",
+        attempt_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeAdmissionRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                MergeAdmissionRecord,
+                "launchplane_merge_admissions",
+            )
+            if (not repository or record.repository == repository.strip().lower())
+            and (not base_branch or record.base_branch == base_branch)
+            and (pull_request_number is None or record.pull_request_number == pull_request_number)
+            and (
+                not landing_plan_record_id
+                or record.landing_plan_record_id == landing_plan_record_id
+            )
+            and (not landing_plan_id or record.landing_plan_id == landing_plan_id)
+            and (not attempt_id or record.attempt_id == attempt_id)
+        ]
+        records.sort(key=lambda item: (item.created_at, item.admission_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def create_merge_landing_outcome_record_if_absent(
+        self, record: MergeLandingOutcomeRecord
+    ) -> tuple[MergeLandingOutcomeRecord, bool]:
+        record_type = "launchplane_merge_landing_outcomes"
+        with self._exclusive_record_lock(record_type, record.admission_id):
+            admission = self.read_merge_admission_record(record.admission_id)
+            validate_merge_landing_outcome_for_admission(
+                admission=admission,
+                outcome=record,
+            )
+            existing_sequence = self.list_merge_landing_outcome_records(
+                admission_id=record.admission_id,
+                observation_sequence=record.observation_sequence,
+                limit=2,
+            )
+            if existing_sequence:
+                existing = existing_sequence[0]
+                if existing != record:
+                    raise ValueError("Merge landing outcome observations are append-only.")
+                return existing, False
+            prior_records = self.list_merge_landing_outcome_records(
+                admission_id=record.admission_id,
+                limit=1,
+            )
+            if prior_records:
+                validate_merge_landing_outcome_successor(
+                    prior=prior_records[0],
+                    successor=record,
+                )
+            elif record.observation_sequence != 1:
+                raise ValueError("Merge landing outcome reconciliation is missing its predecessor.")
+            created = self._create_model_if_absent(record_type, record.outcome_id, record)
+            if created:
+                return record, True
+            existing = self.read_merge_landing_outcome_record(record.outcome_id)
+            if existing != record:
+                raise ValueError("Merge landing outcome records are append-only.")
+            return existing, False
+
+    def read_merge_landing_outcome_record(self, outcome_id: str) -> MergeLandingOutcomeRecord:
+        return self._read_model(
+            MergeLandingOutcomeRecord,
+            "launchplane_merge_landing_outcomes",
+            outcome_id,
+        )
+
+    def list_merge_landing_outcome_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        pull_request_number: int | None = None,
+        admission_id: str = "",
+        status: str = "",
+        observation_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[MergeLandingOutcomeRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                MergeLandingOutcomeRecord,
+                "launchplane_merge_landing_outcomes",
+            )
+            if (not repository or record.repository == repository.strip().lower())
+            and (not base_branch or record.base_branch == base_branch)
+            and (pull_request_number is None or record.pull_request_number == pull_request_number)
+            and (not admission_id or record.admission_id == admission_id)
+            and (not status or record.status == status)
+            and (
+                observation_sequence is None or record.observation_sequence == observation_sequence
+            )
+        ]
+        records.sort(
+            key=lambda item: (
+                item.admission_id,
+                item.observation_sequence,
+                item.observed_at,
+                item.outcome_id,
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def list_unresolved_merge_admission_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeAdmissionRecord, ...]:
+        outcomes_by_admission: dict[str, MergeLandingOutcomeRecord] = {}
+        for outcome in self.list_merge_landing_outcome_records(
+            repository=repository,
+            base_branch=base_branch,
+        ):
+            outcomes_by_admission.setdefault(outcome.admission_id, outcome)
+        records = [
+            admission
+            for admission in self.list_merge_admission_records(
+                repository=repository,
+                base_branch=base_branch,
+            )
+            if (
+                admission.admission_id not in outcomes_by_admission
+                or outcomes_by_admission[admission.admission_id].status == "reconcile_required"
+            )
+        ]
         if limit is not None:
             records = records[:limit]
         return tuple(records)
