@@ -2464,6 +2464,15 @@ provider observation fingerprints, provider-operation linkage, lifecycle
 transitions, timestamps, outcomes, and mutation evidence. Apply events always
 reference the persisted reviewed plan record and digest.
 
+For a present Dokploy application, normal history-based retirement behavior is
+unchanged: the recorded latest deployment must be terminal and the application
+state must be one of the established retirable states. An explicitly recognized
+empty deployment list is stored in provider-observation `deployment_status` as
+the retirement-local `no_history` sentinel. That sentinel is valid only when the
+application state is exactly `idle`; Dokploy `done` is a successfully deployed,
+possibly serving state. Malformed or unrecognized deployment payload shapes
+remain non-retirable and are not normalized to that sentinel.
+
 Provider application/domain identifiers and provider-operation keys are
 internal record evidence. Service and workflow responses expose only SHA-256
 identifiers, counts, phases, and record references. Runtime deletion uses the

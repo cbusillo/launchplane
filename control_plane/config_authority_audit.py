@@ -169,6 +169,14 @@ LAUNCHPLANE_CONFIG_AUTHORITY_REUSABLE_WORKFLOW_PATTERN = re.compile(
     r"^cbusillo/launchplane/\.github/workflows/"
     r"reusable-product-repo-config-authority\.yml@(?P<revision>[^\s]+)$"
 )
+LAUNCHPLANE_GENERIC_WEB_PREVIEW_FACADE_PATTERN = re.compile(
+    r"^cbusillo/launchplane/\.github/workflows/"
+    r"reusable-generic-web-preview\.yml@[0-9a-f]{40}$"
+)
+LAUNCHPLANE_GENERIC_WEB_PREVIEW_CALLER_WORKFLOW_PATH = ".github/workflows/launchplane-preview.yml"
+LAUNCHPLANE_GENERIC_WEB_PREVIEW_FACADE_INPUTS = frozenset(
+    ("verification_command", "image_repository")
+)
 LAUNCHPLANE_DEPENDENCY_HEALTH_ACTION_REFERENCE_PATTERN = re.compile(
     r"^cbusillo/launchplane/\.github/actions/dependency-health-trivy@[^\s]+$"
 )
@@ -2175,6 +2183,8 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
     dependency_health_with_count = 0
     config_authority_uses_indent: int | None = None
     config_authority_with_count = 0
+    generic_web_preview_uses_indent: int | None = None
+    generic_web_preview_with_count = 0
     while index < len(lines):
         line_number = index + 1
         line = lines[index]
@@ -2189,6 +2199,8 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
             dependency_health_uses_indent = None
         if config_authority_uses_indent is not None and indent < config_authority_uses_indent:
             config_authority_uses_indent = None
+        if generic_web_preview_uses_indent is not None and indent < generic_web_preview_uses_indent:
+            generic_web_preview_uses_indent = None
         context_stack = _yaml_context_for_indent(context_stack, indent=indent)
         list_match = YAML_LIST_ITEM_PATTERN.match(line)
         if list_match is not None:
@@ -2217,6 +2229,10 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                     scalar_value
                 ):
                     config_authority_uses_indent = indent + 2
+                if yaml_key == "uses" and _is_launchplane_generic_web_preview_facade_reference(
+                    scalar_value
+                ):
+                    generic_web_preview_uses_indent = indent + 2
                 if yaml_key == "uses" and (
                     _is_yaml_reusable_workflow_reference(scalar_value)
                     or _is_launchplane_dependency_health_action_reference(scalar_value)
@@ -2256,6 +2272,14 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                 config_authority_with_count += 1
                 yaml_key = f"launchplane-config-authority.with[{config_authority_with_count}]"
                 config_authority_uses_indent = None
+            elif (
+                yaml_key == "with"
+                and generic_web_preview_uses_indent is not None
+                and indent == generic_web_preview_uses_indent
+            ):
+                generic_web_preview_with_count += 1
+                yaml_key = f"generic-web-preview.with[{generic_web_preview_with_count}]"
+                generic_web_preview_uses_indent = None
             context_stack.append((indent, yaml_key))
             index += 1
             continue
@@ -2283,6 +2307,10 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                 block_value
             ):
                 config_authority_uses_indent = indent
+            if yaml_key == "uses" and _is_launchplane_generic_web_preview_facade_reference(
+                block_value
+            ):
+                generic_web_preview_uses_indent = indent
             if (
                 yaml_key in IGNORED_YAML_SCALAR_KEYS
                 and not _is_yaml_reusable_workflow_reference(block_value)
@@ -2315,6 +2343,10 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                 scalar_value
             ):
                 config_authority_uses_indent = indent
+            if yaml_key == "uses" and _is_launchplane_generic_web_preview_facade_reference(
+                scalar_value
+            ):
+                generic_web_preview_uses_indent = indent
             if (
                 yaml_key in IGNORED_YAML_SCALAR_KEYS
                 and not _is_yaml_reusable_workflow_reference(scalar_value)
@@ -2351,6 +2383,9 @@ def _yaml_candidate_key(context_stack: Sequence[tuple[int, str]], key: str) -> s
     config_authority_block = _yaml_config_authority_with_block(context_stack)
     if config_authority_block:
         return f"launchplane-config-authority.with[{config_authority_block}].{key}"
+    generic_web_preview_block = _yaml_generic_web_preview_with_block(context_stack)
+    if generic_web_preview_block:
+        return f"generic-web-preview.with[{generic_web_preview_block}].{key}"
     return key
 
 
@@ -2426,6 +2461,15 @@ def _yaml_config_authority_with_block(context_stack: Sequence[tuple[int, str]]) 
     if not key.startswith("launchplane-config-authority.with[") or not key.endswith("]"):
         return ""
     return key.removeprefix("launchplane-config-authority.with[").removesuffix("]")
+
+
+def _yaml_generic_web_preview_with_block(context_stack: Sequence[tuple[int, str]]) -> str:
+    if not context_stack:
+        return ""
+    key = context_stack[-1][1]
+    if not key.startswith("generic-web-preview.with[") or not key.endswith("]"):
+        return ""
+    return key.removeprefix("generic-web-preview.with[").removesuffix("]")
 
 
 def _yaml_block_scalar_lines(
@@ -2892,6 +2936,11 @@ def _allow_reason(
         path=normalized,
         key=key,
         value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_generic_web_preview_facade_input(
+        path=normalized,
+        key=key,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if normalized.startswith(".github/workflows/") and _is_cleanup_ghcr_product_forward(
@@ -3538,6 +3587,13 @@ def _is_launchplane_config_authority_workflow_reference(value: object) -> bool:
     )
 
 
+def _is_launchplane_generic_web_preview_facade_reference(value: object) -> bool:
+    return (
+        LAUNCHPLANE_GENERIC_WEB_PREVIEW_FACADE_PATTERN.fullmatch(_string_value(value).strip())
+        is not None
+    )
+
+
 def _launchplane_config_authority_workflow_revision(value: object) -> str:
     match = LAUNCHPLANE_CONFIG_AUTHORITY_REUSABLE_WORKFLOW_PATTERN.fullmatch(
         _string_value(value).strip()
@@ -3580,6 +3636,16 @@ def _is_workflow_thin_connector_key_value(*, path: str, key: str, value: object)
         return False
     value_text = _string_value(value).strip().rstrip(",")
     return value_text in allowed_values
+
+
+def _is_generic_web_preview_facade_input(*, path: str, key: str) -> bool:
+    if path != LAUNCHPLANE_GENERIC_WEB_PREVIEW_CALLER_WORKFLOW_PATH:
+        return False
+    match = re.fullmatch(r"generic-web-preview\.with\[\d+\]\.(?P<input_name>[A-Za-z0-9_.-]+)", key)
+    return (
+        match is not None
+        and match.group("input_name") in LAUNCHPLANE_GENERIC_WEB_PREVIEW_FACADE_INPUTS
+    )
 
 
 def _is_cleanup_ghcr_product_forward(

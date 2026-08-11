@@ -502,9 +502,20 @@ caller repository. It publishes an exact digest, invokes the typed generic-web
 preview lifecycle, runs the product-owned verification command in a job without
 OIDC, records verification evidence, and delegates feedback status to the
 existing Launchplane workflow. The caller may override code-adjacent build facts
-such as Dockerfile path, build target, build arguments, or image repository; it
-must not pass provider targets, domains, lane topology, secret values, or
-Launchplane record IDs.
+supported by the facade, but the conventional product-repository connector is
+currently classified to pass only `verification_command` and the optional
+`image_repository`. Dockerfile path, build target, build arguments, and other
+facade inputs require their own reviewed config-authority classification before
+product repositories may set them. The caller must not pass provider targets,
+domains, lane topology, secret values, or Launchplane record IDs.
+
+The config-authority gate classifies `verification_command` and optional
+`image_repository` as thin connector inputs only when they are in the `with:`
+block directly attached to a full-SHA
+`reusable-generic-web-preview.yml` call in the conventional
+`.github/workflows/launchplane-preview.yml` workflow. Lookalike paths, mutable
+facade refs, unrelated reusable workflows, and other input names remain
+rejected.
 
 Same-repository cleanup, fork notices, and Dependabot notices stay in a
 separate trusted workflow so `pull_request_target` never reaches an untrusted
