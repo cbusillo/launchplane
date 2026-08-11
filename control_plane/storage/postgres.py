@@ -198,6 +198,9 @@ from control_plane.contracts.product_profile_record import (
     product_profile_record_sha256,
 )
 from control_plane.contracts.product_retirement import ProductRetirementRecord
+from control_plane.contracts.detached_application_retirement import (
+    DetachedApplicationRetirementRecord,
+)
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEventRecord,
     PublicIngressIncidentReminderStateRecord,
@@ -1663,6 +1666,56 @@ class LaunchplaneProductRetirementRow(Base):
     mode: Mapped[str] = mapped_column(String, nullable=False)
     outcome: Mapped[str] = mapped_column(String, nullable=False)
     recorded_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneDetachedApplicationRetirementRow(Base):
+    __tablename__ = "launchplane_detached_application_retirements"
+    __table_args__ = (
+        Index(
+            "launchplane_detached_app_retirements_candidate_idx",
+            "candidate_target_sha256",
+            desc("recorded_at"),
+        ),
+        Index(
+            "launchplane_detached_app_retirements_plan_idx",
+            "plan_record_id",
+            desc("recorded_at"),
+        ),
+        Index(
+            "launchplane_detached_app_retirements_idempotency_idx",
+            "idempotency_key",
+            desc("recorded_at"),
+        ),
+        Index(
+            "launchplane_detached_app_retirements_plan_idempotency_unique",
+            "candidate_target_sha256",
+            "actor",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("mode = 'plan'"),
+            sqlite_where=text("mode = 'plan'"),
+        ),
+        CheckConstraint(
+            "authority_write_count = 0",
+            name="launchplane_detached_app_retirements_no_authority_writes",
+        ),
+        CheckConstraint(
+            "protected_target_count > 0",
+            name="launchplane_detached_app_retirements_protected_nonempty",
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    plan_record_id: Mapped[str] = mapped_column(String, nullable=False)
+    candidate_target_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    outcome: Mapped[str] = mapped_column(String, nullable=False)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
+    protected_target_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    authority_write_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -13518,6 +13571,128 @@ class PostgresRecordStore(HumanSessionStore):
             return tuple(
                 self._read_payload(
                     model_type=ProductRetirementRecord,
+                    payload=row.payload,
+                )
+                for row in session.scalars(statement)
+            )
+
+    def write_detached_application_retirement_record(
+        self, record: DetachedApplicationRetirementRecord
+    ) -> None:
+        candidate_target_sha256 = record.candidate_observation.target_id_sha256
+        with self._session_factory() as session:
+            existing = session.get(
+                LaunchplaneDetachedApplicationRetirementRow,
+                record.record_id,
+            )
+            if existing is not None:
+                stored = self._read_payload(
+                    model_type=DetachedApplicationRetirementRecord,
+                    payload=existing.payload,
+                )
+                if stored != record and not (
+                    record.mode == "plan"
+                    and stored.mode == "plan"
+                    and stored.candidate_observation.target_id_sha256 == candidate_target_sha256
+                    and stored.identity.actor == record.identity.actor
+                    and stored.idempotency_key == record.idempotency_key
+                    and stored.continuity_sha256 == record.continuity_sha256
+                ):
+                    raise ValueError("Detached application retirement records are append-only.")
+                return
+            session.add(
+                LaunchplaneDetachedApplicationRetirementRow(
+                    record_id=record.record_id,
+                    plan_record_id=record.plan_record_id,
+                    candidate_target_sha256=candidate_target_sha256,
+                    actor=record.identity.actor,
+                    idempotency_key=record.idempotency_key,
+                    mode=record.mode,
+                    outcome=record.outcome,
+                    recorded_at=record.recorded_at,
+                    protected_target_count=len(record.protected_targets),
+                    authority_write_count=record.authority_write_count,
+                    payload=self._payload_dict(record),
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError as error:
+                session.rollback()
+                if record.mode != "plan":
+                    raise
+                existing_plan = session.scalar(
+                    select(LaunchplaneDetachedApplicationRetirementRow).where(
+                        LaunchplaneDetachedApplicationRetirementRow.candidate_target_sha256
+                        == candidate_target_sha256,
+                        LaunchplaneDetachedApplicationRetirementRow.actor == record.identity.actor,
+                        LaunchplaneDetachedApplicationRetirementRow.idempotency_key
+                        == record.idempotency_key,
+                        LaunchplaneDetachedApplicationRetirementRow.mode == "plan",
+                    )
+                )
+                if existing_plan is None:
+                    raise error
+                stored = self._read_payload(
+                    model_type=DetachedApplicationRetirementRecord,
+                    payload=existing_plan.payload,
+                )
+                if stored.continuity_sha256 != record.continuity_sha256:
+                    raise ValueError(
+                        "Detached application retirement plan idempotency key was reused."
+                    ) from error
+
+    def read_detached_application_retirement_record(
+        self, record_id: str
+    ) -> DetachedApplicationRetirementRecord:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneDetachedApplicationRetirementRow, record_id)
+            if row is None:
+                raise FileNotFoundError(
+                    "No Launchplane detached application retirement record found for "
+                    f"record_id={record_id!r}."
+                )
+            return self._read_payload(
+                model_type=DetachedApplicationRetirementRecord,
+                payload=row.payload,
+            )
+
+    def list_detached_application_retirement_records(
+        self,
+        *,
+        candidate_target_sha256: str = "",
+        actor: str = "",
+        mode: str = "",
+        idempotency_key: str = "",
+        limit: int | None = None,
+    ) -> tuple[DetachedApplicationRetirementRecord, ...]:
+        statement = select(LaunchplaneDetachedApplicationRetirementRow)
+        filters: list[object] = []
+        if candidate_target_sha256:
+            filters.append(
+                LaunchplaneDetachedApplicationRetirementRow.candidate_target_sha256
+                == candidate_target_sha256
+            )
+        if actor:
+            filters.append(LaunchplaneDetachedApplicationRetirementRow.actor == actor)
+        if mode:
+            filters.append(LaunchplaneDetachedApplicationRetirementRow.mode == mode)
+        if idempotency_key:
+            filters.append(
+                LaunchplaneDetachedApplicationRetirementRow.idempotency_key == idempotency_key
+            )
+        if filters:
+            statement = statement.where(*cast(Any, filters))
+        statement = statement.order_by(
+            desc(LaunchplaneDetachedApplicationRetirementRow.recorded_at),
+            desc(LaunchplaneDetachedApplicationRetirementRow.record_id),
+        )
+        if limit is not None:
+            statement = statement.limit(max(limit, 0))
+        with self._session_factory() as session:
+            return tuple(
+                self._read_payload(
+                    model_type=DetachedApplicationRetirementRecord,
                     payload=row.payload,
                 )
                 for row in session.scalars(statement)

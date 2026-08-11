@@ -2564,3 +2564,37 @@ caller `workflow_ref` and the exact immutable `job_workflow_ref`:
 workflow_ref=cbusillo/launchplane/.github/workflows/product-retirement.yml@refs/heads/main
 job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml@c922d5f1a0bf3ab17a829196042a96ba89d7b693
 ```
+
+## Detached Application Retirement
+
+Phase one provides **Reusable Detached Application Retirement** as a
+`workflow_call`-only worker. It is intentionally uncalled: do not add or invoke
+a `workflow_dispatch` wrapper, configure the future live authz managed-set
+secret, deploy this branch, or attempt a provider mutation as part of phase one.
+The worker uses the protected `launchplane-authz-admin` environment, OIDC,
+target-digest concurrency, exact input validation, and redacted evidence.
+
+The future operator sequence is plan then apply. Inputs are exact Dokploy
+project/environment/application names, the candidate target SHA-256, a sorted
+non-empty JSON array of every other application target SHA-256 in the project,
+a stable idempotency key, reason, and issue. Apply additionally requires the
+persisted plan record/digest and the exact target-bound confirmation. Never pass
+or recover a raw target ID through workflow inputs, artifacts, summaries, issue
+comments, or local CLI fallbacks.
+
+Planning stops on ambiguous or malformed `/api/project.all` evidence, a
+non-idle candidate, any domain, any recognized deployment history, digest/set
+drift, or any Launchplane authority reference. Apply repeats all proofs under a
+durable provider-operation lease before checkpointing the sole
+`application.delete`. Reconciliation and already-absent retries reuse the same
+apply idempotency key. Completion requires candidate absence, unchanged
+protected fingerprints, and zero authority writes.
+
+Managed authz routing is reserved through the
+`detached-application-retirement` selector, managed-set ID
+`operator.detached-application-retirement`, and secret name
+`LAUNCHPLANE_AUTHZ_DETACHED_APPLICATION_RETIREMENT_MANAGED_SET_JSON`. Phase one
+does not create or populate that secret and does not reconcile a live rule. A
+later phase must first pin a thin caller to the exact merged reusable-worker SHA,
+then authorize the exact caller `workflow_ref` and immutable worker
+`job_workflow_ref` before any protected plan/apply run.

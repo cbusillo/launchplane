@@ -1,0 +1,240 @@
+---
+name: Reusable Detached Application Retirement
+
+"on":
+  workflow_call:
+    inputs:
+      mode:
+        description: Persist a reviewed plan or apply that exact persisted plan.
+        required: true
+        type: string
+      project_name:
+        description: Exact Dokploy project name.
+        required: true
+        type: string
+      environment_name:
+        description: Exact Dokploy environment name.
+        required: true
+        type: string
+      application_name:
+        description: Exact globally unique detached Dokploy application name.
+        required: true
+        type: string
+      candidate_target_sha256:
+        description: SHA-256 of the detached application identifier.
+        required: true
+        type: string
+      expected_protected_target_sha256_json:
+        description: Sorted non-empty JSON array of protected application target SHA-256 values.
+        required: true
+        type: string
+      operator_idempotency_key:
+        description: Stable operator-selected key reused for retries of this retirement intent.
+        required: true
+        type: string
+      reason:
+        description: Required single-line operator reason bound into plan continuity.
+        required: true
+        type: string
+      related_issue:
+        description: Required issue or change reference bound into plan continuity.
+        required: true
+        type: string
+      reviewed_plan_record_id:
+        description: Persisted plan record id returned by the reviewed plan; required for apply.
+        required: false
+        default: ""
+        type: string
+      reviewed_plan_sha256:
+        description: Plan SHA-256 returned by the reviewed plan; required for apply.
+        required: false
+        default: ""
+        type: string
+      confirmation:
+        description: Exact target-bound apply confirmation returned by the plan contract.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: >-
+    launchplane-detached-application-retirement-${{ inputs.candidate_target_sha256 }}
+  cancel-in-progress: false
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    environment: launchplane-authz-admin
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      MODE: ${{ inputs.mode }}
+      PROJECT_NAME: ${{ inputs.project_name }}
+      ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+      APPLICATION_NAME: ${{ inputs.application_name }}
+      CANDIDATE_TARGET_SHA256: ${{ inputs.candidate_target_sha256 }}
+      EXPECTED_PROTECTED_TARGET_SHA256_JSON: >-
+        ${{ inputs.expected_protected_target_sha256_json }}
+      OPERATOR_IDEMPOTENCY_KEY: ${{ inputs.operator_idempotency_key }}
+      REASON: ${{ inputs.reason }}
+      RELATED_ISSUE: ${{ inputs.related_issue }}
+      REVIEWED_PLAN_RECORD_ID: ${{ inputs.reviewed_plan_record_id }}
+      REVIEWED_PLAN_SHA256: ${{ inputs.reviewed_plan_sha256 }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - name: Validate exact detached application intent
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.repository }}" != "cbusillo/launchplane" ]; then
+            echo "Caller repository must be cbusillo/launchplane." >&2
+            exit 1
+          fi
+          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
+          : "${PROJECT_NAME:?Missing project_name input}"
+          : "${ENVIRONMENT_NAME:?Missing environment_name input}"
+          : "${APPLICATION_NAME:?Missing application_name input}"
+          : "${CANDIDATE_TARGET_SHA256:?Missing candidate_target_sha256 input}"
+          : "${EXPECTED_PROTECTED_TARGET_SHA256_JSON:?Missing protected target digest input}"
+          : "${OPERATOR_IDEMPOTENCY_KEY:?Missing operator_idempotency_key input}"
+          : "${REASON:?Missing reason input}"
+          : "${RELATED_ISSUE:?Missing related_issue input}"
+          if ! [[ "$CANDIDATE_TARGET_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "candidate_target_sha256 must be lowercase SHA-256." >&2
+            exit 1
+          fi
+          if [[ "$REASON" == *$'\n'* || "$RELATED_ISSUE" == *$'\n'* ]]; then
+            echo "reason and related_issue must be single-line values." >&2
+            exit 1
+          fi
+          protected="$(jq -cer '
+            if type != "array" or length == 0 then error("non-empty array required") else . end
+            | if all(.[]; type == "string" and test("^[0-9a-f]{64}$"))
+              then . else error("protected targets must be SHA-256") end
+            | if . == (unique | sort) then . else error("protected targets must be sorted unique") end
+          ' <<< "$EXPECTED_PROTECTED_TARGET_SHA256_JSON")"
+          if jq -e --arg candidate "$CANDIDATE_TARGET_SHA256" 'index($candidate) != null' \
+            <<< "$protected" >/dev/null; then
+            echo "candidate target cannot be protected." >&2
+            exit 1
+          fi
+          printf '%s\n' "$protected" > protected-targets.json
+          case "$MODE" in
+            plan|apply) ;;
+            *) echo "mode must be plan or apply." >&2; exit 1 ;;
+          esac
+          if [ "$MODE" = "apply" ]; then
+            : "${REVIEWED_PLAN_RECORD_ID:?Apply requires reviewed_plan_record_id}"
+            if ! [[ "$REVIEWED_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "Apply requires reviewed_plan_sha256." >&2
+              exit 1
+            fi
+            expected_confirmation="retire detached Dokploy application ${PROJECT_NAME}/${ENVIRONMENT_NAME}/${APPLICATION_NAME} target ${CANDIDATE_TARGET_SHA256}"
+            if [ "$CONFIRMATION" != "$expected_confirmation" ]; then
+              echo "Apply confirmation does not exactly bind the detached application." >&2
+              exit 1
+            fi
+          elif [ -n "$REVIEWED_PLAN_RECORD_ID$REVIEWED_PLAN_SHA256$CONFIRMATION" ]; then
+            echo "Plan mode rejects apply-only review and confirmation inputs." >&2
+            exit 1
+          fi
+
+      - name: Build detached application retirement request
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg mode "$MODE" \
+            --arg project_name "$PROJECT_NAME" \
+            --arg environment_name "$ENVIRONMENT_NAME" \
+            --arg application_name "$APPLICATION_NAME" \
+            --arg candidate_target_sha256 "$CANDIDATE_TARGET_SHA256" \
+            --slurpfile protected protected-targets.json \
+            --arg reason "$REASON" \
+            --arg related_issue "$RELATED_ISSUE" \
+            --arg reviewed_plan_record_id "$REVIEWED_PLAN_RECORD_ID" \
+            --arg reviewed_plan_sha256 "$REVIEWED_PLAN_SHA256" \
+            --arg confirmation "$CONFIRMATION" \
+            '{
+              mode: $mode,
+              project_name: $project_name,
+              environment_name: $environment_name,
+              application_name: $application_name,
+              candidate_target_sha256: $candidate_target_sha256,
+              expected_protected_target_sha256: $protected[0],
+              reason: $reason,
+              related_issue: $related_issue,
+              reviewed_plan_record_id: $reviewed_plan_record_id,
+              reviewed_plan_sha256: $reviewed_plan_sha256,
+              confirmation: $confirmation
+            }' > detached-application-retirement-request.json
+
+      - name: Request audited detached application retirement
+        id: request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@3f063c09bab63836d2b1c880ecb995786f045893 # main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          route-path: /v1/detached-application-retirement
+          payload-file: detached-application-retirement-request.json
+          idempotency-key: ${{ env.OPERATOR_IDEMPOTENCY_KEY }}
+          response-output-file: detached-application-retirement-response.json
+
+      - name: Verify redacted detached application evidence
+        shell: bash
+        env:
+          STATUS_CODE: ${{ steps.request.outputs.status-code }}
+        run: |
+          set -euo pipefail
+          if [ "$STATUS_CODE" != "202" ]; then
+            jq '{trace_id, error}' detached-application-retirement-response.json >&2
+            exit 1
+          fi
+          test "$(jq -r '.result.mode' detached-application-retirement-response.json)" = "$MODE"
+          test "$(jq -r '.result.candidate_target_sha256' detached-application-retirement-response.json)" = "$CANDIDATE_TARGET_SHA256"
+          jq -e --slurpfile protected protected-targets.json \
+            '.result.protected_target_sha256 == $protected[0] and .result.authority_write_count == 0' \
+            detached-application-retirement-response.json >/dev/null
+          if jq -e '.. | objects | has("application_id") or has("project_id") or has("environment_id") or has("provider_operation_key")' \
+            detached-application-retirement-response.json >/dev/null; then
+            echo "Detached application response exposed a provider identifier." >&2
+            exit 1
+          fi
+          if [ "$MODE" = "plan" ]; then
+            test "$(jq -r '.result.outcome' detached-application-retirement-response.json)" = "planned"
+          else
+            outcome="$(jq -r '.result.outcome' detached-application-retirement-response.json)"
+            case "$outcome" in
+              retired|already_absent) ;;
+              *) echo "Apply did not reach a terminal retirement outcome: $outcome" >&2; exit 1 ;;
+            esac
+            test "$(jq -r '.result.provider_absence_verified' detached-application-retirement-response.json)" = "true"
+            test "$(jq -r '.result.protected_targets_unchanged' detached-application-retirement-response.json)" = "true"
+          fi
+
+      - name: Upload redacted detached application evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: detached-application-retirement-${{ inputs.mode }}-${{ github.run_id }}
+          path: detached-application-retirement-response.json
+          if-no-files-found: error
+
+      - name: Summarize detached application evidence
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Detached Application Retirement'
+            echo
+            echo "- Mode: ${MODE}"
+            echo "- Candidate target SHA-256: ${CANDIDATE_TARGET_SHA256}"
+            echo "- Protected target count: $(jq -r '.result.protected_target_count' detached-application-retirement-response.json)"
+            echo "- Authority source count: $(jq -r '.result.authority_source_count' detached-application-retirement-response.json)"
+            echo "- Plan record: $(jq -r '.records.detached_application_retirement_plan_id' detached-application-retirement-response.json)"
+            echo "- Plan SHA-256: $(jq -r '.result.plan_sha256' detached-application-retirement-response.json)"
+            echo "- Outcome: $(jq -r '.result.outcome' detached-application-retirement-response.json)"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -147,6 +147,9 @@ from control_plane.contracts.product_profile_lifecycle_migration import (
     migrate_product_profile_lifecycle_payload,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.detached_application_retirement import (
+    DetachedApplicationRetirementRecord,
+)
 from control_plane.contracts.product_retirement import ProductRetirementRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEventRecord,
@@ -3785,6 +3788,67 @@ class FilesystemRecordStore:
                 "launchplane_product_retirements",
             )
             if (not product or record.product == product)
+            and (not actor or record.identity.actor == actor)
+            and (not mode or record.mode == mode)
+            and (not idempotency_key or record.idempotency_key == idempotency_key)
+        ]
+        records.sort(key=lambda record: (record.recorded_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_detached_application_retirement_record(
+        self, record: DetachedApplicationRetirementRecord
+    ) -> Path:
+        if not self._create_model_if_absent(
+            "launchplane_detached_application_retirements",
+            record.record_id,
+            record,
+        ):
+            existing = self.read_detached_application_retirement_record(record.record_id)
+            if existing != record and not (
+                record.mode == "plan"
+                and existing.mode == "plan"
+                and existing.candidate_observation.target_id_sha256
+                == record.candidate_observation.target_id_sha256
+                and existing.identity.actor == record.identity.actor
+                and existing.idempotency_key == record.idempotency_key
+                and existing.continuity_sha256 == record.continuity_sha256
+            ):
+                raise ValueError("Detached application retirement records are append-only.")
+        return self._record_path(
+            "launchplane_detached_application_retirements",
+            record.record_id,
+        )
+
+    def read_detached_application_retirement_record(
+        self, record_id: str
+    ) -> DetachedApplicationRetirementRecord:
+        return self._read_model(
+            DetachedApplicationRetirementRecord,
+            "launchplane_detached_application_retirements",
+            record_id,
+        )
+
+    def list_detached_application_retirement_records(
+        self,
+        *,
+        candidate_target_sha256: str = "",
+        actor: str = "",
+        mode: str = "",
+        idempotency_key: str = "",
+        limit: int | None = None,
+    ) -> tuple[DetachedApplicationRetirementRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                DetachedApplicationRetirementRecord,
+                "launchplane_detached_application_retirements",
+            )
+            if (
+                not candidate_target_sha256
+                or record.candidate_observation.target_id_sha256 == candidate_target_sha256
+            )
             and (not actor or record.identity.actor == actor)
             and (not mode or record.mode == mode)
             and (not idempotency_key or record.idempotency_key == idempotency_key)

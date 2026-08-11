@@ -1293,7 +1293,24 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "c6e8f1b3d5a7")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "d8a0c2e4f6b8")
+        self.assertEqual(
+            column_types[("launchplane_detached_application_retirements", "payload")],
+            ("jsonb",),
+        )
+        self.assertEqual(
+            indexes[
+                (
+                    "launchplane_detached_application_retirements",
+                    "launchplane_detached_app_retirements_plan_idempotency_unique",
+                )
+            ].predicate_expression,
+            "mode='plan'",
+        )
+        self.assertEqual(
+            primary_keys["launchplane_detached_application_retirements"],
+            ("record_id",),
+        )
         self.assertEqual(
             column_types[("launchplane_repository_human_role_policies", "payload")],
             ("jsonb",),

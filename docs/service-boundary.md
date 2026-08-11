@@ -3668,3 +3668,51 @@ already-absent applications. Mutable runtime and target records
 are removed only after provider absence is verified; runtime deletion events
 and preserved managed-secret references remain audit evidence. The profile is
 never deleted and becomes `retired` with previews disabled.
+
+## Detached application retirement
+
+`POST /v1/detached-application-retirement` is a separate bounded operation for
+one Dokploy application that is not owned by Launchplane product/runtime
+authority. It does not call product retirement and its adapter/store boundary
+has no profile, target, runtime, secret, route, inventory, deployment, or authz
+write/delete methods. The only allowed authority-write count is zero.
+
+The request accepts `plan` or `apply`, exact project/environment/application
+names, the candidate target identifier SHA-256, a sorted non-empty tuple of
+expected protected application target SHA-256 values, reason and issue, plus
+apply-only reviewed-plan identity/digest and exact confirmation. Raw target IDs
+are never accepted. The candidate digest must not be protected.
+
+Planning strictly parses `/api/project.all`, requires one exact project,
+environment, and globally unique application name, then reads
+`application.one`, domains, and deployment history. The candidate must match
+the requested digest, be exactly `idle`, have a recognized empty deployment
+history, and have zero domains. Every other application in the project is a
+protected provider target. Launchplane requires the exact expected protected
+digest set and persists each protected application fingerprint, domains, and
+history snapshot.
+
+The candidate ID must also be absent from every bounded Launchplane authority
+source capable of carrying or resolving provider-target authority. The proof
+stores only source names, record counts, and source digests, has a literal zero
+match count, and cannot be built after an ID or exact provider-application-name
+match. A tracked Dokploy `target_name` is not treated as a provider application
+name by itself; exact provider IDs and provider application ownership fields
+remain authoritative.
+
+Apply requires the exact stored plan and rederives candidate discovery,
+authority absence, and the protected snapshot under the same target-key
+namespace used by product retirement. It checkpoints immediately before the
+single `application.delete` call, treats a provider 404 as already absent,
+reconciles unknown outcomes through fresh observation, verifies candidate
+absence, and requires protected fingerprints to remain unchanged. Apply writes
+one terminal detached-retirement record and no authority records.
+
+Only a local admin or GitHub Actions running the exact SHA-pinned reusable
+worker may reach the route. Authorization actions are
+`detached_application_retirement.plan` and
+`detached_application_retirement.apply` against Launchplane's global
+control-plane context, never a product instance. Phase one adds the reusable
+`workflow_call` worker and managed authz secret routing only; it intentionally
+adds no mutable dispatch wrapper, live managed rule/secret value, deployment,
+or provider mutation.
