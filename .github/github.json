@@ -21,6 +21,7 @@
     "uiStandards": "docs/ui-standards.md",
     "workGraphReadModel": "docs/work-graph-read-model.md",
     "mergeTrainPolicy": "docs/merge-train-policy.md",
+    "mergeReadiness": "docs/merge-readiness.md",
     "agentContextBoundary": "docs/agent-context-boundary.md",
     "operations": "docs/operations.md",
     "records": "docs/records.md",
