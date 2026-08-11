@@ -25,6 +25,10 @@ from control_plane.http_routes.owner_acceptance import (
     register_owner_acceptance_routes,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.owner_acceptance import (
+    build_owner_acceptance_system_event,
+    evaluate_owner_acceptance,
+)
 from control_plane.owner_acceptance_queue import build_owner_acceptance_queue
 from control_plane.service_auth import LaunchplaneIdentity
 from tests.support.http import lifespan_client
@@ -333,6 +337,69 @@ class OwnerAcceptanceQueueHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["entry_count"], 0)
+
+    def test_queue_rejects_non_adjacent_duplicate_subject_sequence(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            provider = _EvidenceProvider(_repository_evidence())
+            decision = evaluate_owner_acceptance(
+                store=store,
+                repository_evidence_provider=provider,
+                target=ChangeImpactTargetReference(
+                    repository=REPOSITORY,
+                    pull_request_number=2022,
+                ),
+                evaluated_at="2026-08-07T12:00:00Z",
+            )
+            assert decision.binding is not None
+            first = build_owner_acceptance_system_event(
+                binding=decision.binding,
+                action="superseded",
+                occurred_at="2026-08-07T12:00:00Z",
+                source_event_id="duplicate-sequence-one",
+                reason="Sequence integrity fixture.",
+            ).model_copy(update={"subject_sequence": 1})
+            second = build_owner_acceptance_system_event(
+                binding=decision.binding,
+                action="invalidated",
+                occurred_at="2026-08-07T13:00:00Z",
+                source_event_id="duplicate-sequence-two",
+                reason="Sequence integrity fixture.",
+            ).model_copy(update={"subject_sequence": 2})
+            duplicate = build_owner_acceptance_system_event(
+                binding=decision.binding,
+                action="superseded",
+                occurred_at="2026-08-07T14:00:00Z",
+                source_event_id="duplicate-sequence-three",
+                reason="Sequence integrity fixture.",
+            ).model_copy(update={"subject_sequence": 1})
+
+            class DuplicateSequenceStore:
+                def list_owner_acceptance_event_records(
+                    self,
+                ) -> tuple[OwnerAcceptanceEventRecord, ...]:
+                    return (first, second, duplicate)
+
+            with self.assertRaisesRegex(ValueError, "duplicate sequence"):
+                build_owner_acceptance_queue(store=DuplicateSequenceStore())
+
+    async def test_queue_history_integrity_failure_returns_traced_503(self) -> None:
+        class InvalidHistoryStore:
+            def list_owner_acceptance_event_records(
+                self,
+            ) -> tuple[OwnerAcceptanceEventRecord, ...]:
+                raise ValueError("Owner acceptance sequence integrity failed")
+
+        app = _app(store=InvalidHistoryStore())
+        async with lifespan_client(app) as client:
+            response = await client.get(OWNER_ACCEPTANCE_QUEUE_ROUTE)
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "owner_acceptance_history_unavailable",
+        )
+        self.assertEqual(response.json()["detail"]["trace_id"], "trace-queue")
 
     async def test_queue_status_filter_before_pagination(self) -> None:
         """Status filter is applied before the pagination limit."""

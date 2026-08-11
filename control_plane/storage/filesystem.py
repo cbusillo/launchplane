@@ -50,6 +50,8 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceEventRecord,
     OwnerAcceptanceEventWriteStatus,
     owner_acceptance_event_replay_digest,
+    owner_acceptance_subject_key,
+    validate_owner_acceptance_event_transition,
 )
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
@@ -2496,12 +2498,13 @@ class FilesystemRecordStore:
     ) -> OwnerAcceptanceEventWriteStatus:
         record_type = "launchplane_owner_acceptance_events"
         with self._product_authority_bundle_lock():
+            records = self._owner_acceptance_event_records_locked()
             record_path = self._record_path(record_type, record.event_id)
             if record_path.exists():
-                existing = self._read_model_locked(
-                    OwnerAcceptanceEventRecord,
-                    record_type,
-                    record.event_id,
+                existing = next(
+                    existing_record
+                    for existing_record in records
+                    if existing_record.event_id == record.event_id
                 )
                 if owner_acceptance_event_replay_digest(
                     existing
@@ -2510,18 +2513,40 @@ class FilesystemRecordStore:
                         "Owner acceptance event replay changed the persisted payload."
                     )
                 return "replayed"
-            self._write_model_locked(record_type, record.event_id, record)
+            subject_records = tuple(
+                existing_record
+                for existing_record in records
+                if owner_acceptance_subject_key(existing_record)
+                == owner_acceptance_subject_key(record)
+            )
+            previous = (
+                max(subject_records, key=lambda existing_record: existing_record.subject_sequence)
+                if subject_records
+                else None
+            )
+            persisted_record = record.model_copy(
+                update={
+                    "subject_sequence": (
+                        previous.subject_sequence + 1 if previous is not None else 1
+                    )
+                }
+            )
+            validate_owner_acceptance_event_transition(
+                previous=previous,
+                proposed=persisted_record,
+            )
+            self._write_model_locked(record_type, record.event_id, persisted_record)
             return "written"
 
     def read_owner_acceptance_event_record(
         self,
         event_id: str,
     ) -> OwnerAcceptanceEventRecord:
-        return self._read_model(
-            OwnerAcceptanceEventRecord,
-            "launchplane_owner_acceptance_events",
-            event_id,
-        )
+        with self._product_authority_bundle_lock():
+            for record in self._owner_acceptance_event_records_locked():
+                if record.event_id == event_id:
+                    return record
+        raise FileNotFoundError(event_id)
 
     def list_owner_acceptance_event_records(
         self,
@@ -2535,27 +2560,64 @@ class FilesystemRecordStore:
         acceptance_action: str = "",
         limit: int | None = None,
     ) -> tuple[OwnerAcceptanceEventRecord, ...]:
-        records = [
-            record
-            for record in self._list_models(
-                OwnerAcceptanceEventRecord,
-                "launchplane_owner_acceptance_events",
-            )
-            if (not repository_id or record.binding.repository_id == repository_id.strip())
-            and (not repository or record.binding.repository == repository.lower())
-            and (
-                pull_request_number is None
-                or record.binding.pull_request_number == pull_request_number
-            )
-            and (not product or record.binding.product == product.strip())
-            and (not system or record.binding.system == system.strip())
-            and (not action or record.binding.action == action.strip())
-            and (not acceptance_action or record.action == acceptance_action.strip())
-        ]
-        records.sort(key=lambda record: (record.occurred_at, record.event_id), reverse=True)
+        with self._product_authority_bundle_lock():
+            records = [
+                record
+                for record in self._owner_acceptance_event_records_locked()
+                if (not repository_id or record.binding.repository_id == repository_id.strip())
+                and (not repository or record.binding.repository == repository.lower())
+                and (
+                    pull_request_number is None
+                    or record.binding.pull_request_number == pull_request_number
+                )
+                and (not product or record.binding.product == product.strip())
+                and (not system or record.binding.system == system.strip())
+                and (not action or record.binding.action == action.strip())
+                and (not acceptance_action or record.action == acceptance_action.strip())
+            ]
+        records.sort(
+            key=lambda record: (record.occurred_at, record.event_id),
+            reverse=True,
+        )
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def _owner_acceptance_event_records_locked(
+        self,
+    ) -> tuple[OwnerAcceptanceEventRecord, ...]:
+        record_type = "launchplane_owner_acceptance_events"
+        records = list(self._list_models_locked(OwnerAcceptanceEventRecord, record_type))
+        records_by_subject: dict[
+            tuple[str, int, str, str, str, str],
+            list[OwnerAcceptanceEventRecord],
+        ] = {}
+        for record in records:
+            records_by_subject.setdefault(owner_acceptance_subject_key(record), []).append(record)
+
+        normalized_records: dict[str, OwnerAcceptanceEventRecord] = {
+            record.event_id: record for record in records
+        }
+        for subject_records in records_by_subject.values():
+            legacy_records = [record for record in subject_records if record.subject_sequence == 0]
+            if not legacy_records:
+                continue
+            last_sequence = max(
+                (record.subject_sequence for record in subject_records),
+                default=0,
+            )
+            for sequence, legacy_record in enumerate(
+                sorted(legacy_records, key=lambda record: (record.occurred_at, record.event_id)),
+                start=last_sequence + 1,
+            ):
+                normalized_record = legacy_record.model_copy(update={"subject_sequence": sequence})
+                self._write_model_locked(
+                    record_type,
+                    normalized_record.event_id,
+                    normalized_record,
+                )
+                normalized_records[normalized_record.event_id] = normalized_record
+        return tuple(normalized_records.values())
 
     def list_every_code_pr_feedback_records(
         self,

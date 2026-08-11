@@ -23,6 +23,23 @@ test("Owner acceptance request contains only the exact reviewed binding target",
     action: "changes_requested",
     expected_binding_sha256: "a".repeat(64),
     reason: "Fix this.",
+    resolution: null,
+  });
+});
+
+test("Owner acceptance resolution stays structured and binding scoped", () => {
+  const resolution = {
+    schema_version: 1,
+    summary: "The requested behavior is covered.",
+    resolved_evidence_references: ["test:owner-flow"],
+  };
+  assert.deepEqual(ownerAcceptanceRequest(binding, "accepted", "", resolution), {
+    schema_version: 1,
+    target: { repository: "example/site", pull_request_number: 42 },
+    action: "accepted",
+    expected_binding_sha256: "a".repeat(64),
+    reason: "",
+    resolution,
   });
 });
 

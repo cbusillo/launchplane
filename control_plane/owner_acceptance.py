@@ -26,6 +26,7 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptancePreviewBinding,
     OwnerAcceptanceProductDecision,
     OwnerAcceptanceReasonCode,
+    OwnerAcceptanceResolutionEvidence,
     OwnerAcceptanceSourceEventKind,
     OwnerAcceptanceViewerBindingEligibility,
     OwnerAcceptanceViewerEligibilityReason,
@@ -267,6 +268,7 @@ def record_owner_acceptance_event(
     source_event_kind: OwnerAcceptanceSourceEventKind,
     source_event_id: str,
     reason: str = "",
+    resolution: OwnerAcceptanceResolutionEvidence | None = None,
     occurred_at: str = "",
 ) -> OwnerAcceptanceWriteResult:
     if action not in {"accepted", "changes_requested", "revoked"}:
@@ -374,6 +376,7 @@ def record_owner_acceptance_event(
         source_event_kind=source_event_kind,
         source_event_id=source_event_id,
         reason=reason,
+        resolution=resolution,
         authorization=authorization,
     )
     prior_events = tuple(
@@ -392,11 +395,15 @@ def record_owner_acceptance_event(
             "Preview-bound Owner acceptance cannot downgrade to an exact-change-only binding."
         )
     write_status = event_store.write_owner_acceptance_event_record(record)
-    if write_status == "replayed":
-        record = event_store.read_owner_acceptance_event_record(record.event_id)
+    record = event_store.read_owner_acceptance_event_record(record.event_id)
+    folded_events = (
+        prior_events
+        if any(event.event_id == record.event_id for event in prior_events)
+        else (*prior_events, record)
+    )
     selected_decision = evaluate_owner_acceptance_for_binding(
         binding=binding,
-        events=(*prior_events, record),
+        events=folded_events,
         evaluated_at=normalized_occurred_at,
     )
     product_decisions = list(prewrite_decision.products)
@@ -443,20 +450,12 @@ def evaluate_owner_acceptance_for_binding(
 ) -> OwnerAcceptanceDecision:
     normalized_evaluated_at = _evaluation_timestamp(evaluated_at)
     matching = tuple(
-        event
-        for event in events
-        if event.binding.binding_sha256 == binding.binding_sha256
-        and event.occurred_at <= normalized_evaluated_at
+        event for event in events if event.binding.binding_sha256 == binding.binding_sha256
     )
     if not matching:
-        stale_events = tuple(
-            event for event in events if event.occurred_at <= normalized_evaluated_at
-        )
+        stale_events = events
         if stale_events:
-            latest_stale = sorted(
-                stale_events,
-                key=lambda event: (event.occurred_at, event.event_id),
-            )[-1]
+            latest_stale = _latest_owner_acceptance_event(stale_events)
             return _decision(
                 status="stale",
                 reason_code="acceptance_stale",
@@ -470,7 +469,7 @@ def evaluate_owner_acceptance_for_binding(
             binding=binding,
             evaluated_at=normalized_evaluated_at,
         )
-    latest = sorted(matching, key=lambda event: (event.occurred_at, event.event_id))[-1]
+    latest = _latest_owner_acceptance_event(matching)
     if latest.action == "accepted":
         return _decision(
             status="accepted",
@@ -582,15 +581,10 @@ def _evaluate_owner_acceptance_product(
         )
     except OwnerAcceptanceEvaluationUnavailableError:
         preview_events = tuple(
-            event
-            for event in product_events
-            if event.binding.preview is not None and event.occurred_at <= evaluated_at
+            event for event in product_events if event.binding.preview is not None
         )
         if preview_events:
-            current_event = max(
-                preview_events,
-                key=lambda event: (event.occurred_at, event.event_id),
-            )
+            current_event = _latest_owner_acceptance_event(preview_events)
             decision = _decision(
                 status="stale",
                 reason_code="preview_evidence_stale",
@@ -615,19 +609,14 @@ def _evaluate_owner_acceptance_product(
             ),
         )
     effective_preview_events = tuple(
-        event
-        for event in product_events
-        if event.binding.preview is not None and event.occurred_at <= evaluated_at
+        event for event in product_events if event.binding.preview is not None
     )
     if binding.preview is None and effective_preview_events:
         decision = _decision(
             status="stale",
             reason_code="preview_evidence_stale",
             binding=binding,
-            event=max(
-                effective_preview_events,
-                key=lambda event: (event.occurred_at, event.event_id),
-            ),
+            event=_latest_owner_acceptance_event(effective_preview_events),
             evaluated_at=evaluated_at,
         )
     else:
@@ -933,6 +922,21 @@ def _decision(
         products=products,
         evaluated_at=evaluated_at,
     )
+
+
+def _latest_owner_acceptance_event(
+    events: tuple[OwnerAcceptanceEventRecord, ...],
+) -> OwnerAcceptanceEventRecord:
+    sequences = tuple(event.subject_sequence for event in events)
+    if any(sequence < 1 for sequence in sequences):
+        raise OwnerAcceptanceEvaluationUnavailableError(
+            "Owner acceptance history is missing persisted subject sequence metadata."
+        )
+    if len(set(sequences)) != len(sequences):
+        raise OwnerAcceptanceEvaluationUnavailableError(
+            "Owner acceptance history contains duplicate subject sequences."
+        )
+    return max(events, key=lambda event: event.subject_sequence)
 
 
 def _evaluation_timestamp(value: str) -> str:

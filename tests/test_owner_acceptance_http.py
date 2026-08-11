@@ -238,6 +238,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 payload = written.json()
                 self.assertEqual(payload["write_status"], "written")
                 self.assertEqual(payload["decision"]["status"], "accepted")
+                self.assertEqual(payload["record"]["subject_sequence"], 1)
                 binding = payload["record"]["binding"]
                 self.assertEqual(binding["repository"], REPOSITORY)
                 self.assertEqual(binding["head_sha"], "a" * 40)
@@ -475,10 +476,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
             "repository": REPOSITORY,
             "pull_request_number": 2022,
         }
-        for action, expected_status in (
-            ("changes_requested", "changes_requested"),
-            ("revoked", "revoked"),
-        ):
+        for action, expected_status in (("changes_requested", "changes_requested"),):
             with self.subTest(action=action), TemporaryDirectory() as directory:
                 store = _store(Path(directory))
                 app = _app(store=store)
@@ -522,6 +520,105 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(evaluated.status_code, 200, evaluated.text)
                     self.assertEqual(evaluated.json()["decision"]["status"], expected_status)
+
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            app = _app(store=store)
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(OWNER_ACCEPTANCE_EVALUATION_ROUTE, params=target)
+                binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
+                accepted = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": binding_sha256,
+                    },
+                    headers={"Idempotency-Key": "accept-before-revoke"},
+                )
+                self.assertEqual(accepted.status_code, 202, accepted.text)
+
+                missing_reason = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "revoked",
+                        "expected_binding_sha256": binding_sha256,
+                    },
+                    headers={"Idempotency-Key": "revoke-missing-reason"},
+                )
+                self.assertEqual(missing_reason.status_code, 422, missing_reason.text)
+
+                revoked = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "revoked",
+                        "expected_binding_sha256": binding_sha256,
+                        "reason": "Owner withdrew the product review.",
+                    },
+                    headers={"Idempotency-Key": "revoke-accepted"},
+                )
+                self.assertEqual(revoked.status_code, 202, revoked.text)
+                self.assertEqual(revoked.json()["decision"]["status"], "revoked")
+
+    async def test_changes_requested_resolution_requires_structured_evidence(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            app = _app(store=store)
+            target: dict[str, str | int] = {
+                "repository": REPOSITORY,
+                "pull_request_number": 2022,
+            }
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(OWNER_ACCEPTANCE_EVALUATION_ROUTE, params=target)
+                binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
+                changes_requested = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "changes_requested",
+                        "expected_binding_sha256": binding_sha256,
+                        "reason": "Clarify the product behavior.",
+                    },
+                    headers={"Idempotency-Key": "request-changes"},
+                )
+                self.assertEqual(changes_requested.status_code, 202, changes_requested.text)
+
+                missing_resolution = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": binding_sha256,
+                    },
+                    headers={"Idempotency-Key": "resolve-without-evidence"},
+                )
+                self.assertEqual(missing_resolution.status_code, 409, missing_resolution.text)
+                self.assertEqual(
+                    missing_resolution.json()["detail"]["code"],
+                    "owner_acceptance_transition_invalid",
+                )
+
+                resolved = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": target,
+                        "action": "accepted",
+                        "expected_binding_sha256": binding_sha256,
+                        "resolution": {
+                            "summary": "The requested behavior is implemented and verified.",
+                            "resolved_evidence_references": [
+                                "test:owner-flow",
+                                "record:product-spec-17",
+                            ],
+                        },
+                    },
+                    headers={"Idempotency-Key": "resolve-with-evidence"},
+                )
+                self.assertEqual(resolved.status_code, 202, resolved.text)
+                self.assertEqual(resolved.json()["decision"]["status"], "accepted")
+                self.assertEqual(resolved.json()["record"]["subject_sequence"], 2)
 
     async def test_event_route_rejects_non_human_identity(self) -> None:
         with TemporaryDirectory() as directory:
