@@ -603,8 +603,12 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
                 "provider-operation", "delete_application", adapter.reconciliation_key()
             )
         self.assertEqual(observation.outcome, "present")
-        self.assertEqual(observation.response_payload["result"]["outcome"], "retired")
-        terminal = next(iter(store.records.values()))
+        result_payload = cast(dict[str, object], observation.response_payload["result"])
+        self.assertEqual(result_payload["outcome"], "retired")
+        terminal = cast(
+            DetachedApplicationRetirementRecord,
+            next(iter(store.records.values())),
+        )
         self.assertTrue(terminal.mutation_evidence.provider_effect_attempted)
         self.assertTrue(terminal.mutation_evidence.provider_effect_performed)
         self.assertEqual(terminal.mutation_evidence.provider_effect_phases, ("delete_application",))
