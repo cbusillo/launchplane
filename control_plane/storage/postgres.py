@@ -7209,6 +7209,7 @@ class PostgresRecordStore(HumanSessionStore):
             self._sync_odoo_prod_retained_volume_backup_import_operation_row(
                 row, checkpointed_record
             )
+            session.commit()
             return checkpointed_record
 
     def complete_odoo_prod_retained_volume_backup_import_operation_record(
@@ -13229,12 +13230,7 @@ class PostgresRecordStore(HumanSessionStore):
         statement = statement.order_by(LaunchplaneProductProfileRow.product.asc())
         with self._session_factory() as session:
             rows = session.scalars(statement).all()
-            return tuple(
-                record
-                for row in rows
-                if (record := self._read_product_profile_payload(row.payload)).lifecycle_state
-                == "active"
-            )
+            return tuple(self._read_product_profile_payload(row.payload) for row in rows)
 
     def write_product_retirement_record(self, record: ProductRetirementRecord) -> None:
         with self._session_factory() as session:
@@ -13290,7 +13286,9 @@ class PostgresRecordStore(HumanSessionStore):
                     payload=existing_plan.payload,
                 )
                 if stored.continuity_sha256 != record.continuity_sha256:
-                    raise ValueError("Product retirement plan idempotency key was reused.") from error
+                    raise ValueError(
+                        "Product retirement plan idempotency key was reused."
+                    ) from error
 
     def read_product_retirement_record(self, record_id: str) -> ProductRetirementRecord:
         with self._session_factory() as session:

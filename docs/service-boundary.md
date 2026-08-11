@@ -3624,9 +3624,11 @@ Planning persists an append-only audit record and returns its record ID and
 digest without exposing provider identifiers. Apply requires that exact stored
 record and digest plus the target-bound confirmation phrase. Before the first
 provider effect, Launchplane changes the profile from `active` to `retiring`,
-which excludes it from active automation. Durable provider-operation leases and
-checkpoints reconcile partial domain deletion, application deletion, lost
-responses, and already-absent applications. Mutable runtime and target records
+which excludes it from active automation. Reconciliation observation is strictly
+read-only; an observed absent application is finalized only by an acquired
+provider-operation lease. Durable provider-operation leases and checkpoints
+reconcile partial domain deletion, application deletion, lost responses, and
+already-absent applications. Mutable runtime and target records
 are removed only after provider absence is verified; runtime deletion events
 and preserved managed-secret references remain audit evidence. The profile is
 never deleted and becomes `retired` with previews disabled.

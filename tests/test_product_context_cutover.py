@@ -873,6 +873,72 @@ class ProductContextCutoverTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_legacy_cleanup_rejects_source_context_owned_by_retiring_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "test.sqlite3")
+            )
+            try:
+                store.ensure_schema()
+                primary_profile = LaunchplaneProductProfileRecord(
+                    product="sellyouroutboard",
+                    display_name="SellYourOutboard.com",
+                    repository="cbusillo/sellyouroutboard",
+                    driver_id="generic-web",
+                    image=ProductImageProfile(repository="ghcr.io/cbusillo/sellyouroutboard"),
+                    runtime_port=3000,
+                    health_path="/api/health",
+                    lanes=(
+                        ProductLaneProfile(
+                            instance="prod",
+                            context="sellyouroutboard",
+                            base_url="https://www.sellyouroutboard.com",
+                            health_url="https://www.sellyouroutboard.com/api/health",
+                        ),
+                    ),
+                    preview=ProductPreviewProfile(enabled=False),
+                    updated_at="2026-08-11T01:00:00Z",
+                    source="test",
+                )
+                retiring_profile = LaunchplaneProductProfileRecord(
+                    product="legacy-owner",
+                    display_name="Legacy Owner",
+                    repository="cbusillo/legacy-owner",
+                    driver_id="generic-web",
+                    image=ProductImageProfile(repository="ghcr.io/cbusillo/legacy-owner"),
+                    runtime_port=3000,
+                    health_path="/api/health",
+                    lanes=(
+                        ProductLaneProfile(
+                            instance="prod",
+                            context="sellyouroutboard-testing",
+                            base_url="https://legacy.example",
+                            health_url="https://legacy.example/api/health",
+                        ),
+                    ),
+                    preview=ProductPreviewProfile(enabled=False),
+                    lifecycle_state="retiring",
+                    updated_at="2026-08-11T01:00:00Z",
+                    source="test",
+                )
+                store.write_product_profile_record(primary_profile)
+                store.write_product_profile_record(retiring_profile)
+
+                with self.assertRaisesRegex(
+                    LegacyContextCleanupBoundaryError,
+                    "owned by another product profile",
+                ):
+                    apply_legacy_context_cleanup(
+                        record_store=store,
+                        request=LegacyContextCleanupRequest(
+                            product="sellyouroutboard",
+                            source_context="sellyouroutboard-testing",
+                            target_context="sellyouroutboard",
+                        ),
+                    )
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

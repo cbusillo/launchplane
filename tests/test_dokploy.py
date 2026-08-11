@@ -170,6 +170,30 @@ class DokployConfigTests(unittest.TestCase):
         self.assertNotIn("secret-token", raised.exception.format_message())
         self.assertIn("[redacted]", raised.exception.format_message())
 
+    def test_dokploy_request_converts_response_read_timeout_to_request_failure(self) -> None:
+        class TimeoutResponse:
+            def __enter__(self) -> "TimeoutResponse":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                raise TimeoutError("read timed out")
+
+        with patch("control_plane.dokploy.api.urlopen", return_value=TimeoutResponse()):
+            with self.assertRaises(dokploy_api.DokployRequestFailed) as raised:
+                dokploy_api.dokploy_request(
+                    host="https://dokploy.example",
+                    token="provider-token",
+                    path="/api/application.delete",
+                    method="POST",
+                    payload={"applicationId": "application-one"},
+                )
+
+        self.assertIsNone(raised.exception.status_code)
+        self.assertIn("response read timed out", raised.exception.format_message())
+
     def test_run_dokploy_schedule_enriches_synchronous_remote_exit(self) -> None:
         request_error = dokploy_api.DokployRequestFailed(
             method="POST",

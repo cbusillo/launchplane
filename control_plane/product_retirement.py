@@ -11,6 +11,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_retirement import (
+    MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH,
     ProductRetirementAuthoritySnapshot,
     ProductRetirementIdentity,
     ProductRetirementMutationEvidence,
@@ -418,11 +419,15 @@ def build_product_retirement_plan_record(
     }
     record_id = (
         "product-retirement-plan-"
-        f"{canonical_sha256({
-            'product': request.product,
-            'actor': identity.actor,
-            'idempotency_key': idempotency_key,
-        })[:32]}"
+        f"{
+            canonical_sha256(
+                {
+                    'product': request.product,
+                    'actor': identity.actor,
+                    'idempotency_key': idempotency_key,
+                }
+            )[:32]
+        }"
     )
     return ProductRetirementRecord(
         record_id=record_id,
@@ -490,6 +495,7 @@ class DokployProductRetirementAdapter:
         self._provider_effect_performed = False
         self._started = False
         self._lifecycle_before_value: Literal["active", "retiring", "retired"] | None = None
+        self._terminal_error_message = ""
 
     def target_key(self) -> str:
         return f"provider-target:dokploy:application:{self._plan.provider_observation.target_id}"
@@ -513,24 +519,16 @@ class DokployProductRetirementAdapter:
         reconciliation_key: str,
     ) -> ProviderObservation:
         del provider_effect_phase, reconciliation_key
-        observation = observe_tracked_dokploy_application(
-            control_plane_root=self._control_plane_root,
-            target_id=self._plan.provider_observation.target_id,
-            observed_at=self._requested_at,
-        )
+        try:
+            observation = observe_tracked_dokploy_application(
+                control_plane_root=self._control_plane_root,
+                target_id=self._plan.provider_observation.target_id,
+                observed_at=self._requested_at,
+            )
+        except (click.ClickException, OSError, TimeoutError, ValueError):
+            return ProviderObservation(outcome="unknown")
         if observation.state == "absent":
-            self._ensure_retiring_profile()
-            self._finalize_authority()
-            terminal = self._write_terminal_record(
-                outcome="already_absent",
-                provider_operation_key=provider_operation_key,
-                provider_absence_verified=True,
-            )
-            return ProviderObservation(
-                outcome="present",
-                response_status_code=202,
-                response_payload=redacted_product_retirement_response(terminal),
-            )
+            return ProviderObservation(outcome="absent", retry_safe=True)
         if not _observation_allows_reconciliation(
             planned=self._plan.provider_observation,
             current=observation,
@@ -584,7 +582,12 @@ class DokployProductRetirementAdapter:
                 raise ProductRetirementBlockedError(
                     "Provider observation changed during retirement reconciliation."
                 )
-        except (FileNotFoundError, ProductRetirementBlockedError, click.ClickException) as error:
+        except (
+            FileNotFoundError,
+            ProductRetirementBlockedError,
+            click.ClickException,
+            TimeoutError,
+        ) as error:
             raise ProviderMutationRejectedError(error) from error
 
         self._ensure_retiring_profile()
@@ -601,9 +604,18 @@ class DokployProductRetirementAdapter:
                 response_payload=redacted_product_retirement_response(terminal),
                 provider_effect_performed=False,
             )
-        host, token = dokploy_source.read_dokploy_config(
-            control_plane_root=self._control_plane_root
-        )
+        try:
+            host, token = dokploy_source.read_dokploy_config(
+                control_plane_root=self._control_plane_root
+            )
+        except (
+            click.ClickException,
+            FileNotFoundError,
+            OSError,
+            TimeoutError,
+            ValueError,
+        ) as error:
+            raise self._unknown_provider_error(error) from error
         for domain_id in current_observation.domain_ids:
             self._checkpoint(
                 lease,
@@ -618,7 +630,9 @@ class DokployProductRetirementAdapter:
                 self._provider_effect_performed = True
             except dokploy_api.DokployRequestFailed as error:
                 if error.status_code != 404:
-                    raise ProviderMutationUnknownError(str(error)) from error
+                    raise self._unknown_provider_error(error) from error
+            except (OSError, TimeoutError) as error:
+                raise self._unknown_provider_error(error) from error
             lease.assert_current()
         self._checkpoint(lease, "delete_application")
         try:
@@ -630,17 +644,25 @@ class DokployProductRetirementAdapter:
             self._provider_effect_performed = True
         except dokploy_api.DokployRequestFailed as error:
             if error.status_code != 404:
-                raise ProviderMutationUnknownError(str(error)) from error
-        absence = observe_tracked_dokploy_application(
-            control_plane_root=self._control_plane_root,
-            target_id=current_observation.target_id,
-            observed_at=self._requested_at,
-        )
-        if absence.state != "absent":
-            raise ProviderMutationUnknownError(
-                "Dokploy application absence could not be verified after deletion."
+                raise self._unknown_provider_error(error) from error
+        except (OSError, TimeoutError) as error:
+            raise self._unknown_provider_error(error) from error
+        try:
+            absence = observe_tracked_dokploy_application(
+                control_plane_root=self._control_plane_root,
+                target_id=current_observation.target_id,
+                observed_at=self._requested_at,
             )
-        self._finalize_authority()
+        except (click.ClickException, OSError, TimeoutError, ValueError) as error:
+            raise self._unknown_provider_error(error) from error
+        if absence.state != "absent":
+            raise self._unknown_provider_error(
+                ValueError("Dokploy application absence could not be verified after deletion.")
+            )
+        try:
+            self._finalize_authority()
+        except (FileNotFoundError, ProductRetirementBlockedError, ValueError) as error:
+            raise self._unknown_provider_error(error) from error
         terminal = self._write_terminal_record(
             outcome="retired",
             provider_operation_key=provider_operation_key,
@@ -694,6 +716,10 @@ class DokployProductRetirementAdapter:
             )
         )
         self._started = True
+
+    def _unknown_provider_error(self, error: Exception) -> ProviderMutationUnknownError:
+        self._terminal_error_message = _redacted_terminal_error_message(str(error))
+        return ProviderMutationUnknownError(self._terminal_error_message)
 
     def _checkpoint(self, lease: ProviderOperationLease, phase: str) -> None:
         lease.checkpoint_effect(phase)
@@ -970,10 +996,11 @@ class DokployProductRetirementAdapter:
                     lifecycle_after,
                 ),
                 error_code=error_code,
-                error_message=error_message,
+                error_message=_redacted_terminal_error_message(
+                    self._terminal_error_message or error_message
+                ),
             ),
         )
-
 
 
 def build_started_product_retirement_record(
@@ -1063,14 +1090,20 @@ def active_preview_ids(
     return tuple(
         sorted(
             preview_id
-        for preview in record_store.list_preview_records(
-            context_name=preview_context,
-            anchor_repo=profile.repository,
-        )
+            for preview in record_store.list_preview_records(
+                context_name=preview_context,
+                anchor_repo=profile.repository,
+            )
             if getattr(preview, "state", "") in _ACTIVE_PREVIEW_STATES
             and (preview_id := str(getattr(preview, "preview_id", "")).strip())
         )
     )
+
+
+def _redacted_terminal_error_message(error_message: str) -> str:
+    return dokploy_api.redact_dokploy_log_line(error_message).strip()[
+        :MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH
+    ]
 
 
 def _observation_allows_reconciliation(

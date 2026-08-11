@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
+import click
+
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -19,6 +21,7 @@ from control_plane.contracts.product_retirement import (
     provider_identifier_sha256,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.dokploy import api as dokploy_api
 from control_plane.product_retirement import (
     DokployProductRetirementAdapter,
     ProductRetirementBlockedError,
@@ -27,6 +30,7 @@ from control_plane.product_retirement import (
     build_product_retirement_plan_record,
     build_provider_observation,
 )
+from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.profiles import _generic_site_profile_payload
@@ -99,7 +103,7 @@ class _Store:
     def list_product_profile_records(
         self, *, driver_id: str = ""
     ) -> tuple[LaunchplaneProductProfileRecord, ...]:
-        return (self.profile,) if self.profile.is_active else ()
+        return (self.profile,) if not driver_id or self.profile.driver_id == driver_id else ()
 
     def compare_and_write_product_profile_record(
         self,
@@ -358,6 +362,153 @@ class ProductRetirementTests(unittest.TestCase):
                 adapter.apply("provider-operation:test", _Lease())
         self.assertEqual(store.profile.lifecycle_state, "retiring")
 
+    def test_observe_provider_absence_is_read_only_and_retryable(self) -> None:
+        store = _Store()
+        plan = _plan(store, _observation())
+        adapter = DokployProductRetirementAdapter(
+            control_plane_root=Path("."),
+            record_store=cast(ProductRetirementStore, store),
+            request=_request(),
+            plan=plan,
+            identity=ProductRetirementIdentity(actor="test", identity_kind="test"),
+            trace_id="observe-trace",
+            idempotency_key="retire-example-site",
+            requested_at=NOW,
+        )
+        absent = _observation().model_copy(
+            update={
+                "state": "absent",
+                "application_fingerprint_sha256": "",
+                "application_name_sha256": "",
+                "project_reference_sha256": "",
+                "domain_ids": (),
+                "domain_id_sha256": (),
+                "domain_host_sha256": (),
+                "deployment_status": "",
+                "retirable": False,
+            }
+        )
+
+        with patch(
+            "control_plane.product_retirement.observe_tracked_dokploy_application",
+            return_value=absent,
+        ):
+            observed = adapter.observe("provider-operation:test", "delete_application", "test")
+
+        self.assertEqual(observed.outcome, "absent")
+        self.assertTrue(observed.retry_safe)
+        self.assertEqual(store.profile.lifecycle_state, "active")
+        self.assertEqual(len(store.runtime_records), 1)
+        self.assertIsNotNone(store.provider_target)
+        self.assertEqual(store.records, {})
+
+    def test_terminal_error_message_is_redacted_and_truncated(self) -> None:
+        store = _Store()
+        plan = _plan(store, _observation())
+        adapter = DokployProductRetirementAdapter(
+            control_plane_root=Path("."),
+            record_store=cast(ProductRetirementStore, store),
+            request=_request(),
+            plan=plan,
+            identity=ProductRetirementIdentity(actor="test", identity_kind="test"),
+            trace_id="error-trace",
+            idempotency_key="retire-example-site",
+            requested_at=NOW,
+        )
+
+        terminal = adapter.terminal_record(
+            outcome="reconcile_required",
+            provider_operation_key="provider-operation:test",
+            error_message=f"TOKEN=secret {'x' * 1100}",
+        )
+
+        self.assertEqual(len(terminal.mutation_evidence.error_message), 1000)
+        self.assertNotIn("secret", terminal.mutation_evidence.error_message)
+        self.assertIn("TOKEN=[redacted]", terminal.mutation_evidence.error_message)
+
+    def test_post_profile_config_failure_requires_reconciliation(self) -> None:
+        store = _Store()
+        plan = _plan(store, _observation())
+        request = _request(
+            mode="apply",
+            reviewed_plan_record_id=plan.record_id,
+            reviewed_plan_sha256=plan.plan_sha256,
+            confirmation=(f"retire product example-site instance prod target {TARGET_SHA256}"),
+        )
+        adapter = DokployProductRetirementAdapter(
+            control_plane_root=Path("."),
+            record_store=cast(ProductRetirementStore, store),
+            request=request,
+            plan=plan,
+            identity=ProductRetirementIdentity(actor="test", identity_kind="test"),
+            trace_id="config-failure-trace",
+            idempotency_key="retire-example-site",
+            requested_at=NOW,
+        )
+
+        with (
+            patch(
+                "control_plane.product_retirement.observe_tracked_dokploy_application",
+                return_value=_observation(),
+            ),
+            patch(
+                "control_plane.product_retirement.dokploy_source.read_dokploy_config",
+                side_effect=click.ClickException("TOKEN=secret provider configuration failed"),
+            ),
+        ):
+            with self.assertRaises(ProviderMutationUnknownError):
+                adapter.apply("provider-operation:test", _Lease())
+
+        terminal = adapter.terminal_record(
+            outcome="reconcile_required",
+            provider_operation_key="provider-operation:test",
+        )
+        self.assertEqual(store.profile.lifecycle_state, "retiring")
+        self.assertIn("TOKEN=[redacted]", terminal.mutation_evidence.error_message)
+
+    def test_final_provider_observation_failure_requires_reconciliation(self) -> None:
+        store = _Store()
+        observation = _observation()
+        plan = _plan(store, observation)
+        request = _request(
+            mode="apply",
+            reviewed_plan_record_id=plan.record_id,
+            reviewed_plan_sha256=plan.plan_sha256,
+            confirmation=(f"retire product example-site instance prod target {TARGET_SHA256}"),
+        )
+        adapter = DokployProductRetirementAdapter(
+            control_plane_root=Path("."),
+            record_store=cast(ProductRetirementStore, store),
+            request=request,
+            plan=plan,
+            identity=ProductRetirementIdentity(actor="test", identity_kind="test"),
+            trace_id="final-observation-failure-trace",
+            idempotency_key="retire-example-site",
+            requested_at=NOW,
+        )
+        provider_failure = dokploy_api.DokployRequestFailed(
+            method="GET",
+            path="/api/application.one",
+            detail="provider read failed",
+            status_code=500,
+        )
+
+        with (
+            patch(
+                "control_plane.product_retirement.observe_tracked_dokploy_application",
+                side_effect=(observation, provider_failure),
+            ),
+            patch(
+                "control_plane.product_retirement.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.invalid", "token"),
+            ),
+            patch("control_plane.product_retirement.dokploy_api.delete_dokploy_application"),
+        ):
+            with self.assertRaises(ProviderMutationUnknownError):
+                adapter.apply("provider-operation:test", _Lease())
+
+        self.assertEqual(store.profile.lifecycle_state, "retiring")
+
     def test_filesystem_store_is_append_only_and_migrates_active_lifecycle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)
@@ -380,7 +531,7 @@ class ProductRetirementTests(unittest.TestCase):
                 expected_record=migrated,
                 replacement_record=retiring,
             )
-            self.assertEqual(store.list_product_profile_records(), ())
+            self.assertEqual(store.list_product_profile_records(), (retiring,))
             self.assertEqual(
                 store.read_product_profile_record("example-site").lifecycle_state,
                 "retiring",
@@ -398,9 +549,7 @@ class ProductRetirementTests(unittest.TestCase):
                 )
             )
             self.assertEqual(store.read_product_retirement_record(plan.record_id), plan)
-            changed = plan.model_copy(
-                update={"reason": "different", "continuity_sha256": "f" * 64}
-            )
+            changed = plan.model_copy(update={"reason": "different", "continuity_sha256": "f" * 64})
             with self.assertRaisesRegex(ValueError, "append-only"):
                 store.write_product_retirement_record(changed)
 
@@ -418,7 +567,7 @@ class ProductRetirementTests(unittest.TestCase):
                 {**profile_payload, "lifecycle_state": "retiring"}
             )
             store.write_product_profile_record(retiring_profile)
-            self.assertEqual(store.list_product_profile_records(), ())
+            self.assertEqual(store.list_product_profile_records(), (retiring_profile,))
             self.assertEqual(
                 store.read_product_profile_record("example-site").lifecycle_state,
                 "retiring",
@@ -441,9 +590,7 @@ class ProductRetirementTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "append-only"):
                 store.write_product_retirement_record(
-                    plan.model_copy(
-                        update={"reason": "different", "continuity_sha256": "f" * 64}
-                    )
+                    plan.model_copy(update={"reason": "different", "continuity_sha256": "f" * 64})
                 )
             store.close()
 

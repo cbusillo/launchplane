@@ -17,6 +17,7 @@ ProductRetirementOutcome = Literal[
     "reconcile_required",
     "failed",
 ]
+MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH = 1000
 
 
 def canonical_sha256(value: object) -> str:
@@ -233,7 +234,7 @@ class ProductRetirementMutationEvidence(BaseModel):
     lifecycle_before: Literal["", "active", "retiring", "retired"] = ""
     lifecycle_after: Literal["", "active", "retiring", "retired"] = ""
     error_code: str = ""
-    error_message: str = Field(default="", max_length=1000)
+    error_message: str = Field(default="", max_length=MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH)
 
 
 class ProductRetirementRecord(BaseModel):

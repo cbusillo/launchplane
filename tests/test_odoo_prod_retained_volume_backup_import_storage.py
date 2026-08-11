@@ -331,6 +331,11 @@ class OdooProdRetainedVolumeBackupImportStorageTests(unittest.TestCase):
             plan_records = store.list_odoo_prod_retained_volume_backup_import_operation_records(
                 operation_kind="plan"
             )
+            persisted_checkpoint = (
+                store.read_odoo_prod_retained_volume_backup_import_operation_record(
+                    operation.operation_id
+                )
+            )
 
         self.assertTrue(created)
         self.assertEqual(persisted.operation_id, operation.operation_id)
@@ -343,6 +348,7 @@ class OdooProdRetainedVolumeBackupImportStorageTests(unittest.TestCase):
             checkpointed.checkpoints[-1].evidence["provider_effect"],
             "schedule_trigger",
         )
+        self.assertEqual(persisted_checkpoint, checkpointed)
         self.assertEqual(len(plan_records), 1)
 
     def test_postgres_store_fails_expired_import_after_provider_effect(self) -> None:

@@ -7871,7 +7871,15 @@ env_var = "GH_TOKEN"
                 )
             )
             filesystem_store.write_release_tuple_record(_release_tuple_record())
-            filesystem_store.write_product_profile_record(_product_profile_record())
+            active_profile = _product_profile_record()
+            filesystem_store.write_product_profile_record(
+                active_profile.model_copy(
+                    update={
+                        "lifecycle_state": "retiring",
+                        "preview": active_profile.preview.model_copy(update={"enabled": False}),
+                    }
+                )
+            )
             filesystem_store.write_runtime_key_safety_policy_record(
                 RuntimeKeySafetyPolicyRecord(
                     record_id="runtime-key-safety-policy-20260505T200000Z-test",
@@ -8110,5 +8118,9 @@ env_var = "GH_TOKEN"
                 .rules[0]
                 .binding_key,
                 "SHOPIFY_ACCESS_TOKEN",
+            )
+            self.assertEqual(
+                store.read_product_profile_record(active_profile.product).lifecycle_state,
+                "retiring",
             )
             store.close()

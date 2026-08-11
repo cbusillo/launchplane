@@ -3639,9 +3639,7 @@ class FilesystemRecordStore:
             if record_dir.exists():
                 for record_path in sorted(record_dir.glob("*.json")):
                     record = self._read_product_profile_record_path(record_path)
-                    if record.lifecycle_state == "active" and (
-                        not driver_id or record.driver_id == driver_id
-                    ):
+                    if not driver_id or record.driver_id == driver_id:
                         records.append(record)
             records.sort(key=lambda record: record.product)
             return tuple(records)

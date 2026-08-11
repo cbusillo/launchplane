@@ -112,6 +112,27 @@ class ProtectedArtifactTests(TestCase):
         self.assertEqual(protected.image_references, ())
         self.assertTrue(any("environment_inventory" in warning for warning in protected.warnings))
 
+    def test_build_protected_artifact_set_keeps_retiring_profile_artifacts_protected(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            seed_protected_artifact_store(store)
+            active_profile = store.read_product_profile_record("verireel")
+            retiring_profile = active_profile.model_copy(
+                update={
+                    "lifecycle_state": "retiring",
+                    "preview": active_profile.preview.model_copy(update={"enabled": False}),
+                }
+            )
+            store.compare_and_write_product_profile_record(
+                expected_record=active_profile,
+                replacement_record=retiring_profile,
+            )
+
+            protected = build_protected_artifact_set(store, product="verireel")
+
+        self.assertIn("artifact-verireel-prod", protected.artifact_ids)
+        self.assertIn("artifact-verireel-testing", protected.artifact_ids)
+
     def test_protected_artifacts_cli_outputs_json_for_cleanup_consumers(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:

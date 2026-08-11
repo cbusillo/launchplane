@@ -968,19 +968,17 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 )
                 for rule in self.local_admins
             )
-        if isinstance(identity, GitHubActionsIdentity):
-            return any(
-                rule.allows(
-                    identity=identity,
-                    action=action,
-                    product=product,
-                    context=context,
-                    target=resolved_target,
-                    schema_version=self.schema_version,
-                )
-                for rule in self.github_actions
+        return any(
+            rule.allows(
+                identity=identity,
+                action=action,
+                product=product,
+                context=context,
+                target=resolved_target,
+                schema_version=self.schema_version,
             )
-        return False
+            for rule in self.github_actions
+        )
 
     def allows_product_instance_preflight(
         self,

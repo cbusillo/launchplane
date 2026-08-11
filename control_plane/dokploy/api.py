@@ -1068,7 +1068,15 @@ def dokploy_request(
         with urlopen(request, timeout=timeout_seconds) as response:
             raw_payload = response.read()
     except HTTPError as error:
-        error_body = error.read().decode(errors="replace").strip()
+        try:
+            error_body = error.read().decode(errors="replace").strip()
+        except TimeoutError as read_error:
+            raise DokployRequestFailed(
+                method=method,
+                path=normalized_path,
+                status_code=error.code,
+                detail="response read timed out",
+            ) from read_error
         redacted_error_body = redact_dokploy_log_line(error_body).strip()
         raise DokployRequestFailed(
             method=method,
@@ -1084,6 +1092,12 @@ def dokploy_request(
             detail=redact_dokploy_log_line(str(error.reason)).strip()[
                 :_MAX_DOKPLOY_ERROR_DETAIL_LENGTH
             ],
+        ) from error
+    except TimeoutError as error:
+        raise DokployRequestFailed(
+            method=method,
+            path=normalized_path,
+            detail="response read timed out",
         ) from error
 
     if not raw_payload:
