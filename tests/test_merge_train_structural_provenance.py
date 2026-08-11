@@ -169,7 +169,7 @@ class MergeTrainStructuralProvenanceTests(unittest.TestCase):
         self.assertIn("structural_position_mismatch", reordered.reason_codes)
 
     def test_landing_entry_identity_must_match_candidate_provenance(self) -> None:
-        candidate_record, landing_record = _records((_entry(1, 1),))
+        candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
         cases = (
             ({"expected_head_sha": "different-head"}, "structural_head_sha_mismatch"),
             (
@@ -186,13 +186,13 @@ class MergeTrainStructuralProvenanceTests(unittest.TestCase):
         for updates, reason in cases:
             with self.subTest(reason=reason):
                 landing_entry = _landing_entry(
-                    landing_record.landing_plan.entries[0],
+                    landing_record.landing_plan.entries[1],
                     **updates,
                 )
                 plan = MergeTrainBatchLandingPlan.model_validate(
                     {
                         **landing_record.landing_plan.model_dump(mode="python"),
-                        "entries": (landing_entry,),
+                        "entries": (landing_record.landing_plan.entries[0], landing_entry),
                         "landing_plan_sha256": "",
                     }
                 )
@@ -308,6 +308,25 @@ class MergeTrainStructuralProvenanceTests(unittest.TestCase):
             progressed_round_trip.landing_plan_sha256,
             landing_record.landing_plan.landing_plan_sha256,
         )
+
+    def test_skipped_landing_entry_requires_recorded_candidate_evidence(self) -> None:
+        _, landing_record = _records((_entry(1, 1),))
+        payload = landing_record.landing_plan.entries[0].model_dump(mode="python")
+        payload.update(
+            {
+                "status": "skipped",
+                "recorded_candidate_parent_sha": "",
+                "recorded_rolling_base_sha": "base-main",
+                "recorded_rolling_base_tree_sha": "tree-base",
+                "landed_head_sha": "head-1",
+                "landed_head_tree_sha": "tree-head-1",
+                "merge_commit_sha": "base-main",
+                "merge_commit_tree_sha": "tree-base",
+            }
+        )
+
+        with self.assertRaisesRegex(ValidationError, "complete Git evidence"):
+            MergeTrainBatchLandingEntry.model_validate(payload)
 
 
 def _entry(pull_request_number: int, position: int) -> MergeTrainBatchEntry:

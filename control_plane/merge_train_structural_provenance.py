@@ -288,7 +288,14 @@ def _landing_plan_shape_result(
             "structural_position_mismatch",
         )
     provenance = candidate_record.candidate.structural_provenance
-    assert provenance is not None
+    if provenance is None:
+        return _bound_result(
+            evaluation,
+            candidate_record,
+            landing_plan_record,
+            "structural_provenance_missing",
+            status="unknown",
+        )
     for candidate_entry, landing_entry, provenance_step in zip(
         candidate_entries,
         landing_entries,

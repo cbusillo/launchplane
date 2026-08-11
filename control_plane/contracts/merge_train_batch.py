@@ -200,6 +200,10 @@ class MergeTrainBatchLandingEntry(BaseModel):
             setattr(self, field_name, str(getattr(self, field_name)).strip())
         if self.status == "skipped":
             required_evidence = (
+                self.recorded_candidate_parent_sha,
+                self.recorded_candidate_parent_tree_sha,
+                self.recorded_candidate_result_sha,
+                self.recorded_candidate_result_tree_sha,
                 self.recorded_rolling_base_sha,
                 self.recorded_rolling_base_tree_sha,
                 self.landed_head_sha,
