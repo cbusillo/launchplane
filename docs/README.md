@@ -32,6 +32,8 @@ Use these docs as the source of truth for `launchplane`.
   graph snapshot and recommendation queue contract.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge
   train policy contract, enqueue authority, and smoke-target policy.
+- [merge-readiness.md](merge-readiness.md) — ephemeral Owner-aware L2 merge
+  readiness facets, fail-closed aggregation, and live-evidence adapter boundary.
 - [runner-lane-baseline.md](runner-lane-baseline.md) — self-hosted runner lane
   baseline, Docker credential isolation, and readiness contract.
 - [runner-host-hygiene.md](runner-host-hygiene.md) — report-only shared runner
