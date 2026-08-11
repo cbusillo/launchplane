@@ -862,6 +862,38 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
+  test("resolving requested Owner changes requires structured evidence", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/owner-acceptance?fixture=products");
+
+    const panel = page.getByRole("region", { name: /Owner product review for/ });
+    const submit = panel.getByRole("button", { name: "Record product review" });
+    await panel.getByRole("combobox").selectOption("changes_requested");
+    await panel
+      .getByRole("textbox", { name: "Reason" })
+      .fill("Please clarify the product behavior.");
+    await submit.click();
+
+    await expect(panel.getByText("Resolution evidence required.", { exact: true })).toBeVisible();
+    await expect(submit).toBeDisabled();
+    await panel
+      .getByRole("textbox", { name: "Resolution summary" })
+      .fill("The requested behavior is now explicit and covered by the owner flow test.");
+    await panel
+      .getByRole("textbox", { name: "Resolved evidence references" })
+      .fill("test:owner-flow\nrecord:product-spec-17");
+    await expect(submit).toBeEnabled();
+    await captureScreenshot(page, testInfo, "owner-product-review-resolution-evidence");
+    await submit.click();
+
+    await expect(panel.getByText("Resolution evidence required.", { exact: true })).toHaveCount(0);
+    await expect(panel.getByText(/recorded in shadow mode/i)).toBeVisible();
+    diagnostics.assertClean();
+  });
+
   test("non-Owner sees exact review evidence without actionable controls", async ({
     page,
   }, testInfo) => {

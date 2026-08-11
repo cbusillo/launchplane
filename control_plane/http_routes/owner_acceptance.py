@@ -18,6 +18,8 @@ from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_READ_ACTION,
     OwnerAcceptanceDecision,
     OwnerAcceptanceEventRecord,
+    OwnerAcceptanceResolutionEvidence,
+    OwnerAcceptanceTransitionError,
     OwnerAcceptanceViewerBindingEligibility,
 )
 from control_plane.github_app_identity import (
@@ -80,6 +82,7 @@ class OwnerAcceptanceEventEnvelope(BaseModel):
     action: Literal["accepted", "changes_requested", "revoked"]
     expected_binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     reason: str = Field(default="", max_length=4000)
+    resolution: OwnerAcceptanceResolutionEvidence | None = None
 
     @model_validator(mode="after")
     def _validate_reason(self) -> "OwnerAcceptanceEventEnvelope":
@@ -375,6 +378,7 @@ def register_owner_acceptance_routes(
                 source_event_kind="browser_api",
                 source_event_id=idempotency_key,
                 reason=envelope.reason,
+                resolution=envelope.resolution,
             )
         except OwnerAcceptanceAuthorizationError as error:
             raise common.http_error(
@@ -388,6 +392,13 @@ def register_owner_acceptance_routes(
                 status_code=409,
                 trace_id=trace_id,
                 code="owner_acceptance_event_conflict",
+                message=str(error),
+            ) from error
+        except OwnerAcceptanceTransitionError as error:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="owner_acceptance_transition_invalid",
                 message=str(error),
             ) from error
         except OwnerAcceptanceBindingConflictError as error:
@@ -483,11 +494,15 @@ def register_owner_acceptance_routes(
                 repository=repository,
                 status=status,
             )
-        except TypeError as error:
+        except (TypeError, ValueError) as error:
             raise common.http_error(
                 status_code=503,
                 trace_id=trace_id,
-                code="database_storage_required",
+                code=(
+                    "database_storage_required"
+                    if isinstance(error, TypeError)
+                    else "owner_acceptance_history_unavailable"
+                ),
                 message=str(error),
             ) from error
         generated_at = (

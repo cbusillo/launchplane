@@ -1914,6 +1914,22 @@
   resize: vertical;
 }
 
+.engineering-owner-action-resolution {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+  border-radius: 0.8rem;
+  background: color-mix(in srgb, var(--warning-soft) 45%, var(--surface-raised));
+}
+
+.engineering-owner-action-resolution > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
 .engineering-owner-action-confirm {
   grid-template-columns: auto 1fr;
   align-items: center;
