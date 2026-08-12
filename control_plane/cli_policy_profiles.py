@@ -9,7 +9,6 @@ from typing import Protocol
 import click
 from pydantic import ValidationError
 
-from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane.cli_shared import (
     DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
     direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
@@ -654,51 +653,6 @@ def product_profiles_show(database_url: str, product: str) -> None:
     click.echo(
         json.dumps(
             {"status": "ok", "profile": record.model_dump(mode="json")},
-            indent=2,
-            sort_keys=True,
-        )
-    )
-
-
-@product_profiles.command("audit-context-cutover")
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane product and runtime records.",
-)
-@click.option("--product", required=True, help="Product key to audit.")
-@click.option("--source-context", required=True, help="Legacy context to inspect.")
-@click.option("--target-context", required=True, help="Canonical context to inspect.")
-@click.option(
-    "--preview-context",
-    default="",
-    help="Preview context to inspect; defaults to the product profile preview context.",
-)
-def product_profiles_audit_context_cutover(
-    database_url: str,
-    product: str,
-    source_context: str,
-    target_context: str,
-    preview_context: str,
-) -> None:
-    record_store = _product_profile_store(database_url)
-    try:
-        payload = control_plane_product_context_audit.build_product_context_cutover_audit(
-            record_store=record_store,
-            product=product,
-            source_context=source_context,
-            target_context=target_context,
-            preview_context=preview_context,
-        )
-    except ValueError as error:
-        raise click.ClickException(str(error)) from error
-    finally:
-        record_store.close()
-
-    click.echo(
-        json.dumps(
-            payload,
             indent=2,
             sort_keys=True,
         )

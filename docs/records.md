@@ -196,14 +196,14 @@ runtime/config ownership. PostgreSQL storage exposes a single
 can include product profiles, provider targets, legacy Dokploy target records,
 runtime-environment rows and delete events, managed-secret versions/current
 pointers/bindings/audit events, environment inventory, release tuples, and the
-completed idempotency response. Product config, onboarding, context cutover,
-and legacy cleanup plan their whole graph first and then commit through this
-method once. A current managed-secret pointer must not advance unless the new
-version, binding, audit evidence, required runtime-environment changes, and
-applicable idempotency completion are in the same transaction. Cleanup deletes
-compare the current row payload with the planned expected record under the
-storage boundary and fail closed on missing or drifted authority instead of
-publishing a partial graph. Provider-target writes likewise carry an
+completed idempotency response. Product config and onboarding plan their whole
+graph first and then commit through this method once. A current managed-secret
+pointer must not advance unless the new version, binding, audit evidence,
+required runtime-environment changes, and applicable idempotency completion are
+in the same transaction. Bundle deletes compare the current row payload with the
+planned expected record under the storage boundary and fail closed on missing or
+drifted authority instead of publishing a partial graph. Provider-target writes
+likewise carry an
 expected-current or expected-absent precondition so a concurrent route owner
 cannot be overwritten after planning. Lane-summary reads hold a shared bundle
 guard while assembling their multi-record view, so a bundle commit cannot split
@@ -553,8 +553,8 @@ an ORM column/table or remains only in the evidence payload.
   Dokploy target and target-id records still provide audit/backfill comparison
   material and provider execution configuration, but they no longer synthesize
   steady-state provider-target authority when an explicit row is missing.
-- Product onboarding, Dokploy target adoption/creation, product context cutover,
-  and tracked Dokploy target metadata commands now dual-write explicit
+- Product onboarding, Dokploy target adoption/creation, and tracked Dokploy
+  target metadata commands now dual-write explicit
   provider-target rows when a complete Dokploy target and target-id pair exists.
   The dual-write is identity-only: Dokploy route/runtime execution metadata such
   as domains, health policy, source metadata, env keys, and product policies
@@ -566,11 +566,6 @@ an ORM column/table or remains only in the evidence payload.
   evidence. One physical provider target identity may be bound to only one
   steady-state context/instance route; same-route replacement evidence does not
   authorize a cross-route alias.
-- Product context audit, cutover, and legacy cleanup responses expose target
-  copy/delete summaries under provider-neutral `provider_targets` and
-  `provider_target_ids` keys. Dokploy target and target-id records can still be
-  the provider-specific source records copied or deleted by those workflows, but
-  they are not exposed as Dokploy-named response buckets.
 - `uv run launchplane storage provider-target-audit` is the read-only preflight
   for this record family. It compares explicit provider-target rows
   with the neutral projection from paired Dokploy target and target-id records,
@@ -824,48 +819,10 @@ generic-web lanes should converge on the product context, such as
 resolve one product stack. A separate preview context may remain while preview
 apps are isolated from stable lane records.
 
-When cleaning up a legacy context such as `sellyouroutboard-testing`, first
-copy or reseed only the mutable current-authority records needed by live
-resolution: runtime environments, managed secrets and bindings, tracked targets,
-tracked target IDs, inventories, and release tuples. After the product profile
-points at the canonical context, cleanup can delete legacy runtime environment
-records and Dokploy target lookups, and can disable legacy managed secret records
-and bindings. It should not delete inventory records, release tuples,
-deployments, promotions, backup gates, or preview history; those records are
-historical evidence and should continue to describe the route that produced
-them. Product profiles retain legacy route names in `historical_contexts` after
-cutover so product activity read models can continue to include that preserved
-evidence without making the legacy context current authority again.
-
-Before changing a product profile or deleting legacy rows, audit both route
-families with:
-
-```bash
-uv run launchplane product-profiles audit-context-cutover \
-  --product sellyouroutboard \
-  --source-context sellyouroutboard-testing \
-  --target-context sellyouroutboard
-```
-
-The audit reports key names, record ids, counts, target names, and binding
-metadata only. It does not print runtime values, managed secret plaintext,
-secret ciphertext, or full provider env text.
-
-The same redacted audit is exposed through the Launchplane service at
-`GET /v1/product-profiles/{product}/context-cutover-audit` with
-`source_context`, `target_context`, and optional `preview_context` query
-parameters. The manual `Product Context Cutover Audit` GitHub workflow calls
-that service route through GitHub OIDC and uploads the redacted JSON artifact.
-After cutover, the source context is historical evidence rather than a current
-product boundary, so this pre-cutover audit will reject the legacy context. Use
-the `Product Legacy Context Cleanup` workflow in `dry_run=true` mode for
-post-cutover SYO evidence, then validate live runtime against the canonical
-`sellyouroutboard` testing and prod lanes.
-The manual `Product Legacy Context Cleanup` GitHub workflow calls the matching
-write route through GitHub OIDC. It defaults to `dry_run=true`, refuses cleanup
-while the source context is still product-owned, blocks individual mutable
-records without target-context replacements, and preserves historical evidence
-rows.
+`historical_contexts` preserves retired routing evidence without becoming current
+authority. Current lanes and enabled previews may not reactivate a context
+listed in `historical_contexts`; onboarding and target setup enforce that
+boundary while product activity read models retain the historical evidence.
 
 These records replace repo-local Launchplane lifecycle manifests. Product repos
 still own their normal app/runtime contract, such as Dockerfile, image publish,

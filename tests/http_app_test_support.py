@@ -147,7 +147,6 @@ from tests.support.merge_train import (
 )
 from tests.support.profiles import (
     _generic_site_profile_payload,
-    _product_profile_payload_with_prod,
 )
 
 
@@ -1560,53 +1559,6 @@ def _driver_context_store(state_dir: Path) -> FilesystemRecordStore:
         )
     )
     return store
-
-
-def _write_context_cutover_audit_records(database_url: str) -> None:
-    store = PostgresRecordStore(database_url=database_url)
-    store.ensure_schema()
-    try:
-        store.write_product_profile_record(
-            LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
-        )
-        store.write_runtime_environment_record(
-            RuntimeEnvironmentRecord(
-                scope="instance",
-                context="sellyouroutboard-testing",
-                instance="prod",
-                env={"TAWK_PROPERTY_ID": "property-legacy"},
-                updated_at="2026-05-01T00:03:00Z",
-                source_label="legacy",
-            )
-        )
-        store.write_runtime_environment_record(
-            RuntimeEnvironmentRecord(
-                scope="instance",
-                context="sellyouroutboard",
-                instance="prod",
-                env={"TAWK_WIDGET_ID": "widget-canonical"},
-                updated_at="2026-05-01T00:04:00Z",
-                source_label="operator:mistake",
-            )
-        )
-        with patch.dict(
-            "os.environ",
-            {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-            clear=True,
-        ):
-            control_plane_secrets.write_secret_value(
-                record_store=store,
-                scope="context_instance",
-                integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                name="smtp-password",
-                plaintext_value="smtp-password-secret",
-                binding_key="SMTP_PASSWORD",
-                context_name="sellyouroutboard-testing",
-                instance_name="prod",
-                actor="test",
-            )
-    finally:
-        store.close()
 
 
 def _seed_product_environment_read_records(database_url: str) -> None:
@@ -4449,54 +4401,6 @@ async def _post_product_environment_config_apply(
     )
 
 
-async def _post_context_cutover_apply(
-    app: FastAPI,
-    payload: dict[str, object],
-    *,
-    authorization: str = "Bearer valid-token",
-    idempotency_key: str = "",
-    headers: dict[str, str] | None = None,
-    raw_body: bytes | None = None,
-) -> _AsgiResponse:
-    request_headers = dict(headers or {})
-    if authorization:
-        request_headers["Authorization"] = authorization
-    if idempotency_key:
-        request_headers["Idempotency-Key"] = idempotency_key
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/product-profiles/context-cutover/apply",
-        headers=request_headers,
-        payload=payload,
-        raw_body=raw_body,
-    )
-
-
-async def _post_legacy_context_cleanup_apply(
-    app: FastAPI,
-    payload: dict[str, object],
-    *,
-    authorization: str = "Bearer valid-token",
-    idempotency_key: str = "",
-    headers: dict[str, str] | None = None,
-    raw_body: bytes | None = None,
-) -> _AsgiResponse:
-    request_headers = dict(headers or {})
-    if authorization:
-        request_headers["Authorization"] = authorization
-    if idempotency_key:
-        request_headers["Idempotency-Key"] = idempotency_key
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/product-profiles/legacy-context-cleanup/apply",
-        headers=request_headers,
-        payload=payload,
-        raw_body=raw_body,
-    )
-
-
 async def _get_preview_record(
     app: FastAPI,
     preview_id: str,
@@ -5340,51 +5244,6 @@ class _AgentWriteIntentEvaluateReplayOnlyStore:
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> None:
         del record
         raise AssertionError("idempotent replay must not write write-intent evidence")
-
-
-class _ProductContextApplyReplayOnlyStore:
-    def __init__(
-        self,
-        *,
-        route_path: str,
-        payload: dict[str, object],
-        idempotency_key: str,
-    ) -> None:
-        self.read_idempotency_calls = 0
-        self._route_path = route_path
-        self._payload = payload
-        self._idempotency_key = idempotency_key
-
-    def read_idempotency_record(
-        self,
-        *,
-        scope: str,
-        route_path: str,
-        idempotency_key: str,
-    ) -> LaunchplaneIdempotencyRecord | None:
-        self.read_idempotency_calls += 1
-        if route_path != self._route_path or idempotency_key != self._idempotency_key:
-            return None
-        return LaunchplaneIdempotencyRecord(
-            record_id="idempotency-launchplane_req_original",
-            scope=scope,
-            route_path=route_path,
-            idempotency_key=idempotency_key,
-            request_fingerprint=hashlib.sha256(
-                json.dumps(self._payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest(),
-            response_status_code=202,
-            response_trace_id="launchplane_req_original",
-            recorded_at="2026-05-29T12:00:00Z",
-            response_payload={
-                "status": "accepted",
-                "trace_id": "launchplane_req_original",
-                "records": {"product_profile": "sellyouroutboard"},
-            },
-        )
-
-    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
-        raise AssertionError("idempotent replay must not write a new record")
 
 
 class _IdempotencyOnlyRunnerHostHygieneAuditReplayStore:

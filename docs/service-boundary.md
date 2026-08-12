@@ -214,9 +214,6 @@ cleanup scope so the store is always closed.
     `secret.list` for the path context
   - `GET /v1/secrets/{secret_id}`, requiring `secret.read` for the stored
     secret context
-  - `GET /v1/product-profiles/{product}/context-cutover-audit`, requiring
-    `product_profile.read` for the stored product profile in the Launchplane
-    service context and returning redacted current-authority metadata only
   - `GET /v1/products/{product}/environments/{environment}/public-ingress/incidents`,
     requiring `product_environment.read` for the profile-resolved stable lane
     and returning a bounded list of lane-owned incident occurrences
@@ -300,10 +297,6 @@ cleanup scope so the store is always closed.
   - `POST /v1/provider-targets/operations` (native FastAPI for bearer-token
     callers, DB-backed audit/backfill records, apply-only `Idempotency-Key`
     replay/conflict handling, and repeatable audits/dry-runs)
-- product context cutover route:
-  - `POST /v1/product-profiles/context-cutover/apply`
-- product legacy context cleanup route:
-  - `POST /v1/product-profiles/legacy-context-cleanup/apply`
 - public ingress notification policy route:
   - `POST /v1/public-ingress/notification-policies/apply` (native FastAPI for
     bearer-token callers, DB-backed storage, local-operator reason enforcement,
@@ -2064,12 +2057,6 @@ sources, managed rule IDs/count, and a SHA-256 identity digest, never raw numeri
 repository IDs; the existing plan digest, policy CAS, protected apply, and
 idempotency boundaries remain unchanged.
 
-Product context audit, cutover, and legacy cleanup routes expose copied or
-deleted runtime identity records under neutral `provider_targets` and
-`provider_target_ids` response groups. Dokploy target records remain
-provider-specific execution/config storage where needed, but service responses
-must not reintroduce Dokploy-named target buckets for these workflows.
-
 Provider-target operations use the native FastAPI
 `POST /v1/provider-targets/operations` route. The route accepts one
 Launchplane-owned route at a time with mode `audit`, `backfill-dry-run`, or
@@ -2317,8 +2304,6 @@ are present. The descriptor routes remain discoverable.
   human-session, and Every Code worker-token callers)
 - `GET /v1/product-profiles/{product}` (native FastAPI for bearer-token and
   human-session callers)
-- `GET /v1/product-profiles/{product}/context-cutover-audit` (native FastAPI
-  for bearer-token and human-session callers)
 - `GET /v1/service/runtime` (native FastAPI for bearer-token and human-session
   callers)
 - `GET /v1/service/odoo-workers/status` (native FastAPI for bearer-token and
@@ -2403,12 +2388,8 @@ context, preserve the `driver_id` filter, and continue accepting the dedicated
 Every Code worker token for the collection route only. Product profile show
 reads load the stored profile first, check `product_profile.read` against the
 stored profile product and Launchplane service context, and return the typed
-profile envelope. Product context cutover audit reads load the product profile
-from DB-backed records, check `product_profile.read` against the stored profile
-product and Launchplane service context, and require the requested source,
-target, and optional preview contexts to belong to that profile before returning
-the typed audit envelope. Ingress route audit reads check `ingress_route.plan`
-against the requested query product/context before storage access, require those
+profile envelope. Ingress route audit reads check `ingress_route.plan` against
+the requested query product/context before storage access, require those
 scope query parameters for list and single-record reads, preserve optional
 `status`, `mode`, `provider_host_id`, `trace_id`, `idempotency_key`, and `limit`
 list filters, and return `404 not_found` when a record exists outside the
@@ -2596,37 +2577,6 @@ not just refresh and destroy operations.
 Prod-scoped product actions are only shown when the product profile actually
 defines a prod lane. Generic-web prod promotion is additionally hidden unless
 the testing and prod lanes share the same context.
-
-Product context cutover audit is read-only and uses `product_profile.read` for
-the requested product in the Launchplane service context. It returns redacted
-current-authority metadata for source, target, and optional preview contexts:
-runtime key names, managed secret IDs/binding keys, Dokploy target metadata,
-inventory and release tuple pointers, and append-only evidence counts. It does
-not return runtime values, secret plaintext, secret ciphertext, or full provider
-environment text.
-
-Product context cutover apply uses native FastAPI
-`POST /v1/product-profiles/context-cutover/apply` and `product_profile.write`
-for the requested product in the Launchplane service context. It supports
-`dry-run` and `apply` modes, copies only current-authority records into the
-target context, updates lane/preview product profile context fields, returns key
-names/counts only, and preserves optional `Idempotency-Key` replay/conflict
-behavior. It does not copy append-only deployments, promotions, backup gates, or
-preview history.
-
-Product legacy context cleanup uses native FastAPI
-`POST /v1/product-profiles/legacy-context-cleanup/apply` and
-`product_profile.write` for the requested product in the Launchplane service
-context. It supports `dry-run` and `apply` modes after a context cutover has
-moved the product profile to the target context, preserves optional
-`Idempotency-Key` replay/conflict behavior. Cleanup refuses to run while
-the source context is still owned by this or another product profile. It deletes
-legacy runtime environment records and Dokploy target lookup records only when
-matching target-context records already exist, disables legacy managed secret
-records and bindings, and preserves inventory, release tuple, deployment,
-promotion, backup gate, and preview history records as evidence. Responses
-remain redacted to key names, counts, target metadata, secret IDs, and binding
-keys/status.
 
 ### Driver execution endpoints
 

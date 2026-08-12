@@ -153,32 +153,6 @@ async def _get_product_profile(
     )
 
 
-async def _get_context_cutover_audit(
-    app: FastAPI,
-    *,
-    product: str = "sellyouroutboard",
-    source_context: str = "sellyouroutboard-testing",
-    target_context: str = "sellyouroutboard",
-    preview_context: str = "",
-    authorization: str = "Bearer valid-token",
-    headers: dict[str, str] | None = None,
-) -> Response:
-    request_headers = dict(headers or {})
-    if authorization:
-        request_headers["Authorization"] = authorization
-    params = {
-        "source_context": source_context,
-        "target_context": target_context,
-    }
-    if preview_context:
-        params["preview_context"] = preview_context
-    return await http_get(
-        app,
-        f"/v1/product-profiles/{product}/context-cutover-audit?{urlencode(params)}",
-        headers=request_headers,
-    )
-
-
 async def _get_protected_artifacts(
     app: FastAPI,
     *,

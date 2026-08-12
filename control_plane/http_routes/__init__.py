@@ -95,10 +95,8 @@ from control_plane.http_routes.runner_host_hygiene import (
 )
 from control_plane.http_routes.products import (
     ProductReadRouteDependencies,
-    product_profile_context_cutover_contexts_allowed,
     register_agent_context_read_routes,
     register_product_config_status_read_routes,
-    register_product_context_audit_read_routes,
     register_product_environment_read_routes,
     register_product_promotion_status_read_routes,
     register_product_profile_read_routes,
@@ -169,7 +167,6 @@ __all__ = (
     "build_generic_web_write_route_handlers",
     "idempotency_capable_store",
     "idempotency_scope",
-    "product_profile_context_cutover_contexts_allowed",
     "provider_operation_response_payload",
     "register_agent_context_read_routes",
     "register_change_impact_read_routes",
@@ -202,7 +199,6 @@ __all__ = (
     "register_owner_acceptance_routes",
     "register_preview_record_read_routes",
     "register_product_config_status_read_routes",
-    "register_product_context_audit_read_routes",
     "register_product_environment_read_routes",
     "register_product_promotion_status_read_routes",
     "register_product_profile_read_routes",
