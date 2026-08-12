@@ -3822,6 +3822,29 @@ class PostgresRecordStore(HumanSessionStore):
         session: Any,
         write: ProviderTargetWrite,
     ) -> None:
+        conflicting_identity_statement = select(LaunchplaneProviderTargetRow).where(
+            LaunchplaneProviderTargetRow.provider_id == write.record.provider_id,
+            LaunchplaneProviderTargetRow.target_category == write.record.target_category,
+            LaunchplaneProviderTargetRow.target_id == write.record.target_id,
+        )
+        if not self.database_url.startswith("sqlite"):
+            conflicting_identity_statement = conflicting_identity_statement.with_for_update()
+        allowed_conflicting_routes = set(write.allowed_conflicting_routes)
+        conflicting_routes = sorted(
+            (candidate.context, candidate.instance)
+            for candidate in session.scalars(conflicting_identity_statement)
+            if (candidate.context, candidate.instance)
+            != (write.record.context, write.record.instance)
+            and (candidate.context, candidate.instance) not in allowed_conflicting_routes
+        )
+        if conflicting_routes:
+            formatted_routes = ", ".join(
+                f"{context}/{instance}" for context, instance in conflicting_routes
+            )
+            raise ValueError(
+                "Provider target identity was bound to another route after authority "
+                f"bundle planning: {formatted_routes}."
+            )
         statement = (
             select(LaunchplaneProviderTargetRow)
             .where(
@@ -15269,29 +15292,56 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_provider_target_record(self, record: ProviderTargetRecord) -> None:
-        self._write_row(self._provider_target_row(record))
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            current_row = session.scalar(
+                select(LaunchplaneProviderTargetRow)
+                .where(
+                    LaunchplaneProviderTargetRow.context == record.context,
+                    LaunchplaneProviderTargetRow.instance == record.instance,
+                )
+                .limit(1)
+            )
+            current_record = (
+                self._read_payload(
+                    model_type=ProviderTargetRecord,
+                    payload=current_row.payload,
+                )
+                if current_row is not None
+                else None
+            )
+            self._write_provider_target_with_expectation(
+                session=session,
+                write=ProviderTargetWrite(
+                    record=record,
+                    expected_record=current_record,
+                    expected_absent=current_record is None,
+                ),
+            )
+            session.commit()
 
     def create_provider_target_record_if_absent(
         self, record: ProviderTargetRecord
     ) -> ProviderTargetCreateStatus:
-        row = LaunchplaneProviderTargetRow(
-            context=record.context,
-            instance=record.instance,
-            provider_id=record.provider_id,
-            target_category=record.target_category,
-            target_id=record.target_id,
-            display_name=record.display_name,
-            provider_target_type=record.provider_target_type,
-            updated_at=record.updated_at,
-            payload=self._payload_dict(record),
-        )
         with self._session_factory() as session:
-            session.add(row)
-            try:
-                session.commit()
-            except IntegrityError:
-                session.rollback()
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            current_row = session.scalar(
+                select(LaunchplaneProviderTargetRow)
+                .where(
+                    LaunchplaneProviderTargetRow.context == record.context,
+                    LaunchplaneProviderTargetRow.instance == record.instance,
+                )
+                .limit(1)
+            )
+            if current_row is not None:
                 return "exists"
+            self._write_provider_target_with_expectation(
+                session=session,
+                write=ProviderTargetWrite(record=record, expected_absent=True),
+            )
+            session.commit()
         return "created"
 
     def delete_provider_target_record(

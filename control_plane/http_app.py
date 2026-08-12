@@ -42,7 +42,7 @@ from control_plane.generic_web_onboarding import (
     GenericWebOnboardingIntent,
     build_generic_web_onboarding_manifest,
     generic_web_onboarding_plan_sha256,
-    validate_generic_web_onboarding_profile_continuity,
+    validate_generic_web_onboarding_is_new_product,
 )
 from control_plane.generic_web_preview_authz import (
     GenericWebPreviewAuthzPlanResult,
@@ -573,7 +573,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
-    product_profile_historical_context_overlap,
+    validate_product_profile_history_transition,
 )
 from control_plane.contracts.product_retirement import (
     ProductRetirementIdentity,
@@ -997,6 +997,8 @@ _DB_ONLY_MUTATION_LEASE = timedelta(minutes=5)
 
 
 class ProductProfileWriteStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> object: ...
 
 
@@ -2646,11 +2648,18 @@ class _EveryCodePreviewGateWriteStore(Protocol):
 
 
 def require_product_profile_write_store(record_store: object) -> ProductProfileWriteStore:
-    write_record = getattr(record_store, "write_product_profile_record", None)
-    if not callable(write_record):
+    missing_methods = [
+        method_name
+        for method_name in (
+            "read_product_profile_record",
+            "write_product_profile_record",
+        )
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
         raise TypeError(
             "Launchplane record store does not support product profile writes: "
-            "write_product_profile_record"
+            + ", ".join(missing_methods)
         )
     return cast(ProductProfileWriteStore, record_store)
 
@@ -10776,39 +10785,27 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        existing_profile = None
-        read_existing_profile = getattr(profile_store, "read_product_profile_record", None)
-        if callable(read_existing_profile):
-            try:
-                existing_profile = read_existing_profile(profile.product)
-            except (FileNotFoundError, KeyError):
-                existing_profile = None
-            existing_historical_overlap = (
-                product_profile_historical_context_overlap(existing_profile)
-                if existing_profile is not None
-                else frozenset()
+        try:
+            existing_profile = profile_store.read_product_profile_record(profile.product)
+        except (FileNotFoundError, KeyError):
+            existing_profile = None
+        try:
+            validate_product_profile_history_transition(
+                existing_profile=existing_profile,
+                replacement_profile=profile,
             )
-            introduced_historical_overlap = (
-                product_profile_historical_context_overlap(profile) - existing_historical_overlap
-            )
-            if introduced_historical_overlap:
-                raise _launchplane_http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="historical_context_reactivation_blocked",
-                    message=(
-                        "Product profile current contexts cannot reactivate historical "
-                        "contexts: " + ", ".join(sorted(introduced_historical_overlap))
-                    ),
-                )
-            if (
-                existing_profile is not None
-                and control_plane_product_health_monitoring.product_health_monitoring_authority(
-                    existing_profile
-                )
-                != control_plane_product_health_monitoring.product_health_monitoring_authority(
-                    profile
-                )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="historical_context_reactivation_blocked",
+                message=str(error),
+            ) from error
+        if existing_profile is not None:
+            if control_plane_product_health_monitoring.product_health_monitoring_authority(
+                existing_profile
+            ) != control_plane_product_health_monitoring.product_health_monitoring_authority(
+                profile
             ):
                 raise _launchplane_http_error(
                     status_code=409,
@@ -10820,8 +10817,7 @@ def create_launchplane_fastapi_app(
                     ),
                 )
             if (
-                existing_profile is not None
-                and control_plane_product_prelaunch_rebuild_policy.product_prelaunch_rebuild_policy_authority(
+                control_plane_product_prelaunch_rebuild_policy.product_prelaunch_rebuild_policy_authority(
                     existing_profile
                 )
                 != control_plane_product_prelaunch_rebuild_policy.product_prelaunch_rebuild_policy_authority(
@@ -13414,6 +13410,21 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=database_store,
+            identity=identity,
+            route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
         onboarding_manifest = onboarding_request.manifest
         generic_web_plan_sha256 = ""
         if onboarding_request.generic_web is not None:
@@ -13424,7 +13435,7 @@ def create_launchplane_fastapi_app(
             except (FileNotFoundError, KeyError):
                 existing_profile = None
             try:
-                validate_generic_web_onboarding_profile_continuity(
+                validate_generic_web_onboarding_is_new_product(
                     intent=onboarding_request.generic_web,
                     existing_profile=existing_profile,
                 )
@@ -13495,21 +13506,6 @@ def create_launchplane_fastapi_app(
                     message=str(error),
                 ) from error
         assert onboarding_manifest is not None
-        (
-            normalized_idempotency_key,
-            payload_fingerprint,
-            replay_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=database_store,
-            identity=identity,
-            route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
-        )
-        if replay_response is not None:
-            return replay_response
         try:
             onboarding_result, authority_bundle = plan_product_onboarding_authority_bundle(
                 record_store=database_store,

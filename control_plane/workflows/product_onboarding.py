@@ -19,7 +19,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductOdooPrelaunchRebuildPolicy,
     ProductPreviewProfile,
-    product_profile_historical_context_overlap,
+    validate_product_profile_history_transition,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
@@ -134,13 +134,11 @@ def build_product_profile_record(
         expected_config=manifest.product_expected_config_profile(),
         updated_at=updated_at,
         source=manifest.source_label,
-    ).validate_write_contract()
-    historical_context_overlap = product_profile_historical_context_overlap(product_profile)
-    if historical_context_overlap:
-        raise ValueError(
-            "product profile current contexts cannot reuse historical contexts: "
-            + ", ".join(sorted(historical_context_overlap))
-        )
+    )
+    validate_product_profile_history_transition(
+        existing_profile=existing_profile,
+        replacement_profile=product_profile,
+    )
     return product_profile
 
 
@@ -511,12 +509,37 @@ def plan_product_onboarding_authority_bundle(
         dokploy_targets=provider_targets,
         dokploy_target_ids=provider_target_ids,
         provider_target_writes=tuple(
-            ProviderTargetWrite(
-                record=record,
-                expected_record=current_provider_targets.get((record.context, record.instance)),
-                expected_absent=(record.context, record.instance) not in current_provider_targets,
+            sorted(
+                (
+                    ProviderTargetWrite(
+                        record=record,
+                        expected_record=current_provider_targets.get(
+                            (record.context, record.instance)
+                        ),
+                        expected_absent=(record.context, record.instance)
+                        not in current_provider_targets,
+                        allowed_conflicting_routes=tuple(
+                            sorted(
+                                (candidate.context, candidate.instance)
+                                for candidate in current_provider_targets.values()
+                                if existing_product_profile is not None
+                                and record.context == existing_product_profile.product
+                                and candidate.context
+                                in existing_product_profile.historical_contexts
+                                and candidate.instance == record.instance
+                            )
+                        ),
+                    )
+                    for record in physical_provider_targets
+                ),
+                key=lambda write: (
+                    write.record.provider_id,
+                    write.record.target_category,
+                    write.record.target_id,
+                    write.record.context,
+                    write.record.instance,
+                ),
             )
-            for record in physical_provider_targets
         ),
         runtime_environments=runtime_environments,
         secret_bindings=(*secret_bindings, *secret_binding_plan.retired_bindings),

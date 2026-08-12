@@ -17,6 +17,10 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProviderTargetWrite,
+)
 from control_plane.workflows.product_onboarding import (
     apply_product_onboarding_manifest,
     build_product_profile_record,
@@ -2900,18 +2904,26 @@ class ProductOnboardingTests(unittest.TestCase):
                     }
                 )
             )
-            store.write_provider_target_record(
-                ProviderTargetRecord(
-                    context=historical_alias,
-                    instance="testing",
-                    provider_id="dokploy",
-                    target_category="application",
-                    target_id="app-testing-123",
-                    display_name="example-site-testing",
-                    provider_target_type="application",
-                    provider_evidence={"project_name": "example-site"},
-                    updated_at="2026-05-03T01:20:00Z",
-                    source_label="test:regression",
+            store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    provider_target_writes=(
+                        ProviderTargetWrite(
+                            record=ProviderTargetRecord(
+                                context=historical_alias,
+                                instance="testing",
+                                provider_id="dokploy",
+                                target_category="application",
+                                target_id="app-testing-123",
+                                display_name="example-site-testing",
+                                provider_target_type="application",
+                                provider_evidence={"project_name": "example-site"},
+                                updated_at="2026-05-03T01:20:00Z",
+                                source_label="test:regression",
+                            ),
+                            expected_absent=True,
+                            allowed_conflicting_routes=(("example-site", "testing"),),
+                        ),
+                    )
                 )
             )
 

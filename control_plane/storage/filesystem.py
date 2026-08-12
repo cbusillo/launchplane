@@ -552,8 +552,14 @@ class FilesystemRecordStore:
                 model=target_id_record,
                 step_name="write_dokploy_target_id",
             )
+        deleted_provider_target_routes = {
+            (record.context, record.instance) for record in bundle.delete_provider_targets
+        }
         for provider_target_write in bundle.provider_target_writes:
-            self._validate_provider_target_write(provider_target_write)
+            self._validate_provider_target_write(
+                provider_target_write,
+                deleted_routes=deleted_provider_target_routes,
+            )
             self._stage_product_authority_bundle_write(
                 stage_dir=stage_dir,
                 entries=entries,
@@ -665,7 +671,35 @@ class FilesystemRecordStore:
         entries.append(entry)
         self._after_product_authority_bundle_step(f"stage_{step_name}")
 
-    def _validate_provider_target_write(self, write: ProviderTargetWrite) -> None:
+    def _validate_provider_target_write(
+        self,
+        write: ProviderTargetWrite,
+        *,
+        deleted_routes: set[tuple[str, str]] | None = None,
+    ) -> None:
+        allowed_conflicting_routes = set(write.allowed_conflicting_routes)
+        removed_routes = deleted_routes or set()
+        conflicting_routes = sorted(
+            (record.context, record.instance)
+            for record in self._list_models_locked(
+                ProviderTargetRecord,
+                "launchplane_provider_targets",
+            )
+            if record.provider_id == write.record.provider_id
+            and record.target_category == write.record.target_category
+            and record.target_id == write.record.target_id
+            and (record.context, record.instance) != (write.record.context, write.record.instance)
+            and (record.context, record.instance) not in allowed_conflicting_routes
+            and (record.context, record.instance) not in removed_routes
+        )
+        if conflicting_routes:
+            formatted_routes = ", ".join(
+                f"{context}/{instance}" for context, instance in conflicting_routes
+            )
+            raise ValueError(
+                "Provider target identity was bound to another route after authority "
+                f"bundle planning: {formatted_routes}."
+            )
         record_path = self._record_path(
             "launchplane_provider_targets",
             _context_instance_record_id(write.record.context, write.record.instance),
@@ -2939,11 +2973,24 @@ class FilesystemRecordStore:
         )
 
     def write_provider_target_record(self, record: ProviderTargetRecord) -> Path:
-        return self._write_model(
-            "launchplane_provider_targets",
-            _context_instance_record_id(record.context, record.instance),
-            record,
-        )
+        with self._product_authority_bundle_lock():
+            record_id = _context_instance_record_id(record.context, record.instance)
+            current_payload = self._read_json_file(
+                self._record_path("launchplane_provider_targets", record_id)
+            )
+            current_record = (
+                ProviderTargetRecord.model_validate(current_payload)
+                if current_payload is not None
+                else None
+            )
+            self._validate_provider_target_write(
+                ProviderTargetWrite(
+                    record=record,
+                    expected_record=current_record,
+                    expected_absent=current_record is None,
+                )
+            )
+            return self._write_model_locked("launchplane_provider_targets", record_id, record)
 
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
@@ -2975,12 +3022,19 @@ class FilesystemRecordStore:
     def create_provider_target_record_if_absent(
         self, record: ProviderTargetRecord
     ) -> ProviderTargetCreateStatus:
-        created = self._create_model_if_absent(
-            "launchplane_provider_targets",
-            _context_instance_record_id(record.context, record.instance),
-            record,
-        )
-        return "created" if created else "exists"
+        with self._product_authority_bundle_lock():
+            record_id = _context_instance_record_id(record.context, record.instance)
+            if self._record_path("launchplane_provider_targets", record_id).exists():
+                return "exists"
+            self._validate_provider_target_write(
+                ProviderTargetWrite(record=record, expected_absent=True)
+            )
+            created = self._create_model_if_absent_locked(
+                "launchplane_provider_targets",
+                record_id,
+                record,
+            )
+            return "created" if created else "exists"
 
     def delete_provider_target_record(
         self,

@@ -157,7 +157,9 @@ also blocks onboarding or target adoption, even when the requested route
 supplies matching replacement evidence. Product onboarding and target setup
 additionally reject contexts retained as historical product evidence; repair the
 current product profile and remove the stale alias through the reviewed cleanup
-path instead of reactivating the historical route.
+path instead of reactivating the historical route. The generic-web onboarding
+workflow is new-product-only; existing product changes use the bounded profile
+or advanced manifest apply surface.
 
 ## Mutation Reservation Recovery
 

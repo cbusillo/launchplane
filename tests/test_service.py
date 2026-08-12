@@ -2918,7 +2918,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 400)
         self.assertEqual(payload["error"]["code"], "invalid_product_onboarding_manifest")
-        self.assertIn("historical testing context", payload["error"]["message"])
+        self.assertIn("only creates new products", payload["error"]["message"])
 
     def test_generic_web_onboarding_planner_cannot_apply_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

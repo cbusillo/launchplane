@@ -1594,9 +1594,11 @@ def _provider_target_record_proves_foreign_application_target(
     target_category = _normalized_lower_string(payload.get("target_category"))
     provider_target_type = _normalized_lower_string(payload.get("provider_target_type"))
     target_id = _normalized_string(payload.get("target_id"))
+    declared_target_types = {
+        target_type for target_type in (target_category, provider_target_type) if target_type
+    }
     return (
-        target_category == "application"
-        and provider_target_type == "application"
+        declared_target_types == {"application"}
         and bool(target_id)
         and target_id != candidate_target_id
     )

@@ -38,7 +38,7 @@ name: Product Onboarding
         default: /healthz
         type: string
       testing_context:
-        description: Optional for new products; must match current authority when re-onboarding.
+        description: Optional new-product testing context; defaults to <product>-testing.
         required: false
         default: ""
         type: string
