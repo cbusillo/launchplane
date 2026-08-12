@@ -3617,6 +3617,16 @@ write. GitHub projection, frontend workbench, tenant-admission consumers,
 production authorization, and legacy manager cleanup remain out of scope. See
 `docs/owner-acceptance.md` for the full record and migration boundary.
 
+`GET /v1/governance/projection` accepts only repository, pull request number,
+and base branch scope. It returns one read-only model containing immutable Owner
+history, current Owner evaluation, current ephemeral merge readiness when an
+active landing lineage exists, latest immutable merge admission, separate
+landing outcome, and neutral advisory observations. It reuses the guarded
+landing readiness evaluator instead of duplicating readiness logic in the HTTP
+or frontend layers. The projection is `authoritative=false`, authorizes no
+effect, and never interprets a missing landing outcome as landed. See
+`docs/governance-evidence.md`.
+
 ## Change Impact Shadow API
 
 `POST /v1/change-impact/evaluation` accepts only a repository/pull-request

@@ -738,6 +738,82 @@ test.describe("operator journeys", () => {
     await expect(page.getByText("Engineering normal flow")).toHaveCount(0);
   });
 
+  test("governance evidence keeps Owner judgment, readiness, admission, and landing separate", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/governance-projection?fixture=products&scenario=25");
+
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Governance evidence" }),
+    ).toBeFocused();
+    await expect(page.getByRole("region", { name: "Level 1 historical Owner judgment" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Level 2 current merge readiness" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Level 3 immutable merge admission" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Separate landing outcome" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Neutral advisory observations" })).toBeVisible();
+    const owner = page.getByRole("region", { name: "Level 1 historical Owner judgment" });
+    await expect(owner).toContainText("Owner product judgment");
+    await expect(owner).toContainText("authorizes: []");
+    await expect(owner).toContainText("product_review_accepted");
+    await expect(page.getByText("No admission recorded", { exact: true })).toBeVisible();
+    await expect(page.getByText("Not Observed", { exact: true })).toBeVisible();
+    await expect(page.getByText("Neutral · non-blocking", { exact: true })).toBeVisible();
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "governance-evidence-independent-facets");
+    diagnostics.assertClean();
+  });
+
+  test("governance scenario 15 preserves landed history after Owner revocation", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/governance-projection?fixture=products&scenario=15");
+
+    const owner = page.getByRole("region", { name: "Level 1 historical Owner judgment" });
+    await expect(owner.getByText("Revoked", { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole("region", { name: "Level 3 immutable merge admission" })).toContainText("Admitted");
+    await expect(page.getByRole("region", { name: "Separate landing outcome" })).toContainText("Landed");
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "governance-evidence-revoked-after-landing");
+    diagnostics.assertClean();
+  });
+
+  test("governance mixed products and unknown checks retain every reason", async ({ page }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/governance-projection?fixture=products&scenario=24");
+
+    await expect(page.getByText("example-secondary", { exact: true })).toBeVisible();
+    await expect(page.getByText("owner_changes_requested", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Blocked Owner Evidence", { exact: true }).first()).toBeVisible();
+    await page.goto("/ui/engineering/governance-projection?fixture=products&scenario=3");
+    await expect(page.getByText("checks_unknown", { exact: true })).toBeVisible();
+    await assertDocumentBasics(page);
+    diagnostics.assertClean();
+  });
+
+  test("governance evidence preserves stale data and honest access failures", async ({ page }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/engineering/governance-projection?fixture=products&scenario=20&refresh=error",
+    );
+    await expect(page.getByText("preview_isolation_insufficient", { exact: true }).first()).toBeVisible();
+    await page.getByRole("button", { name: "Refresh governance" }).click();
+    await expect(page.getByText("Cached evidence", { exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Level 1 historical Owner judgment" })).toBeVisible();
+
+    await page.goto("/ui/engineering/governance-projection?fixture=denied");
+    await expect(page.getByText("Access denied", { exact: true })).toBeVisible();
+    await page.goto("/ui/engineering/governance-projection?fixture=error");
+    await expect(page.getByText("Governance evidence unavailable", { exact: true })).toBeVisible();
+    await assertDocumentBasics(page);
+    diagnostics.assertClean();
+  });
+
   test("operator reviews Recorded Owner acceptance list without mutation controls", async ({
     page,
   }, testInfo) => {

@@ -36,6 +36,11 @@ from control_plane.http_routes.every_code import (
     register_every_code_work_request_read_routes,
 )
 from control_plane.http_routes.ingress import register_ingress_read_routes
+from control_plane.http_routes.governance_projection import (
+    GOVERNANCE_PROJECTION_ROUTE,
+    GovernanceProjectionRouteDependencies,
+    register_governance_projection_routes,
+)
 from control_plane.http_routes.merge_train import register_merge_train_read_routes
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
@@ -133,6 +138,8 @@ __all__ = (
     "EvidenceWriteRouteDependencies",
     "GenericWebWriteRouteDependencies",
     "GenericWebWriteRouteHandlers",
+    "GOVERNANCE_PROJECTION_ROUTE",
+    "GovernanceProjectionRouteDependencies",
     "ProductReadRouteDependencies",
     "ChangeImpactWriteRouteDependencies",
     "ProductOwnerWriteRouteDependencies",
@@ -182,6 +189,7 @@ __all__ = (
     "register_engineering_review_decision_routes",
     "register_generic_web_rollback_write_routes",
     "register_generic_web_write_routes",
+    "register_governance_projection_routes",
     "register_ingress_read_routes",
     "register_inventory_operation_read_routes",
     "register_managed_secret_read_routes",
