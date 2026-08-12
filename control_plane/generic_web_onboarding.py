@@ -19,6 +19,7 @@ from control_plane.contracts.product_onboarding_manifest import (
 )
 from control_plane.contracts.product_profile_record import (
     PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL,
+    LaunchplaneProductProfileRecord,
     ProductRuntimeConfigRequirement,
 )
 
@@ -157,6 +158,48 @@ def generic_web_onboarding_plan_sha256(intent: GenericWebOnboardingIntent) -> st
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def validate_generic_web_onboarding_profile_continuity(
+    *,
+    intent: GenericWebOnboardingIntent,
+    existing_profile: LaunchplaneProductProfileRecord | None,
+) -> None:
+    if existing_profile is None:
+        return
+    historical_contexts = set(existing_profile.historical_contexts)
+    for label, context in (
+        ("testing", intent.testing_context),
+        ("preview", intent.preview_context),
+    ):
+        if context in historical_contexts:
+            raise ValueError(
+                f"Generic-web onboarding cannot reactivate historical {label} context "
+                f"{context} for product {intent.product}."
+            )
+    testing_lane = next(
+        (lane for lane in existing_profile.lanes if lane.instance == "testing"),
+        None,
+    )
+    if testing_lane is not None and testing_lane.context != intent.testing_context:
+        repairs_historical_alias = (
+            testing_lane.context in historical_contexts
+            and intent.testing_context == existing_profile.product
+        )
+        if not repairs_historical_alias:
+            raise ValueError(
+                "Generic-web onboarding testing context does not match current product "
+                f"authority: expected {testing_lane.context}, received {intent.testing_context}."
+            )
+    if (
+        existing_profile.preview.context
+        and existing_profile.preview.context != intent.preview_context
+    ):
+        raise ValueError(
+            "Generic-web onboarding preview context does not match current product "
+            f"authority: expected {existing_profile.preview.context}, "
+            f"received {intent.preview_context}."
+        )
 
 
 def build_generic_web_onboarding_manifest(

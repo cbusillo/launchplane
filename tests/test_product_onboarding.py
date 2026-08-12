@@ -2782,6 +2782,219 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(second_result.product_profile.historical_contexts, ("example-site-old",))
         self.assertEqual(profile.historical_contexts, ("example-site-old",))
 
+    def test_apply_product_onboarding_manifest_rejects_historical_context_reactivation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            initial_manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+            initial_result = apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=initial_manifest,
+                updated_at="2026-05-03T00:20:00Z",
+            )
+            store.write_product_profile_record(
+                initial_result.product_profile.model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(update={"context": "example-site"})
+                            if lane.instance == "testing"
+                            else lane
+                            for lane in initial_result.product_profile.lanes
+                        ),
+                        "historical_contexts": ("example-site-testing",),
+                        "updated_at": "2026-05-03T01:20:00Z",
+                        "source": "test:cutover",
+                    }
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "cannot reuse historical contexts"):
+                apply_product_onboarding_manifest(
+                    record_store=store,
+                    manifest=initial_manifest,
+                    updated_at="2026-05-03T02:20:00Z",
+                )
+            profile = store.read_product_profile_record("example-site")
+            store.close()
+
+        self.assertEqual(
+            next(lane.context for lane in profile.lanes if lane.instance == "testing"),
+            "example-site",
+        )
+
+    def test_product_onboarding_rejects_cross_route_provider_target_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context="canonical-site",
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="app-testing-123",
+                    display_name="canonical-site",
+                    provider_target_type="application",
+                    provider_evidence={"project_name": "example-site"},
+                    updated_at="2026-05-03T00:20:00Z",
+                    source_label="test:canonical",
+                )
+            )
+            manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+
+            with self.assertRaisesRegex(ValueError, "already bound to another route"):
+                apply_product_onboarding_manifest(record_store=store, manifest=manifest)
+            self.assertEqual(store.list_product_profile_records(), ())
+            store.close()
+
+    def test_product_onboarding_allows_canonical_repair_from_historical_alias(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            manifest_payload = _manifest_payload()
+            manifest_payload["lanes"][0]["context"] = "example-site"
+            manifest_payload["provider_targets"][0]["context"] = "example-site"
+            for runtime_record in manifest_payload["runtime_environments"]:
+                if runtime_record["context"] == "example-site-testing":
+                    runtime_record["context"] = "example-site"
+            for secret_binding in manifest_payload["secret_bindings"]:
+                if secret_binding["context"] == "example-site-testing":
+                    secret_binding["context"] = "example-site"
+            for runtime_requirement in manifest_payload["expected_config"][
+                "runtime_environment_keys"
+            ]:
+                if runtime_requirement["context"] == "example-site-testing":
+                    runtime_requirement["context"] = "example-site"
+            for secret_requirement in manifest_payload["expected_config"][
+                "managed_secret_bindings"
+            ]:
+                if secret_requirement["context"] == "example-site-testing":
+                    secret_requirement["context"] = "example-site"
+            manifest = ProductOnboardingManifest.model_validate(manifest_payload)
+            initial_result = apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=manifest,
+                updated_at="2026-05-03T00:20:00Z",
+            )
+            historical_alias = "example-site-testing"
+            store.write_product_profile_record(
+                initial_result.product_profile.model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(update={"context": historical_alias})
+                            if lane.instance == "testing"
+                            else lane
+                            for lane in initial_result.product_profile.lanes
+                        ),
+                        "historical_contexts": (historical_alias,),
+                        "updated_at": "2026-05-03T01:20:00Z",
+                        "source": "test:regression",
+                    }
+                )
+            )
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context=historical_alias,
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="app-testing-123",
+                    display_name="example-site-testing",
+                    provider_target_type="application",
+                    provider_evidence={"project_name": "example-site"},
+                    updated_at="2026-05-03T01:20:00Z",
+                    source_label="test:regression",
+                )
+            )
+
+            repaired = apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=manifest,
+                updated_at="2026-05-03T02:20:00Z",
+            )
+            store.close()
+
+        testing_lane = next(
+            lane for lane in repaired.product_profile.lanes if lane.instance == "testing"
+        )
+        self.assertEqual(testing_lane.context, "example-site")
+        self.assertEqual(repaired.product_profile.historical_contexts, (historical_alias,))
+
+    def test_product_onboarding_rejects_historical_alias_rebind_to_noncanonical_route(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            manifest_payload = _manifest_payload()
+            manifest_payload["product"] = "example-site"
+            manifest_payload["lanes"][0]["context"] = "example-site-new"
+            manifest_payload["provider_targets"][0]["context"] = "example-site-new"
+            for runtime_record in manifest_payload["runtime_environments"]:
+                if runtime_record["context"] == "example-site-testing":
+                    runtime_record["context"] = "example-site-new"
+            for secret_binding in manifest_payload["secret_bindings"]:
+                if secret_binding["context"] == "example-site-testing":
+                    secret_binding["context"] = "example-site-new"
+            for runtime_requirement in manifest_payload["expected_config"][
+                "runtime_environment_keys"
+            ]:
+                if runtime_requirement["context"] == "example-site-testing":
+                    runtime_requirement["context"] = "example-site-new"
+            for secret_requirement in manifest_payload["expected_config"][
+                "managed_secret_bindings"
+            ]:
+                if secret_requirement["context"] == "example-site-testing":
+                    secret_requirement["context"] = "example-site-new"
+            manifest = ProductOnboardingManifest.model_validate(manifest_payload)
+            store.write_product_profile_record(
+                build_product_profile_record(
+                    manifest=manifest,
+                    updated_at="2026-05-03T00:20:00Z",
+                ).model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(update={"context": "example-site-testing"})
+                            if lane.instance == "testing"
+                            else lane
+                            for lane in build_product_profile_record(
+                                manifest=manifest,
+                                updated_at="2026-05-03T00:20:00Z",
+                            ).lanes
+                        ),
+                        "historical_contexts": ("example-site-testing",),
+                    }
+                )
+            )
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context="example-site-testing",
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="app-testing-123",
+                    display_name="example-site-testing",
+                    provider_target_type="application",
+                    provider_evidence={"project_name": "example-site"},
+                    updated_at="2026-05-03T00:20:00Z",
+                    source_label="test:regression",
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "already bound to another route"):
+                apply_product_onboarding_manifest(record_store=store, manifest=manifest)
+            store.close()
+
     def test_apply_product_onboarding_manifest_preserves_configured_secret_binding(
         self,
     ) -> None:

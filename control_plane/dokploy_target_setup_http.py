@@ -252,6 +252,11 @@ def execute_dokploy_target_setup(
     request: DokployTargetSetupEnvelope,
 ) -> dict[str, object]:
     apply_changes = request.mode == "apply"
+    if request.operation in {"adopt", "create-application", "create-compose"}:
+        ensure_dokploy_target_setup_context_is_not_historical(
+            record_store=record_store,
+            context=request.context,
+        )
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root_path)
     result: (
         DokployTargetAdoptionResult
@@ -377,6 +382,23 @@ def execute_dokploy_target_setup(
         "route_domain_ids": route_domain_ids,
         "setup": dokploy_target_setup_result_payload(result),
     }
+
+
+def ensure_dokploy_target_setup_context_is_not_historical(
+    *,
+    record_store: PostgresRecordStore,
+    context: str,
+) -> None:
+    historical_owners = sorted(
+        profile.product
+        for profile in record_store.list_product_profile_records()
+        if context in profile.historical_contexts
+    )
+    if historical_owners:
+        raise ValueError(
+            "Dokploy target setup cannot write historical product context "
+            f"{context}; owned as history by {', '.join(historical_owners)}."
+        )
 
 
 def _execute_dokploy_compose_domain_reconcile(

@@ -186,6 +186,46 @@ class DokployTargetAdoptionTests(unittest.TestCase):
             self.assertEqual(store.list_dokploy_target_id_records(), ())
             store.close()
 
+    def test_adopt_target_blocks_cross_route_provider_target_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context="canonical-site",
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="app-123",
+                    display_name="canonical-site",
+                    provider_target_type="application",
+                    provider_evidence={"project_name": "Demo"},
+                    updated_at="2026-05-04T22:00:00Z",
+                    source_label="test:canonical",
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "already bound to another route"):
+                adopt_dokploy_target(
+                    record_store=store,
+                    host="https://dokploy.example.invalid",
+                    token="token",
+                    context="legacy-site",
+                    instance="testing",
+                    target_type="application",
+                    target_id="app-123",
+                    project_name="Demo",
+                    target_name="legacy-site",
+                    healthcheck_path="/health",
+                    apply=False,
+                    fetch_target_payload=lambda *_args: {"name": "legacy-site"},
+                )
+            self.assertEqual(store.list_dokploy_target_records(), ())
+            self.assertEqual(store.list_dokploy_target_id_records(), ())
+            store.close()
+
     def test_adopt_target_replaces_provider_target_when_current_authority_matches_expectation(
         self,
     ) -> None:

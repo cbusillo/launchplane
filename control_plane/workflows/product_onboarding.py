@@ -19,6 +19,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductOdooPrelaunchRebuildPolicy,
     ProductPreviewProfile,
+    product_profile_historical_context_overlap,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
@@ -28,6 +29,7 @@ from control_plane.storage.product_authority_bundle import (
     ProviderTargetWrite,
 )
 from control_plane.workflows.provider_target_dual_write import (
+    ensure_provider_target_identity_unbound_elsewhere,
     prepare_provider_target_from_dokploy_records,
 )
 from control_plane.workflows.ship import utc_now_timestamp
@@ -96,7 +98,7 @@ def build_product_profile_record(
         manifest_contexts=manifest.historical_contexts,
         existing_profile=existing_profile,
     )
-    return LaunchplaneProductProfileRecord(
+    product_profile = LaunchplaneProductProfileRecord(
         product=manifest.product,
         display_name=manifest.display_name,
         repository=manifest.repository,
@@ -132,7 +134,14 @@ def build_product_profile_record(
         expected_config=manifest.product_expected_config_profile(),
         updated_at=updated_at,
         source=manifest.source_label,
-    )
+    ).validate_write_contract()
+    historical_context_overlap = product_profile_historical_context_overlap(product_profile)
+    if historical_context_overlap:
+        raise ValueError(
+            "product profile current contexts cannot reuse historical contexts: "
+            + ", ".join(sorted(historical_context_overlap))
+        )
+    return product_profile
 
 
 def _lane_health_monitoring(
@@ -450,7 +459,39 @@ def plan_product_onboarding_authority_bundle(
         )
         for record in physical_provider_targets
     )
+    planned_provider_target_routes: dict[tuple[str, str, str], tuple[str, str]] = {}
+    for provider_target_record in physical_provider_targets:
+        identity = (
+            provider_target_record.provider_id,
+            provider_target_record.target_category,
+            provider_target_record.target_id,
+        )
+        route = (provider_target_record.context, provider_target_record.instance)
+        existing_route = planned_provider_target_routes.get(identity)
+        if existing_route is not None and existing_route != route:
+            raise ValueError(
+                "Product onboarding cannot bind one provider target identity to multiple "
+                f"routes: {existing_route[0]}/{existing_route[1]} and {route[0]}/{route[1]}."
+            )
+        planned_provider_target_routes[identity] = route
     for target_record, target_id_record in provider_target_pairs:
+        provider_target_record = ProviderTargetRecord.from_dokploy_records(
+            target_record=target_record,
+            target_id_record=target_id_record,
+        )
+        allowed_historical_aliases = frozenset(
+            (record.context, record.instance)
+            for record in current_provider_targets.values()
+            if existing_product_profile is not None
+            and provider_target_record.context == existing_product_profile.product
+            and record.context in existing_product_profile.historical_contexts
+            and record.instance == provider_target_record.instance
+        )
+        ensure_provider_target_identity_unbound_elsewhere(
+            record_store=record_store,
+            provider_target_record=provider_target_record,
+            allowed_conflicting_routes=allowed_historical_aliases,
+        )
         prepare_provider_target_from_dokploy_records(
             record_store=record_store,
             target_record=target_record,

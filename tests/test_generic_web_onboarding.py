@@ -4,11 +4,124 @@ from control_plane.generic_web_onboarding import (
     GenericWebOnboardingIntent,
     build_generic_web_onboarding_manifest,
     generic_web_onboarding_plan_sha256,
+    validate_generic_web_onboarding_profile_continuity,
 )
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.workflows.product_onboarding import build_product_profile_record
 
 
 class GenericWebOnboardingTests(unittest.TestCase):
+    def test_existing_profile_rejects_historical_context_reactivation(self) -> None:
+        existing_manifest = build_generic_web_onboarding_manifest(
+            intent=GenericWebOnboardingIntent(
+                product="demo-web",
+                display_name="Demo Web",
+                repository="example/demo-web",
+                repository_id="123",
+                repository_owner_id="456",
+                image_repository="ghcr.io/example/demo-web",
+                runtime_port=3000,
+                health_path="/healthz",
+                preview_base_url="https://demo-preview.example.com",
+                testing_context="demo-web",
+            ),
+            target_id="dokploy-app-1",
+        )
+        existing_profile = build_product_profile_record(
+            manifest=existing_manifest,
+            updated_at="2026-08-05T00:00:00Z",
+        ).model_copy(update={"historical_contexts": ("demo-web-testing",)})
+        regressing_intent = GenericWebOnboardingIntent(
+            product="demo-web",
+            display_name="Demo Web",
+            repository="example/demo-web",
+            repository_id="123",
+            repository_owner_id="456",
+            image_repository="ghcr.io/example/demo-web",
+            runtime_port=3000,
+            health_path="/healthz",
+            preview_base_url="https://demo-preview.example.com",
+        )
+
+        with self.assertRaisesRegex(ValueError, "cannot reactivate historical testing context"):
+            validate_generic_web_onboarding_profile_continuity(
+                intent=regressing_intent,
+                existing_profile=existing_profile,
+            )
+
+    def test_existing_profile_requires_current_contexts(self) -> None:
+        existing_profile = LaunchplaneProductProfileRecord.model_validate(
+            {
+                "product": "demo-web",
+                "display_name": "Demo Web",
+                "repository": "example/demo-web",
+                "repository_id": "123",
+                "repository_owner_id": "456",
+                "driver_id": "generic-web",
+                "image": {"repository": "ghcr.io/example/demo-web"},
+                "runtime_port": 3000,
+                "health_path": "/healthz",
+                "lanes": [{"instance": "testing", "context": "demo-web"}],
+                "preview": {"enabled": True, "context": "demo-web-preview"},
+                "updated_at": "2026-08-05T00:00:00Z",
+                "source": "test",
+            }
+        )
+        mismatched_intent = GenericWebOnboardingIntent(
+            product="demo-web",
+            display_name="Demo Web",
+            repository="example/demo-web",
+            repository_id="123",
+            repository_owner_id="456",
+            image_repository="ghcr.io/example/demo-web",
+            runtime_port=3000,
+            health_path="/healthz",
+            preview_base_url="https://demo-preview.example.com",
+        )
+
+        with self.assertRaisesRegex(ValueError, "expected demo-web, received demo-web-testing"):
+            validate_generic_web_onboarding_profile_continuity(
+                intent=mismatched_intent,
+                existing_profile=existing_profile,
+            )
+
+    def test_existing_profile_allows_canonical_repair_from_historical_alias(self) -> None:
+        existing_profile = LaunchplaneProductProfileRecord.model_validate(
+            {
+                "product": "demo-web",
+                "display_name": "Demo Web",
+                "repository": "example/demo-web",
+                "repository_id": "123",
+                "repository_owner_id": "456",
+                "driver_id": "generic-web",
+                "image": {"repository": "ghcr.io/example/demo-web"},
+                "runtime_port": 3000,
+                "health_path": "/healthz",
+                "lanes": [{"instance": "testing", "context": "demo-web-testing"}],
+                "historical_contexts": ["demo-web-testing"],
+                "preview": {"enabled": True, "context": "demo-web-preview"},
+                "updated_at": "2026-08-05T00:00:00Z",
+                "source": "test:regression",
+            }
+        )
+        repair_intent = GenericWebOnboardingIntent(
+            product="demo-web",
+            display_name="Demo Web",
+            repository="example/demo-web",
+            repository_id="123",
+            repository_owner_id="456",
+            image_repository="ghcr.io/example/demo-web",
+            runtime_port=3000,
+            health_path="/healthz",
+            preview_base_url="https://demo-preview.example.com",
+            testing_context="demo-web",
+        )
+
+        validate_generic_web_onboarding_profile_continuity(
+            intent=repair_intent,
+            existing_profile=existing_profile,
+        )
+
     def test_intent_defaults_and_manifest_are_conventional(self) -> None:
         intent = GenericWebOnboardingIntent(
             product="demo-web",

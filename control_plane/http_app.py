@@ -42,6 +42,7 @@ from control_plane.generic_web_onboarding import (
     GenericWebOnboardingIntent,
     build_generic_web_onboarding_manifest,
     generic_web_onboarding_plan_sha256,
+    validate_generic_web_onboarding_profile_continuity,
 )
 from control_plane.generic_web_preview_authz import (
     GenericWebPreviewAuthzPlanResult,
@@ -561,6 +562,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
+    product_profile_historical_context_overlap,
 )
 from control_plane.contracts.product_retirement import (
     ProductRetirementIdentity,
@@ -10700,12 +10702,31 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message=str(error),
             ) from error
+        existing_profile = None
         read_existing_profile = getattr(profile_store, "read_product_profile_record", None)
         if callable(read_existing_profile):
             try:
                 existing_profile = read_existing_profile(profile.product)
             except (FileNotFoundError, KeyError):
                 existing_profile = None
+            existing_historical_overlap = (
+                product_profile_historical_context_overlap(existing_profile)
+                if existing_profile is not None
+                else frozenset()
+            )
+            introduced_historical_overlap = (
+                product_profile_historical_context_overlap(profile) - existing_historical_overlap
+            )
+            if introduced_historical_overlap:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="historical_context_reactivation_blocked",
+                    message=(
+                        "Product profile current contexts cannot reactivate historical "
+                        "contexts: " + ", ".join(sorted(introduced_historical_overlap))
+                    ),
+                )
             if (
                 existing_profile is not None
                 and control_plane_product_health_monitoring.product_health_monitoring_authority(
@@ -13322,6 +13343,24 @@ def create_launchplane_fastapi_app(
         onboarding_manifest = onboarding_request.manifest
         generic_web_plan_sha256 = ""
         if onboarding_request.generic_web is not None:
+            try:
+                existing_profile = database_store.read_product_profile_record(
+                    onboarding_request.generic_web.product
+                )
+            except (FileNotFoundError, KeyError):
+                existing_profile = None
+            try:
+                validate_generic_web_onboarding_profile_continuity(
+                    intent=onboarding_request.generic_web,
+                    existing_profile=existing_profile,
+                )
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_product_onboarding_manifest",
+                    message=str(error),
+                ) from error
             generic_web_plan_sha256 = generic_web_onboarding_plan_sha256(
                 onboarding_request.generic_web
             )

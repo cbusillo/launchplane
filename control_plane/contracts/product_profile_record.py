@@ -602,6 +602,15 @@ class LaunchplaneProductProfileRecord(BaseModel):
         return self
 
 
+def product_profile_historical_context_overlap(
+    profile: LaunchplaneProductProfileRecord,
+) -> frozenset[str]:
+    current_contexts = {lane.context.strip() for lane in profile.lanes if lane.context.strip()}
+    if profile.preview.enabled and profile.preview.context.strip():
+        current_contexts.add(profile.preview.context.strip())
+    return frozenset(current_contexts.intersection(profile.historical_contexts))
+
+
 def product_profile_record_sha256(record: LaunchplaneProductProfileRecord) -> str:
     canonical_payload = json.dumps(
         record.model_dump(mode="json"),

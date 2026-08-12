@@ -7,6 +7,7 @@ from control_plane.contracts.deploy_target import DeployedTargetReference, Provi
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetType
 from control_plane.workflows.provider_target_dual_write import (
+    ensure_provider_target_identity_unbound_elsewhere,
     prepare_provider_target_from_dokploy_records,
 )
 from control_plane.workflows.ship import utc_now_timestamp
@@ -169,6 +170,10 @@ def adopt_dokploy_target(
     provider_target_record = ProviderTargetRecord.from_dokploy_records(
         target_record=target_record,
         target_id_record=target_id_record,
+    )
+    ensure_provider_target_identity_unbound_elsewhere(
+        record_store=record_store,
+        provider_target_record=provider_target_record,
     )
 
     if apply:

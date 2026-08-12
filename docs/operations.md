@@ -134,6 +134,12 @@ cutover, and tracked Dokploy target metadata commands. These paths validate an
 existing explicit provider-target row before mutating the Dokploy pair, write the
 Dokploy target/id records, then write the matching provider-target row. A stale
 explicit provider-target row blocks the mutation instead of being overwritten.
+A physical provider target identity already bound to another context/instance
+also blocks onboarding or target adoption, even when the requested route
+supplies matching replacement evidence. Product onboarding and target setup
+additionally reject contexts retained as historical product evidence; repair the
+current product profile and remove the stale alias through the reviewed cleanup
+path instead of reactivating the historical route.
 
 ## Mutation Reservation Recovery
 
