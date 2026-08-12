@@ -75,7 +75,7 @@
       "prepare": {
         "python": {
           "version": "3.13",
-          "moduleName": "launchplane",
+          "moduleName": "launchplane-inspection",
           "testRoots": ["tests"],
           "sync": true,
           "extras": ["dev"],
