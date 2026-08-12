@@ -40,6 +40,17 @@ def _utc_now_timestamp() -> str:
 class MergeAdmissionDeniedError(ValueError):
     """Raised when fresh L2 or structural evidence refuses an effect attempt."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "merge_admission_denied",
+        readiness: MergeReadinessResult | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.readiness = readiness
+
 
 class MergeAdmissionReconciliationRequiredError(RuntimeError):
     """Raised when an earlier attempt remains effect-ambiguous."""
@@ -190,11 +201,14 @@ class GuardedMergeAdmission:
         )
         if evaluation.readiness.state != "ready":
             raise MergeAdmissionDeniedError(
-                "Fresh merge readiness evidence did not admit the provider effect."
+                "Fresh merge readiness evidence did not admit the provider effect.",
+                reason_code="merge_readiness_not_ready",
+                readiness=evaluation.readiness,
             )
         if evaluation.structural_result.status not in {"exact", "recorded_rolling"}:
             raise MergeAdmissionDeniedError(
-                "Fresh structural provenance did not admit the provider effect."
+                "Fresh structural provenance did not admit the provider effect.",
+                reason_code="structural_provenance_not_admitted",
             )
         admitted_at = self.admission_time_provider()
         if self.controller_state_provider is not None:
@@ -203,7 +217,10 @@ class GuardedMergeAdmission:
         candidate = self.candidate_record.candidate
         provenance = candidate.structural_provenance
         if provenance is None:
-            raise MergeAdmissionDeniedError("Merge admission requires structural provenance.")
+            raise MergeAdmissionDeniedError(
+                "Merge admission requires structural provenance.",
+                reason_code="structural_provenance_missing",
+            )
         attempt_id = build_merge_effect_attempt_id(
             controller_key=self.controller_state.controller_key,
             lease_owner=self.controller_state.lease_owner,
@@ -249,7 +266,8 @@ class GuardedMergeAdmission:
             )
         except ValueError as error:
             raise MergeAdmissionDeniedError(
-                "Persisted controller authority changed after live merge evaluation."
+                "Persisted controller authority changed after live merge evaluation.",
+                reason_code="controller_authority_changed",
             ) from error
         try:
             stored, created = self.record_store.create_guarded_merge_admission_record_if_absent(
@@ -257,7 +275,10 @@ class GuardedMergeAdmission:
                 admitted_at=admitted_at,
             )
         except MergeAdmissionFenceRejectedError as error:
-            raise MergeAdmissionDeniedError(str(error)) from error
+            raise MergeAdmissionDeniedError(
+                str(error),
+                reason_code="controller_fence_rejected",
+            ) from error
         if not created:
             raise MergeAdmissionReconciliationRequiredError(
                 "Existing merge admission cannot be reused for another provider effect."

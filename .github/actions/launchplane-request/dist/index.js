@@ -289,6 +289,30 @@ function isExpectedStatus(response, expectedStatuses) {
   return expectedStatuses.has(response.status);
 }
 
+function publicSafeFailureDetail(responseBody) {
+  if (responseBody === null || typeof responseBody !== "object" || Array.isArray(responseBody)) {
+    return "";
+  }
+  const error = responseBody.error;
+  const code =
+    error !== null && typeof error === "object" && !Array.isArray(error) &&
+    typeof error.code === "string"
+      ? error.code.trim()
+      : "";
+  const traceId = typeof responseBody.trace_id === "string" ? responseBody.trace_id.trim() : "";
+  if (!code && !traceId) {
+    return "";
+  }
+  const fields = [];
+  if (code) {
+    fields.push(`code=${code}`);
+  }
+  if (traceId) {
+    fields.push(`trace_id=${traceId}`);
+  }
+  return ` (${fields.join(", ")})`;
+}
+
 function readJsonPath(value, path) {
   let cursor = value;
   for (const segment of path.split(".").filter(Boolean)) {
@@ -597,7 +621,9 @@ async function main() {
       responseBodies.push(responseBody);
       if (!isExpectedStatus(response, options.expectedStatuses)) {
         writeResponseOutputFile(responseBodies);
-        const responseDetail = logResponseBody ? `: ${responseText || "empty response"}` : "";
+        const responseDetail = logResponseBody
+          ? `: ${responseText || "empty response"}`
+          : publicSafeFailureDetail(responseBody);
         throw new Error(
           `Launchplane request ${index + 1} failed with ${response.status}${responseDetail}`,
         );
@@ -642,7 +668,9 @@ async function main() {
     process.stdout.write(`${JSON.stringify(responseBody, null, 2)}\n`);
   }
   if (!isExpectedStatus(response, options.expectedStatuses)) {
-    const responseDetail = logResponseBody ? `: ${responseText || "empty response"}` : "";
+    const responseDetail = logResponseBody
+      ? `: ${responseText || "empty response"}`
+      : publicSafeFailureDetail(responseBody);
     throw new Error(
       `Launchplane request failed with ${response.status}${responseDetail}`,
     );

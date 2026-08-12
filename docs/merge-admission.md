@@ -31,6 +31,14 @@ acquisition token, expiry, policy digest, active PR, stable landing-plan ID, and
 expected effect SHA using the actual admission timestamp. Finding the same
 admission again never authorizes replay of the provider mutation.
 
+If fresh readiness or structural evidence refuses admission before the provider
+checkpoint, the controller returns an accepted `block` result with a stable
+reason code and the public-safe readiness facets. It releases the controller
+lease cleanly and leaves the landing plan available for a later pass after the
+missing or stale evidence is corrected. A pre-effect policy refusal is not
+durable effect ambiguity and must not be converted into controller
+reconciliation.
+
 ## Outcome Boundary
 
 Outcomes use only three public states:
@@ -66,6 +74,14 @@ Landing progress records retain one stable `landing_plan_id` while each
 persisted checkpoint receives its own record ID. Admissions bind both values,
 and recovery searches the stable lineage so a restart after a progress
 checkpoint can still find the preceding attempt.
+
+Controller phase evidence distinguishes admission work from the provider effect.
+`admit_pull_request` means Launchplane is re-observing prior outcomes and
+computing or persisting fresh merge admission; GitHub's merge endpoint has not
+yet been called. `merge_pull_request` is checkpointed only after an immutable
+admission exists and immediately before the guarded GitHub merge request. An
+operator must not infer that GitHub rejected a merge from a 409 recorded under
+the admission phase.
 
 On restart, an already-merged exact PR is reconciled against its preceding
 admission and receives a truthful `landed` outcome only after Launchplane reads

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, cast
+from typing import Callable, Protocol, cast
 
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
@@ -9,6 +9,7 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchEntry,
     MergeTrainBatchLandingEntry,
     MergeTrainBatchLandingPlan,
+    MergeTrainBatchLandingPlanRecord,
     build_merge_train_batch_candidate,
     build_merge_train_batch_candidate_record,
 )
@@ -33,6 +34,7 @@ from control_plane.merge_train import (
     discover_merge_train_stack,
 )
 from control_plane.merge_train_github import MergeTrainGitHubError, MergeTrainGitHubStaleHeadError
+from control_plane.merge_admission import MergeAdmissionDeniedError
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.merge_train_worker import (
@@ -42,6 +44,12 @@ from control_plane.workflows.merge_train_worker import (
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.support.auth import _identity
+
+
+class _LandingPlanRecordUpdater(Protocol):
+    def update_landing_plan_record(
+        self, landing_plan_record: MergeTrainBatchLandingPlanRecord
+    ) -> None: ...
 
 
 class _FakeMergeTrainGitHubClient:
@@ -102,10 +110,17 @@ class _FakeMergeTrainGitHubClient:
         self,
         *,
         landing_plan: MergeTrainBatchLandingPlan,
-        admission_guard: object,
+        admission_guard: _LandingPlanRecordUpdater,
         recorded_at: str,
+        provider_checkpoint: (
+            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry], None] | None
+        ) = None,
         checkpoint: (
-            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str], None] | None
+            Callable[
+                [MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str],
+                MergeTrainBatchLandingPlanRecord | None,
+            ]
+            | None
         ) = None,
     ) -> MergeTrainBatchLandingPlan:
         type(self).land_batch_candidate_calls += 1
@@ -120,6 +135,15 @@ class _FakeMergeTrainGitHubClient:
                     ),
                     entry,
                     "merge_entry",
+                )
+            if provider_checkpoint is not None:
+                provider_checkpoint(
+                    landing_plan.model_copy(
+                        update={
+                            "entries": tuple(merged_entries) + landing_plan.entries[entry_index:]
+                        }
+                    ),
+                    entry,
                 )
             merged_entry = entry.model_copy(
                 update={
@@ -224,8 +248,15 @@ class _StaleLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
         landing_plan: MergeTrainBatchLandingPlan,
         admission_guard: object,
         recorded_at: str,
+        provider_checkpoint: (
+            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry], None] | None
+        ) = None,
         checkpoint: (
-            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str], None] | None
+            Callable[
+                [MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str],
+                MergeTrainBatchLandingPlanRecord | None,
+            ]
+            | None
         ) = None,
     ) -> MergeTrainBatchLandingPlan:
         raise MergeTrainGitHubStaleHeadError(
@@ -240,12 +271,82 @@ class _UnavailableLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
         landing_plan: MergeTrainBatchLandingPlan,
         admission_guard: object,
         recorded_at: str,
+        provider_checkpoint: (
+            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry], None] | None
+        ) = None,
         checkpoint: (
-            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str], None] | None
+            Callable[
+                [MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str],
+                MergeTrainBatchLandingPlanRecord | None,
+            ]
+            | None
         ) = None,
     ) -> MergeTrainBatchLandingPlan:
         raise MergeTrainGitHubError(
             "GitHub API request failed for /repos/example/repo", status_code=503
+        )
+
+
+class _BlockedAdmissionMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    def land_batch_candidate(
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        admission_guard: object,
+        recorded_at: str,
+        provider_checkpoint: (
+            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry], None] | None
+        ) = None,
+        checkpoint: (
+            Callable[
+                [MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str],
+                MergeTrainBatchLandingPlanRecord | None,
+            ]
+            | None
+        ) = None,
+    ) -> MergeTrainBatchLandingPlan:
+        entry = landing_plan.entries[0]
+        if checkpoint is not None:
+            checkpoint(landing_plan, entry, "merge_entry")
+        raise MergeAdmissionDeniedError(
+            "Fresh merge readiness evidence did not admit the provider effect.",
+            reason_code="merge_readiness_not_ready",
+        )
+
+
+class _ProgressedBlockedAdmissionMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    def land_batch_candidate(
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        admission_guard: _LandingPlanRecordUpdater,
+        recorded_at: str,
+        provider_checkpoint: (
+            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry], None] | None
+        ) = None,
+        checkpoint: (
+            Callable[
+                [MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str],
+                MergeTrainBatchLandingPlanRecord | None,
+            ]
+            | None
+        ) = None,
+    ) -> MergeTrainBatchLandingPlan:
+        entry = landing_plan.entries[0]
+        merged_entry = entry.model_copy(
+            update={
+                "status": "merged",
+                "merge_commit_sha": f"merge-{entry.pull_request_number}",
+            }
+        )
+        progress_plan = landing_plan.model_copy(update={"entries": (merged_entry,)})
+        if checkpoint is not None:
+            progress_record = checkpoint(progress_plan, merged_entry, "entry_merged")
+            if progress_record is not None:
+                admission_guard.update_landing_plan_record(progress_record)
+        raise MergeAdmissionDeniedError(
+            "Fresh merge readiness evidence did not admit the provider effect.",
+            reason_code="merge_readiness_not_ready",
         )
 
 

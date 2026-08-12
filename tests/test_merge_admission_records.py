@@ -475,9 +475,11 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
     def test_scenario_12_policy_drift_refuses_next_admission(self) -> None:
         readiness = self._readiness(policy_fingerprints=_policy_fingerprints(drift="merge_train"))
 
-        with self.assertRaises(MergeAdmissionDeniedError):
+        with self.assertRaises(MergeAdmissionDeniedError) as context:
             self._admit(self._guard(readiness))
 
+        self.assertEqual(context.exception.reason_code, "merge_readiness_not_ready")
+        self.assertEqual(context.exception.readiness, readiness)
         self.assertEqual(self.store.list_merge_admission_records(), ())
 
     def test_scenario_22_lost_lease_refuses_admission(self) -> None:

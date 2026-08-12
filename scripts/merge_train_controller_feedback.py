@@ -167,6 +167,10 @@ def _feedback_message(
 
 
 def _blocking_detail(result: dict[str, Any]) -> str:
+    blocking_reason = _as_dict(result.get("blocking_reason"))
+    blocking_message = _string(blocking_reason.get("message"))
+    if blocking_message:
+        return blocking_message
     dry_run_result = _as_dict(result.get("dry_run_result"))
     detail = _string(dry_run_result.get("next_action_detail"))
     if detail:
@@ -217,10 +221,11 @@ def _landing_plan_complete(landing_plan: dict[str, Any]) -> bool:
 
 def _landing_plan_stale(landing_plan: dict[str, Any]) -> bool:
     entries = _as_list(landing_plan.get("entries"))
-    return bool(entries) and all(
-        _string(_as_dict(entry).get("status")) in {"merged", "stale"}
-        for entry in entries
-    ) and any(_string(_as_dict(entry).get("status")) == "stale" for entry in entries)
+    return (
+        bool(entries)
+        and all(_string(_as_dict(entry).get("status")) in {"merged", "stale"} for entry in entries)
+        and any(_string(_as_dict(entry).get("status")) == "stale" for entry in entries)
+    )
 
 
 def _required_string(value: object, field_name: str) -> str:

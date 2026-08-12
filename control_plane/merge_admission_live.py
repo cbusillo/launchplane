@@ -139,7 +139,8 @@ class LiveMergeAdmissionEvaluator:
             )
         except (LookupError, ValueError, MergeTrainPolicyStoreMissingError) as error:
             raise MergeAdmissionDeniedError(
-                "Active merge-train policy no longer admits the landing-plan lineage."
+                "Active merge-train policy no longer admits the landing-plan lineage.",
+                reason_code="landing_policy_not_admitted",
             ) from error
         expected_queue = tuple(
             (plan_entry.pull_request_number, plan_entry.expected_head_sha)
@@ -153,7 +154,8 @@ class LiveMergeAdmissionEvaluator:
         )
         if snapshot.base_sha != observed_base_sha or live_queue_identity != expected_queue:
             raise MergeAdmissionDeniedError(
-                "Live merge queue or base identity changed from the landing-plan lineage."
+                "Live merge queue or base identity changed from the landing-plan lineage.",
+                reason_code="landing_lineage_changed",
             )
         entry_evidence = tuple(
             self._entry_evidence(

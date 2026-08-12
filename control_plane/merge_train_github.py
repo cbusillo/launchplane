@@ -275,6 +275,9 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         landing_plan: MergeTrainBatchLandingPlan,
         admission_guard: GuardedMergeAdmission | None = None,
         recorded_at: str = "",
+        provider_checkpoint: (
+            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry], None] | None
+        ) = None,
         checkpoint: (
             Callable[
                 [MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str],
@@ -489,6 +492,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 observed_head_sha=landed_head_sha,
                 observed_head_tree_sha=landed_head_tree_sha,
             )
+            if provider_checkpoint is not None:
+                provider_checkpoint(
+                    _validated_model_update(
+                        landing_plan,
+                        entries=tuple(landed_entries) + landing_plan.entries[entry_index:],
+                    ),
+                    entry,
+                )
             try:
                 merge_commit_sha = self.merge_pull_request(
                     repository=landing_plan.repository,

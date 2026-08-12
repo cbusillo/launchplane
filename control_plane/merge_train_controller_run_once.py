@@ -43,6 +43,7 @@ from control_plane.merge_train import (
 )
 from control_plane.merge_admission import (
     GuardedMergeAdmission,
+    MergeAdmissionDeniedError,
     MergeAdmissionEvaluator,
     MergeAdmissionRecordStore,
 )
@@ -845,7 +846,7 @@ def _advance_active_landing_record(
         entry: MergeTrainBatchLandingEntry,
         phase: str,
     ) -> MergeTrainBatchLandingPlanRecord | None:
-        state_phase = "merge_pull_request" if phase == "merge_entry" else "landing_entry_merged"
+        state_phase = "admit_pull_request" if phase == "merge_entry" else "landing_entry_merged"
         lease.checkpoint(
             active_action="land_batch",
             active_phase=state_phase,
@@ -872,13 +873,64 @@ def _advance_active_landing_record(
         landing_store.write_merge_train_batch_landing_plan_record(progress_record)
         return progress_record
 
+    def checkpoint_provider_merge(
+        progress_plan: MergeTrainBatchLandingPlan,
+        entry: MergeTrainBatchLandingEntry,
+    ) -> None:
+        lease.checkpoint(
+            active_action="land_batch",
+            active_phase="merge_pull_request",
+            active_record_id=active_landing_record.record_id,
+            active_pull_request_number=entry.pull_request_number,
+            step_payload={
+                "landing_plan_record_id": active_landing_record.record_id,
+                "landing_plan_id": progress_plan.plan_id,
+                "batch_id": progress_plan.batch_id,
+                "candidate_ref": progress_plan.candidate_ref,
+                "expected_effect_sha": progress_plan.candidate_sha,
+                "completed_entry_count": sum(
+                    progress_entry.status == "merged" for progress_entry in progress_plan.entries
+                ),
+            },
+        )
+
     try:
         landed_plan = github_client.land_batch_candidate(
             landing_plan=active_landing_record.landing_plan,
             admission_guard=admission_guard,
             recorded_at=recorded_at,
+            provider_checkpoint=checkpoint_provider_merge,
             checkpoint=checkpoint_landing_progress,
         )
+    except MergeAdmissionDeniedError as error:
+        readiness = error.readiness
+        blocked_landing_record = admission_guard.landing_plan_record
+        return {
+            "merge_train_batch_landing_plan_record_id": blocked_landing_record.record_id,
+            "repository": blocked_landing_record.landing_plan.repository,
+            "base_branch": blocked_landing_record.landing_plan.base_branch,
+            "mode": "blocked",
+            "controller_action": "block",
+            "blocking_reason": {
+                "code": error.reason_code,
+                "message": str(error),
+            },
+            "merge_readiness": (
+                {
+                    "state": readiness.state,
+                    "reason_codes": list(readiness.reason_codes),
+                    "owner_states": sorted({facet.state for facet in readiness.owner_facets}),
+                    "technical_checks_state": readiness.technical_checks.state,
+                    "engineering_review_state": readiness.engineering_review.state,
+                    "policy_state": readiness.policy.state,
+                    "candidate_state": readiness.candidate.state,
+                    "fence_state": readiness.fence.state,
+                }
+                if readiness is not None
+                else None
+            ),
+            "landing_plan": blocked_landing_record.landing_plan.model_dump(mode="json"),
+        }
     except MergeTrainGitHubStaleHeadError as error:
         stale_plan = stale_merge_train_landing_plan(active_landing_record.landing_plan)
         stale_record = build_merge_train_batch_landing_plan_record(

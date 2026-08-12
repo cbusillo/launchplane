@@ -66,6 +66,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             landing_plan: MergeTrainBatchLandingPlan,
             admission_guard: object | None = None,
             recorded_at: str = "",
+            provider_checkpoint: object | None = None,
             checkpoint: object | None = None,
         ) -> MergeTrainBatchLandingPlan:
             return original(
@@ -75,6 +76,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     admission_guard or _PermissiveMergeAdmissionGuard()  # type: ignore[arg-type]
                 ),
                 recorded_at=recorded_at or "2026-08-11T00:00:00Z",
+                provider_checkpoint=provider_checkpoint,  # type: ignore[arg-type]
                 checkpoint=checkpoint,  # type: ignore[arg-type]
             )
 
@@ -848,6 +850,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
     def test_land_batch_candidate_merges_original_prs_in_order(self) -> None:
         landing_plan = _landing_plan()
         checkpoints: list[tuple[str, int, int]] = []
+        provider_checkpoints: list[tuple[int, int]] = []
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(sha="base-main"),
@@ -863,6 +866,12 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             checkpoint=lambda progress, entry, phase: checkpoints.append(
                 (
                     phase,
+                    entry.pull_request_number,
+                    sum(item.status == "merged" for item in progress.entries),
+                )
+            ),
+            provider_checkpoint=lambda progress, entry: provider_checkpoints.append(
+                (
                     entry.pull_request_number,
                     sum(item.status == "merged" for item in progress.entries),
                 )
@@ -909,6 +918,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ("entry_merged", 2, 2),
             ],
         )
+        self.assertEqual(provider_checkpoints, [(1, 0), (2, 1)])
 
     def test_land_batch_candidate_records_candidate_no_op_as_skipped(self) -> None:
         landing_plan = _landing_plan()

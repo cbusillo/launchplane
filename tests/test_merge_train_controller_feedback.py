@@ -116,6 +116,29 @@ class MergeTrainControllerFeedbackTests(TestCase):
         self.assertEqual({"stale_policy"}, {payload["event"] for payload in payloads})
         self.assertIn("stale", payloads[0]["message"])
 
+    def test_build_feedback_payloads_reports_admission_block_detail(self) -> None:
+        response: dict[str, Any] = {
+            "result": {
+                "repository": "cbusillo/example",
+                "base_branch": "main",
+                "controller_action": "block",
+                "blocking_reason": {
+                    "code": "merge_readiness_not_ready",
+                    "message": "Fresh merge readiness evidence did not admit the provider effect.",
+                },
+                "landing_plan": {
+                    "entries": [{"pull_request_number": 7, "status": "planned"}],
+                },
+            },
+            "records": {"merge_train_batch_landing_plan_record_id": "landing-plan-123"},
+        }
+
+        payloads = feedback.build_feedback_payloads(response=response)
+
+        self.assertEqual(1, len(payloads))
+        self.assertEqual("blocked", payloads[0]["event"])
+        self.assertIn("Fresh merge readiness evidence", payloads[0]["message"])
+
     def test_build_feedback_payloads_skips_actions_without_pr_numbers(self) -> None:
         response: dict[str, Any] = {
             "result": {
