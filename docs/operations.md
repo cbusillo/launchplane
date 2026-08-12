@@ -503,6 +503,12 @@ Product Health Monitoring wrapper's exact immutable worker grant;
 exact-instance route-binding read/apply grants for generic-web stable lanes and
 must declare `operator.generic-web-route-binding`. Keep real products, contexts,
 instances, and immutable workflow identities only in that protected secret;
+`LAUNCHPLANE_AUTHZ_GENERIC_WEB_TESTING_INGRESS_ROUTE_MANAGED_SET_JSON` owns the
+separate exact-instance `ingress_route.plan` and `ingress_route.apply` grants
+for generic-web testing lanes and must declare
+`operator.generic-web-testing-ingress-route`; keep it independent from the
+route-binding set so ingress provider access is never implied by record-only
+route-binding authority;
 `LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
 Odoo stable managed route-binding set.
 `LAUNCHPLANE_AUTHZ_PREVIEW_FEEDBACK_REMEDIATION_MANAGED_SET_JSON` owns the
