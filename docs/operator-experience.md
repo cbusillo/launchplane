@@ -262,6 +262,12 @@ The first product/site read endpoints are:
 - `GET /v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}`
 - `GET /v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness?action={authz_action}&artifact_id={artifact_id}&expected_current_artifact_id={expected_current_artifact_id}`
 
+Engineering Ops also exposes `/ui/engineering/governance-projection`, backed by
+`GET /v1/governance/projection`. The workbench keeps historical Owner product
+judgment, current ephemeral readiness, immutable admission, landing outcome,
+and advisory observations in separately named regions. It is read-only and
+does not add a browser mutation contract.
+
 These endpoints are profile and driver driven. A standard `generic-web` site
 should appear in the read model from Launchplane records alone: product profile,
 lane profiles, target records, runtime-environment records, managed secret

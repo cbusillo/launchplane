@@ -21,6 +21,7 @@ MergeTrainIdentityKind = Literal["github_actions_oidc", "github_app", "github_to
 MergeTrainMergeMethod = Literal["merge", "squash", "rebase"]
 MergeTrainPolicyRecordStatus = Literal["active", "superseded"]
 MergeTrainSchedulerRunnerMode = Literal["level1", "controller"]
+MERGE_TRAIN_POLICY_TARGETS_READ_ACTION = "merge_train.policy_targets"
 
 
 class MergeTrainEnqueuePolicy(BaseModel):

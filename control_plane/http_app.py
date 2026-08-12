@@ -99,6 +99,7 @@ from control_plane.http_routes import (
     PRODUCT_OWNER_ROUTING_APPLY_ROUTE,
     ProductOwnerWriteRouteDependencies,
     OwnerAcceptanceRouteDependencies,
+    GovernanceProjectionRouteDependencies,
     ProductReadRouteDependencies,
     PromotionEvidenceRequest as PromotionEvidenceRequest,
     ReadRouteDependencies,
@@ -124,6 +125,7 @@ from control_plane.http_routes import (
     register_every_code_work_request_read_routes,
     register_generic_web_rollback_write_routes,
     register_generic_web_write_routes,
+    register_governance_projection_routes,
     register_ingress_read_routes,
     register_inventory_operation_read_routes,
     register_managed_secret_read_routes,
@@ -264,6 +266,7 @@ from control_plane.merge_admission import (
     require_merge_admission_record_store,
 )
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
+from control_plane.governance_projection import LiveGovernanceCurrentReadinessProvider
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
@@ -20997,6 +21000,17 @@ def create_launchplane_fastapi_app(
                 api_request=github_api_request,
             ),
             github_api=github_api_request,
+        ),
+    )
+    register_governance_projection_routes(
+        app,
+        dependencies=GovernanceProjectionRouteDependencies(
+            common=read_route_dependencies,
+            repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
+            current_readiness_provider=LiveGovernanceCurrentReadinessProvider(
+                github_token=lambda env_var: os.environ.get(env_var, "").strip(),
+            ),
+            now=utc_now_timestamp,
         ),
     )
 

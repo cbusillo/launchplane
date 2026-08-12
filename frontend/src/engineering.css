@@ -1531,6 +1531,233 @@
   }
 }
 
+/* ── Governance evidence ────────────────────────────────────────────── */
+
+.governance-lookup {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.5fr) minmax(120px, 0.6fr) minmax(150px, 0.8fr) auto;
+  align-items: end;
+  gap: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  padding: 16px;
+}
+
+.governance-lookup label {
+  display: grid;
+  gap: 6px;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.governance-lookup input {
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 11px;
+}
+
+.governance-lookup p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--error, #ef6b73);
+  font-size: 13px;
+}
+
+.governance-workbench {
+  display: grid;
+  gap: 16px;
+}
+
+.governance-facet {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 11px;
+  background: linear-gradient(145deg, var(--surface-raised), var(--surface));
+  padding: 18px;
+}
+
+.governance-facet-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.governance-facet-header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.governance-facet-header > div > span {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.governance-facet-header h2 {
+  margin: 0;
+  font-size: 17px;
+  letter-spacing: -0.01em;
+}
+
+.governance-authority-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.governance-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.governance-meta-grid > div {
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-raised) 78%, transparent);
+  padding: 10px 12px;
+}
+
+.governance-meta-grid dt {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 720;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.governance-meta-grid dd {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.governance-product-list,
+.governance-advisory-list,
+.governance-history ol {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.governance-product-list li,
+.governance-advisory-list li,
+.governance-history li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.governance-product-list li > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.governance-product-list li > div span,
+.governance-history li span,
+.governance-advisory-list li span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.governance-history {
+  display: grid;
+  gap: 8px;
+}
+
+.governance-history h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.governance-history li time,
+.governance-advisory-list li code,
+.governance-history li code {
+  margin-left: auto;
+}
+
+.governance-readiness-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.governance-subfacet {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 11px;
+}
+
+.governance-subfacet > strong {
+  font-size: 13px;
+}
+
+.governance-subfacet ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.governance-subfacet code {
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.governance-advisory {
+  border-style: dashed;
+}
+
+@media (max-width: 760px) {
+  .governance-lookup,
+  .governance-meta-grid,
+  .governance-readiness-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .governance-facet-header,
+  .governance-product-list li,
+  .governance-advisory-list li,
+  .governance-history li {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .governance-history li time,
+  .governance-advisory-list li code,
+  .governance-history li code {
+    margin-left: 0;
+  }
+}
+
 @media (max-width: 520px) {
   .engineering-route-nav {
     margin-inline: -4px;

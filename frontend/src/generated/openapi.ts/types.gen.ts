@@ -187,6 +187,16 @@ export type BootstrapEvidence = {
     run_status: 'pending' | 'pass' | 'fail' | 'skipped';
 };
 
+export type ChangeImpactTarget = {
+    head_sha: string;
+    pull_request_number: number;
+    repository: string;
+    repository_id: string;
+    repository_owner_id: string;
+    schema_version: number;
+    tree_sha: string;
+};
+
 export type ChangeImpactTargetReference = {
     pull_request_number: number;
     repository: string;
@@ -531,6 +541,81 @@ export type GitHubIssueInboxRepositoryGroup = {
     repository: string;
 };
 
+export type GovernanceAdvisoryObservation = {
+    authoritative: false;
+    authorizes: Array<string>;
+    neutral: true;
+    observation: MergeReadinessAdvisoryObservation;
+    observation_scope: 'current_readiness' | 'admission_readiness';
+};
+
+export type GovernanceLandingOutcomeFacet = {
+    authoritative: false;
+    authorizes: Array<string>;
+    landed: boolean;
+    mode: 'immutable_provider_observation';
+    record: MergeLandingOutcomeRecord | null;
+    status: 'not_observed' | 'landed' | 'rejected' | 'reconcile_required';
+    target_status: 'current' | 'historical' | 'none';
+};
+
+export type GovernanceMergeAdmissionFacet = {
+    authoritative: false;
+    authorizes: Array<'one_exact_merge_attempt'>;
+    current_effect_authority: false;
+    level: 3;
+    mode: 'immutable_attempt_authorization';
+    record: MergeAdmissionRecord | null;
+    status: 'not_recorded' | 'admitted_current_target' | 'admitted_historical_target';
+};
+
+export type GovernanceMergeReadinessFacet = {
+    authoritative: false;
+    authorizes: Array<string>;
+    availability: 'available' | 'not_active' | 'unavailable';
+    level: 2;
+    mode: 'ephemeral';
+    reason_code: 'current_evaluation_available' | 'no_active_merge_lineage' | 'current_evidence_unavailable';
+    result: MergeReadinessResult | null;
+};
+
+export type GovernanceOwnerHistoryEntry = {
+    authorizes: Array<string>;
+    decision_relationship: 'current' | 'historical';
+    human_action_semantics: 'none' | 'product_review_accepted' | 'product_review_changes_requested' | 'product_review_revoked' | 'product_review_superseded' | 'product_review_invalidated';
+    record: OwnerAcceptanceEventRecord;
+    target_status: 'current' | 'historical';
+};
+
+export type GovernanceOwnerJudgmentFacet = {
+    authoritative: false;
+    authorizes: Array<string>;
+    current: OwnerAcceptanceDecision;
+    history: Array<GovernanceOwnerHistoryEntry>;
+    level: 1;
+    mode: 'historical_product_judgment';
+};
+
+export type GovernanceProjection = {
+    advisory_observations: Array<GovernanceAdvisoryObservation>;
+    authoritative: false;
+    authorizes: Array<string>;
+    generated_at: string;
+    landing_outcome: GovernanceLandingOutcomeFacet;
+    merge_admission: GovernanceMergeAdmissionFacet;
+    merge_readiness: GovernanceMergeReadinessFacet;
+    mode: 'read_only_projection';
+    owner_judgment: GovernanceOwnerJudgmentFacet;
+    schema_version: 1;
+    target: ChangeImpactTarget;
+};
+
+export type GovernanceProjectionResponse = {
+    projection: GovernanceProjection;
+    status: 'ok';
+    trace_id: string;
+};
+
 export type HealthcheckEvidence = {
     observed_runtime_identity: RuntimeIdentity | null;
     runtime_identity_detail: string;
@@ -618,6 +703,207 @@ export type ManagerPreviewApprovalDecision = {
     reason_code: 'approval_missing' | 'approval_valid' | 'changes_requested' | 'approval_revoked' | 'approval_stale' | 'preview_inactive' | 'serving_generation_missing' | 'serving_generation_mismatch' | 'generation_not_ready' | 'generation_verification_failed' | 'preview_identity_mismatch' | 'artifact_identity_missing' | 'runtime_identity_missing' | 'runtime_identity_mismatch' | 'policy_unavailable';
     schema_version: number;
     status: 'pending' | 'approved' | 'changes_requested' | 'revoked' | 'stale' | 'unavailable';
+};
+
+export type MergeAdmissionRecord = {
+    admission_algorithm_version: string;
+    admission_binding_sha256: string;
+    admission_id: string;
+    attempt_id: string;
+    attempt_sequence: number;
+    base_branch: string;
+    batch_id: string;
+    candidate_record_id: string;
+    candidate_sha: string;
+    candidate_sha256: string;
+    candidate_tree_sha: string;
+    controller_key: string;
+    created_at: string;
+    decision: 'admitted';
+    effective_base_sha: string;
+    effective_base_tree_sha: string;
+    expected_effect_sha: string;
+    landing_plan_id: string;
+    landing_plan_record_id: string;
+    landing_plan_sha256: string;
+    lease_acquired_at: string;
+    lease_expires_at: string;
+    lease_owner: string;
+    merge_method: 'merge' | 'squash' | 'rebase';
+    pull_request_head_sha: string;
+    pull_request_head_tree_sha: string;
+    pull_request_number: number;
+    queue_position: number;
+    readiness: MergeReadinessResult;
+    repository: string;
+    schema_version: 1;
+    source: string;
+    structural_provenance_sha256: string;
+    structural_result: MergeTrainStructuralCandidateResult;
+};
+
+export type MergeLandingOutcomeRecord = {
+    admission_binding_sha256: string;
+    admission_id: string;
+    attempt_id: string;
+    base_branch: string;
+    base_contains_merge_commit: boolean | null;
+    exact_landing_confirmed: boolean;
+    merge_commit_sha: string;
+    merge_commit_tree_sha: string;
+    observation_sequence: number;
+    observed_at: string;
+    observed_base_sha: string;
+    observed_base_tree_sha: string;
+    observed_pull_request_head_sha: string;
+    observed_pull_request_head_tree_sha: string;
+    observed_pull_request_state: '' | 'open' | 'closed' | 'merged';
+    outcome_binding_sha256: string;
+    outcome_id: string;
+    prior_outcome_id: string;
+    provider_conclusive_rejection: boolean;
+    provider_effect_attempted: boolean;
+    provider_message: string;
+    provider_request_id: string;
+    provider_status_code: number | null;
+    pull_request_number: number;
+    reason: 'provider_and_git_confirmed' | 'provider_rejected' | 'reconciliation_confirmed_no_effect' | 'provider_transport_ambiguous' | 'process_interrupted' | 'lease_lost_after_admission' | 'landing_evidence_incomplete' | 'landing_evidence_contradicted';
+    repository: string;
+    schema_version: 1;
+    source: string;
+    status: 'landed' | 'rejected' | 'reconcile_required';
+};
+
+export type MergeReadinessAdvisoryObservation = {
+    app_id: number | null;
+    name: string;
+    state: string;
+};
+
+export type MergeReadinessCandidateEvidence = {
+    base_sha: string;
+    candidate_sha: string;
+    pull_request_head_sha: string;
+    pull_request_number: number | null;
+    queue_position: number | null;
+    record_id: string;
+    repository: string;
+    structural_status: 'exact' | 'recorded_rolling' | 'mismatch' | 'unknown';
+};
+
+export type MergeReadinessCandidateFacet = {
+    evidence: MergeReadinessCandidateEvidence;
+    reason_codes: Array<'owner_not_required' | 'owner_acceptance_valid' | 'owner_acceptance_missing' | 'owner_changes_requested' | 'owner_acceptance_revoked' | 'owner_acceptance_stale' | 'owner_evidence_stale' | 'owner_evidence_unavailable' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'owner_preview_evidence_unavailable' | 'owner_preview_evidence_stale' | 'owner_review_expired' | 'owner_preview_isolation_insufficient' | 'owner_contributing_identity_unknown' | 'owner_self_review_denied' | 'owner_review_context_missing' | 'owner_evidence_head_mismatch' | 'owner_evidence_tree_mismatch' | 'checks_passed' | 'checks_pending' | 'checks_failed' | 'checks_unknown' | 'checks_head_mismatch' | 'engineering_review_approved' | 'engineering_review_pending' | 'engineering_review_changes_requested' | 'engineering_review_blocked' | 'engineering_review_unknown' | 'engineering_review_stale' | 'engineering_review_head_mismatch' | 'engineering_review_tree_mismatch' | 'engineering_review_evidence_missing' | 'policy_fingerprints_match' | 'policy_impact_missing' | 'policy_impact_drift' | 'policy_technical_checks_missing' | 'policy_technical_checks_drift' | 'policy_engineering_review_missing' | 'policy_engineering_review_drift' | 'policy_ruleset_missing' | 'policy_ruleset_drift' | 'policy_merge_train_missing' | 'policy_merge_train_drift' | 'policy_authorization_missing' | 'policy_authorization_drift' | 'policy_admission_algorithm_missing' | 'policy_admission_algorithm_drift' | 'candidate_exact' | 'candidate_recorded_rolling' | 'candidate_identity_mismatch' | 'candidate_identity_unknown' | 'candidate_queue_mismatch' | 'candidate_base_mismatch' | 'candidate_head_mismatch' | 'controller_scope_mismatch' | 'controller_lease_held' | 'controller_lease_missing' | 'controller_lease_lost' | 'controller_lease_expired' | 'expected_sha_match' | 'expected_sha_mismatch'>;
+    state: 'ready' | 'blocked_owner_evidence' | 'blocked_checks' | 'blocked_engineering_review' | 'blocked_policy' | 'blocked_candidate_identity' | 'unknown';
+};
+
+export type MergeReadinessEngineeringEvidenceReference = {
+    evidence_digest: string;
+    head_sha: string;
+    run_id: string;
+    tree_sha: string;
+};
+
+export type MergeReadinessEngineeringReviewFacet = {
+    decision_binding_sha256: string;
+    decision_id: string;
+    evidence: Array<MergeReadinessEngineeringEvidenceReference>;
+    head_sha: string;
+    reason_codes: Array<'owner_not_required' | 'owner_acceptance_valid' | 'owner_acceptance_missing' | 'owner_changes_requested' | 'owner_acceptance_revoked' | 'owner_acceptance_stale' | 'owner_evidence_stale' | 'owner_evidence_unavailable' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'owner_preview_evidence_unavailable' | 'owner_preview_evidence_stale' | 'owner_review_expired' | 'owner_preview_isolation_insufficient' | 'owner_contributing_identity_unknown' | 'owner_self_review_denied' | 'owner_review_context_missing' | 'owner_evidence_head_mismatch' | 'owner_evidence_tree_mismatch' | 'checks_passed' | 'checks_pending' | 'checks_failed' | 'checks_unknown' | 'checks_head_mismatch' | 'engineering_review_approved' | 'engineering_review_pending' | 'engineering_review_changes_requested' | 'engineering_review_blocked' | 'engineering_review_unknown' | 'engineering_review_stale' | 'engineering_review_head_mismatch' | 'engineering_review_tree_mismatch' | 'engineering_review_evidence_missing' | 'policy_fingerprints_match' | 'policy_impact_missing' | 'policy_impact_drift' | 'policy_technical_checks_missing' | 'policy_technical_checks_drift' | 'policy_engineering_review_missing' | 'policy_engineering_review_drift' | 'policy_ruleset_missing' | 'policy_ruleset_drift' | 'policy_merge_train_missing' | 'policy_merge_train_drift' | 'policy_authorization_missing' | 'policy_authorization_drift' | 'policy_admission_algorithm_missing' | 'policy_admission_algorithm_drift' | 'candidate_exact' | 'candidate_recorded_rolling' | 'candidate_identity_mismatch' | 'candidate_identity_unknown' | 'candidate_queue_mismatch' | 'candidate_base_mismatch' | 'candidate_head_mismatch' | 'controller_scope_mismatch' | 'controller_lease_held' | 'controller_lease_missing' | 'controller_lease_lost' | 'controller_lease_expired' | 'expected_sha_match' | 'expected_sha_mismatch'>;
+    state: 'ready' | 'blocked_owner_evidence' | 'blocked_checks' | 'blocked_engineering_review' | 'blocked_policy' | 'blocked_candidate_identity' | 'unknown';
+    status: string;
+    tree_sha: string;
+};
+
+export type MergeReadinessFenceEvidence = {
+    controller_base_branch: string;
+    controller_key: string;
+    controller_repository: string;
+    controller_status: string;
+    expected_lease_owner: string;
+    lease_expires_at: string;
+    observed_effect_sha: string;
+    observed_lease_owner: string;
+};
+
+export type MergeReadinessFenceFacet = {
+    evidence: MergeReadinessFenceEvidence;
+    reason_codes: Array<'owner_not_required' | 'owner_acceptance_valid' | 'owner_acceptance_missing' | 'owner_changes_requested' | 'owner_acceptance_revoked' | 'owner_acceptance_stale' | 'owner_evidence_stale' | 'owner_evidence_unavailable' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'owner_preview_evidence_unavailable' | 'owner_preview_evidence_stale' | 'owner_review_expired' | 'owner_preview_isolation_insufficient' | 'owner_contributing_identity_unknown' | 'owner_self_review_denied' | 'owner_review_context_missing' | 'owner_evidence_head_mismatch' | 'owner_evidence_tree_mismatch' | 'checks_passed' | 'checks_pending' | 'checks_failed' | 'checks_unknown' | 'checks_head_mismatch' | 'engineering_review_approved' | 'engineering_review_pending' | 'engineering_review_changes_requested' | 'engineering_review_blocked' | 'engineering_review_unknown' | 'engineering_review_stale' | 'engineering_review_head_mismatch' | 'engineering_review_tree_mismatch' | 'engineering_review_evidence_missing' | 'policy_fingerprints_match' | 'policy_impact_missing' | 'policy_impact_drift' | 'policy_technical_checks_missing' | 'policy_technical_checks_drift' | 'policy_engineering_review_missing' | 'policy_engineering_review_drift' | 'policy_ruleset_missing' | 'policy_ruleset_drift' | 'policy_merge_train_missing' | 'policy_merge_train_drift' | 'policy_authorization_missing' | 'policy_authorization_drift' | 'policy_admission_algorithm_missing' | 'policy_admission_algorithm_drift' | 'candidate_exact' | 'candidate_recorded_rolling' | 'candidate_identity_mismatch' | 'candidate_identity_unknown' | 'candidate_queue_mismatch' | 'candidate_base_mismatch' | 'candidate_head_mismatch' | 'controller_scope_mismatch' | 'controller_lease_held' | 'controller_lease_missing' | 'controller_lease_lost' | 'controller_lease_expired' | 'expected_sha_match' | 'expected_sha_mismatch'>;
+    state: 'ready' | 'blocked_owner_evidence' | 'blocked_checks' | 'blocked_engineering_review' | 'blocked_policy' | 'blocked_candidate_identity' | 'unknown';
+};
+
+export type MergeReadinessOwnerFacet = {
+    action: string;
+    binding_sha256: string;
+    environment: string;
+    event_id: string;
+    owner_reason_code: string;
+    owner_status: string;
+    product: string;
+    reason_codes: Array<'owner_not_required' | 'owner_acceptance_valid' | 'owner_acceptance_missing' | 'owner_changes_requested' | 'owner_acceptance_revoked' | 'owner_acceptance_stale' | 'owner_evidence_stale' | 'owner_evidence_unavailable' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'owner_preview_evidence_unavailable' | 'owner_preview_evidence_stale' | 'owner_review_expired' | 'owner_preview_isolation_insufficient' | 'owner_contributing_identity_unknown' | 'owner_self_review_denied' | 'owner_review_context_missing' | 'owner_evidence_head_mismatch' | 'owner_evidence_tree_mismatch' | 'checks_passed' | 'checks_pending' | 'checks_failed' | 'checks_unknown' | 'checks_head_mismatch' | 'engineering_review_approved' | 'engineering_review_pending' | 'engineering_review_changes_requested' | 'engineering_review_blocked' | 'engineering_review_unknown' | 'engineering_review_stale' | 'engineering_review_head_mismatch' | 'engineering_review_tree_mismatch' | 'engineering_review_evidence_missing' | 'policy_fingerprints_match' | 'policy_impact_missing' | 'policy_impact_drift' | 'policy_technical_checks_missing' | 'policy_technical_checks_drift' | 'policy_engineering_review_missing' | 'policy_engineering_review_drift' | 'policy_ruleset_missing' | 'policy_ruleset_drift' | 'policy_merge_train_missing' | 'policy_merge_train_drift' | 'policy_authorization_missing' | 'policy_authorization_drift' | 'policy_admission_algorithm_missing' | 'policy_admission_algorithm_drift' | 'candidate_exact' | 'candidate_recorded_rolling' | 'candidate_identity_mismatch' | 'candidate_identity_unknown' | 'candidate_queue_mismatch' | 'candidate_base_mismatch' | 'candidate_head_mismatch' | 'controller_scope_mismatch' | 'controller_lease_held' | 'controller_lease_missing' | 'controller_lease_lost' | 'controller_lease_expired' | 'expected_sha_match' | 'expected_sha_mismatch'>;
+    state: 'ready' | 'blocked_owner_evidence' | 'blocked_checks' | 'blocked_engineering_review' | 'blocked_policy' | 'blocked_candidate_identity' | 'unknown';
+    system: string;
+};
+
+export type MergeReadinessPolicyFacet = {
+    fingerprints: MergeReadinessPolicyFingerprints;
+    reason_codes: Array<'owner_not_required' | 'owner_acceptance_valid' | 'owner_acceptance_missing' | 'owner_changes_requested' | 'owner_acceptance_revoked' | 'owner_acceptance_stale' | 'owner_evidence_stale' | 'owner_evidence_unavailable' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'owner_preview_evidence_unavailable' | 'owner_preview_evidence_stale' | 'owner_review_expired' | 'owner_preview_isolation_insufficient' | 'owner_contributing_identity_unknown' | 'owner_self_review_denied' | 'owner_review_context_missing' | 'owner_evidence_head_mismatch' | 'owner_evidence_tree_mismatch' | 'checks_passed' | 'checks_pending' | 'checks_failed' | 'checks_unknown' | 'checks_head_mismatch' | 'engineering_review_approved' | 'engineering_review_pending' | 'engineering_review_changes_requested' | 'engineering_review_blocked' | 'engineering_review_unknown' | 'engineering_review_stale' | 'engineering_review_head_mismatch' | 'engineering_review_tree_mismatch' | 'engineering_review_evidence_missing' | 'policy_fingerprints_match' | 'policy_impact_missing' | 'policy_impact_drift' | 'policy_technical_checks_missing' | 'policy_technical_checks_drift' | 'policy_engineering_review_missing' | 'policy_engineering_review_drift' | 'policy_ruleset_missing' | 'policy_ruleset_drift' | 'policy_merge_train_missing' | 'policy_merge_train_drift' | 'policy_authorization_missing' | 'policy_authorization_drift' | 'policy_admission_algorithm_missing' | 'policy_admission_algorithm_drift' | 'candidate_exact' | 'candidate_recorded_rolling' | 'candidate_identity_mismatch' | 'candidate_identity_unknown' | 'candidate_queue_mismatch' | 'candidate_base_mismatch' | 'candidate_head_mismatch' | 'controller_scope_mismatch' | 'controller_lease_held' | 'controller_lease_missing' | 'controller_lease_lost' | 'controller_lease_expired' | 'expected_sha_match' | 'expected_sha_mismatch'>;
+    state: 'ready' | 'blocked_owner_evidence' | 'blocked_checks' | 'blocked_engineering_review' | 'blocked_policy' | 'blocked_candidate_identity' | 'unknown';
+};
+
+export type MergeReadinessPolicyFingerprintEvidence = {
+    current_sha256: string | null;
+    dimension: 'impact' | 'technical_checks' | 'engineering_review' | 'ruleset' | 'merge_train' | 'authorization' | 'admission_algorithm';
+    expected_sha256: string;
+};
+
+export type MergeReadinessPolicyFingerprints = {
+    admission_algorithm: MergeReadinessPolicyFingerprintEvidence;
+    authorization: MergeReadinessPolicyFingerprintEvidence;
+    engineering_review: MergeReadinessPolicyFingerprintEvidence;
+    impact: MergeReadinessPolicyFingerprintEvidence;
+    merge_train: MergeReadinessPolicyFingerprintEvidence;
+    ruleset: MergeReadinessPolicyFingerprintEvidence;
+    technical_checks: MergeReadinessPolicyFingerprintEvidence;
+};
+
+export type MergeReadinessResult = {
+    authoritative: false;
+    authorizes: Array<string>;
+    candidate: MergeReadinessCandidateFacet;
+    engineering_review: MergeReadinessEngineeringReviewFacet;
+    evaluated_at: string;
+    fence: MergeReadinessFenceFacet;
+    mode: 'ephemeral';
+    owner_facets: Array<MergeReadinessOwnerFacet>;
+    policy: MergeReadinessPolicyFacet;
+    readiness_digest: string;
+    reason_codes: Array<'owner_not_required' | 'owner_acceptance_valid' | 'owner_acceptance_missing' | 'owner_changes_requested' | 'owner_acceptance_revoked' | 'owner_acceptance_stale' | 'owner_evidence_stale' | 'owner_evidence_unavailable' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'owner_preview_evidence_unavailable' | 'owner_preview_evidence_stale' | 'owner_review_expired' | 'owner_preview_isolation_insufficient' | 'owner_contributing_identity_unknown' | 'owner_self_review_denied' | 'owner_review_context_missing' | 'owner_evidence_head_mismatch' | 'owner_evidence_tree_mismatch' | 'checks_passed' | 'checks_pending' | 'checks_failed' | 'checks_unknown' | 'checks_head_mismatch' | 'engineering_review_approved' | 'engineering_review_pending' | 'engineering_review_changes_requested' | 'engineering_review_blocked' | 'engineering_review_unknown' | 'engineering_review_stale' | 'engineering_review_head_mismatch' | 'engineering_review_tree_mismatch' | 'engineering_review_evidence_missing' | 'policy_fingerprints_match' | 'policy_impact_missing' | 'policy_impact_drift' | 'policy_technical_checks_missing' | 'policy_technical_checks_drift' | 'policy_engineering_review_missing' | 'policy_engineering_review_drift' | 'policy_ruleset_missing' | 'policy_ruleset_drift' | 'policy_merge_train_missing' | 'policy_merge_train_drift' | 'policy_authorization_missing' | 'policy_authorization_drift' | 'policy_admission_algorithm_missing' | 'policy_admission_algorithm_drift' | 'candidate_exact' | 'candidate_recorded_rolling' | 'candidate_identity_mismatch' | 'candidate_identity_unknown' | 'candidate_queue_mismatch' | 'candidate_base_mismatch' | 'candidate_head_mismatch' | 'controller_scope_mismatch' | 'controller_lease_held' | 'controller_lease_missing' | 'controller_lease_lost' | 'controller_lease_expired' | 'expected_sha_match' | 'expected_sha_mismatch'>;
+    schema_version: number;
+    state: 'ready' | 'blocked_owner_evidence' | 'blocked_checks' | 'blocked_engineering_review' | 'blocked_policy' | 'blocked_candidate_identity' | 'unknown';
+    target: MergeReadinessTarget;
+    technical_checks: MergeReadinessTechnicalChecksFacet;
+};
+
+export type MergeReadinessTarget = {
+    base_branch: string;
+    base_sha: string;
+    expected_effect_sha: string;
+    pull_request_head_sha: string;
+    pull_request_number: number;
+    pull_request_tree_sha: string;
+    queue_position: number;
+    repository: string;
+    schema_version: number;
+};
+
+export type MergeReadinessTechnicalChecksFacet = {
+    advisory_observations: Array<MergeReadinessAdvisoryObservation>;
+    head_sha: string;
+    reason_codes: Array<'owner_not_required' | 'owner_acceptance_valid' | 'owner_acceptance_missing' | 'owner_changes_requested' | 'owner_acceptance_revoked' | 'owner_acceptance_stale' | 'owner_evidence_stale' | 'owner_evidence_unavailable' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'owner_preview_evidence_unavailable' | 'owner_preview_evidence_stale' | 'owner_review_expired' | 'owner_preview_isolation_insufficient' | 'owner_contributing_identity_unknown' | 'owner_self_review_denied' | 'owner_review_context_missing' | 'owner_evidence_head_mismatch' | 'owner_evidence_tree_mismatch' | 'checks_passed' | 'checks_pending' | 'checks_failed' | 'checks_unknown' | 'checks_head_mismatch' | 'engineering_review_approved' | 'engineering_review_pending' | 'engineering_review_changes_requested' | 'engineering_review_blocked' | 'engineering_review_unknown' | 'engineering_review_stale' | 'engineering_review_head_mismatch' | 'engineering_review_tree_mismatch' | 'engineering_review_evidence_missing' | 'policy_fingerprints_match' | 'policy_impact_missing' | 'policy_impact_drift' | 'policy_technical_checks_missing' | 'policy_technical_checks_drift' | 'policy_engineering_review_missing' | 'policy_engineering_review_drift' | 'policy_ruleset_missing' | 'policy_ruleset_drift' | 'policy_merge_train_missing' | 'policy_merge_train_drift' | 'policy_authorization_missing' | 'policy_authorization_drift' | 'policy_admission_algorithm_missing' | 'policy_admission_algorithm_drift' | 'candidate_exact' | 'candidate_recorded_rolling' | 'candidate_identity_mismatch' | 'candidate_identity_unknown' | 'candidate_queue_mismatch' | 'candidate_base_mismatch' | 'candidate_head_mismatch' | 'controller_scope_mismatch' | 'controller_lease_held' | 'controller_lease_missing' | 'controller_lease_lost' | 'controller_lease_expired' | 'expected_sha_match' | 'expected_sha_mismatch'>;
+    required_checks: Array<string>;
+    state: 'ready' | 'blocked_owner_evidence' | 'blocked_checks' | 'blocked_engineering_review' | 'blocked_policy' | 'blocked_candidate_identity' | 'unknown';
+    status: 'pass' | 'pending' | 'fail' | 'unknown';
 };
 
 export type MergeTrainAdmissionDecision = {
@@ -803,6 +1089,16 @@ export type MergeTrainServiceAuthz = {
     action: string;
     context: string;
     product: string;
+};
+
+export type MergeTrainStructuralCandidateResult = {
+    candidate_sha256: string;
+    effective_base_sha: string;
+    effective_base_tree_sha: string;
+    landing_plan_sha256: string;
+    provenance_sha256: string;
+    reason_codes: Array<'structural_single_entry_exact' | 'structural_batch_entry_exact' | 'structural_rolling_chain_recorded' | 'structural_stack_root_recorded' | 'structural_combined_owner_review_recorded' | 'structural_evidence_unavailable' | 'structural_record_superseded' | 'structural_candidate_incomplete' | 'structural_provenance_missing' | 'structural_landing_plan_missing' | 'structural_landing_plan_superseded' | 'structural_repository_mismatch' | 'structural_base_branch_mismatch' | 'structural_policy_mismatch' | 'structural_candidate_digest_mismatch' | 'structural_landing_plan_digest_mismatch' | 'structural_provenance_digest_mismatch' | 'structural_candidate_sha_mismatch' | 'structural_candidate_tree_mismatch' | 'structural_entry_absent' | 'structural_position_mismatch' | 'structural_head_sha_mismatch' | 'structural_head_tree_mismatch' | 'structural_queue_drift' | 'structural_base_sha_mismatch' | 'structural_base_tree_mismatch' | 'structural_rolling_chain_broken' | 'structural_prior_entry_not_landed' | 'structural_landing_evidence_unavailable' | 'structural_prior_entry_head_mismatch' | 'structural_prior_entry_tree_mismatch' | 'structural_impact_unknown' | 'structural_delta_drift' | 'structural_changed_path_overlap' | 'structural_impact_expanded' | 'structural_same_subject_combined_review_required' | 'structural_combined_owner_review_mismatch' | 'structural_stack_root_unproven'>;
+    status: 'exact' | 'recorded_rolling' | 'mismatch' | 'unknown';
 };
 
 export type OdooAddonSettingOverride = {
@@ -2932,6 +3228,37 @@ export type ListEveryCodeWorkRequestsResponses = {
 };
 
 export type ListEveryCodeWorkRequestsResponse = ListEveryCodeWorkRequestsResponses[keyof ListEveryCodeWorkRequestsResponses];
+
+export type ReadGovernanceProjectionData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query: {
+        repository: string;
+        pull_request_number: number;
+        base_branch?: string;
+    };
+    url: '/v1/governance/projection';
+};
+
+export type ReadGovernanceProjectionErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadGovernanceProjectionError = ReadGovernanceProjectionErrors[keyof ReadGovernanceProjectionErrors];
+
+export type ReadGovernanceProjectionResponses = {
+    200: GovernanceProjectionResponse;
+};
+
+export type ReadGovernanceProjectionResponse = ReadGovernanceProjectionResponses[keyof ReadGovernanceProjectionResponses];
 
 export type ListOwnerAcceptanceCurrentItemsData = {
     body?: never;

@@ -392,6 +392,15 @@ aggregate state plus each affected product and binding. The check remains
 shadow-only, is excluded from Launchplane merge/admission technical inputs, and
 cannot become Owner authority.
 
+## Combined Governance Read Model
+
+`GET /v1/governance/projection` and the Governance evidence workbench preserve
+the current Owner evaluation and immutable event history alongside separate L2
+readiness, L3 admission, landing outcome, and advisory facets. This projection
+does not reinterpret Owner `accepted`; it continues to expose
+`human_action_semantics=product_review_accepted` and `authorizes=[]` even when
+later machine evidence is ready, admitted, or landed.
+
 ## Out Of Scope
 
 - production authorization and promotion consumers

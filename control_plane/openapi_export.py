@@ -182,6 +182,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation",
+    "/v1/governance/projection": "read_governance_projection",
     "/v1/owner-acceptance/evaluation": "evaluate_owner_acceptance",
     "/v1/owner-acceptance/current-items": "list_owner_acceptance_current_items",
     "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",

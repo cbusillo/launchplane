@@ -468,6 +468,21 @@ class MergeReadinessScenarioTests(unittest.TestCase):
                 self.assertEqual(result.state, "blocked_owner_evidence")
                 self.assertIn(expected_reason, result.reason_codes)
 
+    def test_scenario_20_preview_isolation_history_remains_inadmissible(self) -> None:
+        owner = _owner_product(
+            status="stale",
+            reason_code="preview_isolation_insufficient",
+            admissible=False,
+        )
+        owner_payload = owner.model_dump(mode="json")
+
+        result = _evaluate(owner_decision=_owner_decision(owner))
+
+        self.assertEqual(result.state, "blocked_owner_evidence")
+        self.assertIn("owner_preview_isolation_insufficient", result.reason_codes)
+        self.assertEqual(owner.model_dump(mode="json"), owner_payload)
+        self.assertEqual(result.authorizes, ())
+
     def test_scenario_8_policy_or_unrelated_base_drift_replans(self) -> None:
         policy_result = _evaluate(policy_fingerprints=_policy_fingerprints(drift="merge_train"))
         base_result = _evaluate(candidate_evidence=_candidate(base_sha=OTHER_SHA))

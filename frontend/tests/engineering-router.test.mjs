@@ -44,4 +44,5 @@ test("engineering labels are route-specific", () => {
   assert.equal(engineeringViewLabel("every-code"), "Every Code");
   assert.equal(engineeringViewLabel("tenant-admission"), "Tenant admission");
   assert.equal(engineeringViewLabel("owner-acceptance"), "Owner product review");
+  assert.equal(engineeringViewLabel("governance-projection"), "Governance evidence");
 });
