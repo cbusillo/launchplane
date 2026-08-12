@@ -550,18 +550,23 @@ export type GovernanceAdvisoryObservation = {
 };
 
 export type GovernanceLandingOutcomeFacet = {
+    authoritative: false;
+    authorizes: Array<string>;
     landed: boolean;
     mode: 'immutable_provider_observation';
     record: MergeLandingOutcomeRecord | null;
     status: 'not_observed' | 'landed' | 'rejected' | 'reconcile_required';
+    target_status: 'current' | 'historical' | 'none';
 };
 
 export type GovernanceMergeAdmissionFacet = {
-    admitted: boolean;
+    authoritative: false;
     authorizes: Array<'one_exact_merge_attempt'>;
+    current_effect_authority: false;
     level: 3;
     mode: 'immutable_attempt_authorization';
     record: MergeAdmissionRecord | null;
+    status: 'not_recorded' | 'admitted_current_target' | 'admitted_historical_target';
 };
 
 export type GovernanceMergeReadinessFacet = {
@@ -576,8 +581,10 @@ export type GovernanceMergeReadinessFacet = {
 
 export type GovernanceOwnerHistoryEntry = {
     authorizes: Array<string>;
+    decision_relationship: 'current' | 'historical';
     human_action_semantics: 'none' | 'product_review_accepted' | 'product_review_changes_requested' | 'product_review_revoked' | 'product_review_superseded' | 'product_review_invalidated';
     record: OwnerAcceptanceEventRecord;
+    target_status: 'current' | 'historical';
 };
 
 export type GovernanceOwnerJudgmentFacet = {

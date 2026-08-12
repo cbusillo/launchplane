@@ -66,6 +66,7 @@ class GovernanceCurrentReadinessProvider(Protocol):
         repository_evidence: ChangeImpactRepositoryEvidence,
         base_branch: str,
         evaluated_at: str,
+        github_token_env_var: str,
     ) -> GovernanceMergeReadinessFacet: ...
 
 
@@ -82,8 +83,17 @@ class GovernanceMergeTrainReadStore(Protocol):
 
 @dataclass(frozen=True)
 class LiveGovernanceCurrentReadinessProvider:
-    repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider
-    github_token: Callable[[], str]
+    github_token: Callable[[str], str]
+    evaluator_factory: Callable[
+        [object, ChangeImpactRepositoryEvidenceProvider, str],
+        object,
+    ] = lambda store, provider, token: LiveMergeAdmissionEvaluator(
+        store=store,
+        repository_evidence_provider=provider,
+        technical_check_client=TenantAdmissionControllerGitHubClient(
+            transport=UrllibMergeTrainGitHubTransport(token=token)
+        ),
+    )
 
     def __call__(
         self,
@@ -92,6 +102,7 @@ class LiveGovernanceCurrentReadinessProvider:
         repository_evidence: ChangeImpactRepositoryEvidence,
         base_branch: str,
         evaluated_at: str,
+        github_token_env_var: str,
     ) -> GovernanceMergeReadinessFacet:
         repository = repository_evidence.target.repository
         pull_request_number = repository_evidence.target.pull_request_number
@@ -121,7 +132,7 @@ class LiveGovernanceCurrentReadinessProvider:
                 for item in landing_record.landing_plan.entries
                 if item.pull_request_number == pull_request_number
             )
-            if entry.status in {"merged", "skipped"}:
+            if entry.status in {"merged", "skipped", "stale", "blocked"}:
                 return _inactive_readiness()
             candidate_store = require_merge_train_batch_candidate_record_store(store)
             candidate_matches = tuple(
@@ -148,7 +159,7 @@ class LiveGovernanceCurrentReadinessProvider:
             )
             if not controller_records:
                 return _unavailable_readiness()
-            token = self.github_token().strip()
+            token = self.github_token(github_token_env_var).strip()
             if not token:
                 return _unavailable_readiness()
             stack_collapse_record = _stack_collapse_record(
@@ -161,11 +172,12 @@ class LiveGovernanceCurrentReadinessProvider:
                     else ""
                 ),
             )
-            evaluator = LiveMergeAdmissionEvaluator(
-                store=store,
-                repository_evidence_provider=self.repository_evidence_provider,
-                technical_check_client=TenantAdmissionControllerGitHubClient(
-                    transport=UrllibMergeTrainGitHubTransport(token=token)
+            evaluator = cast(
+                LiveMergeAdmissionEvaluator,
+                self.evaluator_factory(
+                    store,
+                    _ResolvedRepositoryEvidenceProvider(repository_evidence),
+                    token,
                 ),
             )
             base = repository_evidence.base
@@ -211,32 +223,42 @@ def build_governance_projection(
     target: ChangeImpactTargetReference,
     base_branch: str,
     generated_at: str,
+    repository_evidence: ChangeImpactRepositoryEvidence | None = None,
+    github_token_env_var: str = "",
 ) -> GovernanceProjection:
-    repository_evidence = repository_evidence_provider.resolve(target)
+    resolved_repository_evidence = repository_evidence or repository_evidence_provider.resolve(
+        target
+    )
+    snapshot_provider = _ResolvedRepositoryEvidenceProvider(resolved_repository_evidence)
     decision = evaluate_owner_acceptance(
         store=store,
-        repository_evidence_provider=repository_evidence_provider,
+        repository_evidence_provider=snapshot_provider,
         target=target,
         evaluated_at=generated_at,
     )
     history = require_owner_acceptance_event_store(store).list_owner_acceptance_event_records(
-        repository_id=repository_evidence.target.repository_id,
-        pull_request_number=repository_evidence.target.pull_request_number,
+        repository_id=resolved_repository_evidence.target.repository_id,
+        pull_request_number=resolved_repository_evidence.target.pull_request_number,
     )
     readiness = current_readiness_provider(
         store=store,
-        repository_evidence=repository_evidence,
+        repository_evidence=resolved_repository_evidence,
         base_branch=base_branch,
         evaluated_at=generated_at,
+        github_token_env_var=github_token_env_var,
     )
     admission_store = require_merge_admission_record_store(store)
     admissions = admission_store.list_merge_admission_records(
-        repository=repository_evidence.target.repository,
+        repository=resolved_repository_evidence.target.repository,
         base_branch=base_branch,
-        pull_request_number=repository_evidence.target.pull_request_number,
-        limit=1,
+        pull_request_number=resolved_repository_evidence.target.pull_request_number,
+        limit=100,
     )
     admission = admissions[0] if admissions else None
+    admission_target_status = _admission_target_status(
+        admission=admission,
+        repository_evidence=resolved_repository_evidence,
+    )
     outcomes = (
         admission_store.list_merge_landing_outcome_records(
             admission_id=admission.admission_id,
@@ -247,18 +269,34 @@ def build_governance_projection(
     )
     outcome = outcomes[0] if outcomes else None
     return GovernanceProjection(
-        target=repository_evidence.target,
+        target=resolved_repository_evidence.target,
         owner_judgment=GovernanceOwnerJudgmentFacet(
             current=decision,
-            history=tuple(_owner_history_entry(event) for event in history),
+            history=tuple(
+                _owner_history_entry(
+                    event,
+                    repository_evidence=resolved_repository_evidence,
+                    current_event_ids=_current_owner_event_ids(decision),
+                )
+                for event in history
+            ),
         ),
         merge_readiness=readiness,
         merge_admission=GovernanceMergeAdmissionFacet(
-            admitted=admission is not None,
+            status=(
+                "not_recorded"
+                if admission is None
+                else (
+                    "admitted_current_target"
+                    if admission_target_status == "current"
+                    else "admitted_historical_target"
+                )
+            ),
             authorizes=("one_exact_merge_attempt",) if admission is not None else (),
             record=admission,
         ),
         landing_outcome=GovernanceLandingOutcomeFacet(
+            target_status=admission_target_status if outcome is not None else "none",
             status=outcome.status if outcome is not None else "not_observed",
             landed=outcome is not None and outcome.status == "landed",
             record=outcome,
@@ -271,11 +309,62 @@ def build_governance_projection(
     )
 
 
-def _owner_history_entry(event: OwnerAcceptanceEventRecord) -> GovernanceOwnerHistoryEntry:
+@dataclass(frozen=True, slots=True)
+class _ResolvedRepositoryEvidenceProvider:
+    evidence: ChangeImpactRepositoryEvidence
+
+    def resolve(self, target: ChangeImpactTargetReference) -> ChangeImpactRepositoryEvidence:
+        if (
+            target.repository.lower() != self.evidence.target.repository.lower()
+            or target.pull_request_number != self.evidence.target.pull_request_number
+        ):
+            raise LookupError("Resolved repository evidence does not match the requested target.")
+        return self.evidence
+
+
+def _owner_history_entry(
+    event: OwnerAcceptanceEventRecord,
+    *,
+    repository_evidence: ChangeImpactRepositoryEvidence,
+    current_event_ids: frozenset[str],
+) -> GovernanceOwnerHistoryEntry:
     return GovernanceOwnerHistoryEntry(
         record=event,
         human_action_semantics=owner_acceptance_human_action_semantics(event.action),
+        target_status=(
+            "current"
+            if event.binding.head_sha == repository_evidence.target.head_sha
+            and event.binding.tree_sha == repository_evidence.target.tree_sha
+            else "historical"
+        ),
+        decision_relationship=("current" if event.event_id in current_event_ids else "historical"),
     )
+
+
+def _current_owner_event_ids(decision: object) -> frozenset[str]:
+    event_ids: set[str] = set()
+    current_event = getattr(decision, "current_event", None)
+    if current_event is not None:
+        event_ids.add(current_event.event_id)
+    for product in getattr(decision, "products", ()):
+        if product.current_event is not None:
+            event_ids.add(product.current_event.event_id)
+    return frozenset(event_ids)
+
+
+def _admission_target_status(
+    *,
+    admission: MergeAdmissionRecord | None,
+    repository_evidence: ChangeImpactRepositoryEvidence,
+) -> Literal["current", "historical", "none"]:
+    if admission is None:
+        return "none"
+    if (
+        admission.pull_request_head_sha == repository_evidence.target.head_sha
+        and admission.pull_request_head_tree_sha == repository_evidence.target.tree_sha
+    ):
+        return "current"
+    return "historical"
 
 
 def _inactive_readiness() -> GovernanceMergeReadinessFacet:

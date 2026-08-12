@@ -2558,4 +2558,6 @@ The governance projection adds no record stream. It reads the immutable Owner,
 admission, and landing records above and may attach a freshly recomputed
 ephemeral L2 view. A missing current L2 result never mutates or weakens the
 stored evidence; the projection reports `not_active` or `unavailable` and keeps
-historical facts independently visible.
+historical facts independently visible. Owner events and admission/outcome
+records are marked current or historical relative to the resolved PR head/tree;
+historical records never grant current effect authority.

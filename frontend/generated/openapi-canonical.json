@@ -8274,6 +8274,20 @@
       "GovernanceLandingOutcomeFacet": {
         "additionalProperties": false,
         "properties": {
+          "authoritative": {
+            "const": false,
+            "default": false,
+            "title": "Authoritative",
+            "type": "boolean"
+          },
+          "authorizes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Authorizes",
+            "type": "array"
+          },
           "landed": {
             "title": "Landed",
             "type": "boolean"
@@ -8303,9 +8317,19 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "target_status": {
+            "enum": [
+              "current",
+              "historical",
+              "none"
+            ],
+            "title": "Target Status",
+            "type": "string"
           }
         },
         "required": [
+          "target_status",
           "status",
           "landed"
         ],
@@ -8315,8 +8339,10 @@
       "GovernanceMergeAdmissionFacet": {
         "additionalProperties": false,
         "properties": {
-          "admitted": {
-            "title": "Admitted",
+          "authoritative": {
+            "const": false,
+            "default": false,
+            "title": "Authoritative",
             "type": "boolean"
           },
           "authorizes": {
@@ -8327,6 +8353,12 @@
             },
             "title": "Authorizes",
             "type": "array"
+          },
+          "current_effect_authority": {
+            "const": false,
+            "default": false,
+            "title": "Current Effect Authority",
+            "type": "boolean"
           },
           "level": {
             "const": 3,
@@ -8349,10 +8381,19 @@
                 "type": "null"
               }
             ]
+          },
+          "status": {
+            "enum": [
+              "not_recorded",
+              "admitted_current_target",
+              "admitted_historical_target"
+            ],
+            "title": "Status",
+            "type": "string"
           }
         },
         "required": [
-          "admitted"
+          "status"
         ],
         "title": "GovernanceMergeAdmissionFacet",
         "type": "object"
@@ -8433,6 +8474,14 @@
             "title": "Authorizes",
             "type": "array"
           },
+          "decision_relationship": {
+            "enum": [
+              "current",
+              "historical"
+            ],
+            "title": "Decision Relationship",
+            "type": "string"
+          },
           "human_action_semantics": {
             "enum": [
               "none",
@@ -8447,11 +8496,21 @@
           },
           "record": {
             "$ref": "#/components/schemas/OwnerAcceptanceEventRecord"
+          },
+          "target_status": {
+            "enum": [
+              "current",
+              "historical"
+            ],
+            "title": "Target Status",
+            "type": "string"
           }
         },
         "required": [
           "record",
-          "human_action_semantics"
+          "human_action_semantics",
+          "target_status",
+          "decision_relationship"
         ],
         "title": "GovernanceOwnerHistoryEntry",
         "type": "object"

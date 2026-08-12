@@ -3152,6 +3152,8 @@ export function governanceProjectionForFixture(
           {
             record: acceptedEvent,
             human_action_semantics: "product_review_accepted",
+            target_status: "current",
+            decision_relationship: scenario === "15" ? "historical" : "current",
             authorizes: [],
           },
           ...(scenario === "15"
@@ -3159,6 +3161,8 @@ export function governanceProjectionForFixture(
                 {
                   record: revokedEvent,
                   human_action_semantics: "product_review_revoked" as const,
+                  target_status: "current" as const,
+                  decision_relationship: "current" as const,
                   authorizes: [],
                 },
               ]
@@ -3177,12 +3181,17 @@ export function governanceProjectionForFixture(
       merge_admission: {
         level: 3,
         mode: "immutable_attempt_authorization",
-        admitted: admission !== null,
+        authoritative: false,
+        status: admission ? "admitted_current_target" : "not_recorded",
+        current_effect_authority: false,
         authorizes: admission ? ["one_exact_merge_attempt"] : [],
         record: admission,
       },
       landing_outcome: {
         mode: "immutable_provider_observation",
+        authoritative: false,
+        authorizes: [],
+        target_status: outcome ? "current" : "none",
         status: outcome?.status ?? "not_observed",
         landed: outcome?.status === "landed",
         record: outcome,

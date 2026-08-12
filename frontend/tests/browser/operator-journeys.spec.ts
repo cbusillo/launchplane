@@ -758,7 +758,7 @@ test.describe("operator journeys", () => {
     await expect(owner).toContainText("authorizes: []");
     await expect(owner).toContainText("product_review_accepted");
     await expect(page.getByText("No admission recorded", { exact: true })).toBeVisible();
-    await expect(page.getByText("Not Observed", { exact: true })).toBeVisible();
+    await expect(page.getByText("Not Observed · None target", { exact: true })).toBeVisible();
     await expect(page.getByText("Neutral · non-blocking", { exact: true })).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "governance-evidence-independent-facets");
@@ -774,8 +774,8 @@ test.describe("operator journeys", () => {
 
     const owner = page.getByRole("region", { name: "Level 1 historical Owner judgment" });
     await expect(owner.getByText("Revoked", { exact: true }).first()).toBeVisible();
-    await expect(page.getByRole("region", { name: "Level 3 immutable merge admission" })).toContainText("Admitted");
-    await expect(page.getByRole("region", { name: "Separate landing outcome" })).toContainText("Landed");
+    await expect(page.getByRole("region", { name: "Level 3 immutable merge admission" })).toContainText("Recorded for current target");
+    await expect(page.getByRole("region", { name: "Separate landing outcome" })).toContainText("Landed · Current target");
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "governance-evidence-revoked-after-landing");
     diagnostics.assertClean();

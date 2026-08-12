@@ -255,6 +255,8 @@ function GovernanceOwnerFacet({ projection }: { projection: GovernanceProjection
                 <span>{entry.record.binding.product}</span>
                 <time dateTime={entry.record.occurred_at}>{formatTime(entry.record.occurred_at)}</time>
                 <code>{entry.human_action_semantics}</code>
+                <code>{entry.target_status} target</code>
+                <code>{entry.decision_relationship} decision</code>
               </li>
             ))}
           </ol>
@@ -365,16 +367,23 @@ function ReadinessSubfacet({
 
 function GovernanceAdmissionFacet({ projection }: { projection: GovernanceProjection }) {
   const admission = projection.merge_admission;
+  const status =
+    admission.status === "admitted_current_target"
+      ? "Recorded for current target"
+      : admission.status === "admitted_historical_target"
+        ? "Historical admission"
+        : "No admission recorded";
   return (
     <section className="governance-facet" aria-label="Level 3 immutable merge admission">
       <GovernanceFacetHeader
         eyebrow="Level 3 · immutable attempt"
         label="Merge admission"
-        status={admission.admitted ? "pass" : "skipped"}
-        value={admission.admitted ? "Admitted" : "No admission recorded"}
+        status={admission.status === "not_recorded" ? "skipped" : "unknown"}
+        value={status}
       />
       <p className="governance-authority-note">
-        Admission authorizes one exact provider-effect attempt. It does not mean the pull
+        Admission authorized one exact provider-effect attempt at record creation. It is
+        immutable history, grants no current effect authority, and does not mean the pull
         request landed.
       </p>
       {admission.record ? (
@@ -396,7 +405,7 @@ function GovernanceLandingFacet({ projection }: { projection: GovernanceProjecti
         eyebrow="Provider observation · durable"
         label="Landing outcome"
         status={landingTone(landing.status)}
-        value={humanize(landing.status)}
+        value={`${humanize(landing.status)} · ${humanize(landing.target_status)} target`}
       />
       <p className="governance-authority-note">
         Landed, rejected, and reconcile required are independent observations. Missing
@@ -433,7 +442,9 @@ function GovernanceAdvisoryFacet({ projection }: { projection: GovernanceProject
       {projection.advisory_observations.length ? (
         <ul className="governance-advisory-list">
           {projection.advisory_observations.map((entry) => (
-            <li key={`${entry.observation_scope}:${entry.observation.name}`}>
+            <li
+              key={`${entry.observation_scope}:${entry.observation.name}:${entry.observation.app_id ?? 0}:${entry.observation.state}`}
+            >
               <strong>{entry.observation.name}</strong>
               <span>{humanize(entry.observation.state)}</span>
               <code>{entry.observation_scope}</code>

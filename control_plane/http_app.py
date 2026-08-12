@@ -21008,11 +21008,7 @@ def create_launchplane_fastapi_app(
             common=read_route_dependencies,
             repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
             current_readiness_provider=LiveGovernanceCurrentReadinessProvider(
-                repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
-                github_token=lambda: resolve_launchplane_github_token(
-                    control_plane_root=resolved_control_plane_root,
-                    context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ),
+                github_token=lambda env_var: os.environ.get(env_var, "").strip(),
             ),
             now=utc_now_timestamp,
         ),

@@ -28,6 +28,7 @@ GovernanceReadinessReason = Literal[
     "current_evidence_unavailable",
 ]
 GovernanceAdvisoryObservationScope = Literal["current_readiness", "admission_readiness"]
+GovernanceEvidenceTargetStatus = Literal["current", "historical", "none"]
 
 
 class GovernanceOwnerHistoryEntry(BaseModel):
@@ -35,6 +36,8 @@ class GovernanceOwnerHistoryEntry(BaseModel):
 
     record: OwnerAcceptanceEventRecord
     human_action_semantics: OwnerAcceptanceHumanActionSemantics
+    target_status: Literal["current", "historical"]
+    decision_relationship: Literal["current", "historical"]
     authorizes: tuple[str, ...] = ()
 
     @model_validator(mode="after")
@@ -109,7 +112,13 @@ class GovernanceMergeAdmissionFacet(BaseModel):
 
     level: Literal[3] = 3
     mode: Literal["immutable_attempt_authorization"] = "immutable_attempt_authorization"
-    admitted: bool
+    authoritative: Literal[False] = False
+    status: Literal[
+        "not_recorded",
+        "admitted_current_target",
+        "admitted_historical_target",
+    ]
+    current_effect_authority: Literal[False] = False
     authorizes: tuple[Literal["one_exact_merge_attempt"], ...] = ()
     record: MergeAdmissionRecord | None = None
 
@@ -118,7 +127,11 @@ class GovernanceMergeAdmissionFacet(BaseModel):
         expected_authorizes: tuple[Literal["one_exact_merge_attempt"], ...] = (
             ("one_exact_merge_attempt",) if self.record is not None else ()
         )
-        if self.admitted != (self.record is not None) or self.authorizes != expected_authorizes:
+        if self.record is None and self.status != "not_recorded":
+            raise ValueError("Missing Level 3 admission requires status=not_recorded")
+        if self.record is not None and self.status == "not_recorded":
+            raise ValueError("Level 3 admission evidence requires a recorded status")
+        if self.authorizes != expected_authorizes:
             raise ValueError("Level 3 admission semantics must match the immutable record")
         return self
 
@@ -127,15 +140,24 @@ class GovernanceLandingOutcomeFacet(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     mode: Literal["immutable_provider_observation"] = "immutable_provider_observation"
+    authoritative: Literal[False] = False
+    authorizes: tuple[str, ...] = ()
+    target_status: GovernanceEvidenceTargetStatus
     status: Literal["not_observed", "landed", "rejected", "reconcile_required"]
     landed: bool
     record: MergeLandingOutcomeRecord | None = None
 
     @model_validator(mode="after")
     def _validate_facet(self) -> "GovernanceLandingOutcomeFacet":
+        if self.authorizes:
+            raise ValueError("Landing outcome observations authorize no effect")
         expected_status = self.record.status if self.record is not None else "not_observed"
         if self.status != expected_status or self.landed != (expected_status == "landed"):
             raise ValueError("Landing outcome semantics must match the immutable record")
+        if self.record is None and self.target_status != "none":
+            raise ValueError("Missing landing outcome evidence requires target_status=none")
+        if self.record is not None and self.target_status == "none":
+            raise ValueError("Landing outcome evidence requires a current or historical target")
         return self
 
 
