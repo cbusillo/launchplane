@@ -15338,15 +15338,17 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if current_record != expected_record:
                 raise ValueError("Dokploy target record changed during domain authority repair.")
-            target_id_row = session.scalar(
+            target_id_statement = (
                 select(LaunchplaneDokployTargetIdRow)
                 .where(
                     LaunchplaneDokployTargetIdRow.context == expected_target_id_record.context,
                     LaunchplaneDokployTargetIdRow.instance == expected_target_id_record.instance,
                 )
                 .limit(1)
-                .with_for_update()
             )
+            if not self.database_url.startswith("sqlite"):
+                target_id_statement = target_id_statement.with_for_update()
+            target_id_row = session.scalar(target_id_statement)
             if target_id_row is None:
                 raise FileNotFoundError(
                     "Dokploy target-id record was missing during compare-and-write."
@@ -15357,7 +15359,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if current_target_id_record != expected_target_id_record:
                 raise ValueError("Dokploy target-id record changed during domain authority repair.")
-            provider_row = session.scalar(
+            provider_statement = (
                 select(LaunchplaneProviderTargetRow)
                 .where(
                     LaunchplaneProviderTargetRow.context == expected_provider_target_record.context,
@@ -15365,8 +15367,10 @@ class PostgresRecordStore(HumanSessionStore):
                     == expected_provider_target_record.instance,
                 )
                 .limit(1)
-                .with_for_update()
             )
+            if not self.database_url.startswith("sqlite"):
+                provider_statement = provider_statement.with_for_update()
+            provider_row = session.scalar(provider_statement)
             if provider_row is None:
                 raise FileNotFoundError(
                     "Provider-target record was missing during compare-and-write."

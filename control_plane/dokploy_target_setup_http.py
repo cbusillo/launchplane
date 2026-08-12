@@ -214,7 +214,7 @@ def fetch_dokploy_target_domains_for_setup(
             token=token,
             application_id=target_id,
         )
-    raise click.ClickException(f"Unsupported Dokploy target type: {target_type}")
+    raise ValueError(f"Unsupported Dokploy target type: {target_type}")
 
 
 def delete_dokploy_domain_for_target_setup(*, host: str, token: str, domain_id: str) -> None:

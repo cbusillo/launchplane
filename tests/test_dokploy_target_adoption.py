@@ -283,12 +283,59 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                 expected_current_provider_target=provider_target.to_deployed_target_reference(),
                 fetch_target_payload=lambda *_args: {"applicationId": target_id_record.target_id},
                 fetch_target_domains=lambda *_args: self._live_domains(
-                    "one.synthetic.invalid", "one.synthetic.invalid"
+                    "One.Synthetic.Invalid", "one.synthetic.invalid"
                 ),
             )
             store.close()
 
         self.assertEqual(result.live_provider_domains, ("one.synthetic.invalid",))
+
+    def test_repair_domain_authority_rejects_timestamp_before_target_id(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            target_record = DokployTargetRecord(
+                context="synthetic-context",
+                instance="synthetic-instance",
+                target_type="application",
+                target_name="synthetic-target",
+                updated_at="2026-08-12T00:00:00Z",
+            )
+            target_id_record = DokployTargetIdRecord(
+                context=target_record.context,
+                instance=target_record.instance,
+                target_id="application-synthetic",
+                updated_at="2026-08-12T01:00:00Z",
+            )
+            provider_target = ProviderTargetRecord.from_dokploy_records(
+                target_record=target_record,
+                target_id_record=target_id_record,
+            )
+            store.write_dokploy_target_record(target_record)
+            store.write_dokploy_target_id_record(target_id_record)
+            store.write_provider_target_record(provider_target)
+            with self.assertRaisesRegex(ValueError, "cannot precede target-id authority"):
+                repair_dokploy_target_domain_authority(
+                    record_store=store,
+                    host="synthetic-host",
+                    token="synthetic-token",
+                    context=target_record.context,
+                    instance=target_record.instance,
+                    target_type="application",
+                    target_id=target_id_record.target_id,
+                    domains=("one.synthetic.invalid",),
+                    expected_current_provider_target=(
+                        provider_target.to_deployed_target_reference()
+                    ),
+                    updated_at="2026-08-12T00:30:00Z",
+                    fetch_target_payload=lambda *_args: {
+                        "applicationId": target_id_record.target_id
+                    },
+                    fetch_target_domains=lambda *_args: self._live_domains("one.synthetic.invalid"),
+                )
+            store.close()
 
     def test_normalize_dokploy_domain_host_rejects_url(self) -> None:
         with self.assertRaisesRegex(ValueError, "bare DNS hosts"):

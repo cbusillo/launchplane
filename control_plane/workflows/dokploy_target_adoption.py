@@ -180,6 +180,10 @@ def repair_dokploy_target_domain_authority(
         raise ValueError(
             "Dokploy domain authority repair provider-target identity is inconsistent."
         )
+    if recorded_at < target_id_record.updated_at:
+        raise ValueError(
+            "Dokploy domain authority repair timestamp cannot precede target-id authority."
+        )
 
     provider_payload = fetch_target_payload(host, token, target_type, normalized_target_id)
     identity_key = "applicationId" if target_type == "application" else "composeId"
@@ -189,14 +193,14 @@ def repair_dokploy_target_domain_authority(
             "Dokploy domain authority repair live provider target identity did not match."
         )
 
-    live_provider_domains = normalize_dokploy_domain_hosts(
-        tuple(
-            dict.fromkeys(
-                str(domain.get("host") or "")
-                for domain in fetch_target_domains(host, token, target_type, normalized_target_id)
-            )
+    live_provider_domains = tuple(
+        dict.fromkeys(
+            normalize_dokploy_domain_host(str(domain.get("host") or ""))
+            for domain in fetch_target_domains(host, token, target_type, normalized_target_id)
         )
     )
+    if not live_provider_domains:
+        raise ValueError("Dokploy domain authority requires at least one live provider DNS host.")
     if tuple(sorted(requested_domains)) != tuple(sorted(live_provider_domains)):
         raise ValueError(
             "Dokploy domain authority repair requested domains did not exactly match live provider domains."
@@ -239,7 +243,7 @@ def repair_dokploy_target_domain_authority(
         live_provider_domains=live_provider_domains,
         warnings=()
         if apply
-        else ("dry run only; provider was not mutated and records were not written",),
+        else ("dry run only; records were not written and provider remained read-only",),
     )
 
 
