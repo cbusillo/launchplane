@@ -3,9 +3,6 @@ from unittest import TestCase
 
 
 _PRODUCTION_MUTATION_WORKFLOW_PATHS = (
-    Path(".github/workflows/product-context-cutover.yml"),
-    Path(".github/workflows/product-context-cutover-audit.yml"),
-    Path(".github/workflows/product-legacy-context-cleanup.yml"),
     Path(".github/workflows/odoo-config-parameter-override.yml"),
     Path(".github/workflows/odoo-target-replacement-plan.yml"),
     Path(".github/workflows/odoo-target-replacement-apply.yml"),

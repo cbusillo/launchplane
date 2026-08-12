@@ -407,7 +407,6 @@ Current implementation scope:
 - `POST /v1/route-bindings/external/reconcile`
 - `POST /v1/provider-targets/operations`
 - `POST /v1/product-onboarding/apply`
-- `POST /v1/product-profiles/context-cutover/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
 - `POST /v1/every-code/notification-policies/apply`
 - `POST /v1/public-ingress/notification-policies/apply`
@@ -1115,44 +1114,6 @@ volume identity. After apply, rerun Odoo Target Replacement Plan; add target-
 replacement apply authority only after that plan returns `ready`. Disable the
 policy through the same dry-run/apply workflow after recovery if no further
 prelaunch rebuild should remain authorized.
-
-The manual Product Context Cutover workflow plans or applies the same
-current-authority record move through the Launchplane service. The workflow
-does not carry product/context defaults; operators must provide the product,
-legacy source context, canonical target context, and display name explicitly.
-Run it first with `dry_run=true`; run with `dry_run=false` only after the
-artifact shows the expected key/count metadata for runtime records, managed
-secrets, Dokploy targets, target IDs, inventories, release tuples, and the
-product profile lane contexts. The workflow intentionally leaves append-only deployments,
-promotions, backup gates, and preview history on their original contexts.
-
-The same protected workflow temporarily exposes `operation=lane-context-repair`
-for the final migration-only repair tracked by #2114. This operation changes
-exactly one named lane from an expected historical context to the canonical
-product context. It fails closed unless both context routes still resolve to
-the same provider, target category, and physical target ID; no third route may
-claim that identity. Run a dry-run first and review the profile, plan, source-
-target, and target-target SHA-256 values. Apply requires the unchanged profile
-digest, reviewed plan digest, operator reason, and a unique idempotency key.
-The service atomically compares the profile and both provider-target records
-before writing only the profile lane pointer, source label, and timestamp. It
-does not mutate provider, runtime, secret, inventory, release, deployment,
-promotion, backup-gate, or preview authority. Remove this temporary operation
-with the migration-only context subsystem after #2114 completes, as tracked by
-#2115.
-
-After a cutover has been applied and the product profile no longer references
-the legacy context, run the manual Product Legacy Context Cleanup workflow with
-`dry_run=true`. The artifact reports mutable source records that can be cleaned:
-runtime environment records and Dokploy target lookups are deleted only when the
-matching target-context record already exists, and managed secret records and
-bindings are disabled rather than deleted. Run with `dry_run=false` only when
-`blocked=false`. Inventory records, release tuples, deployments, promotions,
-backup gates, and preview history are preserved as historical evidence.
-Launchplane keeps the legacy context in the product profile's
-`historical_contexts` metadata after cutover so product activity queries still
-show pre-cutover evidence while deploy and config authority use the current lane
-contexts.
 
 Render an explicit emergency bootstrap policy for service startup with:
 
