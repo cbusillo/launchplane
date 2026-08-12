@@ -331,15 +331,9 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/preview-lifecycle.yml": {
         "inputs.apply.default": frozenset(("false",)),
     },
-    ".github/workflows/product-context-cutover.yml": {
-        "inputs.dry_run.default": frozenset(("true",)),
-    },
     ".github/workflows/product-environment-evidence.yml": {
         "inputs.routes_json.default": frozenset(("[]",)),
         "inputs.target_set.default": frozenset(("configured-json",)),
-    },
-    ".github/workflows/product-legacy-context-cleanup.yml": {
-        "inputs.dry_run.default": frozenset(("true",)),
     },
     ".github/workflows/provider-target-operations.yml": {
         "inputs.mode.default": frozenset(("audit",)),
@@ -690,24 +684,11 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "REQUESTED_REPOSITORY": frozenset(("${{ inputs.repository }}",)),
         "REQUESTED_BASE_BRANCH": frozenset(("${{ inputs.base_branch }}",)),
     },
-    ".github/workflows/product-context-cutover.yml": {
-        "SOURCE_CONTEXT": frozenset(("${{ inputs.source_context }}",)),
-        "TARGET_CONTEXT": frozenset(("${{ inputs.target_context }}",)),
-    },
-    ".github/workflows/product-context-cutover-audit.yml": {
-        "PREVIEW_CONTEXT": frozenset(("${{ inputs.preview_context }}",)),
-        "SOURCE_CONTEXT": frozenset(("${{ inputs.source_context }}",)),
-        "TARGET_CONTEXT": frozenset(("${{ inputs.target_context }}",)),
-    },
     ".github/workflows/product-environment-evidence.yml": {
         "ENVIRONMENT": frozenset(("${{ matrix.route.environment }}",)),
         "PROVIDER_ID": frozenset(("${{ inputs.provider_id }}",)),
         "PRODUCT": frozenset(("${{ matrix.route.product }}",)),
         "TARGET_SET": frozenset(("${{ inputs.target_set }}",)),
-    },
-    ".github/workflows/product-legacy-context-cleanup.yml": {
-        "SOURCE_CONTEXT": frozenset(("${{ inputs.source_context }}",)),
-        "TARGET_CONTEXT": frozenset(("${{ inputs.target_context }}",)),
     },
     ".github/workflows/provider-target-operations.yml": {
         "PROVIDER_ID": frozenset(("${{ inputs.provider_id }}",)),
@@ -777,9 +758,7 @@ WORKFLOW_OPERATOR_VARIABLE_FORWARD_PATHS = frozenset(
         ".github/workflows/odoo-target-replacement-apply.yml",
         ".github/workflows/odoo-target-replacement-plan.yml",
         ".github/workflows/odoo-website-bootstrap-override.yml",
-        ".github/workflows/product-context-cutover.yml",
         ".github/workflows/product-environment-evidence.yml",
-        ".github/workflows/product-legacy-context-cleanup.yml",
         ".github/workflows/tracked-target-logs.yml",
     )
 )
@@ -1012,13 +991,6 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "response-output-file": frozenset(("launchplane-preview-lifecycle-sweep-response.json",)),
         "route-path": frozenset(("/v1/previews/lifecycle-sweep",)),
     },
-    ".github/workflows/product-context-cutover-audit.yml": {
-        "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
-        "fail-result-paths": frozenset(('""',)),
-        "method": frozenset(("GET",)),
-        "response-output-file": frozenset(("launchplane-context-cutover-audit.json",)),
-        "route-path": frozenset(("${{ steps.request.outputs.route_path }}",)),
-    },
     ".github/workflows/product-environment-evidence.yml": {
         "audience": frozenset(("${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}",)),
         "fail-result-paths": frozenset(('""',)),
@@ -1091,14 +1063,6 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
             )
         ),
         "payload-file": frozenset((".launchplane/odoo-website-bootstrap-override-payload.json",)),
-    },
-    ".github/workflows/product-context-cutover.yml": {
-        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
-        "payload-file": frozenset(("launchplane-product-context-cutover-payload.json",)),
-    },
-    ".github/workflows/product-legacy-context-cleanup.yml": {
-        "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
-        "payload-file": frozenset(("launchplane-product-legacy-context-cleanup-payload.json",)),
     },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
         "EXPECTED_PRODUCT_REPOSITORY": frozenset(("${{ inputs.product_repository }}",)),

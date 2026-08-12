@@ -133,3 +133,13 @@ each later L3 attempt. A lost, missing, expired, or wrong-owner lease; controlle
 scope mismatch; expected-SHA mismatch; current-head drift; queue movement;
 policy drift; or evidence loss produces a non-ready result. A previous L2 result
 is never reusable authority.
+
+The production guarded landing adapter follows this rule for every constituent
+PR and persists the complete result only inside the subsequent immutable L3
+admission. See [merge-admission.md](merge-admission.md).
+
+The read-only governance projection uses the same live admission evaluator only
+when an active landing-plan lineage exists. It never persists the recomputed L2
+view and reports current evidence as unavailable rather than reusing a prior
+admission snapshot as current readiness. The immutable admission snapshot
+remains independently inspectable.

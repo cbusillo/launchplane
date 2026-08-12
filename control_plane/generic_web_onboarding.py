@@ -19,6 +19,7 @@ from control_plane.contracts.product_onboarding_manifest import (
 )
 from control_plane.contracts.product_profile_record import (
     PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL,
+    LaunchplaneProductProfileRecord,
     ProductRuntimeConfigRequirement,
 )
 
@@ -157,6 +158,19 @@ def generic_web_onboarding_plan_sha256(intent: GenericWebOnboardingIntent) -> st
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def validate_generic_web_onboarding_is_new_product(
+    *,
+    intent: GenericWebOnboardingIntent,
+    existing_profile: LaunchplaneProductProfileRecord | None,
+) -> None:
+    if existing_profile is None:
+        return
+    raise ValueError(
+        "Generic-web onboarding only creates new products; existing product "
+        f"{intent.product} must use a bounded product-profile or manifest apply path."
+    )
 
 
 def build_generic_web_onboarding_manifest(

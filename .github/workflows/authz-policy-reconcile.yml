@@ -28,6 +28,7 @@ name: Manage Launchplane Authorization
           - product-retirement
           - detached-application-retirement
           - preview-feedback-remediation
+          - generic-web-route-binding
           - odoo-route-binding
           - odoo-external-route-binding
           - odoo-testing-ingress-route
@@ -173,6 +174,18 @@ jobs:
       related_issue: ${{ inputs.related_issue }}
     secrets:
       managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_PREVIEW_FEEDBACK_REMEDIATION_MANAGED_SET_JSON }}
+
+  reconcile-generic-web-route-binding:
+    if: ${{ inputs.managed_set == 'generic-web-route-binding' }}
+    uses: cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@39aecc250d6dee91204e24673725bd1ea1ca6bda # main
+    with:
+      mode: ${{ inputs.mode }}
+      expected_managed_set_id: operator.generic-web-route-binding
+      reviewed_plan_sha256: ${{ inputs.reviewed_plan_sha256 }}
+      reason: ${{ inputs.reason }}
+      related_issue: ${{ inputs.related_issue }}
+    secrets:
+      managed_set_json: ${{ secrets.LAUNCHPLANE_AUTHZ_GENERIC_WEB_ROUTE_BINDING_MANAGED_SET_JSON }}
 
   reconcile-odoo-route-binding:
     if: ${{ inputs.managed_set == 'odoo-route-binding' }}

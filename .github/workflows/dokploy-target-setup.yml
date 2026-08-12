@@ -117,8 +117,10 @@ name: Dokploy Target Setup
         type: string
       expected_current_provider_target_json:
         description: >-
-          JSON deployed target authority required for provider-target compare-and-write
-          fencing, including repair-domain-authority.
+          Optional JSON deployed target authority that must match the existing
+          provider-target row before same-route replacement. It never authorizes
+          cross-route target identity reuse, and is required for
+          repair-domain-authority compare-and-write fencing.
         required: false
         default: ""
         type: string

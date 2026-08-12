@@ -316,13 +316,6 @@ class FastApiReadRouteRegistrarTests(unittest.TestCase):
                 "control_plane.http_routes.products",
             ),
             (
-                "/v1/product-profiles/{product}/context-cutover-audit",
-                "read_product_context_cutover_audit",
-                "read_product_context_cutover_audit",
-                "ProductContextCutoverAuditResponse",
-                "control_plane.http_routes.products",
-            ),
-            (
                 "/v1/contexts/{context}/secrets",
                 "list_context_secret_statuses",
                 "list_context_secret_statuses",
@@ -471,10 +464,9 @@ class FastApiReadRouteRegistrarTests(unittest.TestCase):
             ],
         )
         assert_slice(
-            ("POST", "/v1/product-profiles/legacy-context-cleanup/apply"),
+            ("POST", "/v1/provider-targets/operations"),
             [
-                ("POST", "/v1/product-profiles/legacy-context-cleanup/apply"),
-                ("GET", "/v1/product-profiles/{product}/context-cutover-audit"),
+                ("POST", "/v1/provider-targets/operations"),
                 ("GET", "/v1/contexts/{context}/secrets"),
                 ("GET", "/v1/contexts/{context}/instances/{instance}/secrets"),
                 ("GET", "/v1/secrets/{secret_id}"),

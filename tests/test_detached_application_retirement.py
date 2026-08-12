@@ -745,6 +745,24 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
         )
         self.assertEqual(proof.match_count, 0)
 
+    def test_provider_target_authority_accepts_partial_application_type_evidence(self) -> None:
+        store = _Store()
+        store.sources["provider_target"] = (
+            {
+                "provider_id": "dokploy",
+                "target_category": "application",
+                "provider_target_type": "",
+                "target_id": PROTECTED_IDS[0],
+                "display_name": "detached-application",
+            },
+        )
+        proof = prove_detached_application_authority_absence(
+            record_store=cast(DetachedApplicationRetirementStore, store),
+            candidate_target_id=CANDIDATE_ID,
+            candidate_application_name="detached-application",
+        )
+        self.assertEqual(proof.match_count, 0)
+
     def test_provider_target_authority_retains_candidate_and_weak_evidence_blocks(self) -> None:
         payloads = (
             {
@@ -756,12 +774,6 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
             {
                 "target_category": "unknown",
                 "provider_target_type": "application",
-                "target_id": PROTECTED_IDS[0],
-                "display_name": "detached-application",
-            },
-            {
-                "target_category": "application",
-                "provider_target_type": "",
                 "target_id": PROTECTED_IDS[0],
                 "display_name": "detached-application",
             },

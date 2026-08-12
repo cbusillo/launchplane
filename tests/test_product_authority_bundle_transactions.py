@@ -468,6 +468,125 @@ class ProductAuthorityBundleTransactionTests(unittest.TestCase):
             )
             self.assertFalse((state_dir / ".product_authority_bundle_stages").exists())
 
+    def test_postgres_authority_bundle_rejects_late_cross_route_identity_binding(self) -> None:
+        with TemporaryDirectory() as temporary_dir:
+            store = _FailingPostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_dir) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_provider_target_record(
+                _provider_target(context="foreign", instance="testing")
+            )
+
+            with self.assertRaisesRegex(ValueError, "bound to another route"):
+                store.write_product_authority_bundle(_write_bundle())
+
+            self.assertEqual(len(store.list_provider_target_records()), 1)
+            self.assertEqual(store.list_product_profile_records(), ())
+
+    def test_filesystem_authority_bundle_rejects_late_cross_route_identity_binding(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_dir:
+            store = FilesystemRecordStore(Path(temporary_dir))
+            store.write_provider_target_record(
+                _provider_target(context="foreign", instance="testing")
+            )
+
+            with self.assertRaisesRegex(ValueError, "bound to another route"):
+                store.write_product_authority_bundle(_write_bundle())
+
+            self.assertEqual(len(store.list_provider_target_records()), 1)
+            self.assertEqual(store.list_product_profile_records(), ())
+
+    def test_authority_bundle_allows_declared_temporary_cross_route_identity(self) -> None:
+        for store_factory in (
+            lambda root: _FailingPostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            ),
+            lambda root: FilesystemRecordStore(root),
+        ):
+            with self.subTest(store=store_factory), TemporaryDirectory() as temporary_dir:
+                root = Path(temporary_dir)
+                store = store_factory(root)
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                source_record = _provider_target(context="legacy", instance="testing")
+                store.write_provider_target_record(source_record)
+                target_record = _provider_target(context="canonical", instance="testing")
+                bundle = ProductAuthorityBundle(
+                    provider_target_writes=(
+                        ProviderTargetWrite(
+                            record=target_record,
+                            expected_absent=True,
+                            allowed_conflicting_routes=(("legacy", "testing"),),
+                        ),
+                    )
+                )
+
+                store.write_product_authority_bundle(bundle)
+
+                self.assertEqual(len(store.list_provider_target_records()), 2)
+                close_store = getattr(store, "close", None)
+                if callable(close_store):
+                    close_store()
+
+    def test_direct_provider_target_write_rejects_cross_route_identity(self) -> None:
+        for store_factory in (
+            lambda root: _FailingPostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            ),
+            lambda root: FilesystemRecordStore(root),
+        ):
+            with self.subTest(store=store_factory), TemporaryDirectory() as temporary_dir:
+                root = Path(temporary_dir)
+                store = store_factory(root)
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                store.write_provider_target_record(
+                    _provider_target(context="first", instance="testing")
+                )
+
+                with self.assertRaisesRegex(ValueError, "bound to another route"):
+                    store.write_provider_target_record(
+                        _provider_target(context="second", instance="testing")
+                    )
+
+                self.assertEqual(len(store.list_provider_target_records()), 1)
+                close_store = getattr(store, "close", None)
+                if callable(close_store):
+                    close_store()
+
+    def test_authority_bundle_can_delete_then_rebind_provider_target_identity(self) -> None:
+        for store_factory in (
+            lambda root: _FailingPostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            ),
+            lambda root: FilesystemRecordStore(root),
+        ):
+            with self.subTest(store=store_factory), TemporaryDirectory() as temporary_dir:
+                root = Path(temporary_dir)
+                store = store_factory(root)
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                source_record = _provider_target(context="legacy", instance="testing")
+                store.write_provider_target_record(source_record)
+                target_record = _provider_target(context="canonical", instance="testing")
+
+                store.write_product_authority_bundle(
+                    ProductAuthorityBundle(
+                        delete_provider_targets=(source_record,),
+                        provider_target_writes=(
+                            ProviderTargetWrite(record=target_record, expected_absent=True),
+                        ),
+                    )
+                )
+
+                self.assertEqual(store.list_provider_target_records(), (target_record,))
+                close_store = getattr(store, "close", None)
+                if callable(close_store):
+                    close_store()
+
     def test_postgres_authority_bundle_rolls_back_after_each_write_step(self) -> None:
         write_steps = (
             "write_product_profile",

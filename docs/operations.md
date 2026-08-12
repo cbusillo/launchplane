@@ -2,6 +2,24 @@
 title: Operations
 ---
 
+## Merge Admission Recovery
+
+Treat a merge admission without a terminal outcome as effect-unknown. Do not
+rerun the merge mutation manually and do not infer success from checks,
+candidate status, landing-plan progress, or a sent GitHub request. Re-run the
+Launchplane controller so it observes the exact PR head, target base, merge
+commit/tree, and branch containment through the guarded recovery path.
+
+If the exact PR is already merged, Launchplane appends a `landed` observation.
+If the exact PR remains open and the expected base did not advance, Launchplane
+first appends `process_interrupted` when the attempt lacked an outcome, then
+appends conclusive no-effect evidence with exact open PR, head/tree, and
+base/tree observations; this evidence does not claim that GitHub rejected the
+request. Only then may Launchplane recompute L2 for a fresh admission.
+Contradictory or incomplete evidence remains `reconcile_required` and needs
+operator investigation. Candidate-ref cleanup failures are separate from
+landing truth and may be retried without changing the outcome record.
+
 ## Command Groups
 
 Use `uv run launchplane --help` for the complete CLI surface. The current
@@ -129,11 +147,19 @@ rows and is idempotent. Re-run `storage provider-target-audit` after apply and
 require clean evidence before provider-target authority cutover.
 
 Provider-target dual-write is active for Launchplane-owned target identity
-mutations: product onboarding, Dokploy target adoption/creation, product context
-cutover, and tracked Dokploy target metadata commands. These paths validate an
-existing explicit provider-target row before mutating the Dokploy pair, write the
-Dokploy target/id records, then write the matching provider-target row. A stale
-explicit provider-target row blocks the mutation instead of being overwritten.
+mutations: product onboarding, Dokploy target adoption/creation, and tracked
+Dokploy target metadata commands. These paths validate an existing explicit
+provider-target row before mutating the Dokploy pair, write the Dokploy target/id
+records, then write the matching provider-target row. A stale explicit
+provider-target row blocks the mutation instead of being overwritten.
+A physical provider target identity already bound to another context/instance
+also blocks onboarding or target adoption, even when the requested route
+supplies matching replacement evidence. Product onboarding and target setup
+additionally reject contexts retained as historical product evidence; repair the
+current product profile before onboarding or target setup instead of reactivating
+the historical route. The generic-web onboarding workflow is new-product-only;
+existing product changes use the bounded profile or advanced manifest apply
+surface.
 
 ## Mutation Reservation Recovery
 
@@ -381,7 +407,6 @@ Current implementation scope:
 - `POST /v1/route-bindings/external/reconcile`
 - `POST /v1/provider-targets/operations`
 - `POST /v1/product-onboarding/apply`
-- `POST /v1/product-profiles/context-cutover/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
 - `POST /v1/every-code/notification-policies/apply`
 - `POST /v1/public-ingress/notification-policies/apply`
@@ -474,6 +499,10 @@ must declare `operator.generic-web-onboarding` and must not contain product
 repository, product context, target, domain, or per-product preview rules;
 `LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON` owns the generic
 Product Health Monitoring wrapper's exact immutable worker grant;
+`LAUNCHPLANE_AUTHZ_GENERIC_WEB_ROUTE_BINDING_MANAGED_SET_JSON` owns independent
+exact-instance route-binding read/apply grants for generic-web stable lanes and
+must declare `operator.generic-web-route-binding`. Keep real products, contexts,
+instances, and immutable workflow identities only in that protected secret;
 `LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
 Odoo stable managed route-binding set.
 `LAUNCHPLANE_AUTHZ_PREVIEW_FEEDBACK_REMEDIATION_MANAGED_SET_JSON` owns the
@@ -1089,29 +1118,6 @@ volume identity. After apply, rerun Odoo Target Replacement Plan; add target-
 replacement apply authority only after that plan returns `ready`. Disable the
 policy through the same dry-run/apply workflow after recovery if no further
 prelaunch rebuild should remain authorized.
-
-The manual Product Context Cutover workflow plans or applies the same
-current-authority record move through the Launchplane service. The workflow
-does not carry product/context defaults; operators must provide the product,
-legacy source context, canonical target context, and display name explicitly.
-Run it first with `dry_run=true`; run with `dry_run=false` only after the
-artifact shows the expected key/count metadata for runtime records, managed
-secrets, Dokploy targets, target IDs, inventories, release tuples, and the
-product profile lane contexts. The workflow intentionally leaves append-only deployments,
-promotions, backup gates, and preview history on their original contexts.
-
-After a cutover has been applied and the product profile no longer references
-the legacy context, run the manual Product Legacy Context Cleanup workflow with
-`dry_run=true`. The artifact reports mutable source records that can be cleaned:
-runtime environment records and Dokploy target lookups are deleted only when the
-matching target-context record already exists, and managed secret records and
-bindings are disabled rather than deleted. Run with `dry_run=false` only when
-`blocked=false`. Inventory records, release tuples, deployments, promotions,
-backup gates, and preview history are preserved as historical evidence.
-Launchplane keeps the legacy context in the product profile's
-`historical_contexts` metadata after cutover so product activity queries still
-show pre-cutover evidence while deploy and config authority use the current lane
-contexts.
 
 Render an explicit emergency bootstrap policy for service startup with:
 
@@ -2578,22 +2584,26 @@ job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-product-retirem
 
 ## Detached Application Retirement
 
-**Reusable Detached Application Retirement** is the `workflow_call` worker.
-The thin **Detached Application Retirement** `workflow_dispatch` wrapper is
-pinned to the exact worker SHA below. The wrapper only defines manual inputs,
+Phase one provides **Reusable Detached Application Retirement** as a
+`workflow_call`-only worker. Phase two adds the thin
+**Detached Application Retirement** `workflow_dispatch` wrapper, pinned to the
+exact merged worker SHA below. The wrapper only defines the manual inputs,
 forwards them unchanged, and grants `contents: read` plus `id-token: write`; it
-does not define a runner, environment, steps, or concurrency. The worker uses
-the protected `launchplane-authz-admin` environment, OIDC, target-digest
-concurrency, exact input validation, and redacted evidence.
+does not define a runner, environment, steps, or concurrency. Do not configure
+the live authz managed-set secret, deploy this branch, or attempt a provider
+mutation as part of this code phase. The worker uses the protected
+`launchplane-authz-admin` environment, OIDC, target-digest concurrency, exact
+input validation, and redacted evidence.
 
-Any temporary authorization must bind this exact identity pair:
+The protected identity pair to configure only after this wrapper is merged and
+deployed is:
 
 ```text
 workflow_ref=cbusillo/launchplane/.github/workflows/detached-application-retirement.yml@refs/heads/main
 job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml@11d53d2840a6f1898785d7c8f1553c202caa3fbf
 ```
 
-The operator sequence is plan then apply. Inputs are exact Dokploy
+The future operator sequence is plan then apply. Inputs are exact Dokploy
 project/environment/application names, the candidate target SHA-256, a sorted
 non-empty JSON array of every other accessible application target SHA-256 whose
 provider payload has the same exact project name, including duplicate physical
@@ -2611,27 +2621,18 @@ either the candidate provider target ID is present or the deployment record
 lacks consistent application-typed target evidence and still names the
 candidate. Provider-target records use the same target-ID binding. Do not
 rewrite append-only deployment history or adopted target authority to bypass
-either gate. Apply repeats all proofs under a durable provider-operation lease
-before checkpointing the sole `application.delete`. Reconciliation and
-already-absent retries reuse the same apply idempotency key. Completion requires
-candidate absence, unchanged protected fingerprints, and zero authority writes.
+either gate.
+Apply repeats all proofs under a durable provider-operation lease before checkpointing the sole
+`application.delete`. Reconciliation and already-absent retries reuse the same
+apply idempotency key. Completion requires candidate absence, unchanged
+protected fingerprints, and zero authority writes.
 
 Managed authz routing is reserved through the
 `detached-application-retirement` selector, managed-set ID
 `operator.detached-application-retirement`, and secret name
-`LAUNCHPLANE_AUTHZ_DETACHED_APPLICATION_RETIREMENT_MANAGED_SET_JSON`. The normal
-resting state is dormant: the managed set has no rules and the repository secret
-is absent. In that state the selector remains reusable but fails closed before
-reconciliation or retirement can mint authority.
-
-To re-arm for a reviewed one-shot operation, first verify the wrapper's current
-immutable worker pin, then provision a schema-v2 managed-set secret containing
-only the exact caller and that worker rule. Run managed authz dry-run then apply,
-and verify the active rule before retirement planning. After the retirement
-apply and independent provider verification, replace the secret payload with an
-empty desired policy, run authz dry-run then exact-plan apply, confirm a second
-dry run is unchanged with zero managed rules, and only then delete the secret.
-Verify live policy and secret state at every transition; this documentation is
-procedure, not runtime authority. Never substitute a different caller workflow
-ref, a mutable worker ref, a checked-in target value, or a local CLI live-target
-fallback.
+`LAUNCHPLANE_AUTHZ_DETACHED_APPLICATION_RETIREMENT_MANAGED_SET_JSON`. Neither
+phase creates or populates that secret or reconciles a live rule. The remaining
+sequence is: merge and deploy this wrapper, configure the exact caller and
+worker authz pair through the managed authz path, then run the reviewed plan and
+apply sequence. Never substitute a mutable ref, a checked-in target value, or a
+local CLI live-target fallback.

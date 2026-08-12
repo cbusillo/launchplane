@@ -4,11 +4,50 @@ from control_plane.generic_web_onboarding import (
     GenericWebOnboardingIntent,
     build_generic_web_onboarding_manifest,
     generic_web_onboarding_plan_sha256,
+    validate_generic_web_onboarding_is_new_product,
 )
 from control_plane.workflows.product_onboarding import build_product_profile_record
 
 
 class GenericWebOnboardingTests(unittest.TestCase):
+    def test_generic_web_onboarding_rejects_existing_product(self) -> None:
+        existing_manifest = build_generic_web_onboarding_manifest(
+            intent=GenericWebOnboardingIntent(
+                product="demo-web",
+                display_name="Demo Web",
+                repository="example/demo-web",
+                repository_id="123",
+                repository_owner_id="456",
+                image_repository="ghcr.io/example/demo-web",
+                runtime_port=3000,
+                health_path="/healthz",
+                preview_base_url="https://demo-preview.example.com",
+                testing_context="demo-web",
+            ),
+            target_id="dokploy-app-1",
+        )
+        existing_profile = build_product_profile_record(
+            manifest=existing_manifest,
+            updated_at="2026-08-05T00:00:00Z",
+        ).model_copy(update={"historical_contexts": ("demo-web-testing",)})
+        repeated_intent = GenericWebOnboardingIntent(
+            product="demo-web",
+            display_name="Demo Web",
+            repository="example/demo-web",
+            repository_id="123",
+            repository_owner_id="456",
+            image_repository="ghcr.io/example/demo-web",
+            runtime_port=3000,
+            health_path="/healthz",
+            preview_base_url="https://demo-preview.example.com",
+        )
+
+        with self.assertRaisesRegex(ValueError, "only creates new products"):
+            validate_generic_web_onboarding_is_new_product(
+                intent=repeated_intent,
+                existing_profile=existing_profile,
+            )
+
     def test_intent_defaults_and_manifest_are_conventional(self) -> None:
         intent = GenericWebOnboardingIntent(
             product="demo-web",

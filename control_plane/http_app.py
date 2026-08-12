@@ -35,13 +35,13 @@ from control_plane.dokploy_target_setup_http import (
 )
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_config_service as control_plane_product_config_service
-from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_health_monitoring as control_plane_product_health_monitoring
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane.generic_web_onboarding import (
     GenericWebOnboardingIntent,
     build_generic_web_onboarding_manifest,
     generic_web_onboarding_plan_sha256,
+    validate_generic_web_onboarding_is_new_product,
 )
 from control_plane.generic_web_preview_authz import (
     GenericWebPreviewAuthzPlanResult,
@@ -99,6 +99,7 @@ from control_plane.http_routes import (
     PRODUCT_OWNER_ROUTING_APPLY_ROUTE,
     ProductOwnerWriteRouteDependencies,
     OwnerAcceptanceRouteDependencies,
+    GovernanceProjectionRouteDependencies,
     ProductReadRouteDependencies,
     PromotionEvidenceRequest as PromotionEvidenceRequest,
     ReadRouteDependencies,
@@ -108,7 +109,6 @@ from control_plane.http_routes import (
     idempotency_capable_store,
     idempotency_scope as idempotency_scope,
     provider_operation_response_payload as _provider_operation_response_payload,
-    product_profile_context_cutover_contexts_allowed,
     register_agent_context_read_routes,
     register_change_impact_read_routes,
     register_change_impact_write_routes,
@@ -124,6 +124,7 @@ from control_plane.http_routes import (
     register_every_code_work_request_read_routes,
     register_generic_web_rollback_write_routes,
     register_generic_web_write_routes,
+    register_governance_projection_routes,
     register_ingress_read_routes,
     register_inventory_operation_read_routes,
     register_managed_secret_read_routes,
@@ -136,7 +137,6 @@ from control_plane.http_routes import (
     register_product_owner_read_routes,
     register_product_owner_write_routes,
     register_product_config_status_read_routes,
-    register_product_context_audit_read_routes,
     register_product_environment_read_routes,
     register_product_promotion_status_read_routes,
     register_product_profile_read_routes,
@@ -258,6 +258,13 @@ from control_plane.merge_train_batch_candidate import (
     execute_merge_train_batch_candidate_run_once,
     require_merge_train_batch_candidate_record_store,
 )
+from control_plane.merge_admission import (
+    MergeAdmissionDeniedError,
+    MergeAdmissionReconciliationRequiredError,
+    require_merge_admission_record_store,
+)
+from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
+from control_plane.governance_projection import LiveGovernanceCurrentReadinessProvider
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
@@ -272,7 +279,11 @@ from control_plane.merge_train_controller_run_once import (
     merge_train_controller_mutation_fence,
     require_merge_train_controller_state_record_store,
 )
-from control_plane.merge_train_github import MergeTrainGitHubError, MergeTrainGitHubStaleHeadError
+from control_plane.merge_train_github import (
+    MergeTrainGitHubError,
+    MergeTrainGitHubStaleHeadError,
+    UrllibMergeTrainGitHubTransport,
+)
 from control_plane.merge_train_pr_feedback import (
     MergeTrainPrFeedbackEnvelope,
     build_merge_train_pr_feedback_record,
@@ -283,6 +294,7 @@ from control_plane.merge_train_run_once import (
     execute_merge_train_run_once,
     require_merge_train_run_record_store,
 )
+from control_plane.tenant_admission_controller import TenantAdmissionControllerGitHubClient
 from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapseBatchCandidateStoreMissingError,
     MergeTrainStackCollapsePlanRecordNotFoundError,
@@ -561,6 +573,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
+    validate_product_profile_history_transition,
 )
 from control_plane.contracts.product_retirement import (
     ProductRetirementIdentity,
@@ -960,8 +973,6 @@ _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/app
 _PRODUCT_PREVIEW_TLS_APPLY_ROUTE = "/v1/product-profiles/preview-tls/apply"
 _PRODUCT_RETIREMENT_ROUTE = "/v1/product-retirement"
 _DETACHED_APPLICATION_RETIREMENT_ROUTE = "/v1/detached-application-retirement"
-_PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
-_PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
 _PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
 _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
@@ -984,6 +995,8 @@ _DB_ONLY_MUTATION_LEASE = timedelta(minutes=5)
 
 
 class ProductProfileWriteStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> object: ...
 
 
@@ -2633,11 +2646,18 @@ class _EveryCodePreviewGateWriteStore(Protocol):
 
 
 def require_product_profile_write_store(record_store: object) -> ProductProfileWriteStore:
-    write_record = getattr(record_store, "write_product_profile_record", None)
-    if not callable(write_record):
+    missing_methods = [
+        method_name
+        for method_name in (
+            "read_product_profile_record",
+            "write_product_profile_record",
+        )
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
         raise TypeError(
             "Launchplane record store does not support product profile writes: "
-            "write_product_profile_record"
+            + ", ".join(missing_methods)
         )
     return cast(ProductProfileWriteStore, record_store)
 
@@ -5501,6 +5521,7 @@ def create_launchplane_fastapi_app(
                 record_store
             )
             controller_state_store = require_merge_train_controller_state_record_store(record_store)
+            admission_store = require_merge_admission_record_store(record_store)
         except TypeError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -5528,6 +5549,16 @@ def create_launchplane_fastapi_app(
                     response=idempotent_response,
                 )
 
+            admission_evaluator = LiveMergeAdmissionEvaluator(
+                store=record_store,
+                repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
+                technical_check_client=TenantAdmissionControllerGitHubClient(
+                    transport=UrllibMergeTrainGitHubTransport(
+                        token=token,
+                        api_base_url=controller_request.github_api_base_url,
+                    )
+                ),
+            )
             controller_result = execute_merge_train_controller_run_once(
                 request=controller_request,
                 policy=policy_record.policy,
@@ -5540,12 +5571,28 @@ def create_launchplane_fastapi_app(
                 landing_store=landing_store,
                 stack_collapse_store=stack_collapse_store,
                 controller_state_store=controller_state_store,
+                admission_store=admission_store,
+                admission_evaluator=admission_evaluator,
                 before_release=store_controller_idempotency_before_release,
             )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
         except MergeTrainGitHubError as error:
             return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except MergeAdmissionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="merge_train_landing_not_admitted",
+                message=str(error),
+            ) from error
+        except MergeAdmissionReconciliationRequiredError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="merge_train_landing_reconcile_required",
+                message=str(error),
+            ) from error
         except (
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
@@ -9277,6 +9324,7 @@ def create_launchplane_fastapi_app(
                 record_store
             )
             controller_state_store = require_merge_train_controller_state_record_store(record_store)
+            admission_store = require_merge_admission_record_store(record_store)
         except TypeError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -9303,14 +9351,21 @@ def create_launchplane_fastapi_app(
                 )
 
                 def checkpoint_landing_mutation(
-                    phase: str, pull_request_number: int | None
+                    phase: str,
+                    pull_request_number: int | None,
+                    landing_plan_id: str,
+                    expected_effect_sha: str,
                 ) -> None:
                     lease.checkpoint(
                         active_action="batch_landing_run_once",
                         active_phase=phase,
                         active_record_id=active_record_id,
                         active_pull_request_number=pull_request_number,
-                        step_payload={"mode": landing_request.mode},
+                        step_payload={
+                            "mode": landing_request.mode,
+                            "landing_plan_id": landing_plan_id,
+                            "expected_effect_sha": expected_effect_sha,
+                        },
                     )
 
                 landing_result = execute_merge_train_batch_landing_run_once(
@@ -9323,6 +9378,20 @@ def create_launchplane_fastapi_app(
                     candidate_store=candidate_store,
                     landing_store=landing_store,
                     stack_collapse_store=stack_collapse_store,
+                    admission_store=admission_store,
+                    admission_evaluator=LiveMergeAdmissionEvaluator(
+                        store=record_store,
+                        repository_evidence_provider=(
+                            resolved_change_impact_repository_evidence_provider
+                        ),
+                        technical_check_client=TenantAdmissionControllerGitHubClient(
+                            transport=UrllibMergeTrainGitHubTransport(
+                                token=token,
+                                api_base_url=landing_request.github_api_base_url,
+                            )
+                        ),
+                    ),
+                    controller_state_provider=lease.read_current,
                     mutation_checkpoint=checkpoint_landing_mutation,
                 )
                 response = accepted_evidence_response(
@@ -9343,6 +9412,20 @@ def create_launchplane_fastapi_app(
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
         except MergeTrainGitHubError as error:
             return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except MergeAdmissionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="merge_train_landing_not_admitted",
+                message=str(error),
+            ) from error
+        except MergeAdmissionReconciliationRequiredError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="merge_train_landing_reconcile_required",
+                message=str(error),
+            ) from error
         except (
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
@@ -10700,20 +10783,27 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        read_existing_profile = getattr(profile_store, "read_product_profile_record", None)
-        if callable(read_existing_profile):
-            try:
-                existing_profile = read_existing_profile(profile.product)
-            except (FileNotFoundError, KeyError):
-                existing_profile = None
-            if (
-                existing_profile is not None
-                and control_plane_product_health_monitoring.product_health_monitoring_authority(
-                    existing_profile
-                )
-                != control_plane_product_health_monitoring.product_health_monitoring_authority(
-                    profile
-                )
+        try:
+            existing_profile = profile_store.read_product_profile_record(profile.product)
+        except (FileNotFoundError, KeyError):
+            existing_profile = None
+        try:
+            validate_product_profile_history_transition(
+                existing_profile=existing_profile,
+                replacement_profile=profile,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="historical_context_reactivation_blocked",
+                message=str(error),
+            ) from error
+        if existing_profile is not None:
+            if control_plane_product_health_monitoring.product_health_monitoring_authority(
+                existing_profile
+            ) != control_plane_product_health_monitoring.product_health_monitoring_authority(
+                profile
             ):
                 raise _launchplane_http_error(
                     status_code=409,
@@ -10725,8 +10815,7 @@ def create_launchplane_fastapi_app(
                     ),
                 )
             if (
-                existing_profile is not None
-                and control_plane_product_prelaunch_rebuild_policy.product_prelaunch_rebuild_policy_authority(
+                control_plane_product_prelaunch_rebuild_policy.product_prelaunch_rebuild_policy_authority(
                     existing_profile
                 )
                 != control_plane_product_prelaunch_rebuild_policy.product_prelaunch_rebuild_policy_authority(
@@ -11797,18 +11886,6 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="database_required",
                 message="Dokploy target setup requires Launchplane database storage.",
-            )
-        return record_store
-
-    def require_product_context_apply_database_store(
-        *, record_store: object, trace_id: str, label: str
-    ) -> PostgresRecordStore:
-        if not isinstance(record_store, PostgresRecordStore):
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_required",
-                message=f"{label} requires Launchplane database storage.",
             )
         return record_store
 
@@ -13319,9 +13396,42 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=database_store,
+            identity=identity,
+            route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
         onboarding_manifest = onboarding_request.manifest
         generic_web_plan_sha256 = ""
         if onboarding_request.generic_web is not None:
+            try:
+                existing_profile = database_store.read_product_profile_record(
+                    onboarding_request.generic_web.product
+                )
+            except (FileNotFoundError, KeyError):
+                existing_profile = None
+            try:
+                validate_generic_web_onboarding_is_new_product(
+                    intent=onboarding_request.generic_web,
+                    existing_profile=existing_profile,
+                )
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_product_onboarding_manifest",
+                    message=str(error),
+                ) from error
             generic_web_plan_sha256 = generic_web_onboarding_plan_sha256(
                 onboarding_request.generic_web
             )
@@ -13382,21 +13492,6 @@ def create_launchplane_fastapi_app(
                     message=str(error),
                 ) from error
         assert onboarding_manifest is not None
-        (
-            normalized_idempotency_key,
-            payload_fingerprint,
-            replay_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=database_store,
-            identity=identity,
-            route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
-        )
-        if replay_response is not None:
-            return replay_response
         try:
             onboarding_result, authority_bundle = plan_product_onboarding_authority_bundle(
                 record_store=database_store,
@@ -14245,243 +14340,6 @@ def create_launchplane_fastapi_app(
                 response=provider_target_response,
             )
         return provider_target_response
-
-    async def apply_product_context_cutover(
-        request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        try:
-            raw_payload = await request.json()
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
-        if not isinstance(raw_payload, dict):
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            )
-        try:
-            context_cutover_request = (
-                control_plane_product_context_cutover.ProductContextCutoverRequest.model_validate(
-                    raw_payload
-                )
-            )
-        except ValidationError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request payload failed validation.",
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="product_profile.write",
-            product=context_cutover_request.product,
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot cut over the requested product profile context.",
-            )
-        database_store = require_product_context_apply_database_store(
-            record_store=record_store,
-            trace_id=trace_id,
-            label="Product context cutover",
-        )
-        (
-            normalized_idempotency_key,
-            payload_fingerprint,
-            replay_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=database_store,
-            identity=identity,
-            route_path=_PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
-        )
-        if replay_response is not None:
-            return replay_response
-        try:
-            profile = database_store.read_product_profile_record(context_cutover_request.product)
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if not product_profile_context_cutover_contexts_allowed(
-            profile=profile,
-            source_context=context_cutover_request.source_context,
-            target_context=context_cutover_request.target_context,
-            preview_context="",
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="context_not_in_product_boundary",
-                message="Requested cutover contexts are not owned by the product profile.",
-            )
-        try:
-            result, authority_bundle = (
-                control_plane_product_context_cutover.plan_product_context_cutover_authority_bundle(
-                    record_store=database_store,
-                    request=context_cutover_request,
-                )
-            )
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_context_cutover_request",
-                message="Product context cutover context_cutover_request is invalid.",
-            ) from error
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={"product_profile": context_cutover_request.product},
-            result=result,
-        )
-        if context_cutover_request.mode == "apply":
-            database_store.write_product_authority_bundle(
-                authority_bundle_with_apply_idempotency(
-                    bundle=authority_bundle,
-                    identity=identity,
-                    route_path=_PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE,
-                    idempotency_key=normalized_idempotency_key,
-                    request_fingerprint_value=payload_fingerprint,
-                    trace_id=trace_id,
-                    response=response,
-                )
-            )
-        return response
-
-    async def apply_product_legacy_context_cleanup(
-        request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        try:
-            raw_payload = await request.json()
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
-        if not isinstance(raw_payload, dict):
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            )
-        try:
-            legacy_cleanup_request = (
-                control_plane_product_context_cutover.LegacyContextCleanupRequest.model_validate(
-                    raw_payload
-                )
-            )
-        except ValidationError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request payload failed validation.",
-            ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action="product_profile.write",
-            product=legacy_cleanup_request.product,
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot clean up the requested legacy product context.",
-            )
-        database_store = require_product_context_apply_database_store(
-            record_store=record_store,
-            trace_id=trace_id,
-            label="Legacy context cleanup",
-        )
-        (
-            normalized_idempotency_key,
-            payload_fingerprint,
-            replay_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=database_store,
-            identity=identity,
-            route_path=_PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
-        )
-        if replay_response is not None:
-            return replay_response
-        try:
-            result, authority_bundle = (
-                control_plane_product_context_cutover.plan_legacy_context_cleanup_authority_bundle(
-                    record_store=database_store,
-                    request=legacy_cleanup_request,
-                )
-            )
-        except control_plane_product_context_cutover.LegacyContextCleanupBoundaryError as error:
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="context_not_in_product_boundary",
-                message="Requested cleanup contexts are not in the product cleanup boundary.",
-            ) from error
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_legacy_context_cleanup_request",
-                message="Legacy context cleanup legacy_cleanup_request is invalid.",
-            ) from error
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={"product_profile": legacy_cleanup_request.product},
-            result=result,
-        )
-        if legacy_cleanup_request.mode == "apply":
-            database_store.write_product_authority_bundle(
-                authority_bundle_with_apply_idempotency(
-                    bundle=authority_bundle,
-                    identity=identity,
-                    route_path=_PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE,
-                    idempotency_key=normalized_idempotency_key,
-                    request_fingerprint_value=payload_fingerprint,
-                    trace_id=trace_id,
-                    response=response,
-                )
-            )
-        return response
 
     def resolve_ingress_edge_endpoint(
         *,
@@ -20950,6 +20808,17 @@ def create_launchplane_fastapi_app(
             github_api=github_api_request,
         ),
     )
+    register_governance_projection_routes(
+        app,
+        dependencies=GovernanceProjectionRouteDependencies(
+            common=read_route_dependencies,
+            repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
+            current_readiness_provider=LiveGovernanceCurrentReadinessProvider(
+                github_token=lambda env_var: os.environ.get(env_var, "").strip(),
+            ),
+            now=utc_now_timestamp,
+        ),
+    )
 
     register_preview_readiness_read_routes(
         app,
@@ -21862,72 +21731,6 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE,
-        apply_product_context_cutover,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {
-                        "schema": _openapi_model_schema(
-                            control_plane_product_context_cutover.ProductContextCutoverRequest
-                        )
-                    }
-                },
-            }
-        },
-        operation_id="apply_product_context_cutover",
-        summary="Plan or apply product context cutover",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE,
-        apply_product_legacy_context_cleanup,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {
-                        "schema": _openapi_model_schema(
-                            control_plane_product_context_cutover.LegacyContextCleanupRequest
-                        )
-                    }
-                },
-            }
-        },
-        operation_id="apply_product_legacy_context_cleanup",
-        summary="Plan or apply legacy product context cleanup",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    register_product_context_audit_read_routes(
-        app,
-        dependencies=product_read_route_dependencies,
-    )
     register_managed_secret_read_routes(app, dependencies=read_route_dependencies)
 
     app.add_api_route(

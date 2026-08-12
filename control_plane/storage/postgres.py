@@ -94,6 +94,14 @@ from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalEventRecord,
     ManagerPreviewApprovalEventWriteStatus,
 )
+from control_plane.contracts.merge_admission_record import (
+    MergeAdmissionFenceRejectedError,
+    MergeAdmissionRecord,
+    MergeLandingOutcomeRecord,
+    validate_merge_admission_controller_fence,
+    validate_merge_landing_outcome_for_admission,
+    validate_merge_landing_outcome_successor,
+)
 from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceEventRecord,
     OwnerAcceptanceEventWriteStatus,
@@ -2780,6 +2788,106 @@ class LaunchplaneMergeTrainBatchLandingPlanRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneMergeAdmissionRow(Base):
+    __tablename__ = "launchplane_merge_admissions"
+    __table_args__ = (
+        CheckConstraint(
+            "pull_request_number > 0 AND queue_position > 0 AND attempt_sequence > 0",
+            name="launchplane_merge_admissions_positive_values_check",
+        ),
+        CheckConstraint(
+            "decision = 'admitted'",
+            name="launchplane_merge_admissions_decision_check",
+        ),
+        Index(
+            "launchplane_merge_admissions_attempt_uidx",
+            "attempt_id",
+            unique=True,
+        ),
+        Index(
+            "launchplane_merge_admissions_binding_uidx",
+            "admission_binding_sha256",
+            unique=True,
+        ),
+        Index(
+            "launchplane_merge_admissions_target_idx",
+            "repository",
+            "base_branch",
+            "pull_request_number",
+            desc("created_at"),
+        ),
+        Index(
+            "launchplane_merge_admissions_plan_idx",
+            "landing_plan_id",
+            "queue_position",
+            desc("created_at"),
+        ),
+    )
+
+    admission_id: Mapped[str] = mapped_column(String, primary_key=True)
+    admission_binding_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    attempt_id: Mapped[str] = mapped_column(String, nullable=False)
+    attempt_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    decision: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    base_branch: Mapped[str] = mapped_column(String, nullable=False)
+    pull_request_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    queue_position: Mapped[int] = mapped_column(Integer, nullable=False)
+    landing_plan_record_id: Mapped[str] = mapped_column(String, nullable=False)
+    landing_plan_id: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneMergeLandingOutcomeRow(Base):
+    __tablename__ = "launchplane_merge_landing_outcomes"
+    __table_args__ = (
+        CheckConstraint(
+            "pull_request_number > 0 AND observation_sequence > 0",
+            name="launchplane_merge_landing_outcomes_positive_values_check",
+        ),
+        CheckConstraint(
+            "status IN ('landed', 'rejected', 'reconcile_required')",
+            name="launchplane_merge_landing_outcomes_status_check",
+        ),
+        Index(
+            "launchplane_merge_landing_outcomes_observation_uidx",
+            "admission_id",
+            "observation_sequence",
+            unique=True,
+        ),
+        Index(
+            "launchplane_merge_landing_outcomes_binding_uidx",
+            "outcome_binding_sha256",
+            unique=True,
+        ),
+        Index(
+            "launchplane_merge_landing_outcomes_target_idx",
+            "repository",
+            "base_branch",
+            "pull_request_number",
+            desc("observed_at"),
+        ),
+        Index(
+            "launchplane_merge_landing_outcomes_status_idx",
+            "status",
+            desc("observed_at"),
+        ),
+    )
+
+    outcome_id: Mapped[str] = mapped_column(String, primary_key=True)
+    outcome_binding_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    admission_id: Mapped[str] = mapped_column(String, nullable=False)
+    attempt_id: Mapped[str] = mapped_column(String, nullable=False)
+    observation_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    base_branch: Mapped[str] = mapped_column(String, nullable=False)
+    pull_request_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneMergeTrainStackCollapsePlanRow(Base):
     __tablename__ = "launchplane_merge_train_stack_collapse_plans"
     __table_args__ = (
@@ -3714,6 +3822,29 @@ class PostgresRecordStore(HumanSessionStore):
         session: Any,
         write: ProviderTargetWrite,
     ) -> None:
+        conflicting_identity_statement = select(LaunchplaneProviderTargetRow).where(
+            LaunchplaneProviderTargetRow.provider_id == write.record.provider_id,
+            LaunchplaneProviderTargetRow.target_category == write.record.target_category,
+            LaunchplaneProviderTargetRow.target_id == write.record.target_id,
+        )
+        if not self.database_url.startswith("sqlite"):
+            conflicting_identity_statement = conflicting_identity_statement.with_for_update()
+        allowed_conflicting_routes = set(write.allowed_conflicting_routes)
+        conflicting_routes = sorted(
+            (candidate.context, candidate.instance)
+            for candidate in session.scalars(conflicting_identity_statement)
+            if (candidate.context, candidate.instance)
+            != (write.record.context, write.record.instance)
+            and (candidate.context, candidate.instance) not in allowed_conflicting_routes
+        )
+        if conflicting_routes:
+            formatted_routes = ", ".join(
+                f"{context}/{instance}" for context, instance in conflicting_routes
+            )
+            raise ValueError(
+                "Provider target identity was bound to another route after authority "
+                f"bundle planning: {formatted_routes}."
+            )
         statement = (
             select(LaunchplaneProviderTargetRow)
             .where(
@@ -12293,6 +12424,313 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def create_merge_admission_record_if_absent(
+        self, record: MergeAdmissionRecord
+    ) -> tuple[MergeAdmissionRecord, bool]:
+        with self._session_factory() as session:
+            existing_row = session.scalar(
+                select(LaunchplaneMergeAdmissionRow).where(
+                    LaunchplaneMergeAdmissionRow.attempt_id == record.attempt_id
+                )
+            )
+            if existing_row is not None:
+                existing = MergeAdmissionRecord.model_validate(existing_row.payload)
+                if existing != record:
+                    raise ValueError("Merge admission attempts are append-only.")
+                return existing, False
+            session.add(
+                LaunchplaneMergeAdmissionRow(
+                    admission_id=record.admission_id,
+                    admission_binding_sha256=record.admission_binding_sha256,
+                    attempt_id=record.attempt_id,
+                    attempt_sequence=record.attempt_sequence,
+                    decision=record.decision,
+                    repository=record.repository,
+                    base_branch=record.base_branch,
+                    pull_request_number=record.pull_request_number,
+                    queue_position=record.queue_position,
+                    landing_plan_record_id=record.landing_plan_record_id,
+                    landing_plan_id=record.landing_plan_id,
+                    created_at=record.created_at,
+                    payload=self._payload_dict(record),
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                existing_row = session.scalar(
+                    select(LaunchplaneMergeAdmissionRow).where(
+                        or_(
+                            LaunchplaneMergeAdmissionRow.attempt_id == record.attempt_id,
+                            LaunchplaneMergeAdmissionRow.admission_id == record.admission_id,
+                            LaunchplaneMergeAdmissionRow.admission_binding_sha256
+                            == record.admission_binding_sha256,
+                        )
+                    )
+                )
+                if existing_row is None:
+                    raise
+                existing = MergeAdmissionRecord.model_validate(existing_row.payload)
+                if existing != record:
+                    raise ValueError("Merge admission records are append-only.") from None
+                return existing, False
+        return record, True
+
+    def create_guarded_merge_admission_record_if_absent(
+        self,
+        record: MergeAdmissionRecord,
+        *,
+        admitted_at: str,
+    ) -> tuple[MergeAdmissionRecord, bool]:
+        with self._session_factory() as session:
+            self._advisory_lock_merge_train_controller(session, record.controller_key)
+            controller_row = session.scalar(
+                select(LaunchplaneMergeTrainControllerStateRow)
+                .where(
+                    LaunchplaneMergeTrainControllerStateRow.controller_key == record.controller_key
+                )
+                .with_for_update()
+            )
+            if controller_row is None:
+                raise MergeAdmissionFenceRejectedError(
+                    "Persisted merge controller state is missing at admission creation."
+                )
+            controller_state = MergeTrainControllerStateRecord.model_validate(
+                controller_row.payload
+            )
+            validate_merge_admission_controller_fence(
+                admission=record,
+                controller_state=controller_state,
+                admitted_at=admitted_at,
+            )
+            existing_row = session.scalar(
+                select(LaunchplaneMergeAdmissionRow).where(
+                    LaunchplaneMergeAdmissionRow.attempt_id == record.attempt_id
+                )
+            )
+            if existing_row is not None:
+                existing = MergeAdmissionRecord.model_validate(existing_row.payload)
+                if existing != record:
+                    raise ValueError("Merge admission attempts are append-only.")
+                return existing, False
+            session.add(
+                LaunchplaneMergeAdmissionRow(
+                    admission_id=record.admission_id,
+                    admission_binding_sha256=record.admission_binding_sha256,
+                    attempt_id=record.attempt_id,
+                    attempt_sequence=record.attempt_sequence,
+                    decision=record.decision,
+                    repository=record.repository,
+                    base_branch=record.base_branch,
+                    pull_request_number=record.pull_request_number,
+                    queue_position=record.queue_position,
+                    landing_plan_record_id=record.landing_plan_record_id,
+                    landing_plan_id=record.landing_plan_id,
+                    created_at=record.created_at,
+                    payload=self._payload_dict(record),
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                existing_row = session.scalar(
+                    select(LaunchplaneMergeAdmissionRow).where(
+                        or_(
+                            LaunchplaneMergeAdmissionRow.attempt_id == record.attempt_id,
+                            LaunchplaneMergeAdmissionRow.admission_id == record.admission_id,
+                            LaunchplaneMergeAdmissionRow.admission_binding_sha256
+                            == record.admission_binding_sha256,
+                        )
+                    )
+                )
+                if existing_row is None:
+                    raise
+                existing = MergeAdmissionRecord.model_validate(existing_row.payload)
+                if existing != record:
+                    raise ValueError("Merge admission records are append-only.") from None
+                return existing, False
+        return record, True
+
+    def read_merge_admission_record(self, admission_id: str) -> MergeAdmissionRecord:
+        return self._read_model(
+            model_type=MergeAdmissionRecord,
+            orm_model=LaunchplaneMergeAdmissionRow,
+            filters=(LaunchplaneMergeAdmissionRow.admission_id == admission_id,),
+        )
+
+    def list_merge_admission_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        pull_request_number: int | None = None,
+        landing_plan_record_id: str = "",
+        landing_plan_id: str = "",
+        attempt_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeAdmissionRecord, ...]:
+        filters: list[object] = []
+        if repository:
+            filters.append(LaunchplaneMergeAdmissionRow.repository == repository.strip().lower())
+        if base_branch:
+            filters.append(LaunchplaneMergeAdmissionRow.base_branch == base_branch)
+        if pull_request_number is not None:
+            filters.append(LaunchplaneMergeAdmissionRow.pull_request_number == pull_request_number)
+        if landing_plan_record_id:
+            filters.append(
+                LaunchplaneMergeAdmissionRow.landing_plan_record_id == landing_plan_record_id
+            )
+        if landing_plan_id:
+            filters.append(LaunchplaneMergeAdmissionRow.landing_plan_id == landing_plan_id)
+        if attempt_id:
+            filters.append(LaunchplaneMergeAdmissionRow.attempt_id == attempt_id)
+        return self._list_models(
+            model_type=MergeAdmissionRecord,
+            orm_model=LaunchplaneMergeAdmissionRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneMergeAdmissionRow.created_at.desc(),
+                LaunchplaneMergeAdmissionRow.admission_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def create_merge_landing_outcome_record_if_absent(
+        self, record: MergeLandingOutcomeRecord
+    ) -> tuple[MergeLandingOutcomeRecord, bool]:
+        admission = self.read_merge_admission_record(record.admission_id)
+        validate_merge_landing_outcome_for_admission(admission=admission, outcome=record)
+        prior_records = self.list_merge_landing_outcome_records(
+            admission_id=record.admission_id,
+            limit=1,
+        )
+        if prior_records:
+            prior = prior_records[0]
+            if prior.observation_sequence == record.observation_sequence:
+                if prior != record:
+                    raise ValueError("Merge landing outcome observations are append-only.")
+                return prior, False
+            validate_merge_landing_outcome_successor(prior=prior, successor=record)
+        elif record.observation_sequence != 1:
+            raise ValueError("Merge landing outcome reconciliation is missing its predecessor.")
+        with self._session_factory() as session:
+            session.add(
+                LaunchplaneMergeLandingOutcomeRow(
+                    outcome_id=record.outcome_id,
+                    outcome_binding_sha256=record.outcome_binding_sha256,
+                    admission_id=record.admission_id,
+                    attempt_id=record.attempt_id,
+                    observation_sequence=record.observation_sequence,
+                    status=record.status,
+                    repository=record.repository,
+                    base_branch=record.base_branch,
+                    pull_request_number=record.pull_request_number,
+                    observed_at=record.observed_at,
+                    payload=self._payload_dict(record),
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                existing_row = session.scalar(
+                    select(LaunchplaneMergeLandingOutcomeRow).where(
+                        or_(
+                            LaunchplaneMergeLandingOutcomeRow.outcome_id == record.outcome_id,
+                            (LaunchplaneMergeLandingOutcomeRow.admission_id == record.admission_id)
+                            & (
+                                LaunchplaneMergeLandingOutcomeRow.observation_sequence
+                                == record.observation_sequence
+                            ),
+                        )
+                    )
+                )
+                if existing_row is None:
+                    raise
+                existing = MergeLandingOutcomeRecord.model_validate(existing_row.payload)
+                if existing != record:
+                    raise ValueError("Merge landing outcome records are append-only.") from None
+                return existing, False
+        return record, True
+
+    def read_merge_landing_outcome_record(self, outcome_id: str) -> MergeLandingOutcomeRecord:
+        return self._read_model(
+            model_type=MergeLandingOutcomeRecord,
+            orm_model=LaunchplaneMergeLandingOutcomeRow,
+            filters=(LaunchplaneMergeLandingOutcomeRow.outcome_id == outcome_id,),
+        )
+
+    def list_merge_landing_outcome_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        pull_request_number: int | None = None,
+        admission_id: str = "",
+        status: str = "",
+        observation_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[MergeLandingOutcomeRecord, ...]:
+        filters: list[object] = []
+        if repository:
+            filters.append(
+                LaunchplaneMergeLandingOutcomeRow.repository == repository.strip().lower()
+            )
+        if base_branch:
+            filters.append(LaunchplaneMergeLandingOutcomeRow.base_branch == base_branch)
+        if pull_request_number is not None:
+            filters.append(
+                LaunchplaneMergeLandingOutcomeRow.pull_request_number == pull_request_number
+            )
+        if admission_id:
+            filters.append(LaunchplaneMergeLandingOutcomeRow.admission_id == admission_id)
+        if status:
+            filters.append(LaunchplaneMergeLandingOutcomeRow.status == status)
+        if observation_sequence is not None:
+            filters.append(
+                LaunchplaneMergeLandingOutcomeRow.observation_sequence == observation_sequence
+            )
+        return self._list_models(
+            model_type=MergeLandingOutcomeRecord,
+            orm_model=LaunchplaneMergeLandingOutcomeRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneMergeLandingOutcomeRow.admission_id.desc(),
+                LaunchplaneMergeLandingOutcomeRow.observation_sequence.desc(),
+                LaunchplaneMergeLandingOutcomeRow.observed_at.desc(),
+                LaunchplaneMergeLandingOutcomeRow.outcome_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def list_unresolved_merge_admission_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeAdmissionRecord, ...]:
+        admissions = self.list_merge_admission_records(
+            repository=repository,
+            base_branch=base_branch,
+        )
+        unresolved = tuple(
+            admission
+            for admission in admissions
+            if (
+                not (
+                    outcomes := self.list_merge_landing_outcome_records(
+                        admission_id=admission.admission_id,
+                        limit=1,
+                    )
+                )
+                or outcomes[0].status == "reconcile_required"
+            )
+        )
+        return unresolved[:limit] if limit is not None else unresolved
+
     def write_merge_train_stack_collapse_plan_record(
         self, record: MergeTrainStackCollapsePlanRecord
     ) -> None:
@@ -13241,6 +13679,7 @@ class PostgresRecordStore(HumanSessionStore):
         expected_record: LaunchplaneProductProfileRecord,
         replacement_record: LaunchplaneProductProfileRecord,
         mutation: DbOnlyMutationRequest | None = None,
+        expected_provider_targets: tuple[ProviderTargetRecord, ...] = (),
     ) -> ProductProfileCompareWriteResult:
         if expected_record.product != replacement_record.product:
             raise ValueError("Product profile compare-and-write requires matching products.")
@@ -13264,6 +13703,7 @@ class PostgresRecordStore(HumanSessionStore):
                     statement=statement,
                     expected_record=expected_record,
                     replacement_record=replacement_record,
+                    expected_provider_targets=expected_provider_targets,
                 )
 
         reservation_insert_error: IntegrityError | None = None
@@ -13298,6 +13738,7 @@ class PostgresRecordStore(HumanSessionStore):
                     reservation_row=reservation_row,
                     mutation_reservation=stored_reservation,
                     mutation=mutation,
+                    expected_provider_targets=expected_provider_targets,
                 )
 
         with self._session_factory() as session:
@@ -13379,6 +13820,7 @@ class PostgresRecordStore(HumanSessionStore):
                 reservation_row=reservation_row,
                 mutation_reservation=reclaimed_reservation,
                 mutation=mutation,
+                expected_provider_targets=expected_provider_targets,
             )
 
     def _compare_and_write_product_profile_locked(
@@ -13391,7 +13833,18 @@ class PostgresRecordStore(HumanSessionStore):
         reservation_row: LaunchplaneIdempotencyRow | None = None,
         mutation_reservation: LaunchplaneIdempotencyRecord | None = None,
         mutation: DbOnlyMutationRequest | None = None,
+        expected_provider_targets: tuple[ProviderTargetRecord, ...] = (),
     ) -> ProductProfileCompareWriteResult:
+        if expected_provider_targets:
+            self._lock_product_authority_bundle_write(session)
+            if not self._provider_target_expectations_match(
+                session=session,
+                expected_records=expected_provider_targets,
+            ):
+                if reservation_row is not None:
+                    session.delete(reservation_row)
+                    session.commit()
+                return ProductProfileCompareWriteResult(status="changed")
         row = session.scalar(statement)
         if row is None:
             if reservation_row is not None:
@@ -13427,6 +13880,54 @@ class PostgresRecordStore(HumanSessionStore):
             status="written",
             idempotency_record=stored_completion,
         )
+
+    def _provider_target_expectations_match(
+        self,
+        *,
+        session: Any,
+        expected_records: tuple[ProviderTargetRecord, ...],
+    ) -> bool:
+        expected_routes = {(record.context, record.instance): record for record in expected_records}
+        if len(expected_routes) != len(expected_records):
+            raise ValueError("Provider target expectations must identify unique routes.")
+        expected_identities = {
+            (record.provider_id, record.target_category, record.target_id)
+            for record in expected_records
+        }
+        if len(expected_identities) != 1:
+            raise ValueError("Provider target expectations must share one physical identity.")
+        for route, expected_record in expected_routes.items():
+            statement = (
+                select(LaunchplaneProviderTargetRow)
+                .where(
+                    LaunchplaneProviderTargetRow.context == route[0],
+                    LaunchplaneProviderTargetRow.instance == route[1],
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                return False
+            current_record = self._read_payload(
+                model_type=ProviderTargetRecord,
+                payload=row.payload,
+            )
+            if self._payload_dict(current_record) != self._payload_dict(expected_record):
+                return False
+        provider_id, target_category, target_id = next(iter(expected_identities))
+        identity_statement = select(LaunchplaneProviderTargetRow).where(
+            LaunchplaneProviderTargetRow.provider_id == provider_id,
+            LaunchplaneProviderTargetRow.target_category == target_category,
+            LaunchplaneProviderTargetRow.target_id == target_id,
+        )
+        if not self.database_url.startswith("sqlite"):
+            identity_statement = identity_statement.with_for_update()
+        claimed_routes = {
+            (row.context, row.instance) for row in session.scalars(identity_statement)
+        }
+        return claimed_routes == set(expected_routes)
 
     def _read_product_profile_payload(
         self, payload: PayloadDict
@@ -14937,29 +15438,56 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_provider_target_record(self, record: ProviderTargetRecord) -> None:
-        self._write_row(self._provider_target_row(record))
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            current_row = session.scalar(
+                select(LaunchplaneProviderTargetRow)
+                .where(
+                    LaunchplaneProviderTargetRow.context == record.context,
+                    LaunchplaneProviderTargetRow.instance == record.instance,
+                )
+                .limit(1)
+            )
+            current_record = (
+                self._read_payload(
+                    model_type=ProviderTargetRecord,
+                    payload=current_row.payload,
+                )
+                if current_row is not None
+                else None
+            )
+            self._write_provider_target_with_expectation(
+                session=session,
+                write=ProviderTargetWrite(
+                    record=record,
+                    expected_record=current_record,
+                    expected_absent=current_record is None,
+                ),
+            )
+            session.commit()
 
     def create_provider_target_record_if_absent(
         self, record: ProviderTargetRecord
     ) -> ProviderTargetCreateStatus:
-        row = LaunchplaneProviderTargetRow(
-            context=record.context,
-            instance=record.instance,
-            provider_id=record.provider_id,
-            target_category=record.target_category,
-            target_id=record.target_id,
-            display_name=record.display_name,
-            provider_target_type=record.provider_target_type,
-            updated_at=record.updated_at,
-            payload=self._payload_dict(record),
-        )
         with self._session_factory() as session:
-            session.add(row)
-            try:
-                session.commit()
-            except IntegrityError:
-                session.rollback()
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            current_row = session.scalar(
+                select(LaunchplaneProviderTargetRow)
+                .where(
+                    LaunchplaneProviderTargetRow.context == record.context,
+                    LaunchplaneProviderTargetRow.instance == record.instance,
+                )
+                .limit(1)
+            )
+            if current_row is not None:
                 return "exists"
+            self._write_provider_target_with_expectation(
+                session=session,
+                write=ProviderTargetWrite(record=record, expected_absent=True),
+            )
+            session.commit()
         return "created"
 
     def delete_provider_target_record(
@@ -16049,6 +16577,8 @@ class PostgresRecordStore(HumanSessionStore):
             "merge_train_batch_candidates": 0,
             "merge_train_controller_states": 0,
             "merge_train_batch_landing_plans": 0,
+            "merge_admissions": 0,
+            "merge_landing_outcomes": 0,
             "merge_train_stack_collapse_plans": 0,
             "merge_train_policies": 0,
             "merge_train_runs": 0,
@@ -16217,6 +16747,25 @@ class PostgresRecordStore(HumanSessionStore):
             for plan_record in filesystem_store.list_merge_train_batch_landing_plan_records():
                 self.write_merge_train_batch_landing_plan_record(plan_record)
                 counts["merge_train_batch_landing_plans"] += 1
+        if hasattr(filesystem_store, "list_merge_admission_records"):
+            for admission_record in sorted(
+                filesystem_store.list_merge_admission_records(),
+                key=lambda record: (record.created_at, record.admission_id),
+            ):
+                self.create_merge_admission_record_if_absent(admission_record)
+                counts["merge_admissions"] += 1
+        if hasattr(filesystem_store, "list_merge_landing_outcome_records"):
+            for outcome_record in sorted(
+                filesystem_store.list_merge_landing_outcome_records(),
+                key=lambda record: (
+                    record.admission_id,
+                    record.observation_sequence,
+                    record.observed_at,
+                    record.outcome_id,
+                ),
+            ):
+                self.create_merge_landing_outcome_record_if_absent(outcome_record)
+                counts["merge_landing_outcomes"] += 1
         if hasattr(filesystem_store, "list_merge_train_stack_collapse_plan_records"):
             for collapse_record in filesystem_store.list_merge_train_stack_collapse_plan_records():
                 self.write_merge_train_stack_collapse_plan_record(collapse_record)

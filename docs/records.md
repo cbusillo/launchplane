@@ -196,14 +196,14 @@ runtime/config ownership. PostgreSQL storage exposes a single
 can include product profiles, provider targets, legacy Dokploy target records,
 runtime-environment rows and delete events, managed-secret versions/current
 pointers/bindings/audit events, environment inventory, release tuples, and the
-completed idempotency response. Product config, onboarding, context cutover,
-and legacy cleanup plan their whole graph first and then commit through this
-method once. A current managed-secret pointer must not advance unless the new
-version, binding, audit evidence, required runtime-environment changes, and
-applicable idempotency completion are in the same transaction. Cleanup deletes
-compare the current row payload with the planned expected record under the
-storage boundary and fail closed on missing or drifted authority instead of
-publishing a partial graph. Provider-target writes likewise carry an
+completed idempotency response. Product config and onboarding plan their whole
+graph first and then commit through this method once. A current managed-secret
+pointer must not advance unless the new version, binding, audit evidence,
+required runtime-environment changes, and applicable idempotency completion are
+in the same transaction. Bundle deletes compare the current row payload with the
+planned expected record under the storage boundary and fail closed on missing or
+drifted authority instead of publishing a partial graph. Provider-target writes
+likewise carry an
 expected-current or expected-absent precondition so a concurrent route owner
 cannot be overwritten after planning. Lane-summary reads hold a shared bundle
 guard while assembling their multi-record view, so a bundle commit cannot split
@@ -553,17 +553,19 @@ an ORM column/table or remains only in the evidence payload.
   Dokploy target and target-id records still provide audit/backfill comparison
   material and provider execution configuration, but they no longer synthesize
   steady-state provider-target authority when an explicit row is missing.
-- Product onboarding, Dokploy target adoption/creation, product context cutover,
-  and tracked Dokploy target metadata commands now dual-write explicit
+- Product onboarding, Dokploy target adoption/creation, and tracked Dokploy
+  target metadata commands now dual-write explicit
   provider-target rows when a complete Dokploy target and target-id pair exists.
   The dual-write is identity-only: Dokploy route/runtime execution metadata such
   as domains, health policy, source metadata, env keys, and product policies
   remains in the Dokploy target record.
-- Product context audit, cutover, and legacy cleanup responses expose target
-  copy/delete summaries under provider-neutral `provider_targets` and
-  `provider_target_ids` keys. Dokploy target and target-id records can still be
-  the provider-specific source records copied or deleted by those workflows, but
-  they are not exposed as Dokploy-named response buckets.
+- Current lane and enabled preview contexts may not also appear in a product
+  profile's `historical_contexts`. Generic-web onboarding creates new products
+  only; changes to existing products use bounded profile or manifest apply
+  paths. Target setup refuses to reactivate a context retained as historical
+  evidence. One physical provider target identity may be bound to only one
+  steady-state context/instance route; same-route replacement evidence does not
+  authorize a cross-route alias.
 - `uv run launchplane storage provider-target-audit` is the read-only preflight
   for this record family. It compares explicit provider-target rows
   with the neutral projection from paired Dokploy target and target-id records,
@@ -817,48 +819,10 @@ generic-web lanes should converge on the product context, such as
 resolve one product stack. A separate preview context may remain while preview
 apps are isolated from stable lane records.
 
-When cleaning up a legacy context such as `sellyouroutboard-testing`, first
-copy or reseed only the mutable current-authority records needed by live
-resolution: runtime environments, managed secrets and bindings, tracked targets,
-tracked target IDs, inventories, and release tuples. After the product profile
-points at the canonical context, cleanup can delete legacy runtime environment
-records and Dokploy target lookups, and can disable legacy managed secret records
-and bindings. It should not delete inventory records, release tuples,
-deployments, promotions, backup gates, or preview history; those records are
-historical evidence and should continue to describe the route that produced
-them. Product profiles retain legacy route names in `historical_contexts` after
-cutover so product activity read models can continue to include that preserved
-evidence without making the legacy context current authority again.
-
-Before changing a product profile or deleting legacy rows, audit both route
-families with:
-
-```bash
-uv run launchplane product-profiles audit-context-cutover \
-  --product sellyouroutboard \
-  --source-context sellyouroutboard-testing \
-  --target-context sellyouroutboard
-```
-
-The audit reports key names, record ids, counts, target names, and binding
-metadata only. It does not print runtime values, managed secret plaintext,
-secret ciphertext, or full provider env text.
-
-The same redacted audit is exposed through the Launchplane service at
-`GET /v1/product-profiles/{product}/context-cutover-audit` with
-`source_context`, `target_context`, and optional `preview_context` query
-parameters. The manual `Product Context Cutover Audit` GitHub workflow calls
-that service route through GitHub OIDC and uploads the redacted JSON artifact.
-After cutover, the source context is historical evidence rather than a current
-product boundary, so this pre-cutover audit will reject the legacy context. Use
-the `Product Legacy Context Cleanup` workflow in `dry_run=true` mode for
-post-cutover SYO evidence, then validate live runtime against the canonical
-`sellyouroutboard` testing and prod lanes.
-The manual `Product Legacy Context Cleanup` GitHub workflow calls the matching
-write route through GitHub OIDC. It defaults to `dry_run=true`, refuses cleanup
-while the source context is still product-owned, blocks individual mutable
-records without target-context replacements, and preserves historical evidence
-rows.
+`historical_contexts` preserves retired routing evidence without becoming current
+authority. Current lanes and enabled previews may not reactivate a context
+listed in `historical_contexts`; onboarding and target setup enforce that
+boundary while product activity read models retain the historical evidence.
 
 These records replace repo-local Launchplane lifecycle manifests. Product repos
 still own their normal app/runtime contract, such as Dockerfile, image publish,
@@ -951,7 +915,9 @@ directly with
 `uv run launchplane product-profiles upsert --database-url ... --allow-direct-db-mutation`.
 That command is an explicit local/bootstrap repair tool for creating the
 Launchplane record; it is not a repo-local manifest and should not become
-product repo authority.
+product repo authority. It enforces the same fail-closed historical-context
+transition rule as service and manifest writes, so it cannot reactivate a
+retired context.
 
 ## Public Ingress Observation Records
 
@@ -2519,3 +2485,45 @@ phases, whether the sole application-delete effect was attempted/performed,
 candidate absence verification, protected-target stability, and the literal
 zero authority-write count. There are no profile lifecycle, authority deletion,
 secret mutation, target rewrite, or runtime mutation fields.
+
+## Merge admission and landing outcome records
+
+Guarded merge authorization is persisted separately from mutable batch landing
+progress. `MergeAdmissionRecord` is append-only evidence written immediately
+before one exact provider merge attempt. It binds the current L2 readiness
+result and digest, structural result and provenance digest, Owner and
+engineering evidence carried by L2, all seven policy fingerprints, repository,
+base branch, PR and queue position, candidate and landing-plan identity,
+rolling base/head/tree identity, algorithm version, controller lease, expected
+effect SHA, attempt sequence, and actual creation time. Each admission carries
+the stable landing-plan lineage ID plus the exact persisted progress-record ID.
+Its deterministic attempt ID is contract-validated, and guarded creation
+atomically rechecks persisted lease acquisition/expiry, policy, active PR, plan,
+and expected effect fences.
+
+`MergeLandingOutcomeRecord` is a separate append-only observation for that
+admission. Its status is `landed`, `rejected`, or `reconcile_required`.
+Admissions without outcomes and latest `reconcile_required` observations remain
+effect-unknown and block provider replay. Reconciliation appends a successor
+observation after fresh GitHub reads; terminal `landed` and `rejected` outcomes
+cannot be superseded. `landed` requires the actual observed base SHA/tree and
+containment proof. Observed no-effect reconciliation records exact open PR,
+head/tree, and unchanged base evidence without setting provider-rejection
+fields. Observation sequence, not wall-clock timestamp, is chain authority for
+listing and filesystem import.
+
+Filesystem rehearsal uses `launchplane_merge_admissions/` and
+`launchplane_merge_landing_outcomes/`. PostgreSQL uses
+`launchplane_merge_admissions` and `launchplane_merge_landing_outcomes` with
+unique attempt, binding, and per-admission observation-sequence indexes.
+Migration `e9b1d3f5a7c0` creates both tables after the detached application
+retirement migration. Historical landing plans are not backfilled into L3
+authority.
+
+The governance projection adds no record stream. It reads the immutable Owner,
+admission, and landing records above and may attach a freshly recomputed
+ephemeral L2 view. A missing current L2 result never mutates or weakens the
+stored evidence; the projection reports `not_active` or `unavailable` and keeps
+historical facts independently visible. Owner events and admission/outcome
+records are marked current or historical relative to the resolved PR head/tree;
+historical records never grant current effect authority.

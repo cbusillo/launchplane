@@ -17,6 +17,10 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProviderTargetWrite,
+)
 from control_plane.workflows.product_onboarding import (
     apply_product_onboarding_manifest,
     build_product_profile_record,
@@ -1522,89 +1526,6 @@ class ProductOnboardingTests(unittest.TestCase):
             wrapper_text,
         )
 
-    def test_product_context_cutover_uses_launchplane_request(self) -> None:
-        workflow_text = Path(".github/workflows/product-context-cutover.yml").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("runs-on: ubuntu-latest", workflow_text)
-        self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
-            workflow_text,
-        )
-        self.assertIn(
-            "route-path: /v1/product-profiles/context-cutover/apply",
-            workflow_text,
-        )
-        self.assertIn(
-            "payload-file: launchplane-product-context-cutover-payload.json",
-            workflow_text,
-        )
-        self.assertIn(
-            "idempotency-key: ${{ steps.request.outputs.idempotency_key }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "response-output-file: launchplane-product-context-cutover.json",
-            workflow_text,
-        )
-        self.assertIn('mode="apply"', workflow_text)
-        self.assertIn('mode="dry-run"', workflow_text)
-        self.assertIn('--arg product "$PRODUCT"', workflow_text)
-        self.assertIn('--arg source_context "$SOURCE_CONTEXT"', workflow_text)
-        self.assertIn('--arg target_context "$TARGET_CONTEXT"', workflow_text)
-        self.assertIn('--arg display_name "$DISPLAY_NAME"', workflow_text)
-        self.assertIn('--arg mode "$mode"', workflow_text)
-        self.assertIn("product: $product", workflow_text)
-        self.assertIn("source_context: $source_context", workflow_text)
-        self.assertIn("target_context: $target_context", workflow_text)
-        self.assertIn("display_name: $display_name", workflow_text)
-        self.assertIn("mode: $mode", workflow_text)
-        self.assertIn('source_label: "workflow:product-context-cutover"', workflow_text)
-        self.assertIn("if: always()", workflow_text)
-        self.assertIn(
-            "CUTOVER_STATUS_CODE: ${{ steps.cutover_request.outputs.status-code }}",
-            workflow_text,
-        )
-        self.assertIn('if [ "$CUTOVER_STATUS_CODE" != "202" ]; then', workflow_text)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
-        self.assertNotIn("Authorization: Bearer", workflow_text)
-        self.assertNotIn("curl ", workflow_text)
-
-    def test_product_context_cutover_audit_uses_launchplane_request(self) -> None:
-        workflow_text = Path(".github/workflows/product-context-cutover-audit.yml").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("runs-on: ubuntu-latest", workflow_text)
-        self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
-            workflow_text,
-        )
-        self.assertIn("launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}", workflow_text)
-        self.assertIn("audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}", workflow_text)
-        self.assertIn("method: GET", workflow_text)
-        self.assertIn("route-path: ${{ steps.request.outputs.route_path }}", workflow_text)
-        self.assertIn('fail-result-paths: ""', workflow_text)
-        self.assertIn("response-output-file: launchplane-context-cutover-audit.json", workflow_text)
-        self.assertIn("/v1/product-profiles/{quote(product, safe='')}", workflow_text)
-        self.assertIn("/context-cutover-audit?", workflow_text)
-        self.assertIn('echo "route_path=${route_path}"', workflow_text)
-        self.assertIn(
-            "STATUS_CODE: ${{ steps.audit_request.outputs.status-code }}",
-            workflow_text,
-        )
-        self.assertIn("if [ \"$STATUS_CODE\" != '200' ]; then", workflow_text)
-        self.assertIn('jq "{status, trace_id, error}"', workflow_text.replace("'", '"'))
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
-        self.assertNotIn("Authorization: Bearer", workflow_text)
-        self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
-        self.assertNotIn("oidc_claims", workflow_text)
-        self.assertNotIn("claims.get", workflow_text)
-        self.assertNotIn("curl ", workflow_text)
-
     def test_preview_lifecycle_uses_launchplane_request(self) -> None:
         workflow_text = Path(".github/workflows/preview-lifecycle.yml").read_text(encoding="utf-8")
 
@@ -1631,43 +1552,6 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("launchplane-preview-lifecycle-sweep-response.json", workflow_text)
         self.assertIn("steps.request.outputs.apply_json", workflow_text)
         self.assertNotIn("post_launchplane_json", workflow_text)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
-        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
-        self.assertNotIn("Authorization: Bearer", workflow_text)
-        self.assertNotIn("curl ", workflow_text)
-
-    def test_product_legacy_context_cleanup_uses_launchplane_request(self) -> None:
-        workflow_text = Path(".github/workflows/product-legacy-context-cleanup.yml").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("runs-on: ubuntu-latest", workflow_text)
-        self.assertIn(
-            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
-            workflow_text,
-        )
-        self.assertIn(
-            "route-path: /v1/product-profiles/legacy-context-cleanup/apply",
-            workflow_text,
-        )
-        self.assertIn(
-            "payload-file: launchplane-product-legacy-context-cleanup-payload.json",
-            workflow_text,
-        )
-        self.assertIn(
-            "idempotency-key: ${{ steps.request.outputs.idempotency_key }}",
-            workflow_text,
-        )
-        self.assertIn(
-            "response-output-file: launchplane-product-legacy-context-cleanup.json",
-            workflow_text,
-        )
-        self.assertIn("if: always()", workflow_text)
-        self.assertIn(
-            "CLEANUP_STATUS_CODE: ${{ steps.cleanup_request.outputs.status-code }}",
-            workflow_text,
-        )
-        self.assertIn('if [ "$CLEANUP_STATUS_CODE" != "202" ]; then', workflow_text)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
         self.assertNotIn("Authorization: Bearer", workflow_text)
@@ -2781,6 +2665,245 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertEqual(second_result.product_profile.historical_contexts, ("example-site-old",))
         self.assertEqual(profile.historical_contexts, ("example-site-old",))
+
+    def test_apply_product_onboarding_manifest_rejects_historical_context_reactivation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            initial_manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+            initial_result = apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=initial_manifest,
+                updated_at="2026-05-03T00:20:00Z",
+            )
+            store.write_product_profile_record(
+                initial_result.product_profile.model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(update={"context": "example-site"})
+                            if lane.instance == "testing"
+                            else lane
+                            for lane in initial_result.product_profile.lanes
+                        ),
+                        "historical_contexts": ("example-site-testing",),
+                        "updated_at": "2026-05-03T01:20:00Z",
+                        "source": "test:cutover",
+                    }
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "cannot reuse historical contexts"):
+                apply_product_onboarding_manifest(
+                    record_store=store,
+                    manifest=initial_manifest,
+                    updated_at="2026-05-03T02:20:00Z",
+                )
+            profile = store.read_product_profile_record("example-site")
+            store.close()
+
+        self.assertEqual(
+            next(lane.context for lane in profile.lanes if lane.instance == "testing"),
+            "example-site",
+        )
+
+    def test_product_onboarding_rejects_cross_route_provider_target_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context="canonical-site",
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="app-testing-123",
+                    display_name="canonical-site",
+                    provider_target_type="application",
+                    provider_evidence={"project_name": "example-site"},
+                    updated_at="2026-05-03T00:20:00Z",
+                    source_label="test:canonical",
+                )
+            )
+            manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+
+            with self.assertRaisesRegex(ValueError, "already bound to another route"):
+                apply_product_onboarding_manifest(record_store=store, manifest=manifest)
+            self.assertEqual(store.list_product_profile_records(), ())
+            store.close()
+
+    def test_product_onboarding_allows_canonical_repair_from_historical_alias(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            manifest_payload = _manifest_payload()
+            lanes = cast(list[dict[str, object]], manifest_payload["lanes"])
+            provider_targets = cast(list[dict[str, object]], manifest_payload["provider_targets"])
+            runtime_environments = cast(
+                list[dict[str, object]], manifest_payload["runtime_environments"]
+            )
+            secret_bindings = cast(list[dict[str, object]], manifest_payload["secret_bindings"])
+            expected_config = cast(dict[str, object], manifest_payload["expected_config"])
+            runtime_requirements = cast(
+                list[dict[str, object]], expected_config["runtime_environment_keys"]
+            )
+            secret_requirements = cast(
+                list[dict[str, object]], expected_config["managed_secret_bindings"]
+            )
+            lanes[0]["context"] = "example-site"
+            provider_targets[0]["context"] = "example-site"
+            for runtime_record in runtime_environments:
+                if runtime_record["context"] == "example-site-testing":
+                    runtime_record["context"] = "example-site"
+            for secret_binding in secret_bindings:
+                if secret_binding["context"] == "example-site-testing":
+                    secret_binding["context"] = "example-site"
+            for runtime_requirement in runtime_requirements:
+                if runtime_requirement["context"] == "example-site-testing":
+                    runtime_requirement["context"] = "example-site"
+            for secret_requirement in secret_requirements:
+                if secret_requirement["context"] == "example-site-testing":
+                    secret_requirement["context"] = "example-site"
+            manifest = ProductOnboardingManifest.model_validate(manifest_payload)
+            initial_result = apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=manifest,
+                updated_at="2026-05-03T00:20:00Z",
+            )
+            historical_alias = "example-site-testing"
+            store.write_product_profile_record(
+                initial_result.product_profile.model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(update={"context": historical_alias})
+                            if lane.instance == "testing"
+                            else lane
+                            for lane in initial_result.product_profile.lanes
+                        ),
+                        "historical_contexts": (historical_alias,),
+                        "updated_at": "2026-05-03T01:20:00Z",
+                        "source": "test:regression",
+                    }
+                )
+            )
+            store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    provider_target_writes=(
+                        ProviderTargetWrite(
+                            record=ProviderTargetRecord(
+                                context=historical_alias,
+                                instance="testing",
+                                provider_id="dokploy",
+                                target_category="application",
+                                target_id="app-testing-123",
+                                display_name="example-site-testing",
+                                provider_target_type="application",
+                                provider_evidence={"project_name": "example-site"},
+                                updated_at="2026-05-03T01:20:00Z",
+                                source_label="test:regression",
+                            ),
+                            expected_absent=True,
+                            allowed_conflicting_routes=(("example-site", "testing"),),
+                        ),
+                    )
+                )
+            )
+
+            repaired = apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=manifest,
+                updated_at="2026-05-03T02:20:00Z",
+            )
+            store.close()
+
+        testing_lane = next(
+            lane for lane in repaired.product_profile.lanes if lane.instance == "testing"
+        )
+        self.assertEqual(testing_lane.context, "example-site")
+        self.assertEqual(repaired.product_profile.historical_contexts, (historical_alias,))
+
+    def test_product_onboarding_rejects_historical_alias_rebind_to_noncanonical_route(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            manifest_payload = _manifest_payload()
+            manifest_payload["product"] = "example-site"
+            lanes = cast(list[dict[str, object]], manifest_payload["lanes"])
+            provider_targets = cast(list[dict[str, object]], manifest_payload["provider_targets"])
+            runtime_environments = cast(
+                list[dict[str, object]], manifest_payload["runtime_environments"]
+            )
+            secret_bindings = cast(list[dict[str, object]], manifest_payload["secret_bindings"])
+            expected_config = cast(dict[str, object], manifest_payload["expected_config"])
+            runtime_requirements = cast(
+                list[dict[str, object]], expected_config["runtime_environment_keys"]
+            )
+            secret_requirements = cast(
+                list[dict[str, object]], expected_config["managed_secret_bindings"]
+            )
+            lanes[0]["context"] = "example-site-new"
+            provider_targets[0]["context"] = "example-site-new"
+            for runtime_record in runtime_environments:
+                if runtime_record["context"] == "example-site-testing":
+                    runtime_record["context"] = "example-site-new"
+            for secret_binding in secret_bindings:
+                if secret_binding["context"] == "example-site-testing":
+                    secret_binding["context"] = "example-site-new"
+            for runtime_requirement in runtime_requirements:
+                if runtime_requirement["context"] == "example-site-testing":
+                    runtime_requirement["context"] = "example-site-new"
+            for secret_requirement in secret_requirements:
+                if secret_requirement["context"] == "example-site-testing":
+                    secret_requirement["context"] = "example-site-new"
+            manifest = ProductOnboardingManifest.model_validate(manifest_payload)
+            store.write_product_profile_record(
+                build_product_profile_record(
+                    manifest=manifest,
+                    updated_at="2026-05-03T00:20:00Z",
+                ).model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(update={"context": "example-site-testing"})
+                            if lane.instance == "testing"
+                            else lane
+                            for lane in build_product_profile_record(
+                                manifest=manifest,
+                                updated_at="2026-05-03T00:20:00Z",
+                            ).lanes
+                        ),
+                        "historical_contexts": ("example-site-testing",),
+                    }
+                )
+            )
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context="example-site-testing",
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="app-testing-123",
+                    display_name="example-site-testing",
+                    provider_target_type="application",
+                    provider_evidence={"project_name": "example-site"},
+                    updated_at="2026-05-03T00:20:00Z",
+                    source_label="test:regression",
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "already bound to another route"):
+                apply_product_onboarding_manifest(record_store=store, manifest=manifest)
+            store.close()
 
     def test_apply_product_onboarding_manifest_preserves_configured_secret_binding(
         self,

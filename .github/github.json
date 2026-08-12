@@ -72,6 +72,16 @@
     "inspection": {
       "tool": "jetbrains",
       "ide": "PyCharm",
+      "prepare": {
+        "python": {
+          "version": "3.13",
+          "moduleName": "launchplane-inspection",
+          "testRoots": ["tests"],
+          "sync": true,
+          "extras": ["dev"],
+          "requiredGeneratedState": [".venv", ".idea"]
+        }
+      },
       "scopePreference": ["changed_files", "directory", "whole_project"]
     },
     "docsRequiredWhen": [
@@ -154,8 +164,6 @@
     "Reusable Route Binding Reconcile",
     "Odoo Testing Route Binding Refresh",
     "Reusable Odoo Testing Route Binding Refresh",
-    "Product Context Cutover Audit",
-    "Product Context Cutover",
     "Product Environment Evidence",
     "Product Health Monitoring",
     "Product Onboarding",
@@ -170,7 +178,6 @@
     "Reusable Generic Web Preview Authorization Apply",
     "Reusable Product Health Monitoring",
     "Reusable Product Prelaunch Rebuild Policy",
-    "Product Legacy Context Cleanup",
     "Provider Target Operations",
     "Tracked Target Logs",
     "Work Graph Snapshot Validate",

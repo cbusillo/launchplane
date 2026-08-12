@@ -230,6 +230,10 @@ from control_plane.storage.postgres import (
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
 )
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProviderTargetWrite,
+)
 from control_plane.trusted_maintenance import (
     TrustedMaintenanceEvidenceConflictError,
     TrustedMaintenancePolicyConflictError,
@@ -6558,6 +6562,139 @@ env_var = "GH_TOKEN"
         self.assertEqual(result.status, "changed")
         self.assertEqual(loaded_record, concurrent_record)
 
+    def test_product_profile_compare_and_write_rejects_changed_provider_authority(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            expected_profile = _product_profile_record()
+            replacement_profile = expected_profile.model_copy(
+                update={
+                    "updated_at": "2026-07-12T02:00:00Z",
+                    "source": "service:test-compare-write",
+                }
+            )
+            source_target = _provider_target_record(
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="shared-target",
+            )
+            target_target = _provider_target_record(
+                context="sellyouroutboard",
+                instance="testing",
+                target_id="shared-target",
+            )
+            changed_target = target_target.model_copy(update={"updated_at": "2026-07-12T01:30:00Z"})
+            store.write_product_profile_record(expected_profile)
+            store.write_provider_target_record(source_target)
+            store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    provider_target_writes=(
+                        ProviderTargetWrite(
+                            record=target_target,
+                            expected_absent=True,
+                            allowed_conflicting_routes=(
+                                (source_target.context, source_target.instance),
+                            ),
+                        ),
+                    )
+                )
+            )
+            store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    provider_target_writes=(
+                        ProviderTargetWrite(
+                            record=changed_target,
+                            expected_record=target_target,
+                            allowed_conflicting_routes=(
+                                (source_target.context, source_target.instance),
+                            ),
+                        ),
+                    )
+                )
+            )
+
+            result = store.compare_and_write_product_profile_record(
+                expected_record=expected_profile,
+                replacement_record=replacement_profile,
+                expected_provider_targets=(source_target, target_target),
+            )
+            loaded_profile = store.read_product_profile_record(expected_profile.product)
+            store.close()
+
+        self.assertEqual(result.status, "changed")
+        self.assertEqual(loaded_profile, expected_profile)
+
+    def test_product_profile_compare_and_write_rejects_new_provider_route_claim(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            expected_profile = _product_profile_record()
+            replacement_profile = expected_profile.model_copy(
+                update={
+                    "updated_at": "2026-07-12T02:00:00Z",
+                    "source": "service:test-compare-write",
+                }
+            )
+            source_target = _provider_target_record(
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="shared-target",
+            )
+            target_target = _provider_target_record(
+                context="sellyouroutboard",
+                instance="testing",
+                target_id="shared-target",
+            )
+            unexpected_target = _provider_target_record(
+                context="other-context",
+                instance="testing",
+                target_id="shared-target",
+            )
+            store.write_product_profile_record(expected_profile)
+            store.write_provider_target_record(source_target)
+            store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    provider_target_writes=(
+                        ProviderTargetWrite(
+                            record=target_target,
+                            expected_absent=True,
+                            allowed_conflicting_routes=(
+                                (source_target.context, source_target.instance),
+                            ),
+                        ),
+                        ProviderTargetWrite(
+                            record=unexpected_target,
+                            expected_absent=True,
+                            allowed_conflicting_routes=(
+                                (source_target.context, source_target.instance),
+                                (target_target.context, target_target.instance),
+                            ),
+                        ),
+                    )
+                )
+            )
+
+            result = store.compare_and_write_product_profile_record(
+                expected_record=expected_profile,
+                replacement_record=replacement_profile,
+                expected_provider_targets=(source_target, target_target),
+            )
+            loaded_profile = store.read_product_profile_record(expected_profile.product)
+            store.close()
+
+        self.assertEqual(result.status, "changed")
+        self.assertEqual(loaded_profile, expected_profile)
+
     def test_product_profile_compare_and_write_serializes_sqlite_writers(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -8008,6 +8145,8 @@ env_var = "GH_TOKEN"
                     "odoo_prod_backup_restore_operations": 0,
                     "odoo_prod_retained_volume_backup_import_operations": 0,
                     "merge_train_batch_landing_plans": 1,
+                    "merge_admissions": 0,
+                    "merge_landing_outcomes": 0,
                     "merge_train_stack_collapse_plans": 1,
                     "merge_train_policies": 1,
                     "merge_train_runs": 1,

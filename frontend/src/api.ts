@@ -13,6 +13,7 @@ import type {
   DryRunProductPromotionResponse,
   EveryCodeSummaryResponse,
   EvaluateOwnerAcceptanceResponse,
+  GovernanceProjectionResponse,
   ListOwnerAcceptanceCurrentItemsData,
   ListOwnerAcceptanceQueueData,
   MergeTrainControllerStatusResponse,
@@ -199,6 +200,25 @@ export function logout(): Promise<LogoutPayload> {
 
 export function listProducts(signal?: AbortSignal): Promise<ProductListPayload> {
   return requestJson<ProductListPayload>("/v1/products", "GET", undefined, signal);
+}
+
+export function readGovernanceProjection(
+  repository: string,
+  pullRequestNumber: number,
+  baseBranch = "main",
+  signal?: AbortSignal,
+): Promise<GovernanceProjectionResponse> {
+  const params = new URLSearchParams({
+    repository,
+    pull_request_number: String(pullRequestNumber),
+    base_branch: baseBranch,
+  });
+  return requestJson<GovernanceProjectionResponse>(
+    `/v1/governance/projection?${params.toString()}`,
+    "GET",
+    undefined,
+    signal,
+  );
 }
 
 export function readProduct(

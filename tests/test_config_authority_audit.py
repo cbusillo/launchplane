@@ -2908,63 +2908,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             with self.subTest(key=key, value=value):
                 self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
 
-    def test_product_context_workflow_aliases_are_path_scoped(self) -> None:
-        workflow_aliases = (
-            (
-                ".github/workflows/product-context-cutover.yml",
-                ("SOURCE_CONTEXT", "${{ inputs.source_context }}"),
-                ("TARGET_CONTEXT", "${{ inputs.target_context }}"),
-            ),
-            (
-                ".github/workflows/product-context-cutover-audit.yml",
-                ("SOURCE_CONTEXT", "${{ inputs.source_context }}"),
-                ("TARGET_CONTEXT", "${{ inputs.target_context }}"),
-                ("PREVIEW_CONTEXT", "${{ inputs.preview_context }}"),
-            ),
-            (
-                ".github/workflows/product-legacy-context-cleanup.yml",
-                ("SOURCE_CONTEXT", "${{ inputs.source_context }}"),
-                ("TARGET_CONTEXT", "${{ inputs.target_context }}"),
-            ),
-        )
-
-        for path, *aliases in workflow_aliases:
-            for key, value in aliases:
-                with self.subTest(path=path, key=key):
-                    self.assertEqual(
-                        _allow_reason(path=path, key=key, value=value),
-                        "operator_supplied_runtime_input",
-                    )
-                    self.assertEqual(
-                        _allow_reason(
-                            path=".github/workflows/generic-workflow.yml",
-                            key=key,
-                            value=value,
-                        ),
-                        "",
-                    )
-                    self.assertEqual(
-                        _allow_reason(path=path, key=key, value="hard-coded-context"),
-                        "",
-                    )
-
-        for path, key, value in (
-            (".github/workflows/product-context-cutover.yml", "source_context", "$source_context,"),
-            (".github/workflows/product-context-cutover.yml", "target_context", "$target_context,"),
-            (
-                ".github/workflows/product-legacy-context-cleanup.yml",
-                "source_context",
-                "$source_context,",
-            ),
-            (
-                ".github/workflows/product-legacy-context-cleanup.yml",
-                "target_context",
-                "$target_context,",
-            ),
-        ):
-            with self.subTest(path=path, key=key, value=value):
-                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
-
     def test_remaining_workflow_aliases_are_path_scoped(self) -> None:
         workflow_aliases = (
             (
@@ -3274,23 +3217,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         for key, value in (
             ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
             ("fail-result-paths", '""'),
-            ("method", "GET"),
-            ("response-output-file", "launchplane-context-cutover-audit.json"),
-            ("route-path", "${{ steps.request.outputs.route_path }}"),
-        ):
-            with self.subTest(product_context_cutover_audit_mechanic=key):
-                self.assertEqual(
-                    _allow_reason(
-                        path=".github/workflows/product-context-cutover-audit.yml",
-                        key=key,
-                        value=value,
-                    ),
-                    "thin_connector_input",
-                )
-
-        for key, value in (
-            ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
-            ("fail-result-paths", '""'),
             ("log-response-body", '"false"'),
             ("method", "GET"),
             (
@@ -3430,7 +3356,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("method", "GET"),
             ("response-output-file", "dokploy-target-inspect-response.json"),
             ("response-output-file", "ingress-route-audit-read-raw.json"),
-            ("response-output-file", "launchplane-context-cutover-audit.json"),
             ("response-output-file", "launchplane-preview-lifecycle-sweep-response.json"),
             ("response-output-file", "launchplane-work-graph-snapshot.json"),
         ):
@@ -3881,50 +3806,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         ):
             with self.subTest(key=key, value=value):
                 self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
-
-    def test_product_legacy_context_cleanup_request_mechanics_are_path_scoped(
-        self,
-    ) -> None:
-        path = ".github/workflows/product-legacy-context-cleanup.yml"
-        for key, value in (
-            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
-            ("payload-file", "launchplane-product-legacy-context-cleanup-payload.json"),
-        ):
-            with self.subTest(key=key, value=value):
-                self.assertEqual(
-                    _allow_reason(path=path, key=key, value=value),
-                    "thin_connector_input",
-                )
-                self.assertEqual(
-                    _allow_reason(
-                        path=".github/workflows/generic-workflow.yml",
-                        key=key,
-                        value=value,
-                    ),
-                    "",
-                )
-
-    def test_product_context_cutover_request_mechanics_are_path_scoped(
-        self,
-    ) -> None:
-        path = ".github/workflows/product-context-cutover.yml"
-        for key, value in (
-            ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
-            ("payload-file", "launchplane-product-context-cutover-payload.json"),
-        ):
-            with self.subTest(key=key, value=value):
-                self.assertEqual(
-                    _allow_reason(path=path, key=key, value=value),
-                    "thin_connector_input",
-                )
-                self.assertEqual(
-                    _allow_reason(
-                        path=".github/workflows/generic-workflow.yml",
-                        key=key,
-                        value=value,
-                    ),
-                    "",
-                )
 
     def test_product_driver_reusable_workflow_mechanics_are_path_scoped(
         self,

@@ -40,6 +40,7 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 "product-retirement",
                 "detached-application-retirement",
                 "preview-feedback-remediation",
+                "generic-web-route-binding",
                 "odoo-route-binding",
                 "odoo-external-route-binding",
                 "odoo-testing-ingress-route",
@@ -92,6 +93,10 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             "reconcile-preview-feedback-remediation": (
                 "${{ inputs.managed_set == 'preview-feedback-remediation' }}",
                 "${{ secrets.LAUNCHPLANE_AUTHZ_PREVIEW_FEEDBACK_REMEDIATION_MANAGED_SET_JSON }}",
+            ),
+            "reconcile-generic-web-route-binding": (
+                "${{ inputs.managed_set == 'generic-web-route-binding' }}",
+                "${{ secrets.LAUNCHPLANE_AUTHZ_GENERIC_WEB_ROUTE_BINDING_MANAGED_SET_JSON }}",
             ),
             "reconcile-odoo-route-binding": (
                 "${{ inputs.managed_set == 'odoo-route-binding' }}",
@@ -163,6 +168,9 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                     ),
                     "reconcile-preview-feedback-remediation": (
                         "operator.preview-feedback-remediation"
+                    ),
+                    "reconcile-generic-web-route-binding": (
+                        "operator.generic-web-route-binding"
                     ),
                 }
                 if job_name in expected_managed_set_ids:

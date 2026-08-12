@@ -2830,6 +2830,96 @@ class LaunchplaneServiceTests(unittest.TestCase):
             {"LAUNCHPLANE_PREVIEW_BASE_URL": "https://demo-preview.example.com"},
         )
 
+    def test_generic_web_onboarding_rejects_existing_profile_context_regression(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        {
+                            "product": "demo-web",
+                            "display_name": "Demo Web",
+                            "repository": "example/demo-web",
+                            "repository_id": "123",
+                            "repository_owner_id": "456",
+                            "driver_id": "generic-web",
+                            "image": {"repository": "ghcr.io/example/demo-web"},
+                            "runtime_port": 3000,
+                            "health_path": "/healthz",
+                            "lanes": [{"instance": "testing", "context": "demo-web"}],
+                            "historical_contexts": ["demo-web-testing"],
+                            "preview": {
+                                "enabled": True,
+                                "context": "demo-web-preview",
+                            },
+                            "updated_at": "2026-08-05T00:00:00Z",
+                            "source": "test:cutover",
+                        }
+                    )
+                )
+            finally:
+                store.close()
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["generic_web_onboarding.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "generic_web": {
+                        "product": "demo-web",
+                        "display_name": "Demo Web",
+                        "repository": "example/demo-web",
+                        "repository_id": "123",
+                        "repository_owner_id": "456",
+                        "default_branch": "main",
+                        "image_repository": "ghcr.io/example/demo-web",
+                        "runtime_port": 3000,
+                        "health_path": "/healthz",
+                        "preview_base_url": "https://demo-preview.example.com",
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_product_onboarding_manifest")
+        self.assertIn("only creates new products", payload["error"]["message"])
+
     def test_generic_web_onboarding_planner_cannot_apply_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -3449,6 +3539,88 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(target_records, ())
         self.assertEqual(apply_status, 403)
         self.assertEqual(apply_payload["error"]["code"], "authorization_denied")
+
+    def test_dokploy_target_setup_rejects_historical_context_before_provider_read(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        {
+                            "product": "demo-web",
+                            "display_name": "Demo Web",
+                            "repository": "example/demo-web",
+                            "driver_id": "generic-web",
+                            "image": {"repository": "ghcr.io/example/demo-web"},
+                            "runtime_port": 3000,
+                            "health_path": "/healthz",
+                            "lanes": [{"instance": "testing", "context": "demo-web"}],
+                            "historical_contexts": ["demo-web-testing"],
+                            "updated_at": "2026-08-05T00:00:00Z",
+                            "source": "test:cutover",
+                        }
+                    )
+                )
+            finally:
+                store.close()
+            workflow_ref = (
+                "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [workflow_ref],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_dokploy_target_setup_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=workflow_ref,
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            with patch(
+                "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config"
+            ) as read_dokploy_config:
+                status_code, payload = _invoke_dokploy_target_setup_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "operation": "adopt",
+                        "product": "launchplane",
+                        "context": "demo-web-testing",
+                        "instance": "testing",
+                        "target_type": "application",
+                        "target_id": "app-demo-web",
+                    },
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_dokploy_target_setup")
+        self.assertIn("historical product context", payload["error"]["message"])
+        read_dokploy_config.assert_not_called()
 
     def test_dokploy_target_setup_endpoint_maps_click_exception_to_bad_request(
         self,

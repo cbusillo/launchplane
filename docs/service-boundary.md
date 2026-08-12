@@ -214,9 +214,6 @@ cleanup scope so the store is always closed.
     `secret.list` for the path context
   - `GET /v1/secrets/{secret_id}`, requiring `secret.read` for the stored
     secret context
-  - `GET /v1/product-profiles/{product}/context-cutover-audit`, requiring
-    `product_profile.read` for the stored product profile in the Launchplane
-    service context and returning redacted current-authority metadata only
   - `GET /v1/products/{product}/environments/{environment}/public-ingress/incidents`,
     requiring `product_environment.read` for the profile-resolved stable lane
     and returning a bounded list of lane-owned incident occurrences
@@ -300,10 +297,6 @@ cleanup scope so the store is always closed.
   - `POST /v1/provider-targets/operations` (native FastAPI for bearer-token
     callers, DB-backed audit/backfill records, apply-only `Idempotency-Key`
     replay/conflict handling, and repeatable audits/dry-runs)
-- product context cutover route:
-  - `POST /v1/product-profiles/context-cutover/apply`
-- product legacy context cleanup route:
-  - `POST /v1/product-profiles/legacy-context-cleanup/apply`
 - public ingress notification policy route:
   - `POST /v1/public-ingress/notification-policies/apply` (native FastAPI for
     bearer-token callers, DB-backed storage, local-operator reason enforcement,
@@ -1007,6 +1000,15 @@ response `result.controller_action` is the helper contract for retry/stop
 behavior; see [merge-train-policy.md](merge-train-policy.md) for the action
 matrix and public-safe reporting fields.
 
+Mutating landing phases are guarded by immutable per-attempt Level 3 admission.
+The service recomputes current Level 2 and structural evidence under the live
+controller lease immediately before each constituent PR effect, persists the
+admission before GitHub mutation, and appends `landed`, `rejected`, or
+`reconcile_required` evidence afterward. A blocked admission returns
+`merge_train_landing_not_admitted`; unresolved effect evidence returns
+`merge_train_landing_reconcile_required`. Neither response permits provider
+replay.
+
 Every retained write-capable merge-train route acquires that same
 repository/base fence for its full mutation window. Phase-specific and legacy
 mutation calls therefore return the same lease-held or reconciliation-required
@@ -1058,6 +1060,11 @@ the route validates the linked
 stack-collapse record before the root merge and then writes stack-child
 disposition evidence after the landing record is persisted. Accepted calls
 support optional `Idempotency-Key` replay/conflict handling.
+
+Land mode is not a second authority path. It requires the same guarded
+admission store, live evidence adapter, controller lease, and append-only
+landing outcome behavior as controller mode. If those dependencies are
+unavailable, the route fails closed before GitHub mutation.
 
 `.github/workflows/merge-train-runner.yml` is the first external scheduler for
 this route. It mints a GitHub Actions OIDC token for the Launchplane service,
@@ -2050,12 +2057,6 @@ sources, managed rule IDs/count, and a SHA-256 identity digest, never raw numeri
 repository IDs; the existing plan digest, policy CAS, protected apply, and
 idempotency boundaries remain unchanged.
 
-Product context audit, cutover, and legacy cleanup routes expose copied or
-deleted runtime identity records under neutral `provider_targets` and
-`provider_target_ids` response groups. Dokploy target records remain
-provider-specific execution/config storage where needed, but service responses
-must not reintroduce Dokploy-named target buckets for these workflows.
-
 Provider-target operations use the native FastAPI
 `POST /v1/provider-targets/operations` route. The route accepts one
 Launchplane-owned route at a time with mode `audit`, `backfill-dry-run`, or
@@ -2315,8 +2316,6 @@ are present. The descriptor routes remain discoverable.
   human-session, and Every Code worker-token callers)
 - `GET /v1/product-profiles/{product}` (native FastAPI for bearer-token and
   human-session callers)
-- `GET /v1/product-profiles/{product}/context-cutover-audit` (native FastAPI
-  for bearer-token and human-session callers)
 - `GET /v1/service/runtime` (native FastAPI for bearer-token and human-session
   callers)
 - `GET /v1/service/odoo-workers/status` (native FastAPI for bearer-token and
@@ -2401,12 +2400,8 @@ context, preserve the `driver_id` filter, and continue accepting the dedicated
 Every Code worker token for the collection route only. Product profile show
 reads load the stored profile first, check `product_profile.read` against the
 stored profile product and Launchplane service context, and return the typed
-profile envelope. Product context cutover audit reads load the product profile
-from DB-backed records, check `product_profile.read` against the stored profile
-product and Launchplane service context, and require the requested source,
-target, and optional preview contexts to belong to that profile before returning
-the typed audit envelope. Ingress route audit reads check `ingress_route.plan`
-against the requested query product/context before storage access, require those
+profile envelope. Ingress route audit reads check `ingress_route.plan` against
+the requested query product/context before storage access, require those
 scope query parameters for list and single-record reads, preserve optional
 `status`, `mode`, `provider_host_id`, `trace_id`, `idempotency_key`, and `limit`
 list filters, and return `404 not_found` when a record exists outside the
@@ -2594,37 +2589,6 @@ not just refresh and destroy operations.
 Prod-scoped product actions are only shown when the product profile actually
 defines a prod lane. Generic-web prod promotion is additionally hidden unless
 the testing and prod lanes share the same context.
-
-Product context cutover audit is read-only and uses `product_profile.read` for
-the requested product in the Launchplane service context. It returns redacted
-current-authority metadata for source, target, and optional preview contexts:
-runtime key names, managed secret IDs/binding keys, Dokploy target metadata,
-inventory and release tuple pointers, and append-only evidence counts. It does
-not return runtime values, secret plaintext, secret ciphertext, or full provider
-environment text.
-
-Product context cutover apply uses native FastAPI
-`POST /v1/product-profiles/context-cutover/apply` and `product_profile.write`
-for the requested product in the Launchplane service context. It supports
-`dry-run` and `apply` modes, copies only current-authority records into the
-target context, updates lane/preview product profile context fields, returns key
-names/counts only, and preserves optional `Idempotency-Key` replay/conflict
-behavior. It does not copy append-only deployments, promotions, backup gates, or
-preview history.
-
-Product legacy context cleanup uses native FastAPI
-`POST /v1/product-profiles/legacy-context-cleanup/apply` and
-`product_profile.write` for the requested product in the Launchplane service
-context. It supports `dry-run` and `apply` modes after a context cutover has
-moved the product profile to the target context, preserves optional
-`Idempotency-Key` replay/conflict behavior. Cleanup refuses to run while
-the source context is still owned by this or another product profile. It deletes
-legacy runtime environment records and Dokploy target lookup records only when
-matching target-context records already exist, disables legacy managed secret
-records and bindings, and preserves inventory, release tuple, deployment,
-promotion, backup gate, and preview history records as evidence. Responses
-remain redacted to key names, counts, target metadata, secret IDs, and binding
-keys/status.
 
 ### Driver execution endpoints
 
@@ -3614,6 +3578,23 @@ only when all are current; dropped products stop governing without a read-side
 write. GitHub projection, frontend workbench, tenant-admission consumers,
 production authorization, and legacy manager cleanup remain out of scope. See
 `docs/owner-acceptance.md` for the full record and migration boundary.
+
+`GET /v1/governance/projection` accepts only repository, pull request number,
+and base branch scope. It requires Owner-acceptance, engineering-review
+decision/run/authority, and either the repository policy's service authorization
+or the Launchplane merge-train policy-target read permission;
+the route fails closed rather than returning a partially authorized projection.
+It returns one read-only model containing immutable Owner
+history, current Owner evaluation, current ephemeral merge readiness when an
+active landing lineage exists, latest immutable merge admission, separate
+landing outcome, and neutral advisory observations. It reuses the guarded
+landing readiness evaluator instead of duplicating readiness logic in the HTTP
+or frontend layers, binds the requested branch to the current pull request base
+ref, and resolves the repository policy's declared GitHub token source. The
+projection is `authoritative=false`, authorizes no
+effect, classifies historical head/tree evidence explicitly, and never
+interprets a missing landing outcome as landed. See
+`docs/governance-evidence.md`.
 
 ## Change Impact Shadow API
 

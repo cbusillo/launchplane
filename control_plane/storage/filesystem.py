@@ -46,6 +46,14 @@ from control_plane.contracts.manager_preview_approval import (
     ManagerPreviewApprovalEventRecord,
     ManagerPreviewApprovalEventWriteStatus,
 )
+from control_plane.contracts.merge_admission_record import (
+    MergeAdmissionFenceRejectedError,
+    MergeAdmissionRecord,
+    MergeLandingOutcomeRecord,
+    validate_merge_admission_controller_fence,
+    validate_merge_landing_outcome_for_admission,
+    validate_merge_landing_outcome_successor,
+)
 from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceEventRecord,
     OwnerAcceptanceEventWriteStatus,
@@ -544,8 +552,14 @@ class FilesystemRecordStore:
                 model=target_id_record,
                 step_name="write_dokploy_target_id",
             )
+        deleted_provider_target_routes = {
+            (record.context, record.instance) for record in bundle.delete_provider_targets
+        }
         for provider_target_write in bundle.provider_target_writes:
-            self._validate_provider_target_write(provider_target_write)
+            self._validate_provider_target_write(
+                provider_target_write,
+                deleted_routes=deleted_provider_target_routes,
+            )
             self._stage_product_authority_bundle_write(
                 stage_dir=stage_dir,
                 entries=entries,
@@ -657,7 +671,35 @@ class FilesystemRecordStore:
         entries.append(entry)
         self._after_product_authority_bundle_step(f"stage_{step_name}")
 
-    def _validate_provider_target_write(self, write: ProviderTargetWrite) -> None:
+    def _validate_provider_target_write(
+        self,
+        write: ProviderTargetWrite,
+        *,
+        deleted_routes: set[tuple[str, str]] | None = None,
+    ) -> None:
+        allowed_conflicting_routes = set(write.allowed_conflicting_routes)
+        removed_routes = deleted_routes or set()
+        conflicting_routes = sorted(
+            (record.context, record.instance)
+            for record in self._list_models_locked(
+                ProviderTargetRecord,
+                "launchplane_provider_targets",
+            )
+            if record.provider_id == write.record.provider_id
+            and record.target_category == write.record.target_category
+            and record.target_id == write.record.target_id
+            and (record.context, record.instance) != (write.record.context, write.record.instance)
+            and (record.context, record.instance) not in allowed_conflicting_routes
+            and (record.context, record.instance) not in removed_routes
+        )
+        if conflicting_routes:
+            formatted_routes = ", ".join(
+                f"{context}/{instance}" for context, instance in conflicting_routes
+            )
+            raise ValueError(
+                "Provider target identity was bound to another route after authority "
+                f"bundle planning: {formatted_routes}."
+            )
         record_path = self._record_path(
             "launchplane_provider_targets",
             _context_instance_record_id(write.record.context, write.record.instance),
@@ -1989,6 +2031,209 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def create_merge_admission_record_if_absent(
+        self, record: MergeAdmissionRecord
+    ) -> tuple[MergeAdmissionRecord, bool]:
+        record_type = "launchplane_merge_admissions"
+        with self._exclusive_record_lock(record_type, record.attempt_id):
+            existing_attempts = self.list_merge_admission_records(
+                attempt_id=record.attempt_id,
+                limit=2,
+            )
+            if existing_attempts:
+                existing = existing_attempts[0]
+                if existing != record:
+                    raise ValueError("Merge admission attempts are append-only.")
+                return existing, False
+            created = self._create_model_if_absent(record_type, record.admission_id, record)
+            if created:
+                return record, True
+            existing = self.read_merge_admission_record(record.admission_id)
+            if existing != record:
+                raise ValueError("Merge admission records are append-only.")
+            return existing, False
+
+    def create_guarded_merge_admission_record_if_absent(
+        self,
+        record: MergeAdmissionRecord,
+        *,
+        admitted_at: str,
+    ) -> tuple[MergeAdmissionRecord, bool]:
+        controller_record_type = "launchplane_merge_train_controller_states"
+        controller_storage_id = _merge_train_controller_storage_id(record.controller_key)
+        with self._exclusive_record_lock(controller_record_type, record.controller_key):
+            controller_path = self._record_path(
+                controller_record_type,
+                controller_storage_id,
+            )
+            if not controller_path.exists():
+                raise MergeAdmissionFenceRejectedError(
+                    "Persisted merge controller state is missing at admission creation."
+                )
+            controller_state = self._read_model_locked(
+                MergeTrainControllerStateRecord,
+                controller_record_type,
+                controller_storage_id,
+            )
+            validate_merge_admission_controller_fence(
+                admission=record,
+                controller_state=controller_state,
+                admitted_at=admitted_at,
+            )
+            return self.create_merge_admission_record_if_absent(record)
+
+    def read_merge_admission_record(self, admission_id: str) -> MergeAdmissionRecord:
+        return self._read_model(
+            MergeAdmissionRecord,
+            "launchplane_merge_admissions",
+            admission_id,
+        )
+
+    def list_merge_admission_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        pull_request_number: int | None = None,
+        landing_plan_record_id: str = "",
+        landing_plan_id: str = "",
+        attempt_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeAdmissionRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                MergeAdmissionRecord,
+                "launchplane_merge_admissions",
+            )
+            if (not repository or record.repository == repository.strip().lower())
+            and (not base_branch or record.base_branch == base_branch)
+            and (pull_request_number is None or record.pull_request_number == pull_request_number)
+            and (
+                not landing_plan_record_id
+                or record.landing_plan_record_id == landing_plan_record_id
+            )
+            and (not landing_plan_id or record.landing_plan_id == landing_plan_id)
+            and (not attempt_id or record.attempt_id == attempt_id)
+        ]
+        records.sort(key=lambda item: (item.created_at, item.admission_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def create_merge_landing_outcome_record_if_absent(
+        self, record: MergeLandingOutcomeRecord
+    ) -> tuple[MergeLandingOutcomeRecord, bool]:
+        record_type = "launchplane_merge_landing_outcomes"
+        with self._exclusive_record_lock(record_type, record.admission_id):
+            admission = self.read_merge_admission_record(record.admission_id)
+            validate_merge_landing_outcome_for_admission(
+                admission=admission,
+                outcome=record,
+            )
+            existing_sequence = self.list_merge_landing_outcome_records(
+                admission_id=record.admission_id,
+                observation_sequence=record.observation_sequence,
+                limit=2,
+            )
+            if existing_sequence:
+                existing = existing_sequence[0]
+                if existing != record:
+                    raise ValueError("Merge landing outcome observations are append-only.")
+                return existing, False
+            prior_records = self.list_merge_landing_outcome_records(
+                admission_id=record.admission_id,
+                limit=1,
+            )
+            if prior_records:
+                validate_merge_landing_outcome_successor(
+                    prior=prior_records[0],
+                    successor=record,
+                )
+            elif record.observation_sequence != 1:
+                raise ValueError("Merge landing outcome reconciliation is missing its predecessor.")
+            created = self._create_model_if_absent(record_type, record.outcome_id, record)
+            if created:
+                return record, True
+            existing = self.read_merge_landing_outcome_record(record.outcome_id)
+            if existing != record:
+                raise ValueError("Merge landing outcome records are append-only.")
+            return existing, False
+
+    def read_merge_landing_outcome_record(self, outcome_id: str) -> MergeLandingOutcomeRecord:
+        return self._read_model(
+            MergeLandingOutcomeRecord,
+            "launchplane_merge_landing_outcomes",
+            outcome_id,
+        )
+
+    def list_merge_landing_outcome_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        pull_request_number: int | None = None,
+        admission_id: str = "",
+        status: str = "",
+        observation_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[MergeLandingOutcomeRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                MergeLandingOutcomeRecord,
+                "launchplane_merge_landing_outcomes",
+            )
+            if (not repository or record.repository == repository.strip().lower())
+            and (not base_branch or record.base_branch == base_branch)
+            and (pull_request_number is None or record.pull_request_number == pull_request_number)
+            and (not admission_id or record.admission_id == admission_id)
+            and (not status or record.status == status)
+            and (
+                observation_sequence is None or record.observation_sequence == observation_sequence
+            )
+        ]
+        records.sort(
+            key=lambda item: (
+                item.admission_id,
+                item.observation_sequence,
+                item.observed_at,
+                item.outcome_id,
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def list_unresolved_merge_admission_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeAdmissionRecord, ...]:
+        outcomes_by_admission: dict[str, MergeLandingOutcomeRecord] = {}
+        for outcome in self.list_merge_landing_outcome_records(
+            repository=repository,
+            base_branch=base_branch,
+        ):
+            outcomes_by_admission.setdefault(outcome.admission_id, outcome)
+        records = [
+            admission
+            for admission in self.list_merge_admission_records(
+                repository=repository,
+                base_branch=base_branch,
+            )
+            if (
+                admission.admission_id not in outcomes_by_admission
+                or outcomes_by_admission[admission.admission_id].status == "reconcile_required"
+            )
+        ]
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
     def write_merge_train_stack_collapse_plan_record(
         self, record: MergeTrainStackCollapsePlanRecord
     ) -> Path:
@@ -2779,11 +3024,24 @@ class FilesystemRecordStore:
         )
 
     def write_provider_target_record(self, record: ProviderTargetRecord) -> Path:
-        return self._write_model(
-            "launchplane_provider_targets",
-            _context_instance_record_id(record.context, record.instance),
-            record,
-        )
+        with self._product_authority_bundle_lock():
+            record_id = _context_instance_record_id(record.context, record.instance)
+            current_payload = self._read_json_file(
+                self._record_path("launchplane_provider_targets", record_id)
+            )
+            current_record = (
+                ProviderTargetRecord.model_validate(current_payload)
+                if current_payload is not None
+                else None
+            )
+            self._validate_provider_target_write(
+                ProviderTargetWrite(
+                    record=record,
+                    expected_record=current_record,
+                    expected_absent=current_record is None,
+                )
+            )
+            return self._write_model_locked("launchplane_provider_targets", record_id, record)
 
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
@@ -2815,12 +3073,19 @@ class FilesystemRecordStore:
     def create_provider_target_record_if_absent(
         self, record: ProviderTargetRecord
     ) -> ProviderTargetCreateStatus:
-        created = self._create_model_if_absent(
-            "launchplane_provider_targets",
-            _context_instance_record_id(record.context, record.instance),
-            record,
-        )
-        return "created" if created else "exists"
+        with self._product_authority_bundle_lock():
+            record_id = _context_instance_record_id(record.context, record.instance)
+            if self._record_path("launchplane_provider_targets", record_id).exists():
+                return "exists"
+            self._validate_provider_target_write(
+                ProviderTargetWrite(record=record, expected_absent=True)
+            )
+            created = self._create_model_if_absent_locked(
+                "launchplane_provider_targets",
+                record_id,
+                record,
+            )
+            return "created" if created else "exists"
 
     def delete_provider_target_record(
         self,
