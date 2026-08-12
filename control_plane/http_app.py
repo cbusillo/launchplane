@@ -259,6 +259,12 @@ from control_plane.merge_train_batch_candidate import (
     execute_merge_train_batch_candidate_run_once,
     require_merge_train_batch_candidate_record_store,
 )
+from control_plane.merge_admission import (
+    MergeAdmissionDeniedError,
+    MergeAdmissionReconciliationRequiredError,
+    require_merge_admission_record_store,
+)
+from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
@@ -273,7 +279,11 @@ from control_plane.merge_train_controller_run_once import (
     merge_train_controller_mutation_fence,
     require_merge_train_controller_state_record_store,
 )
-from control_plane.merge_train_github import MergeTrainGitHubError, MergeTrainGitHubStaleHeadError
+from control_plane.merge_train_github import (
+    MergeTrainGitHubError,
+    MergeTrainGitHubStaleHeadError,
+    UrllibMergeTrainGitHubTransport,
+)
 from control_plane.merge_train_pr_feedback import (
     MergeTrainPrFeedbackEnvelope,
     build_merge_train_pr_feedback_record,
@@ -284,6 +294,7 @@ from control_plane.merge_train_run_once import (
     execute_merge_train_run_once,
     require_merge_train_run_record_store,
 )
+from control_plane.tenant_admission_controller import TenantAdmissionControllerGitHubClient
 from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapseBatchCandidateStoreMissingError,
     MergeTrainStackCollapsePlanRecordNotFoundError,
@@ -5503,6 +5514,7 @@ def create_launchplane_fastapi_app(
                 record_store
             )
             controller_state_store = require_merge_train_controller_state_record_store(record_store)
+            admission_store = require_merge_admission_record_store(record_store)
         except TypeError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -5530,6 +5542,16 @@ def create_launchplane_fastapi_app(
                     response=idempotent_response,
                 )
 
+            admission_evaluator = LiveMergeAdmissionEvaluator(
+                store=record_store,
+                repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
+                technical_check_client=TenantAdmissionControllerGitHubClient(
+                    transport=UrllibMergeTrainGitHubTransport(
+                        token=token,
+                        api_base_url=controller_request.github_api_base_url,
+                    )
+                ),
+            )
             controller_result = execute_merge_train_controller_run_once(
                 request=controller_request,
                 policy=policy_record.policy,
@@ -5542,12 +5564,28 @@ def create_launchplane_fastapi_app(
                 landing_store=landing_store,
                 stack_collapse_store=stack_collapse_store,
                 controller_state_store=controller_state_store,
+                admission_store=admission_store,
+                admission_evaluator=admission_evaluator,
                 before_release=store_controller_idempotency_before_release,
             )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
         except MergeTrainGitHubError as error:
             return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except MergeAdmissionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="merge_train_landing_not_admitted",
+                message=str(error),
+            ) from error
+        except MergeAdmissionReconciliationRequiredError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="merge_train_landing_reconcile_required",
+                message=str(error),
+            ) from error
         except (
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,
@@ -9279,6 +9317,7 @@ def create_launchplane_fastapi_app(
                 record_store
             )
             controller_state_store = require_merge_train_controller_state_record_store(record_store)
+            admission_store = require_merge_admission_record_store(record_store)
         except TypeError as error:
             raise _launchplane_http_error(
                 status_code=503,
@@ -9305,14 +9344,21 @@ def create_launchplane_fastapi_app(
                 )
 
                 def checkpoint_landing_mutation(
-                    phase: str, pull_request_number: int | None
+                    phase: str,
+                    pull_request_number: int | None,
+                    landing_plan_id: str,
+                    expected_effect_sha: str,
                 ) -> None:
                     lease.checkpoint(
                         active_action="batch_landing_run_once",
                         active_phase=phase,
                         active_record_id=active_record_id,
                         active_pull_request_number=pull_request_number,
-                        step_payload={"mode": landing_request.mode},
+                        step_payload={
+                            "mode": landing_request.mode,
+                            "landing_plan_id": landing_plan_id,
+                            "expected_effect_sha": expected_effect_sha,
+                        },
                     )
 
                 landing_result = execute_merge_train_batch_landing_run_once(
@@ -9325,6 +9371,20 @@ def create_launchplane_fastapi_app(
                     candidate_store=candidate_store,
                     landing_store=landing_store,
                     stack_collapse_store=stack_collapse_store,
+                    admission_store=admission_store,
+                    admission_evaluator=LiveMergeAdmissionEvaluator(
+                        store=record_store,
+                        repository_evidence_provider=(
+                            resolved_change_impact_repository_evidence_provider
+                        ),
+                        technical_check_client=TenantAdmissionControllerGitHubClient(
+                            transport=UrllibMergeTrainGitHubTransport(
+                                token=token,
+                                api_base_url=landing_request.github_api_base_url,
+                            )
+                        ),
+                    ),
+                    controller_state_provider=lease.read_current,
                     mutation_checkpoint=checkpoint_landing_mutation,
                 )
                 response = accepted_evidence_response(
@@ -9345,6 +9405,20 @@ def create_launchplane_fastapi_app(
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
         except MergeTrainGitHubError as error:
             return merge_train_github_request_failed_response(trace_id=trace_id, error=error)
+        except MergeAdmissionDeniedError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="merge_train_landing_not_admitted",
+                message=str(error),
+            ) from error
+        except MergeAdmissionReconciliationRequiredError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="merge_train_landing_reconcile_required",
+                message=str(error),
+            ) from error
         except (
             MergeTrainControllerLeaseHeldError,
             MergeTrainControllerLeaseLostError,

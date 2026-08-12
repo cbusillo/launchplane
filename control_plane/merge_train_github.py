@@ -11,6 +11,7 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapseBranchClient
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.merge_train_structural_provenance import (
@@ -26,6 +27,7 @@ from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainMergeableState
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainPullRequestState
+from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 
 
 class MergeTrainGitHubError(RuntimeError):
@@ -271,14 +273,40 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self,
         *,
         landing_plan: MergeTrainBatchLandingPlan,
+        admission_guard: GuardedMergeAdmission | None = None,
+        recorded_at: str = "",
         checkpoint: (
-            Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str], None] | None
+            Callable[
+                [MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str],
+                MergeTrainBatchLandingPlanRecord | None,
+            ]
+            | None
         ) = None,
     ) -> MergeTrainBatchLandingPlan:
+        if admission_guard is None:
+            raise MergeAdmissionDeniedError(
+                "Batch landing requires the guarded merge admission boundary."
+            )
+        if not recorded_at.strip():
+            raise ValueError("Batch landing admission requires recorded_at.")
         repository_path = _repository_path(landing_plan.repository)
         expected_base_sha = landing_plan.entries[0].expected_base_sha
         expected_base_tree_sha = landing_plan.entries[0].recorded_candidate_parent_tree_sha
         landed_entries: list[MergeTrainBatchLandingEntry] = []
+
+        def update_progress(
+            progress_plan: MergeTrainBatchLandingPlan,
+            progress_entry: MergeTrainBatchLandingEntry,
+            phase: str,
+        ) -> None:
+            persisted_record = (
+                checkpoint(progress_plan, progress_entry, phase) if checkpoint is not None else None
+            )
+            if persisted_record is not None:
+                admission_guard.update_landing_plan_record(persisted_record)
+            else:
+                admission_guard.update_landing_plan(progress_plan)
+
         for entry_index, entry in enumerate(landing_plan.entries):
             current_base_sha, current_base_tree_sha = _base_branch_identity(
                 transport=self.transport,
@@ -324,10 +352,31 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                         status_code=409,
                     )
                 landed_entries.append(recovered_entry)
+                admission_guard.reconcile_existing_landed(
+                    entry=recovered_entry,
+                    observed_base_sha=current_base_sha,
+                    observed_base_tree_sha=current_base_tree_sha,
+                    provider_effect_attempted=True,
+                    observed_at=recorded_at,
+                )
                 expected_base_sha = recovered_entry.merge_commit_sha
                 expected_base_tree_sha = recovered_entry.merge_commit_tree_sha
+                progress_plan = _validated_model_update(
+                    landing_plan,
+                    entries=tuple(landed_entries) + landing_plan.entries[entry_index + 1 :],
+                )
+                update_progress(progress_plan, recovered_entry, "entry_merged")
                 continue
             if _recorded_candidate_step_is_no_op(entry):
+                if checkpoint is not None:
+                    checkpoint(
+                        _validated_model_update(
+                            landing_plan,
+                            entries=tuple(landed_entries) + landing_plan.entries[entry_index:],
+                        ),
+                        entry,
+                        "merge_entry",
+                    )
                 skipped_entry = self._recover_no_op_landing_entry(
                     repository=landing_plan.repository,
                     repository_path=repository_path,
@@ -336,16 +385,28 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     expected_rolling_base_sha=expected_base_sha,
                     expected_rolling_base_tree_sha=expected_base_tree_sha,
                 )
+                no_op_admission = admission_guard.admit(
+                    entry=entry,
+                    observed_base_sha=current_base_sha,
+                    observed_base_tree_sha=current_base_tree_sha,
+                    observed_head_sha=entry.expected_head_sha,
+                    observed_head_tree_sha=entry.expected_head_tree_sha,
+                )
+                admission_guard.record_landed(
+                    admission=no_op_admission,
+                    entry=skipped_entry,
+                    observed_base_sha=current_base_sha,
+                    observed_base_tree_sha=current_base_tree_sha,
+                    base_contains_merge_commit=True,
+                    provider_effect_attempted=False,
+                    observed_at=recorded_at,
+                )
                 landed_entries.append(skipped_entry)
-                if checkpoint is not None:
-                    checkpoint(
-                        _validated_model_update(
-                            landing_plan,
-                            entries=tuple(landed_entries) + landing_plan.entries[entry_index + 1 :],
-                        ),
-                        skipped_entry,
-                        "entry_skipped",
-                    )
+                progress_plan = _validated_model_update(
+                    landing_plan,
+                    entries=tuple(landed_entries) + landing_plan.entries[entry_index + 1 :],
+                )
+                update_progress(progress_plan, skipped_entry, "entry_skipped")
                 continue
             if current_base_sha != expected_base_sha:
                 already_merged_entry = self._already_merged_landing_entry(
@@ -369,17 +430,20 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                         status_code=409,
                     )
                 landed_entries.append(already_merged_entry)
+                admission_guard.reconcile_existing_landed(
+                    entry=already_merged_entry,
+                    observed_base_sha=current_base_sha,
+                    observed_base_tree_sha=current_base_tree_sha,
+                    provider_effect_attempted=True,
+                    observed_at=recorded_at,
+                )
                 expected_base_sha = already_merged_entry.merge_commit_sha
                 expected_base_tree_sha = already_merged_entry.merge_commit_tree_sha
-                if checkpoint is not None:
-                    checkpoint(
-                        _validated_model_update(
-                            landing_plan,
-                            entries=tuple(landed_entries) + landing_plan.entries[entry_index + 1 :],
-                        ),
-                        already_merged_entry,
-                        "entry_merged",
-                    )
+                progress_plan = _validated_model_update(
+                    landing_plan,
+                    entries=tuple(landed_entries) + landing_plan.entries[entry_index + 1 :],
+                )
+                update_progress(progress_plan, already_merged_entry, "entry_merged")
                 continue
             landed_head_sha, landed_head_tree_sha = _git_commit_identity(
                 transport=self.transport,
@@ -400,6 +464,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 expected_base_ref=landing_plan.base_branch,
                 expected_base_sha=expected_base_sha,
             )
+            admission_guard.reconcile_existing_no_effect(
+                entry=entry,
+                observed_base_sha=current_base_sha,
+                observed_base_tree_sha=current_base_tree_sha,
+                observed_head_sha=landed_head_sha,
+                observed_head_tree_sha=landed_head_tree_sha,
+                observed_pull_request_state="open",
+                observed_at=recorded_at,
+            )
             if checkpoint is not None:
                 checkpoint(
                     _validated_model_update(
@@ -409,20 +482,65 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     entry,
                     "merge_entry",
                 )
-            merge_commit_sha = self.merge_pull_request(
-                repository=landing_plan.repository,
-                pull_request_number=entry.pull_request_number,
-                head_sha=entry.expected_head_sha,
-                merge_method=entry.merge_method,
+            admission = admission_guard.admit(
+                entry=entry,
+                observed_base_sha=current_base_sha,
+                observed_base_tree_sha=current_base_tree_sha,
+                observed_head_sha=landed_head_sha,
+                observed_head_tree_sha=landed_head_tree_sha,
             )
-            merge_commit_sha, merge_commit_tree_sha = _validated_landing_commit_identity(
-                transport=self.transport,
-                repository_path=repository_path,
-                commit_sha=merge_commit_sha,
-                expected_parent_sha=current_base_sha,
-                expected_head_sha=landed_head_sha,
-                merge_method=entry.merge_method,
+            try:
+                merge_commit_sha = self.merge_pull_request(
+                    repository=landing_plan.repository,
+                    pull_request_number=entry.pull_request_number,
+                    head_sha=entry.expected_head_sha,
+                    merge_method=entry.merge_method,
+                )
+            except Exception as error:
+                admission_guard.record_provider_failure(
+                    admission=admission,
+                    error=error,
+                    observed_at=recorded_at,
+                )
+                raise
+            try:
+                merge_commit_sha, merge_commit_tree_sha = _validated_landing_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=merge_commit_sha,
+                    expected_parent_sha=current_base_sha,
+                    expected_head_sha=landed_head_sha,
+                    merge_method=entry.merge_method,
+                )
+                observed_base_sha, observed_base_tree_sha = _base_branch_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    base_branch=landing_plan.base_branch,
+                )
+            except Exception as error:
+                admission_guard.record_reconcile_required(
+                    admission=admission,
+                    reason="landing_evidence_incomplete",
+                    message=str(error).strip(),
+                    observed_at=recorded_at,
+                )
+                raise
+            base_contains_merge_commit = observed_base_sha == merge_commit_sha or (
+                self.branch_contains_commit(
+                    repository=landing_plan.repository,
+                    branch_ref=landing_plan.base_branch,
+                    commit_sha=merge_commit_sha,
+                )
             )
+            if not base_contains_merge_commit:
+                message = "Target base branch does not contain the provider merge commit."
+                admission_guard.record_reconcile_required(
+                    admission=admission,
+                    reason="landing_evidence_contradicted",
+                    message=message,
+                    observed_at=recorded_at,
+                )
+                raise MergeTrainGitHubStaleHeadError(message, status_code=409)
             merged_entry = _validated_model_update(
                 entry,
                 status="merged",
@@ -434,17 +552,22 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 merge_commit_tree_sha=merge_commit_tree_sha,
             )
             landed_entries.append(merged_entry)
+            admission_guard.record_landed(
+                admission=admission,
+                entry=merged_entry,
+                observed_base_sha=observed_base_sha,
+                observed_base_tree_sha=observed_base_tree_sha,
+                base_contains_merge_commit=base_contains_merge_commit,
+                provider_effect_attempted=True,
+                observed_at=recorded_at,
+            )
             expected_base_sha = merge_commit_sha
             expected_base_tree_sha = merge_commit_tree_sha
-            if checkpoint is not None:
-                checkpoint(
-                    _validated_model_update(
-                        landing_plan,
-                        entries=tuple(landed_entries) + landing_plan.entries[entry_index + 1 :],
-                    ),
-                    merged_entry,
-                    "entry_merged",
-                )
+            progress_plan = _validated_model_update(
+                landing_plan,
+                entries=tuple(landed_entries) + landing_plan.entries[entry_index + 1 :],
+            )
+            update_progress(progress_plan, merged_entry, "entry_merged")
         current_base_sha = _base_branch_sha(
             transport=self.transport,
             repository_path=repository_path,

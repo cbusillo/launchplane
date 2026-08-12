@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "d8a0c2e4f6b8"
+EXPECTED_ALEMBIC_HEAD_REVISION = "e9b1d3f5a7c0"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -52,6 +52,26 @@ class CriticalPrimaryKey:
 
 
 CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
+    CriticalColumnType(
+        "launchplane_merge_admissions",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_merge_admissions",
+        "attempt_sequence",
+        ("integer", "int4"),
+    ),
+    CriticalColumnType(
+        "launchplane_merge_landing_outcomes",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_merge_landing_outcomes",
+        "observation_sequence",
+        ("integer", "int4"),
+    ),
     CriticalColumnType(
         "launchplane_detached_application_retirements",
         "payload",
@@ -403,6 +423,30 @@ _ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
 )
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
+    CriticalIndex(
+        "launchplane_merge_admissions",
+        "launchplane_merge_admissions_attempt_uidx",
+        ("attempt_id",),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_merge_admissions",
+        "launchplane_merge_admissions_binding_uidx",
+        ("admission_binding_sha256",),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_merge_landing_outcomes",
+        "launchplane_merge_landing_outcomes_observation_uidx",
+        ("admission_id", "observation_sequence"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_merge_landing_outcomes",
+        "launchplane_merge_landing_outcomes_binding_uidx",
+        ("outcome_binding_sha256",),
+        unique=True,
+    ),
     CriticalIndex(
         "launchplane_detached_application_retirements",
         "launchplane_detached_app_retirements_plan_idempotency_unique",
@@ -839,6 +883,14 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
+    CriticalPrimaryKey(
+        "launchplane_merge_admissions",
+        ("admission_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_merge_landing_outcomes",
+        ("outcome_id",),
+    ),
     CriticalPrimaryKey(
         "launchplane_detached_application_retirements",
         ("record_id",),

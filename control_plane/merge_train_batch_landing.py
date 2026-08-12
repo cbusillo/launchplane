@@ -5,10 +5,14 @@ from typing import Callable, Literal, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchLandingEntry,
     MergeTrainBatchLandingPlan,
     MergeTrainBatchLandingPlanRecord,
     build_merge_train_batch_landing_plan,
     build_merge_train_batch_landing_plan_record,
+)
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.contracts.merge_train_stack_collapse import (
@@ -21,6 +25,11 @@ from control_plane.merge_train_batch_candidate import (
     MergeTrainBatchCandidateRecordStore,
     read_merge_train_batch_candidate_record,
 )
+from control_plane.merge_admission import (
+    GuardedMergeAdmission,
+    MergeAdmissionEvaluator,
+    MergeAdmissionRecordStore,
+)
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
@@ -31,6 +40,9 @@ from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecordStore,
     read_merge_train_stack_collapse_plan_record,
     stack_collapse_expected_root_head_sha,
+)
+from control_plane.workflows.merge_train_controller import (
+    latest_merge_train_batch_candidate_progress_record,
 )
 
 
@@ -116,7 +128,10 @@ def execute_merge_train_batch_landing_run_once(
     candidate_store: MergeTrainBatchCandidateRecordStore,
     landing_store: MergeTrainBatchLandingPlanRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
-    mutation_checkpoint: Callable[[str, int | None], None] | None = None,
+    admission_store: MergeAdmissionRecordStore,
+    admission_evaluator: MergeAdmissionEvaluator,
+    controller_state_provider: Callable[[], MergeTrainControllerStateRecord],
+    mutation_checkpoint: Callable[[str, int | None, str, str], None] | None = None,
 ) -> MergeTrainBatchLandingRunOnceResult:
     if request.mode == "plan":
         return _execute_plan_mode(
@@ -136,6 +151,10 @@ def execute_merge_train_batch_landing_run_once(
         recorded_at=recorded_at,
         landing_store=landing_store,
         stack_collapse_store=stack_collapse_store,
+        candidate_store=candidate_store,
+        admission_store=admission_store,
+        admission_evaluator=admission_evaluator,
+        controller_state_provider=controller_state_provider,
         mutation_checkpoint=mutation_checkpoint,
     )
 
@@ -234,9 +253,13 @@ def _execute_land_mode(
     token: str,
     trace_id: str,
     recorded_at: str,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
     landing_store: MergeTrainBatchLandingPlanRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
-    mutation_checkpoint: Callable[[str, int | None], None] | None,
+    admission_store: MergeAdmissionRecordStore,
+    admission_evaluator: MergeAdmissionEvaluator,
+    controller_state_provider: Callable[[], MergeTrainControllerStateRecord],
+    mutation_checkpoint: Callable[[str, int | None, str, str], None] | None,
 ) -> MergeTrainBatchLandingRunOnceResult:
     landing_record = read_merge_train_batch_landing_plan_record(
         record_store=landing_store,
@@ -251,25 +274,66 @@ def _execute_land_mode(
         landing_plan=landing_record.landing_plan,
         stack_collapse_store=stack_collapse_store,
     )
+    candidate_matches = tuple(
+        record
+        for record in candidate_store.list_merge_train_batch_candidate_records(
+            repository=request.repository,
+            base_branch=request.base_branch,
+            status="active",
+            limit=100,
+        )
+        if record.candidate.batch_id == landing_record.landing_plan.batch_id
+        and record.candidate.candidate_sha == landing_record.landing_plan.candidate_sha
+        and record.candidate.candidate_sha256 == landing_record.landing_plan.candidate_sha256
+    )
+    candidate_record = latest_merge_train_batch_candidate_progress_record(candidate_matches)
+    if candidate_record is None:
+        raise ValueError("merge train landing requires its exact active candidate record")
     github_client = GitHubMergeTrainClient(
         transport=UrllibMergeTrainGitHubTransport(
             token=token,
             api_base_url=request.github_api_base_url,
         )
     )
+    admission_guard = GuardedMergeAdmission(
+        record_store=admission_store,
+        evaluator=admission_evaluator,
+        candidate_record=candidate_record,
+        landing_plan_record=landing_record,
+        controller_state=controller_state_provider(),
+        controller_state_provider=controller_state_provider,
+        stack_collapse_record=collapse_existing_record,
+        trace_id=trace_id,
+    )
+
+    def checkpoint_landing_progress(
+        progress_plan: MergeTrainBatchLandingPlan,
+        entry: MergeTrainBatchLandingEntry,
+        phase: str,
+    ) -> MergeTrainBatchLandingPlanRecord | None:
+        if mutation_checkpoint is not None:
+            mutation_checkpoint(
+                phase,
+                entry.pull_request_number,
+                progress_plan.plan_id,
+                progress_plan.candidate_sha,
+            )
+        if phase not in {"entry_merged", "entry_skipped"}:
+            return None
+        progress_record = build_merge_train_batch_landing_plan_record(
+            landing_plan=progress_plan,
+            source=f"service:{request.mode}:landing-progress:{trace_id}",
+            updated_at=recorded_at,
+        )
+        landing_store.write_merge_train_batch_landing_plan_record(progress_record)
+        return progress_record
+
     try:
         landing_plan = github_client.land_batch_candidate(
             landing_plan=landing_record.landing_plan,
-            checkpoint=(
-                lambda progress_plan, entry, phase: (
-                    mutation_checkpoint(
-                        phase,
-                        entry.pull_request_number,
-                    )
-                    if mutation_checkpoint is not None
-                    else None
-                )
-            ),
+            admission_guard=admission_guard,
+            recorded_at=recorded_at,
+            checkpoint=checkpoint_landing_progress,
         )
     except MergeTrainGitHubStaleHeadError:
         stale_plan = _stale_merge_train_landing_plan(landing_record.landing_plan)
@@ -287,7 +351,12 @@ def _execute_land_mode(
     )
     landing_store.write_merge_train_batch_landing_plan_record(landing_record)
     if mutation_checkpoint is not None:
-        mutation_checkpoint("cleanup_candidate_ref", None)
+        mutation_checkpoint(
+            "cleanup_candidate_ref",
+            None,
+            landing_plan.plan_id,
+            landing_plan.candidate_sha,
+        )
     candidate_ref_cleanup_result = _cleanup_merge_train_batch_candidate_ref(
         github_client=github_client,
         landing_plan=landing_plan,
@@ -311,6 +380,8 @@ def _execute_land_mode(
             mutation_checkpoint(
                 "reconcile_stack_children",
                 collapse_existing_record.plan.root_pull_request_number,
+                landing_plan.plan_id,
+                landing_plan.candidate_sha,
             )
         reconciled_collapse_plan = reconcile_merge_train_stack_children_after_root_landing(
             plan=collapse_existing_record.plan,
@@ -330,6 +401,8 @@ def _execute_land_mode(
                             ),
                             None,
                         ),
+                        landing_plan.plan_id,
+                        landing_plan.candidate_sha,
                     )
                     if mutation_checkpoint is not None
                     else None
