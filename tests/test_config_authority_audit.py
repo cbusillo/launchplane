@@ -3910,7 +3910,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         path = ".github/workflows/product-context-cutover.yml"
         for key, value in (
             ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
-            ("payload-file", "launchplane-product-context-cutover-payload.json"),
+            ("payload-file", "launchplane-product-context-operation-payload.json"),
         ):
             with self.subTest(key=key, value=value):
                 self.assertEqual(

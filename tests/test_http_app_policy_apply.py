@@ -9,7 +9,11 @@ from typing import (
 from unittest.mock import patch
 
 from control_plane import secrets as control_plane_secrets
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    product_profile_record_sha256,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
 from control_plane.http_app import (
@@ -30,7 +34,12 @@ from control_plane.service_human_auth import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.storage.postgres import DbOnlyMutationRequest
+from control_plane.storage.postgres import ProductProfileCompareWriteResult
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProviderTargetWrite,
+)
 from tests.http_app_test_support import (
     _AGENT_WRITE_INTENT_SOURCE_URL,
     _agent_write_intent_payload,
@@ -3319,6 +3328,275 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiProductContextCutoverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lane_context_repair_returns_stale_when_provider_authority_changes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+
+            class _DriftingStore(PostgresRecordStore):
+                def compare_and_write_product_profile_record(
+                    self,
+                    *,
+                    expected_record: LaunchplaneProductProfileRecord,
+                    replacement_record: LaunchplaneProductProfileRecord,
+                    mutation: DbOnlyMutationRequest | None = None,
+                    expected_provider_targets: tuple[ProviderTargetRecord, ...] = (),
+                ) -> ProductProfileCompareWriteResult:
+                    expected_targets = expected_provider_targets
+                    target = expected_targets[1]
+                    self.write_product_authority_bundle(
+                        ProductAuthorityBundle(
+                            provider_target_writes=(
+                                ProviderTargetWrite(
+                                    record=target.model_copy(
+                                        update={"updated_at": "2026-08-12T12:00:00Z"}
+                                    ),
+                                    expected_record=target,
+                                    allowed_conflicting_routes=(
+                                        (
+                                            expected_targets[0].context,
+                                            expected_targets[0].instance,
+                                        ),
+                                    ),
+                                ),
+                            )
+                        )
+                    )
+                    return super().compare_and_write_product_profile_record(
+                        expected_record=expected_record,
+                        replacement_record=replacement_record,
+                        mutation=mutation,
+                        expected_provider_targets=expected_provider_targets,
+                    )
+
+            app_store = _DriftingStore(database_url=database_url)
+            app_store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                {
+                    "product": "sellyouroutboard",
+                    "display_name": "SellYourOutboard",
+                    "repository": "cbusillo/sellyouroutboard",
+                    "driver_id": "generic-web",
+                    "image": {"repository": "ghcr.io/cbusillo/sellyouroutboard"},
+                    "runtime_port": 3000,
+                    "health_path": "/api/health",
+                    "lanes": [
+                        {
+                            "instance": "testing",
+                            "context": "sellyouroutboard-testing",
+                        }
+                    ],
+                    "historical_contexts": ["sellyouroutboard-testing"],
+                    "updated_at": "2026-08-05T17:01:06Z",
+                    "source": "service:generic-web-onboarding",
+                }
+            )
+            source_target = ProviderTargetRecord(
+                context="sellyouroutboard-testing",
+                instance="testing",
+                provider_id="dokploy",
+                target_category="application",
+                target_id="shared-testing-target",
+                display_name="sellyouroutboard-testing",
+                provider_target_type="application",
+                updated_at="2026-08-05T17:47:15Z",
+                source_label="test",
+            )
+            target_target = source_target.model_copy(
+                update={
+                    "context": "sellyouroutboard",
+                    "display_name": "syo-testing-app",
+                }
+            )
+            app_store.write_product_profile_record(profile)
+            app_store.write_provider_target_record(source_target)
+            app_store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    provider_target_writes=(
+                        ProviderTargetWrite(
+                            record=target_target,
+                            expected_absent=True,
+                            allowed_conflicting_routes=(
+                                (source_target.context, source_target.instance),
+                            ),
+                        ),
+                    )
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: app_store,
+            )
+            dry_run_payload: dict[str, object] = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "instance": "testing",
+                "expected_current_context": "sellyouroutboard-testing",
+                "requested_context": "sellyouroutboard",
+                "mode": "dry-run",
+                "reason": "Repair the legacy testing lane pointer.",
+            }
+            dry_run_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/product-profiles/lane-context-repair/apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=dry_run_payload,
+            )
+            apply_payload = {
+                **dry_run_payload,
+                "mode": "apply",
+                "expected_profile_sha256": product_profile_record_sha256(profile),
+                "reviewed_plan_sha256": dry_run_response.json()["result"]["plan_sha256"],
+            }
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/product-profiles/lane-context-repair/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "lane-context-repair-drift",
+                },
+                payload=apply_payload,
+            )
+            stored_profile = app_store.read_product_profile_record("sellyouroutboard")
+            app_store.close()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "stale")
+        self.assertEqual(stored_profile, profile)
+
+    async def test_lane_context_repair_applies_reviewed_single_lane_plan(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            app_store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                {
+                    "product": "sellyouroutboard",
+                    "display_name": "SellYourOutboard",
+                    "repository": "cbusillo/sellyouroutboard",
+                    "driver_id": "generic-web",
+                    "image": {"repository": "ghcr.io/cbusillo/sellyouroutboard"},
+                    "runtime_port": 3000,
+                    "health_path": "/api/health",
+                    "lanes": [
+                        {
+                            "instance": "testing",
+                            "context": "sellyouroutboard-testing",
+                        }
+                    ],
+                    "historical_contexts": ["sellyouroutboard-testing"],
+                    "preview": {
+                        "enabled": True,
+                        "context": "sellyouroutboard-preview",
+                    },
+                    "updated_at": "2026-08-05T17:01:06Z",
+                    "source": "service:generic-web-onboarding",
+                }
+            )
+            source_target = ProviderTargetRecord(
+                context="sellyouroutboard-testing",
+                instance="testing",
+                provider_id="dokploy",
+                target_category="application",
+                target_id="shared-testing-target",
+                display_name="sellyouroutboard-testing",
+                provider_target_type="application",
+                updated_at="2026-08-05T17:47:15Z",
+                source_label="test",
+            )
+            target_target = source_target.model_copy(
+                update={
+                    "context": "sellyouroutboard",
+                    "display_name": "syo-testing-app",
+                }
+            )
+            app_store.write_product_profile_record(profile)
+            app_store.write_provider_target_record(source_target)
+            app_store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    provider_target_writes=(
+                        ProviderTargetWrite(
+                            record=target_target,
+                            expected_absent=True,
+                            allowed_conflicting_routes=(
+                                (source_target.context, source_target.instance),
+                            ),
+                        ),
+                    )
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: app_store,
+            )
+            request_payload: dict[str, object] = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "instance": "testing",
+                "expected_current_context": "sellyouroutboard-testing",
+                "requested_context": "sellyouroutboard",
+                "mode": "dry-run",
+                "reason": "Repair the legacy testing lane pointer.",
+            }
+
+            dry_run_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/product-profiles/lane-context-repair/apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=request_payload,
+            )
+            dry_run_result = dry_run_response.json()["result"]
+            apply_payload = {
+                **request_payload,
+                "mode": "apply",
+                "expected_profile_sha256": product_profile_record_sha256(profile),
+                "reviewed_plan_sha256": dry_run_result["plan_sha256"],
+            }
+            apply_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/product-profiles/lane-context-repair/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "lane-context-repair",
+                },
+                payload=apply_payload,
+            )
+            replay_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/product-profiles/lane-context-repair/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "lane-context-repair",
+                },
+                payload=apply_payload,
+            )
+            stored_profile = app_store.read_product_profile_record("sellyouroutboard")
+            stored_targets = app_store.list_physical_provider_target_records()
+            app_store.close()
+
+        self.assertEqual(dry_run_response.status_code, 202)
+        self.assertTrue(dry_run_result["same_physical_target"])
+        self.assertEqual(apply_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertEqual(replay_response.json()["records"], apply_response.json()["records"])
+        self.assertEqual(replay_response.json()["result"], apply_response.json()["result"])
+        self.assertTrue(apply_response.json()["result"]["applied"])
+        self.assertEqual(stored_profile.lanes[0].context, "sellyouroutboard")
+        self.assertEqual(stored_profile.preview.context, "sellyouroutboard-preview")
+        self.assertEqual(stored_profile.historical_contexts, ("sellyouroutboard-testing",))
+        self.assertEqual(stored_targets, (target_target, source_target))
+
     async def test_context_cutover_apply_updates_profile_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -3604,10 +3882,15 @@ class FastApiProductContextCutoverTests(unittest.IsolatedAsyncioTestCase):
         cleanup_route = openapi["paths"]["/v1/product-profiles/legacy-context-cleanup/apply"][
             "post"
         ]
+        repair_route = openapi["paths"]["/v1/product-profiles/lane-context-repair/apply"]["post"]
         self.assertEqual(cutover_route["operationId"], "apply_product_context_cutover")
         self.assertEqual(
             cleanup_route["operationId"],
             "apply_product_legacy_context_cleanup",
+        )
+        self.assertEqual(
+            repair_route["operationId"],
+            "apply_product_lane_context_repair",
         )
         self.assertEqual(
             cutover_route["requestBody"]["content"]["application/json"]["schema"]["title"],
@@ -3617,7 +3900,11 @@ class FastApiProductContextCutoverTests(unittest.IsolatedAsyncioTestCase):
             cleanup_route["requestBody"]["content"]["application/json"]["schema"]["title"],
             "LegacyContextCleanupRequest",
         )
-        for route in (cutover_route, cleanup_route):
+        self.assertEqual(
+            repair_route["requestBody"]["content"]["application/json"]["schema"]["title"],
+            "ProductLaneContextRepairRequest",
+        )
+        for route in (cutover_route, cleanup_route, repair_route):
             self.assertEqual(
                 route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
                 "#/components/schemas/AcceptedEvidenceResponse",

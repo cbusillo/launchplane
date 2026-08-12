@@ -333,6 +333,7 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     },
     ".github/workflows/product-context-cutover.yml": {
         "inputs.dry_run.default": frozenset(("true",)),
+        "inputs.operation.default": frozenset(("context-cutover",)),
     },
     ".github/workflows/product-environment-evidence.yml": {
         "inputs.routes_json.default": frozenset(("[]",)),
@@ -691,6 +692,11 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "REQUESTED_BASE_BRANCH": frozenset(("${{ inputs.base_branch }}",)),
     },
     ".github/workflows/product-context-cutover.yml": {
+        "EXPECTED_PROFILE_SHA256": frozenset(("${{ inputs.expected_profile_sha256 }}",)),
+        "INSTANCE": frozenset(("${{ inputs.instance }}",)),
+        "OPERATION": frozenset(("${{ inputs.operation }}",)),
+        "REASON": frozenset(("${{ inputs.reason }}",)),
+        "REVIEWED_PLAN_SHA256": frozenset(("${{ inputs.reviewed_plan_sha256 }}",)),
         "SOURCE_CONTEXT": frozenset(("${{ inputs.source_context }}",)),
         "TARGET_CONTEXT": frozenset(("${{ inputs.target_context }}",)),
     },
@@ -1094,7 +1100,8 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
     },
     ".github/workflows/product-context-cutover.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
-        "payload-file": frozenset(("launchplane-product-context-cutover-payload.json",)),
+        "payload-file": frozenset(("launchplane-product-context-operation-payload.json",)),
+        "route-path": frozenset(("${{ steps.request.outputs.route_path }}",)),
     },
     ".github/workflows/product-legacy-context-cleanup.yml": {
         "idempotency-key": frozenset(("${{ steps.request.outputs.idempotency_key }}",)),
