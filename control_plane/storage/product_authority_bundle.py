@@ -36,6 +36,7 @@ class ProviderTargetWrite(BaseModel):
     record: ProviderTargetRecord
     expected_record: ProviderTargetRecord | None = None
     expected_absent: bool = False
+    allowed_conflicting_routes: tuple[tuple[str, str], ...] = ()
 
     @model_validator(mode="after")
     def validate_expectation(self) -> ProviderTargetWrite:
@@ -48,6 +49,12 @@ class ProviderTargetWrite(BaseModel):
             or self.expected_record.instance != self.record.instance
         ):
             raise ValueError("Provider target write expectation must identify the same route.")
+        requested_route = (self.record.context, self.record.instance)
+        if requested_route in self.allowed_conflicting_routes:
+            raise ValueError(
+                "Provider target write cannot allow its requested route as a conflict."
+            )
+        self.allowed_conflicting_routes = tuple(dict.fromkeys(self.allowed_conflicting_routes))
         return self
 
 

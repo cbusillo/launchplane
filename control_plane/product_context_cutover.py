@@ -869,6 +869,7 @@ def plan_product_context_cutover_authority_bundle(
                 record=record,
                 expected_record=current_provider_targets.get((record.context, record.instance)),
                 expected_absent=(record.context, record.instance) not in current_provider_targets,
+                allowed_conflicting_routes=((request.source_context, record.instance),),
             )
             for record in planned_provider_target_records.values()
         ),

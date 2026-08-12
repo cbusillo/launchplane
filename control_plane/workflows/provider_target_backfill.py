@@ -167,11 +167,24 @@ def backfill_provider_targets(
             if record is None:
                 applied_items.append(item)
                 continue
-            create_status = _create_provider_target_record(
-                record_store=record_store,
-                conditional_create=conditional_create,
-                record=record,
-            )
+            try:
+                create_status = _create_provider_target_record(
+                    record_store=record_store,
+                    conditional_create=conditional_create,
+                    record=record,
+                )
+            except ValueError as error:
+                applied_items.append(
+                    _item(
+                        context=record.context,
+                        instance=record.instance,
+                        status="skipped-conflict",
+                        severity="blocked",
+                        detail=str(error),
+                        projected_record=record,
+                    )
+                )
+                continue
             if create_status == "exists":
                 applied_items.append(
                     _item(

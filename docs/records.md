@@ -559,6 +559,13 @@ an ORM column/table or remains only in the evidence payload.
   The dual-write is identity-only: Dokploy route/runtime execution metadata such
   as domains, health policy, source metadata, env keys, and product policies
   remains in the Dokploy target record.
+- Current lane and enabled preview contexts may not also appear in a product
+  profile's `historical_contexts`. Generic-web onboarding creates new products
+  only; changes to existing products use bounded profile or manifest apply
+  paths. Target setup refuses to reactivate a context retained as historical
+  evidence. One physical provider target identity may be bound to only one
+  steady-state context/instance route; same-route replacement evidence does not
+  authorize a cross-route alias.
 - Product context audit, cutover, and legacy cleanup responses expose target
   copy/delete summaries under provider-neutral `provider_targets` and
   `provider_target_ids` keys. Dokploy target and target-id records can still be
@@ -951,7 +958,9 @@ directly with
 `uv run launchplane product-profiles upsert --database-url ... --allow-direct-db-mutation`.
 That command is an explicit local/bootstrap repair tool for creating the
 Launchplane record; it is not a repo-local manifest and should not become
-product repo authority.
+product repo authority. It enforces the same fail-closed historical-context
+transition rule as service and manifest writes, so it cannot reactivate a
+retired context.
 
 ## Public Ingress Observation Records
 

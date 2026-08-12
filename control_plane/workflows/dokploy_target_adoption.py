@@ -6,14 +6,20 @@ from pydantic import BaseModel, ConfigDict
 from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetType
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProductAuthorityBundleStore,
+    ProviderTargetWrite,
+)
 from control_plane.workflows.provider_target_dual_write import (
+    ensure_provider_target_identity_unbound_elsewhere,
     prepare_provider_target_from_dokploy_records,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy.api import JsonObject
 
 
-class DokployTargetAdoptionRecordStore(Protocol):
+class DokployTargetAdoptionRecordStore(ProductAuthorityBundleStore, Protocol):
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None: ...
 
     def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None: ...
@@ -170,6 +176,10 @@ def adopt_dokploy_target(
         target_record=target_record,
         target_id_record=target_id_record,
     )
+    ensure_provider_target_identity_unbound_elsewhere(
+        record_store=record_store,
+        provider_target_record=provider_target_record,
+    )
 
     if apply:
         provider_target_record = prepare_provider_target_from_dokploy_records(
@@ -178,9 +188,24 @@ def adopt_dokploy_target(
             target_id_record=target_id_record,
             expected_current_provider_target=expected_current_provider_target,
         )
-        record_store.write_dokploy_target_record(target_record)
-        record_store.write_dokploy_target_id_record(target_id_record)
-        record_store.write_provider_target_record(provider_target_record)
+        current_provider_targets = {
+            (record.context, record.instance): record
+            for record in record_store.list_physical_provider_target_records()
+        }
+        requested_route = (provider_target_record.context, provider_target_record.instance)
+        record_store.write_product_authority_bundle(
+            ProductAuthorityBundle(
+                dokploy_targets=(target_record,),
+                dokploy_target_ids=(target_id_record,),
+                provider_target_writes=(
+                    ProviderTargetWrite(
+                        record=provider_target_record,
+                        expected_record=current_provider_targets.get(requested_route),
+                        expected_absent=requested_route not in current_provider_targets,
+                    ),
+                ),
+            )
+        )
 
     return DokployTargetAdoptionResult(
         applied=apply,
@@ -578,13 +603,22 @@ def create_dokploy_compose_target(
         }
     )
     if target_record != adoption.target_record:
-        record_store.write_dokploy_target_record(target_record)
         provider_target_record = prepare_provider_target_from_dokploy_records(
             record_store=record_store,
             target_record=target_record,
             target_id_record=adoption.target_id_record,
         )
-        record_store.write_provider_target_record(provider_target_record)
+        record_store.write_product_authority_bundle(
+            ProductAuthorityBundle(
+                dokploy_targets=(target_record,),
+                provider_target_writes=(
+                    ProviderTargetWrite(
+                        record=provider_target_record,
+                        expected_record=adoption.provider_target_record,
+                    ),
+                ),
+            )
+        )
     else:
         provider_target_record = adoption.provider_target_record
     return DokployComposeTargetCreateResult(

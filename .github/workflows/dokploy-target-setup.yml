@@ -117,7 +117,8 @@ name: Dokploy Target Setup
       expected_current_provider_target_json:
         description: >-
           Optional JSON deployed target authority that must match the existing
-          provider-target row before replacing it.
+          provider-target row before same-route replacement. It never authorizes
+          cross-route target identity reuse.
         required: false
         default: ""
         type: string

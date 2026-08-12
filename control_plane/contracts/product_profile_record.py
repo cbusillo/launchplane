@@ -602,6 +602,57 @@ class LaunchplaneProductProfileRecord(BaseModel):
         return self
 
 
+def product_profile_historical_context_overlap(
+    profile: LaunchplaneProductProfileRecord,
+) -> frozenset[tuple[str, str]]:
+    historical_contexts = {
+        context.strip() for context in profile.historical_contexts if context.strip()
+    }
+    overlaps = {
+        (f"lane:{lane.instance.strip()}", lane.context.strip())
+        for lane in profile.lanes
+        if lane.context.strip() in historical_contexts
+    }
+    if profile.preview.enabled and profile.preview.context.strip() in historical_contexts:
+        overlaps.add(("preview", profile.preview.context.strip()))
+    return frozenset(overlaps)
+
+
+def validate_product_profile_history_transition(
+    *,
+    existing_profile: LaunchplaneProductProfileRecord | None,
+    replacement_profile: LaunchplaneProductProfileRecord,
+) -> None:
+    if existing_profile is not None:
+        existing_history = {
+            context.strip() for context in existing_profile.historical_contexts if context.strip()
+        }
+        replacement_history = {
+            context.strip()
+            for context in replacement_profile.historical_contexts
+            if context.strip()
+        }
+        removed_history = sorted(existing_history - replacement_history)
+        if removed_history:
+            raise ValueError(
+                "product profile historical contexts are append-only: " + ", ".join(removed_history)
+            )
+    replacement_overlap = product_profile_historical_context_overlap(replacement_profile)
+    if not replacement_overlap:
+        return
+    existing_overlap = (
+        product_profile_historical_context_overlap(existing_profile)
+        if existing_profile is not None
+        else frozenset()
+    )
+    introduced_overlap = replacement_overlap - existing_overlap
+    if introduced_overlap:
+        raise ValueError(
+            "product profile current contexts cannot reuse historical contexts: "
+            + ", ".join(f"{binding}={context}" for binding, context in sorted(introduced_overlap))
+        )
+
+
 def product_profile_record_sha256(record: LaunchplaneProductProfileRecord) -> str:
     canonical_payload = json.dumps(
         record.model_dump(mode="json"),
