@@ -1303,6 +1303,19 @@ DB-backed Launchplane records:
   provider-target authority changes should use the deployed service route or
   operator workflow.
 
+For an invalid tracked Dokploy target domain authority, use the `Dokploy Target
+Setup` workflow with `operation=repair-domain-authority`. Supply the exact
+tracked target type and target ID, a comma-separated tuple of bare DNS hosts,
+and the JSON projection of the current provider-target record as the compare
+expectation. The service reads provider evidence only; it does not create,
+update, or delete Dokploy domains. Run dry-run first. Apply is allowed only
+after the dry-run shows the intended domain-only projection and requires the
+normal setup confirmation, operator reason, and idempotency key. The repair
+preserves all target metadata except `domains`, `updated_at`, and
+`source_label`. The same atomic write advances only `updated_at` and
+`source_label` on the canonical provider-target projection so downstream
+projection checks remain consistent.
+
 Two deployment prerequisites remain Dokploy-side operational contracts rather
 than Launchplane CLI validations:
 

@@ -36,9 +36,13 @@ from control_plane.http_app import (
     idempotency_request_fingerprint,
     idempotency_scope,
 )
+from control_plane.dokploy.api import JsonObject
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
+from control_plane.workflows.dokploy_target_adoption import (
+    repair_dokploy_target_domain_authority,
+)
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -49,6 +53,10 @@ from tests.support.ingress import _get_route_binding_record, _get_route_binding_
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
+
+
+def _live_domains(*hosts: str) -> tuple[JsonObject, ...]:
+    return tuple({"host": host} for host in hosts)
 
 
 def _route_binding_record(
@@ -973,6 +981,52 @@ def _ready_route_binding_reconcile_store(
 
 
 class RouteBindingReconcileTests(unittest.TestCase):
+    def test_reconcile_is_ready_after_domain_authority_repair(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            target_record = _dokploy_target_record(domains=("https://app.example.test",))
+            target_id_record = _dokploy_target_id_record()
+            provider_target_record = ProviderTargetRecord.from_dokploy_records(
+                target_record=target_record,
+                target_id_record=target_id_record,
+            )
+            store.write_dokploy_target_record(target_record)
+            store.write_dokploy_target_id_record(target_id_record)
+            store.write_provider_target_record(provider_target_record)
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            store.write_ingress_route_audit_record(_ingress_audit_record())
+
+            repair_dokploy_target_domain_authority(
+                record_store=store,
+                host="synthetic-host",
+                token="synthetic-token",
+                context=target_record.context,
+                instance=target_record.instance,
+                target_type=target_record.target_type,
+                target_id=target_id_record.target_id,
+                domains=("app.example.test",),
+                expected_current_provider_target=(
+                    provider_target_record.to_deployed_target_reference()
+                ),
+                updated_at="2026-07-12T00:05:00Z",
+                apply=True,
+                fetch_target_payload=lambda *_args: {"composeId": target_id_record.target_id},
+                fetch_target_domains=lambda *_args: _live_domains("app.example.test"),
+            )
+            plan = plan_route_binding_reconcile(
+                record_store=store,
+                request=_route_binding_reconcile_request(),
+            )
+            store.close()
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.operation, "create")
+
     def test_reconcile_plans_create_with_service_owned_freshness(self) -> None:
         plan = plan_route_binding_reconcile(
             record_store=_ready_route_binding_reconcile_store(),
