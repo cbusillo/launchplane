@@ -71,6 +71,12 @@ global.fetch = async (url, init) => {{
   }}
   const configuredStatuses = String(process.env.TEST_REFRESH_STATUSES || '').split(',').filter(Boolean);
   const refreshStatus = configuredStatuses[launchplaneRequestCount - 1] || process.env.TEST_REFRESH_STATUS || 'pass';
+  if (process.env.TEST_TRACE_ONLY === 'true') {{
+    return new Response(JSON.stringify({{
+      status: 'rejected',
+      trace_id: process.env.TEST_TRACE_ID || ''
+    }}), {{status: statusCode}});
+  }}
   if (process.env.TEST_ERROR_CODE) {{
     return new Response(JSON.stringify({{
       status: 'rejected',
@@ -241,6 +247,24 @@ process.on('beforeExit', () => {{
         self.assertIn("code=merge_train_landing_not_admitted", result.stderr)
         self.assertIn("trace_id=launchplane_req_example", result.stderr)
         self.assertNotIn("sensitive diagnostic detail", result.stderr)
+
+    def test_reports_trace_id_without_error_wrapper(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/work-graph/merge-train/controller/run-once",
+                "payload": '{"schema_version":1,"repository":"example/repo"}',
+                "log-response-body": "false",
+            },
+            environment={
+                "TEST_STATUS": "502",
+                "TEST_TRACE_ONLY": "true",
+                "TEST_TRACE_ID": "launchplane_req_gateway",
+            },
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("trace_id=launchplane_req_gateway", result.stderr)
 
     def test_rejects_invalid_expected_status_input(self) -> None:
         result = self.run_action(

@@ -294,10 +294,11 @@ function publicSafeFailureDetail(responseBody) {
     return "";
   }
   const error = responseBody.error;
-  if (error === null || typeof error !== "object" || Array.isArray(error)) {
-    return "";
-  }
-  const code = typeof error.code === "string" ? error.code.trim() : "";
+  const code =
+    error !== null && typeof error === "object" && !Array.isArray(error) &&
+    typeof error.code === "string"
+      ? error.code.trim()
+      : "";
   const traceId = typeof responseBody.trace_id === "string" ? responseBody.trace_id.trim() : "";
   if (!code && !traceId) {
     return "";
