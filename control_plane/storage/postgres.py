@@ -13679,6 +13679,7 @@ class PostgresRecordStore(HumanSessionStore):
         expected_record: LaunchplaneProductProfileRecord,
         replacement_record: LaunchplaneProductProfileRecord,
         mutation: DbOnlyMutationRequest | None = None,
+        expected_provider_targets: tuple[ProviderTargetRecord, ...] = (),
     ) -> ProductProfileCompareWriteResult:
         if expected_record.product != replacement_record.product:
             raise ValueError("Product profile compare-and-write requires matching products.")
@@ -13702,6 +13703,7 @@ class PostgresRecordStore(HumanSessionStore):
                     statement=statement,
                     expected_record=expected_record,
                     replacement_record=replacement_record,
+                    expected_provider_targets=expected_provider_targets,
                 )
 
         reservation_insert_error: IntegrityError | None = None
@@ -13736,6 +13738,7 @@ class PostgresRecordStore(HumanSessionStore):
                     reservation_row=reservation_row,
                     mutation_reservation=stored_reservation,
                     mutation=mutation,
+                    expected_provider_targets=expected_provider_targets,
                 )
 
         with self._session_factory() as session:
@@ -13817,6 +13820,7 @@ class PostgresRecordStore(HumanSessionStore):
                 reservation_row=reservation_row,
                 mutation_reservation=reclaimed_reservation,
                 mutation=mutation,
+                expected_provider_targets=expected_provider_targets,
             )
 
     def _compare_and_write_product_profile_locked(
@@ -13829,7 +13833,18 @@ class PostgresRecordStore(HumanSessionStore):
         reservation_row: LaunchplaneIdempotencyRow | None = None,
         mutation_reservation: LaunchplaneIdempotencyRecord | None = None,
         mutation: DbOnlyMutationRequest | None = None,
+        expected_provider_targets: tuple[ProviderTargetRecord, ...] = (),
     ) -> ProductProfileCompareWriteResult:
+        if expected_provider_targets:
+            self._lock_product_authority_bundle_write(session)
+            if not self._provider_target_expectations_match(
+                session=session,
+                expected_records=expected_provider_targets,
+            ):
+                if reservation_row is not None:
+                    session.delete(reservation_row)
+                    session.commit()
+                return ProductProfileCompareWriteResult(status="changed")
         row = session.scalar(statement)
         if row is None:
             if reservation_row is not None:
@@ -13865,6 +13880,54 @@ class PostgresRecordStore(HumanSessionStore):
             status="written",
             idempotency_record=stored_completion,
         )
+
+    def _provider_target_expectations_match(
+        self,
+        *,
+        session: Any,
+        expected_records: tuple[ProviderTargetRecord, ...],
+    ) -> bool:
+        expected_routes = {(record.context, record.instance): record for record in expected_records}
+        if len(expected_routes) != len(expected_records):
+            raise ValueError("Provider target expectations must identify unique routes.")
+        expected_identities = {
+            (record.provider_id, record.target_category, record.target_id)
+            for record in expected_records
+        }
+        if len(expected_identities) != 1:
+            raise ValueError("Provider target expectations must share one physical identity.")
+        for route, expected_record in expected_routes.items():
+            statement = (
+                select(LaunchplaneProviderTargetRow)
+                .where(
+                    LaunchplaneProviderTargetRow.context == route[0],
+                    LaunchplaneProviderTargetRow.instance == route[1],
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                return False
+            current_record = self._read_payload(
+                model_type=ProviderTargetRecord,
+                payload=row.payload,
+            )
+            if self._payload_dict(current_record) != self._payload_dict(expected_record):
+                return False
+        provider_id, target_category, target_id = next(iter(expected_identities))
+        identity_statement = select(LaunchplaneProviderTargetRow).where(
+            LaunchplaneProviderTargetRow.provider_id == provider_id,
+            LaunchplaneProviderTargetRow.target_category == target_category,
+            LaunchplaneProviderTargetRow.target_id == target_id,
+        )
+        if not self.database_url.startswith("sqlite"):
+            identity_statement = identity_statement.with_for_update()
+        claimed_routes = {
+            (row.context, row.instance) for row in session.scalars(identity_statement)
+        }
+        return claimed_routes == set(expected_routes)
 
     def _read_product_profile_payload(
         self, payload: PayloadDict

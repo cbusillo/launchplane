@@ -1532,16 +1532,18 @@ class ProductOnboardingTests(unittest.TestCase):
         )
 
         self.assertIn("runs-on: ubuntu-latest", workflow_text)
+        self.assertIn("environment: launchplane-authz-admin", workflow_text)
         self.assertIn(
             "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
             workflow_text,
         )
+        self.assertIn('route_path="/v1/product-profiles/context-cutover/apply"', workflow_text)
         self.assertIn(
-            "route-path: /v1/product-profiles/context-cutover/apply",
+            'route_path="/v1/product-profiles/lane-context-repair/apply"',
             workflow_text,
         )
         self.assertIn(
-            "payload-file: launchplane-product-context-cutover-payload.json",
+            "payload-file: launchplane-product-context-operation-payload.json",
             workflow_text,
         )
         self.assertIn(
@@ -1549,7 +1551,7 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
         self.assertIn(
-            "response-output-file: launchplane-product-context-cutover.json",
+            "response-output-file: launchplane-product-context-operation.json",
             workflow_text,
         )
         self.assertIn('mode="apply"', workflow_text)
@@ -1558,19 +1560,25 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('--arg source_context "$SOURCE_CONTEXT"', workflow_text)
         self.assertIn('--arg target_context "$TARGET_CONTEXT"', workflow_text)
         self.assertIn('--arg display_name "$DISPLAY_NAME"', workflow_text)
+        self.assertIn('--arg instance "$INSTANCE"', workflow_text)
+        self.assertIn('--arg expected_profile_sha256 "$EXPECTED_PROFILE_SHA256"', workflow_text)
+        self.assertIn('--arg reviewed_plan_sha256 "$REVIEWED_PLAN_SHA256"', workflow_text)
         self.assertIn('--arg mode "$mode"', workflow_text)
         self.assertIn("product: $product", workflow_text)
         self.assertIn("source_context: $source_context", workflow_text)
         self.assertIn("target_context: $target_context", workflow_text)
         self.assertIn("display_name: $display_name", workflow_text)
+        self.assertIn("expected_current_context: $expected_current_context", workflow_text)
+        self.assertIn("requested_context: $requested_context", workflow_text)
+        self.assertIn("reviewed_plan_sha256: $reviewed_plan_sha256", workflow_text)
         self.assertIn("mode: $mode", workflow_text)
         self.assertIn('source_label: "workflow:product-context-cutover"', workflow_text)
         self.assertIn("if: always()", workflow_text)
         self.assertIn(
-            "CUTOVER_STATUS_CODE: ${{ steps.cutover_request.outputs.status-code }}",
+            "CONTEXT_STATUS_CODE: ${{ steps.context_request.outputs.status-code }}",
             workflow_text,
         )
-        self.assertIn('if [ "$CUTOVER_STATUS_CODE" != "202" ]; then', workflow_text)
+        self.assertIn('if [ "$CONTEXT_STATUS_CODE" != "202" ]; then', workflow_text)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", workflow_text)
         self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", workflow_text)
         self.assertNotIn("Authorization: Bearer", workflow_text)
