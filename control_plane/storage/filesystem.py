@@ -2953,10 +2953,16 @@ class FilesystemRecordStore:
         domains: tuple[str, ...],
         updated_at: str,
         source_label: str,
-    ) -> DokployTargetRecord:
+    ) -> tuple[DokployTargetRecord, ProviderTargetRecord]:
         replacement_record = expected_record.model_copy(
             update={
                 "domains": domains,
+                "updated_at": updated_at,
+                "source_label": source_label,
+            }
+        )
+        replacement_provider_target_record = expected_provider_target_record.model_copy(
+            update={
                 "updated_at": updated_at,
                 "source_label": source_label,
             }
@@ -2993,7 +2999,12 @@ class FilesystemRecordStore:
             if current_provider_target_record != expected_provider_target_record:
                 raise ValueError("Provider-target record changed during domain authority repair.")
             self._write_model_locked("dokploy_targets", record_id, replacement_record)
-        return replacement_record
+            self._write_model_locked(
+                "launchplane_provider_targets",
+                record_id,
+                replacement_provider_target_record,
+            )
+        return replacement_record, replacement_provider_target_record
 
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str

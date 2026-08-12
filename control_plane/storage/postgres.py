@@ -15302,10 +15302,16 @@ class PostgresRecordStore(HumanSessionStore):
         domains: tuple[str, ...],
         updated_at: str,
         source_label: str,
-    ) -> DokployTargetRecord:
+    ) -> tuple[DokployTargetRecord, ProviderTargetRecord]:
         replacement_record = expected_record.model_copy(
             update={
                 "domains": domains,
+                "updated_at": updated_at,
+                "source_label": source_label,
+            }
+        )
+        replacement_provider_target_record = expected_provider_target_record.model_copy(
+            update={
                 "updated_at": updated_at,
                 "source_label": source_label,
             }
@@ -15373,8 +15379,10 @@ class PostgresRecordStore(HumanSessionStore):
                 raise ValueError("Provider-target record changed during domain authority repair.")
             row.updated_at = replacement_record.updated_at
             row.payload = self._payload_dict(replacement_record)
+            provider_row.updated_at = replacement_provider_target_record.updated_at
+            provider_row.payload = self._payload_dict(replacement_provider_target_record)
             session.commit()
-        return replacement_record
+        return replacement_record, replacement_provider_target_record
 
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str

@@ -50,7 +50,7 @@ class DokployTargetAdoptionRecordStore(ProductAuthorityBundleStore, Protocol):
         domains: tuple[str, ...],
         updated_at: str,
         source_label: str,
-    ) -> DokployTargetRecord: ...
+    ) -> tuple[DokployTargetRecord, ProviderTargetRecord]: ...
 
 
 class DokployTargetAdoptionResult(BaseModel):
@@ -138,6 +138,7 @@ def repair_dokploy_target_domain_authority(
     normalized_target_id = _require_non_empty(target_id, "target_id")
     requested_domains = normalize_dokploy_domain_hosts(domains)
     recorded_at = updated_at.strip() or utc_now_timestamp()
+    normalized_source_label = source_label.strip()
 
     try:
         target_record = record_store.read_dokploy_target_record(
@@ -190,8 +191,10 @@ def repair_dokploy_target_domain_authority(
 
     live_provider_domains = normalize_dokploy_domain_hosts(
         tuple(
-            str(domain.get("host") or "")
-            for domain in fetch_target_domains(host, token, target_type, normalized_target_id)
+            dict.fromkeys(
+                str(domain.get("host") or "")
+                for domain in fetch_target_domains(host, token, target_type, normalized_target_id)
+            )
         )
     )
     if tuple(sorted(requested_domains)) != tuple(sorted(live_provider_domains)):
@@ -203,20 +206,29 @@ def repair_dokploy_target_domain_authority(
         update={
             "domains": requested_domains,
             "updated_at": recorded_at,
-            "source_label": source_label.strip(),
+            "source_label": normalized_source_label,
+        }
+    )
+    projected_provider_target_record = provider_target_record.model_copy(
+        update={
+            "updated_at": recorded_at,
+            "source_label": normalized_source_label,
         }
     )
     if apply:
-        target_record = record_store.compare_and_write_dokploy_target_domains(
-            expected_record=target_record,
-            expected_target_id_record=target_id_record,
-            expected_provider_target_record=provider_target_record,
-            domains=requested_domains,
-            updated_at=recorded_at,
-            source_label=source_label,
+        target_record, provider_target_record = (
+            record_store.compare_and_write_dokploy_target_domains(
+                expected_record=target_record,
+                expected_target_id_record=target_id_record,
+                expected_provider_target_record=provider_target_record,
+                domains=requested_domains,
+                updated_at=recorded_at,
+                source_label=normalized_source_label,
+            )
         )
     else:
         target_record = projected_target_record
+        provider_target_record = projected_provider_target_record
 
     return DokployTargetDomainRepairResult(
         applied=apply,

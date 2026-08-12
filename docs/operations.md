@@ -1312,7 +1312,9 @@ update, or delete Dokploy domains. Run dry-run first. Apply is allowed only
 after the dry-run shows the intended domain-only projection and requires the
 normal setup confirmation, operator reason, and idempotency key. The repair
 preserves all target metadata except `domains`, `updated_at`, and
-`source_label`.
+`source_label`. The same atomic write advances only `updated_at` and
+`source_label` on the canonical provider-target projection so downstream
+projection checks remain consistent.
 
 Two deployment prerequisites remain Dokploy-side operational contracts rather
 than Launchplane CLI validations:

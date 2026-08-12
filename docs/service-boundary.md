@@ -2108,9 +2108,12 @@ provider-target projection, reads the live Dokploy target and its domains, and
 requires the requested normalized bare DNS host tuple to exactly match the live
 provider hosts. It never mutates Dokploy. Dry-run returns the projected target
 record without writes. Apply compare-and-writes only `domains`, `updated_at`, and
-`source_label`; every other target-record field remains unchanged. The operation
+`source_label` on the target plus `updated_at` and `source_label` on the matching
+provider-target projection; every authority and identity field remains
+unchanged. The operation
 uses the dedicated `dokploy_target.repair_domain_authority` authorization action
-and remains fail-closed when any tracked or live identity/evidence is missing or
+for apply and `dokploy_target.repair_domain_authority.plan` for dry-run. It
+remains fail-closed when any tracked or live identity/evidence is missing or
 changed.
 
 Dokploy target inspect uses the native FastAPI
