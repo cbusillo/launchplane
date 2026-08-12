@@ -2864,22 +2864,31 @@ class ProductOnboardingTests(unittest.TestCase):
             )
             store.ensure_schema()
             manifest_payload = _manifest_payload()
-            manifest_payload["lanes"][0]["context"] = "example-site"
-            manifest_payload["provider_targets"][0]["context"] = "example-site"
-            for runtime_record in manifest_payload["runtime_environments"]:
+            lanes = cast(list[dict[str, object]], manifest_payload["lanes"])
+            provider_targets = cast(list[dict[str, object]], manifest_payload["provider_targets"])
+            runtime_environments = cast(
+                list[dict[str, object]], manifest_payload["runtime_environments"]
+            )
+            secret_bindings = cast(list[dict[str, object]], manifest_payload["secret_bindings"])
+            expected_config = cast(dict[str, object], manifest_payload["expected_config"])
+            runtime_requirements = cast(
+                list[dict[str, object]], expected_config["runtime_environment_keys"]
+            )
+            secret_requirements = cast(
+                list[dict[str, object]], expected_config["managed_secret_bindings"]
+            )
+            lanes[0]["context"] = "example-site"
+            provider_targets[0]["context"] = "example-site"
+            for runtime_record in runtime_environments:
                 if runtime_record["context"] == "example-site-testing":
                     runtime_record["context"] = "example-site"
-            for secret_binding in manifest_payload["secret_bindings"]:
+            for secret_binding in secret_bindings:
                 if secret_binding["context"] == "example-site-testing":
                     secret_binding["context"] = "example-site"
-            for runtime_requirement in manifest_payload["expected_config"][
-                "runtime_environment_keys"
-            ]:
+            for runtime_requirement in runtime_requirements:
                 if runtime_requirement["context"] == "example-site-testing":
                     runtime_requirement["context"] = "example-site"
-            for secret_requirement in manifest_payload["expected_config"][
-                "managed_secret_bindings"
-            ]:
+            for secret_requirement in secret_requirements:
                 if secret_requirement["context"] == "example-site-testing":
                     secret_requirement["context"] = "example-site"
             manifest = ProductOnboardingManifest.model_validate(manifest_payload)
@@ -2950,22 +2959,31 @@ class ProductOnboardingTests(unittest.TestCase):
             store.ensure_schema()
             manifest_payload = _manifest_payload()
             manifest_payload["product"] = "example-site"
-            manifest_payload["lanes"][0]["context"] = "example-site-new"
-            manifest_payload["provider_targets"][0]["context"] = "example-site-new"
-            for runtime_record in manifest_payload["runtime_environments"]:
+            lanes = cast(list[dict[str, object]], manifest_payload["lanes"])
+            provider_targets = cast(list[dict[str, object]], manifest_payload["provider_targets"])
+            runtime_environments = cast(
+                list[dict[str, object]], manifest_payload["runtime_environments"]
+            )
+            secret_bindings = cast(list[dict[str, object]], manifest_payload["secret_bindings"])
+            expected_config = cast(dict[str, object], manifest_payload["expected_config"])
+            runtime_requirements = cast(
+                list[dict[str, object]], expected_config["runtime_environment_keys"]
+            )
+            secret_requirements = cast(
+                list[dict[str, object]], expected_config["managed_secret_bindings"]
+            )
+            lanes[0]["context"] = "example-site-new"
+            provider_targets[0]["context"] = "example-site-new"
+            for runtime_record in runtime_environments:
                 if runtime_record["context"] == "example-site-testing":
                     runtime_record["context"] = "example-site-new"
-            for secret_binding in manifest_payload["secret_bindings"]:
+            for secret_binding in secret_bindings:
                 if secret_binding["context"] == "example-site-testing":
                     secret_binding["context"] = "example-site-new"
-            for runtime_requirement in manifest_payload["expected_config"][
-                "runtime_environment_keys"
-            ]:
+            for runtime_requirement in runtime_requirements:
                 if runtime_requirement["context"] == "example-site-testing":
                     runtime_requirement["context"] = "example-site-new"
-            for secret_requirement in manifest_payload["expected_config"][
-                "managed_secret_bindings"
-            ]:
+            for secret_requirement in secret_requirements:
                 if secret_requirement["context"] == "example-site-testing":
                     secret_requirement["context"] = "example-site-new"
             manifest = ProductOnboardingManifest.model_validate(manifest_payload)

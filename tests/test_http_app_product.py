@@ -2333,8 +2333,10 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
             existing_payload = _product_profile_payload()
             existing_payload["historical_contexts"] = ["sellyouroutboard-testing"]
-            existing_payload["lanes"][0]["context"] = "sellyouroutboard"
-            existing_payload["preview"]["context"] = "sellyouroutboard-preview"
+            lanes = cast(tuple[dict[str, object], ...], existing_payload["lanes"])
+            preview = cast(dict[str, object], existing_payload["preview"])
+            lanes[0]["context"] = "sellyouroutboard"
+            preview["context"] = "sellyouroutboard-preview"
             existing_profile = LaunchplaneProductProfileRecord.model_validate(existing_payload)
             record_store.write_product_profile_record(existing_profile)
             app = create_launchplane_fastapi_app(
