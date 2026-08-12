@@ -1430,6 +1430,7 @@ def register_product_profile_read_routes(
         },
     )
 
+
 def register_product_config_status_read_routes(
     app: ApiRouteRegistrar,
     *,

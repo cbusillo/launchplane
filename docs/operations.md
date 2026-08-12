@@ -147,19 +147,19 @@ rows and is idempotent. Re-run `storage provider-target-audit` after apply and
 require clean evidence before provider-target authority cutover.
 
 Provider-target dual-write is active for Launchplane-owned target identity
-mutations: product onboarding, Dokploy target adoption/creation, product context
-cutover, and tracked Dokploy target metadata commands. These paths validate an
-existing explicit provider-target row before mutating the Dokploy pair, write the
-Dokploy target/id records, then write the matching provider-target row. A stale
-explicit provider-target row blocks the mutation instead of being overwritten.
+mutations: product onboarding, Dokploy target adoption/creation, and tracked
+Dokploy target metadata commands. These paths validate an existing explicit
+provider-target row before mutating the Dokploy pair, write the Dokploy target/id
+records, then write the matching provider-target row. A stale explicit
+provider-target row blocks the mutation instead of being overwritten.
 A physical provider target identity already bound to another context/instance
 also blocks onboarding or target adoption, even when the requested route
 supplies matching replacement evidence. Product onboarding and target setup
 additionally reject contexts retained as historical product evidence; repair the
-current product profile and remove the stale alias through the reviewed cleanup
-path instead of reactivating the historical route. The generic-web onboarding
-workflow is new-product-only; existing product changes use the bounded profile
-or advanced manifest apply surface.
+current product profile before onboarding or target setup instead of reactivating
+the historical route. The generic-web onboarding workflow is new-product-only;
+existing product changes use the bounded profile or advanced manifest apply
+surface.
 
 ## Mutation Reservation Recovery
 

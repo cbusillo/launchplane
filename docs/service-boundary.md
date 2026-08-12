@@ -2057,12 +2057,6 @@ sources, managed rule IDs/count, and a SHA-256 identity digest, never raw numeri
 repository IDs; the existing plan digest, policy CAS, protected apply, and
 idempotency boundaries remain unchanged.
 
-Product context audit, cutover, and legacy cleanup routes expose copied or
-deleted runtime identity records under neutral `provider_targets` and
-`provider_target_ids` response groups. Dokploy target records remain
-provider-specific execution/config storage where needed, but service responses
-must not reintroduce Dokploy-named target buckets for these workflows.
-
 Provider-target operations use the native FastAPI
 `POST /v1/provider-targets/operations` route. The route accepts one
 Launchplane-owned route at a time with mode `audit`, `backfill-dry-run`, or

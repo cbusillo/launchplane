@@ -463,6 +463,16 @@ class FastApiReadRouteRegistrarTests(unittest.TestCase):
                 ("POST", "/v1/product-config/apply"),
             ],
         )
+        assert_slice(
+            ("POST", "/v1/provider-targets/operations"),
+            [
+                ("POST", "/v1/provider-targets/operations"),
+                ("GET", "/v1/contexts/{context}/secrets"),
+                ("GET", "/v1/contexts/{context}/instances/{instance}/secrets"),
+                ("GET", "/v1/secrets/{secret_id}"),
+                ("POST", "/v1/products/public-ingress-monitor/run-once"),
+            ],
+        )
         self.assertEqual(
             route_keys[-6:],
             [

@@ -1557,7 +1557,6 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("Authorization: Bearer", workflow_text)
         self.assertNotIn("curl ", workflow_text)
 
-
     def test_github_metadata_prefers_repository_merge_method(self) -> None:
         metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
 

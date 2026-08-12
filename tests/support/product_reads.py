@@ -153,7 +153,6 @@ async def _get_product_profile(
     )
 
 
-
 async def _get_protected_artifacts(
     app: FastAPI,
     *,
