@@ -72,6 +72,16 @@
     "inspection": {
       "tool": "jetbrains",
       "ide": "PyCharm",
+      "prepare": {
+        "python": {
+          "version": "3.13",
+          "moduleName": "launchplane",
+          "testRoots": ["tests"],
+          "sync": true,
+          "extras": ["dev"],
+          "requiredGeneratedState": [".venv", ".idea"]
+        }
+      },
       "scopePreference": ["changed_files", "directory", "whole_project"]
     },
     "docsRequiredWhen": [
