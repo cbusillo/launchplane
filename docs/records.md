@@ -198,12 +198,12 @@ runtime-environment rows and delete events, managed-secret versions/current
 pointers/bindings/audit events, environment inventory, release tuples, and the
 completed idempotency response. Product config and onboarding plan their whole
 graph first and then commit through this method once. A current managed-secret
-pointer must not advance unless the new
-version, binding, audit evidence, required runtime-environment changes, and
-applicable idempotency completion are in the same transaction. Cleanup deletes
-compare the current row payload with the planned expected record under the
-storage boundary and fail closed on missing or drifted authority instead of
-publishing a partial graph. Provider-target writes likewise carry an
+pointer must not advance unless the new version, binding, audit evidence,
+required runtime-environment changes, and applicable idempotency completion are
+in the same transaction. Bundle deletes compare the current row payload with the
+planned expected record under the storage boundary and fail closed on missing or
+drifted authority instead of publishing a partial graph. Provider-target writes
+likewise carry an
 expected-current or expected-absent precondition so a concurrent route owner
 cannot be overwritten after planning. Lane-summary reads hold a shared bundle
 guard while assembling their multi-record view, so a bundle commit cannot split
