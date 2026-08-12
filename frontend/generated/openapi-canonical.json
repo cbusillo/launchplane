@@ -3202,7 +3202,8 @@
               "create-application",
               "create-compose",
               "prune-compose-domain",
-              "reconcile-compose-domain"
+              "reconcile-compose-domain",
+              "repair-domain-authority"
             ],
             "title": "Operation",
             "type": "string"
