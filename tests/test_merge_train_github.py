@@ -983,7 +983,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             with self.assertRaises(MergeTrainGitHubStaleHeadError):
                 client.land_batch_candidate(
                     landing_plan=landing_plan,
-                    admission_guard=guard,
+                    admission_guard=guard,  # type: ignore[arg-type]
                     recorded_at="2026-08-11T03:01:00Z",
                 )
 
