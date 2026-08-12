@@ -3,8 +3,11 @@ from typing import Annotated, Literal, cast
 from fastapi import Depends, Query
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from control_plane.contracts.merge_train_policy import MergeTrainSchedulerPolicy
-from control_plane.contracts.merge_train_policy import MergeTrainServiceAuthz
+from control_plane.contracts.merge_train_policy import (
+    MERGE_TRAIN_POLICY_TARGETS_READ_ACTION,
+    MergeTrainSchedulerPolicy,
+    MergeTrainServiceAuthz,
+)
 from control_plane.http_routes.support import (
     LAUNCHPLANE_SERVICE_CONTEXT,
     ApiRouteRegistrar,
@@ -264,7 +267,7 @@ def register_merge_train_read_routes(
         targets: list[MergeTrainPolicyTarget] = []
         local_operator_can_read_targets = dependencies.authorization_allows(
             identity=identity,
-            action="merge_train.policy_targets",
+            action=MERGE_TRAIN_POLICY_TARGETS_READ_ACTION,
             product="launchplane",
             context=LAUNCHPLANE_SERVICE_CONTEXT,
         )

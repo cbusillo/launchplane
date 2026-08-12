@@ -11,6 +11,7 @@ import {
 import { EngineeringEveryCodeRoute } from "./EngineeringEveryCodeRoute";
 import { EngineeringIssueInboxRoute } from "./EngineeringIssueInboxRoute";
 import { EngineeringMergeTrainRoute } from "./EngineeringMergeTrainRoute";
+import { EngineeringGovernanceProjectionRoute } from "./EngineeringGovernanceProjectionRoute";
 import { EngineeringOwnerAcceptanceRoute } from "./EngineeringOwnerAcceptanceRoute";
 import { EngineeringTenantAdmissionRoute } from "./EngineeringTenantAdmissionRoute";
 import { EngineeringRouteFrame } from "./EngineeringRouteUi";
@@ -24,6 +25,14 @@ import {
 import type { DevFixtureMode } from "./dev-fixture-loader";
 
 const ENGINEERING_SURFACES = [
+  {
+    detail:
+      "Inspect historical Owner judgment, current readiness, immutable admission, landing outcome, and advisory observations without fusing authority.",
+    icon: ShieldCheck,
+    label: "Read only",
+    title: "Governance evidence",
+    view: "governance-projection" as const,
+  },
   {
     detail:
       "Rank the current Launchplane-assembled snapshot and inspect recommendation evidence.",
@@ -96,6 +105,9 @@ export function EngineeringOpsRoute({
   if (view === "tenant-admission") {
     return <EngineeringTenantAdmissionRoute fixtureMode={fixtureMode} />;
   }
+  if (view === "governance-projection") {
+    return <EngineeringGovernanceProjectionRoute fixtureMode={fixtureMode} />;
+  }
   if (view === "owner-acceptance") {
     return <EngineeringOwnerAcceptanceRoute fixtureMode={fixtureMode} />;
   }
@@ -111,7 +123,7 @@ function EngineeringOpsHub() {
       view="hub"
     >
       <div className="engineering-hub-intro">
-        <strong>Five independent evidence routes</strong>
+        <strong>Seven independent evidence routes</strong>
         <p>
           Each surface owns its own request lifecycle, direct link, stale-data
           disclosure, refresh failure, and cancellation state. Browser controls

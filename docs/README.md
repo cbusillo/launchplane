@@ -34,6 +34,9 @@ Use these docs as the source of truth for `launchplane`.
   train policy contract, enqueue authority, and smoke-target policy.
 - [merge-readiness.md](merge-readiness.md) — ephemeral Owner-aware L2 merge
   readiness facets, fail-closed aggregation, and live-evidence adapter boundary.
+- [governance-evidence.md](governance-evidence.md) — one read-only API and
+  workbench projection that keeps L1 judgment, L2 readiness, L3 admission,
+  landing outcomes, and advisory observations independent.
 - [merge-train-structural-provenance.md](merge-train-structural-provenance.md) —
   deterministic candidate, rolling-base, impact-subject, and landing-plan
   provenance consumed by merge readiness.

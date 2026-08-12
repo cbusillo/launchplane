@@ -6,9 +6,14 @@ import type {
   DryRunProductPromotionData,
   EveryCodeSummaryResponse,
   GitHubHumanIdentityResponse,
+  GovernanceProjectionResponse,
+  MergeAdmissionRecord,
+  MergeLandingOutcomeRecord,
+  MergeReadinessResult,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
   OwnerAcceptanceQueueResponse,
+  OwnerAcceptanceProductDecision,
   ProductActionAvailability,
   ProductActivityReadModel,
   ProductEnvironmentConfigStatus,
@@ -3030,6 +3035,399 @@ export function ownerAcceptanceEvaluationForFixture(
       },
     ],
     evaluated_at: OBSERVED_AT,
+  };
+}
+
+export function governanceProjectionForFixture(
+  fixture: DataFixtureMode,
+): GovernanceProjectionResponse {
+  assertEngineeringFixtureAvailable(fixture);
+  const scenario = new URLSearchParams(window.location.search).get("scenario") ?? "25";
+  const binding = _ownerAcceptanceBinding({
+    pull_request_number: 308,
+    binding_sha256: "a".repeat(64),
+    head_sha: "a".repeat(40),
+  });
+  const acceptedEvent = _ownerAcceptanceEvent("accepted", binding, {
+    occurred_at: "2026-08-12T04:00:00.000000Z",
+    event_id: "owner-acceptance-event-governance-accepted",
+    acceptance_id: "owner-acceptance-" + "a".repeat(32),
+  });
+  const revokedEvent = _ownerAcceptanceEvent("revoked", binding, {
+    occurred_at: "2026-08-12T04:40:00.000000Z",
+    event_id: "owner-acceptance-event-governance-revoked",
+    acceptance_id: "owner-acceptance-" + "a".repeat(32),
+  });
+  const currentStatus =
+    scenario === "15"
+      ? "revoked"
+      : scenario === "20"
+        ? "stale"
+        : scenario === "24"
+          ? "changes_requested"
+          : "accepted";
+  const currentReason =
+    scenario === "15"
+      ? "acceptance_revoked"
+      : scenario === "20"
+        ? "preview_isolation_insufficient"
+        : scenario === "24"
+          ? "changes_requested"
+          : "acceptance_valid";
+  const currentEvent = scenario === "15" ? revokedEvent : acceptedEvent;
+  const product: OwnerAcceptanceProductDecision = {
+    schema_version: 1,
+    product: binding.product,
+    system: binding.system,
+    action: binding.action,
+    environment: binding.environment,
+    status: currentStatus,
+    reason_code: currentReason,
+    binding,
+    current_event: currentEvent,
+    admissible: currentStatus === "accepted",
+    human_action_semantics:
+      scenario === "15" ? "product_review_revoked" : "product_review_accepted",
+    authorizes: [],
+  };
+  const products: OwnerAcceptanceProductDecision[] =
+    scenario === "24"
+      ? [
+          { ...product, status: "accepted", reason_code: "acceptance_valid", admissible: true },
+          {
+            ...product,
+            product: "example-secondary",
+            status: "changes_requested",
+            reason_code: "changes_requested",
+            admissible: false,
+          },
+        ]
+      : [product];
+  const decision: OwnerAcceptanceDecision = {
+    schema_version: 1,
+    mode: "shadow",
+    authoritative: false,
+    enforcement_effect: "none",
+    status: currentStatus,
+    reason_code: currentReason,
+    binding,
+    current_event: currentEvent,
+    admissible: currentStatus === "accepted",
+    human_action_semantics:
+      scenario === "15" ? "product_review_revoked" : "product_review_accepted",
+    authorizes: [],
+    products,
+    evaluated_at: OBSERVED_AT,
+  };
+  const readiness = governanceReadinessFixture(
+    scenario === "3" ? "unknown" : scenario === "24" || scenario === "20" ? "blocked_owner_evidence" : "blocked_checks",
+    products,
+  );
+  const admission = scenario === "15" ? governanceAdmissionFixture(readiness) : null;
+  const outcome = scenario === "15" && admission ? governanceOutcomeFixture(admission) : null;
+  return {
+    status: "ok",
+    trace_id: `fixture-governance-${scenario}`,
+    projection: {
+      schema_version: 1,
+      mode: "read_only_projection",
+      authoritative: false,
+      authorizes: [],
+      target: {
+        schema_version: 1,
+        repository_id: binding.repository_id,
+        repository_owner_id: binding.repository_owner_id,
+        repository: binding.repository,
+        pull_request_number: binding.pull_request_number,
+        head_sha: binding.head_sha,
+        tree_sha: binding.tree_sha,
+      },
+      owner_judgment: {
+        level: 1,
+        mode: "historical_product_judgment",
+        authoritative: false,
+        authorizes: [],
+        current: decision,
+        history: [
+          {
+            record: acceptedEvent,
+            human_action_semantics: "product_review_accepted",
+            target_status: "current",
+            decision_relationship: scenario === "15" ? "historical" : "current",
+            authorizes: [],
+          },
+          ...(scenario === "15"
+            ? [
+                {
+                  record: revokedEvent,
+                  human_action_semantics: "product_review_revoked" as const,
+                  target_status: "current" as const,
+                  decision_relationship: "current" as const,
+                  authorizes: [],
+                },
+              ]
+            : []),
+        ],
+      },
+      merge_readiness: {
+        level: 2,
+        mode: "ephemeral",
+        authoritative: false,
+        authorizes: [],
+        availability: "available",
+        reason_code: "current_evaluation_available",
+        result: readiness,
+      },
+      merge_admission: {
+        level: 3,
+        mode: "immutable_attempt_authorization",
+        authoritative: false,
+        status: admission ? "admitted_current_target" : "not_recorded",
+        current_effect_authority: false,
+        authorizes: admission ? ["one_exact_merge_attempt"] : [],
+        record: admission,
+      },
+      landing_outcome: {
+        mode: "immutable_provider_observation",
+        authoritative: false,
+        authorizes: [],
+        target_status: outcome ? "current" : "none",
+        status: outcome?.status ?? "not_observed",
+        landed: outcome?.status === "landed",
+        record: outcome,
+      },
+      advisory_observations: [
+        {
+          observation_scope: "current_readiness",
+          observation: {
+            name: "launchplane/owner-acceptance",
+            state: "neutral",
+            app_id: 42,
+          },
+          neutral: true,
+          authoritative: false,
+          authorizes: [],
+        },
+        {
+          observation_scope: "current_readiness",
+          observation: {
+            name: "launchplane/engineering-review",
+            state: "neutral",
+            app_id: 42,
+          },
+          neutral: true,
+          authoritative: false,
+          authorizes: [],
+        },
+      ],
+      generated_at: OBSERVED_AT,
+    },
+  };
+}
+
+function governanceReadinessFixture(
+  state: MergeReadinessResult["state"],
+  products: readonly unknown[],
+): MergeReadinessResult {
+  const ownerState = state === "blocked_owner_evidence" ? "blocked_owner_evidence" : "ready";
+  return {
+    schema_version: 1,
+    mode: "ephemeral" as const,
+    authoritative: false as const,
+    authorizes: [],
+    target: {
+      schema_version: 1,
+      repository: "example/tenant-site",
+      pull_request_number: 308,
+      base_branch: "main",
+      base_sha: "1".repeat(40),
+      pull_request_head_sha: "a".repeat(40),
+      pull_request_tree_sha: "b".repeat(40),
+      expected_effect_sha: "4".repeat(40),
+      queue_position: 1,
+    },
+    state,
+    reason_codes:
+      state === "unknown"
+        ? ["checks_unknown"]
+        : state === "blocked_owner_evidence"
+          ? ["owner_changes_requested", "checks_passed"]
+          : ["owner_acceptance_valid", "checks_pending"],
+    owner_facets: products.map((_, index) => ({
+      product: index ? "example-secondary" : "example-site",
+      system: "web",
+      action: "change",
+      environment: "production",
+      owner_status: ownerState === "ready" ? "accepted" : "changes_requested",
+      owner_reason_code:
+        ownerState === "ready" ? "acceptance_valid" : "changes_requested",
+      binding_sha256: "a".repeat(64),
+      event_id: "owner-acceptance-event-governance-accepted",
+      state: ownerState,
+      reason_codes:
+        ownerState === "ready" ? ["owner_acceptance_valid"] : ["owner_changes_requested"],
+    })),
+    technical_checks: {
+      head_sha: "4".repeat(40),
+      status: state === "unknown" ? "unknown" : state === "blocked_checks" ? "pending" : "pass",
+      required_checks: ["ci-gate", "security-gate"],
+      advisory_observations: [],
+      state: state === "unknown" ? "unknown" : state === "blocked_checks" ? "blocked_checks" : "ready",
+      reason_codes:
+        state === "unknown" ? ["checks_unknown"] : state === "blocked_checks" ? ["checks_pending"] : ["checks_passed"],
+    },
+    engineering_review: {
+      status: "approved",
+      decision_id: "engineering-review-fixture",
+      decision_binding_sha256: "c".repeat(64),
+      head_sha: "a".repeat(40),
+      tree_sha: "b".repeat(40),
+      evidence: [],
+      state: "ready",
+      reason_codes: ["engineering_review_approved"],
+    },
+    policy: {
+      fingerprints: governancePolicyFingerprintsFixture(),
+      state: "ready",
+      reason_codes: ["policy_fingerprints_match"],
+    },
+    candidate: {
+      evidence: {
+        structural_status: "exact" as const,
+        record_id: "candidate-fixture",
+        repository: "example/tenant-site",
+        base_sha: "1".repeat(40),
+        candidate_sha: "4".repeat(40),
+        pull_request_number: 308,
+        queue_position: 1,
+        pull_request_head_sha: "a".repeat(40),
+      },
+      state: "ready",
+      reason_codes: ["candidate_exact"],
+    },
+    fence: {
+      evidence: {
+        controller_base_branch: "main",
+        controller_key: "merge-train-controller:example:tenant-site:main",
+        controller_repository: "example/tenant-site",
+        controller_status: "running",
+        expected_lease_owner: "fixture",
+        lease_expires_at: "2026-08-12T04:50:00Z",
+        observed_effect_sha: "4".repeat(40),
+        observed_lease_owner: "fixture",
+      },
+      state: "ready",
+      reason_codes: ["controller_lease_held", "expected_sha_match"],
+    },
+    evaluated_at: OBSERVED_AT,
+    readiness_digest: "d".repeat(64),
+  };
+}
+
+function governancePolicyFingerprintsFixture() {
+  const fingerprint = (
+    dimension:
+      | "impact"
+      | "technical_checks"
+      | "engineering_review"
+      | "ruleset"
+      | "merge_train"
+      | "authorization"
+      | "admission_algorithm",
+  ) => ({
+    dimension,
+    expected_sha256: "e".repeat(64),
+    current_sha256: "e".repeat(64),
+  });
+  return {
+    impact: fingerprint("impact"),
+    technical_checks: fingerprint("technical_checks"),
+    engineering_review: fingerprint("engineering_review"),
+    ruleset: fingerprint("ruleset"),
+    merge_train: fingerprint("merge_train"),
+    authorization: fingerprint("authorization"),
+    admission_algorithm: fingerprint("admission_algorithm"),
+  };
+}
+
+function governanceAdmissionFixture(readiness: MergeReadinessResult): MergeAdmissionRecord {
+  return {
+    schema_version: 1 as const,
+    admission_id: "merge-admission-fixture",
+    admission_binding_sha256: "1".repeat(64),
+    attempt_id: "merge-effect-attempt-fixture",
+    attempt_sequence: 1,
+    decision: "admitted" as const,
+    source: "fixture",
+    repository: "example/tenant-site",
+    base_branch: "main",
+    pull_request_number: 308,
+    queue_position: 1,
+    batch_id: "batch-fixture",
+    candidate_record_id: "candidate-fixture",
+    landing_plan_record_id: "landing-record-fixture",
+    landing_plan_id: "landing-plan-fixture",
+    merge_method: "merge" as const,
+    effective_base_sha: "1".repeat(40),
+    effective_base_tree_sha: "2".repeat(40),
+    pull_request_head_sha: "a".repeat(40),
+    pull_request_head_tree_sha: "b".repeat(40),
+    candidate_sha: "4".repeat(40),
+    candidate_tree_sha: "5".repeat(40),
+    expected_effect_sha: "4".repeat(40),
+    candidate_sha256: "6".repeat(64),
+    structural_provenance_sha256: "7".repeat(64),
+    landing_plan_sha256: "8".repeat(64),
+    readiness,
+    structural_result: {
+      status: "exact" as const,
+      reason_codes: ["structural_single_entry_exact"],
+      effective_base_sha: "1".repeat(40),
+      effective_base_tree_sha: "2".repeat(40),
+      candidate_sha256: "6".repeat(64),
+      landing_plan_sha256: "8".repeat(64),
+      provenance_sha256: "7".repeat(64),
+    },
+    admission_algorithm_version: "merge-admission-v1",
+    controller_key: "merge-train-controller:example:tenant-site:main",
+    lease_owner: "fixture",
+    lease_acquired_at: "2026-08-12T03:50:00Z",
+    lease_expires_at: "2026-08-12T04:50:00Z",
+    created_at: "2026-08-12T04:05:00Z",
+  };
+}
+
+function governanceOutcomeFixture(admission: MergeAdmissionRecord): MergeLandingOutcomeRecord {
+  return {
+    schema_version: 1 as const,
+    outcome_id: "merge-landing-outcome-fixture",
+    outcome_binding_sha256: "9".repeat(64),
+    admission_id: admission.admission_id,
+    admission_binding_sha256: admission.admission_binding_sha256,
+    attempt_id: admission.attempt_id,
+    observation_sequence: 1,
+    prior_outcome_id: "",
+    source: "fixture",
+    repository: admission.repository,
+    base_branch: admission.base_branch,
+    pull_request_number: admission.pull_request_number,
+    status: "landed" as const,
+    reason: "provider_and_git_confirmed" as const,
+    provider_effect_attempted: true,
+    provider_conclusive_rejection: false,
+    provider_status_code: 200,
+    provider_request_id: "fixture-request",
+    provider_message: "",
+    observed_pull_request_state: "merged" as const,
+    observed_pull_request_head_sha: admission.pull_request_head_sha,
+    observed_pull_request_head_tree_sha: admission.pull_request_head_tree_sha,
+    observed_base_sha: admission.candidate_sha,
+    observed_base_tree_sha: admission.candidate_tree_sha,
+    merge_commit_sha: admission.candidate_sha,
+    merge_commit_tree_sha: admission.candidate_tree_sha,
+    base_contains_merge_commit: true,
+    exact_landing_confirmed: true,
+    observed_at: "2026-08-12T04:10:00Z",
   };
 }
 
