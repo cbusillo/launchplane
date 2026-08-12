@@ -135,6 +135,33 @@ class ProviderTargetBackfillTests(unittest.TestCase):
         self.assertEqual(second_result.counts, {"skipped-exists": 1})
         self.assertEqual(second_physical, first_physical)
 
+    def test_apply_reports_cross_route_identity_conflict(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_provider_target_record(
+                _provider_target_record(context="legacy", instance="prod")
+            )
+            store.write_dokploy_target_record(_dokploy_target_record(context="canonical"))
+            store.write_dokploy_target_id_record(_dokploy_target_id_record(context="canonical"))
+
+            result = backfill_provider_targets(
+                store,
+                apply=True,
+                context_name="canonical",
+            )
+            physical_records = store.list_physical_provider_target_records()
+            store.close()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.counts, {"skipped-conflict": 1})
+        self.assertIn("bound to another route", result.items[0].detail)
+        self.assertEqual(len(physical_records), 1)
+
     def test_apply_does_not_churn_matching_physical_row(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

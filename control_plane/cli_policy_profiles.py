@@ -26,6 +26,7 @@ from control_plane.contracts.product_profile_record import (
     ProductImageProfile,
     ProductLaneProfile,
     ProductPreviewProfile,
+    validate_product_profile_history_transition,
 )
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeEnvironmentClass,
@@ -778,6 +779,17 @@ def product_profiles_upsert(
         raise click.ClickException(f"Product profile failed validation: {exc}") from exc
     store = _product_profile_store(database_url)
     try:
+        try:
+            existing_record = store.read_product_profile_record(record.product)
+        except (FileNotFoundError, KeyError):
+            existing_record = None
+        try:
+            validate_product_profile_history_transition(
+                existing_profile=existing_record,
+                replacement_profile=record,
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
         store.write_product_profile_record(record)
     finally:
         store.close()

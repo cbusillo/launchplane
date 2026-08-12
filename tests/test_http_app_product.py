@@ -2326,6 +2326,66 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             "health_monitoring_bounded_apply_required",
         )
 
+    async def test_write_product_profile_blocks_new_historical_context_reactivation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            existing_payload = _product_profile_payload()
+            existing_payload["historical_contexts"] = ["sellyouroutboard-testing"]
+            lanes = cast(tuple[dict[str, object], ...], existing_payload["lanes"])
+            preview = cast(dict[str, object], existing_payload["preview"])
+            lanes[0]["context"] = "sellyouroutboard"
+            preview["context"] = "sellyouroutboard-preview"
+            existing_profile = LaunchplaneProductProfileRecord.model_validate(existing_payload)
+            record_store.write_product_profile_record(existing_profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: record_store,
+            )
+            replacement_payload = existing_profile.model_dump(mode="json")
+            replacement_payload["lanes"][0]["context"] = "sellyouroutboard-testing"
+
+            response = await _post_product_profile(
+                app,
+                replacement_payload,
+                idempotency_key="profile-reactivate-history",
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "historical_context_reactivation_blocked",
+        )
+
+    async def test_write_product_profile_blocks_historical_context_removal(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            existing_payload = _product_profile_payload()
+            existing_payload["historical_contexts"] = ["sellyouroutboard-legacy"]
+            existing_profile = LaunchplaneProductProfileRecord.model_validate(existing_payload)
+            record_store.write_product_profile_record(existing_profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: record_store,
+            )
+            replacement_payload = existing_profile.model_dump(mode="json")
+            replacement_payload["historical_contexts"] = []
+
+            response = await _post_product_profile(
+                app,
+                replacement_payload,
+                idempotency_key="profile-remove-history",
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "historical_context_reactivation_blocked",
+        )
+
     async def test_write_product_profile_requires_bounded_apply_for_prelaunch_rebuild_changes(
         self,
     ) -> None:

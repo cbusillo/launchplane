@@ -13,6 +13,32 @@ class ProviderTargetDualWriteStore(Protocol):
     def write_provider_target_record(self, record: ProviderTargetRecord) -> None: ...
 
 
+def ensure_provider_target_identity_unbound_elsewhere(
+    *,
+    record_store: ProviderTargetDualWriteStore,
+    provider_target_record: ProviderTargetRecord,
+    allowed_conflicting_routes: frozenset[tuple[str, str]] = frozenset(),
+) -> None:
+    requested_route = (provider_target_record.context, provider_target_record.instance)
+    conflicting_routes = sorted(
+        (record.context, record.instance)
+        for record in record_store.list_physical_provider_target_records()
+        if record.provider_id == provider_target_record.provider_id
+        and record.target_category == provider_target_record.target_category
+        and record.target_id == provider_target_record.target_id
+        and (record.context, record.instance) != requested_route
+        and (record.context, record.instance) not in allowed_conflicting_routes
+    )
+    if conflicting_routes:
+        formatted_routes = ", ".join(
+            f"{context}/{instance}" for context, instance in conflicting_routes
+        )
+        raise ValueError(
+            "Provider target identity is already bound to another route: "
+            f"{formatted_routes}; requested {requested_route[0]}/{requested_route[1]}."
+        )
+
+
 def prepare_provider_target_from_dokploy_records(
     *,
     record_store: ProviderTargetDualWriteStore,

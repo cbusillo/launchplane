@@ -38,7 +38,7 @@ name: Product Onboarding
         default: /healthz
         type: string
       testing_context:
-        description: Optional testing context; defaults to <product>-testing.
+        description: Optional new-product testing context; defaults to <product>-testing.
         required: false
         default: ""
         type: string
@@ -57,7 +57,7 @@ name: Product Onboarding
         default: launchplane-preview
         type: string
       target_name:
-        description: Optional Dokploy application name.
+        description: Optional Dokploy application name for a new product.
         required: false
         default: ""
         type: string

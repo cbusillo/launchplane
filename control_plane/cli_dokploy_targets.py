@@ -14,6 +14,10 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    ProviderTargetWrite,
+)
 from control_plane.workflows.dokploy_target_adoption import (
     adopt_dokploy_target,
     create_dokploy_application_target,
@@ -415,14 +419,10 @@ def dokploy_targets_put_shopify_protected_store_key(
             context_name=record.context,
             instance_name=record.instance,
         )
-        prepare_provider_target_from_dokploy_records(
-            record_store=postgres_store,
-            target_record=record,
+        _write_dokploy_target_with_provider_target(
+            postgres_store=postgres_store,
+            record=record,
             target_id_record=target_id_record,
-        )
-        postgres_store.write_dokploy_target_record(record)
-        postgres_store.write_provider_target_record(
-            record=record_to_provider_target(record=record, target_id_record=target_id_record)
         )
     finally:
         postgres_store.close()
@@ -490,14 +490,10 @@ def dokploy_targets_unset_shopify_protected_store_key(
             context_name=record.context,
             instance_name=record.instance,
         )
-        prepare_provider_target_from_dokploy_records(
-            record_store=postgres_store,
-            target_record=record,
+        _write_dokploy_target_with_provider_target(
+            postgres_store=postgres_store,
+            record=record,
             target_id_record=target_id_record,
-        )
-        postgres_store.write_dokploy_target_record(record)
-        postgres_store.write_provider_target_record(
-            record=record_to_provider_target(record=record, target_id_record=target_id_record)
         )
     finally:
         postgres_store.close()
@@ -554,14 +550,10 @@ def dokploy_targets_relabel(
             context_name=record.context,
             instance_name=record.instance,
         )
-        prepare_provider_target_from_dokploy_records(
-            record_store=postgres_store,
-            target_record=record,
+        _write_dokploy_target_with_provider_target(
+            postgres_store=postgres_store,
+            record=record,
             target_id_record=target_id_record,
-        )
-        postgres_store.write_dokploy_target_record(record)
-        postgres_store.write_provider_target_record(
-            record=record_to_provider_target(record=record, target_id_record=target_id_record)
         )
     finally:
         postgres_store.close()
@@ -639,6 +631,37 @@ def record_to_provider_target(
     return ProviderTargetRecord.from_dokploy_records(
         target_record=record,
         target_id_record=target_id_record,
+    )
+
+
+def _write_dokploy_target_with_provider_target(
+    *,
+    postgres_store: PostgresRecordStore,
+    record: DokployTargetRecord,
+    target_id_record: DokployTargetIdRecord,
+) -> None:
+    provider_target_record = prepare_provider_target_from_dokploy_records(
+        record_store=postgres_store,
+        target_record=record,
+        target_id_record=target_id_record,
+    )
+    requested_route = (provider_target_record.context, provider_target_record.instance)
+    current_provider_targets = {
+        (candidate.context, candidate.instance): candidate
+        for candidate in postgres_store.list_physical_provider_target_records()
+    }
+    current_provider_target = current_provider_targets.get(requested_route)
+    postgres_store.write_product_authority_bundle(
+        ProductAuthorityBundle(
+            dokploy_targets=(record,),
+            provider_target_writes=(
+                ProviderTargetWrite(
+                    record=provider_target_record,
+                    expected_record=current_provider_target,
+                    expected_absent=current_provider_target is None,
+                ),
+            ),
+        )
     )
 
 
