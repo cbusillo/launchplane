@@ -20,6 +20,24 @@ Contradictory or incomplete evidence remains `reconcile_required` and needs
 operator investigation. Candidate-ref cleanup failures are separate from
 landing truth and may be retried without changing the outcome record.
 
+Use the controller phase when diagnosing a failed landing. An active
+`admit_pull_request` phase means the failure occurred while reconciling or
+evaluating Launchplane admission, before a GitHub merge request. An active
+`merge_pull_request` phase means Launchplane persisted admission and crossed the
+provider-effect checkpoint immediately before the GitHub merge request. Preserve
+the response JSON and trace ID from protected workflow failures; an HTTP 409 by
+itself does not distinguish controller fencing, admission refusal, admission
+reconciliation, or a GitHub state conflict.
+
+A controller response with `controller_action=block` and
+`blocking_reason.code=merge_readiness_not_ready` is a normal fail-closed
+pre-effect result. Read `merge_readiness.reason_codes` and the individual facets,
+repair or record the missing evidence, and call the controller again. Do not
+clear controller state or treat the result as a GitHub merge conflict: no
+provider effect was attempted for the blocked entry and the controller lease is
+released cleanly. Earlier entries in a multi-PR batch may already be merged; the
+returned landing plan identifies their persisted status.
+
 ## Command Groups
 
 Use `uv run launchplane --help` for the complete CLI surface. The current

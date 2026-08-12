@@ -71,6 +71,16 @@ global.fetch = async (url, init) => {{
   }}
   const configuredStatuses = String(process.env.TEST_REFRESH_STATUSES || '').split(',').filter(Boolean);
   const refreshStatus = configuredStatuses[launchplaneRequestCount - 1] || process.env.TEST_REFRESH_STATUS || 'pass';
+  if (process.env.TEST_ERROR_CODE) {{
+    return new Response(JSON.stringify({{
+      status: 'rejected',
+      trace_id: process.env.TEST_TRACE_ID || '',
+      error: {{
+        code: process.env.TEST_ERROR_CODE,
+        message: process.env.TEST_ERROR_MESSAGE || 'request rejected'
+      }}
+    }}), {{status: statusCode}});
+  }}
   return new Response(JSON.stringify({{
     ok: true,
     result: {{
@@ -211,6 +221,27 @@ process.on('beforeExit', () => {{
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Launchplane request failed with 401", result.stderr)
 
+    def test_reports_public_safe_error_code_when_body_logging_is_disabled(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/work-graph/merge-train/controller/run-once",
+                "payload": '{"schema_version":1,"repository":"example/repo"}',
+                "log-response-body": "false",
+            },
+            environment={
+                "TEST_STATUS": "409",
+                "TEST_ERROR_CODE": "merge_train_landing_not_admitted",
+                "TEST_ERROR_MESSAGE": "sensitive diagnostic detail",
+                "TEST_TRACE_ID": "launchplane_req_example",
+            },
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("code=merge_train_landing_not_admitted", result.stderr)
+        self.assertIn("trace_id=launchplane_req_example", result.stderr)
+        self.assertNotIn("sensitive diagnostic detail", result.stderr)
+
     def test_rejects_invalid_expected_status_input(self) -> None:
         result = self.run_action(
             inputs={
@@ -256,24 +287,27 @@ process.on('beforeExit', () => {{
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(response_output_path.read_text(encoding="utf-8")), [
-                {
-                    "ok": True,
-                    "result": {
-                        "refresh_status": "pass",
-                        "error_message": "",
-                        "application_id": "app-123",
+            self.assertEqual(
+                json.loads(response_output_path.read_text(encoding="utf-8")),
+                [
+                    {
+                        "ok": True,
+                        "result": {
+                            "refresh_status": "pass",
+                            "error_message": "",
+                            "application_id": "app-123",
+                        },
                     },
-                },
-                {
-                    "ok": True,
-                    "result": {
-                        "refresh_status": "pass",
-                        "error_message": "",
-                        "application_id": "app-123",
+                    {
+                        "ok": True,
+                        "result": {
+                            "refresh_status": "pass",
+                            "error_message": "",
+                            "application_id": "app-123",
+                        },
                     },
-                },
-            ])
+                ],
+            )
             calls = json.loads(result.stderr.strip().splitlines()[-1])
             launchplane_calls = [
                 call
@@ -441,7 +475,9 @@ process.on('beforeExit', () => {{
             if call["url"] == "https://launchplane.example/v1/service/runtime"
         ]
         self.assertEqual(len(launchplane_calls), 2)
-        self.assertIn("Launchplane result runtime.docker_image_reference is HTTP 503", result.stderr)
+        self.assertIn(
+            "Launchplane result runtime.docker_image_reference is HTTP 503", result.stderr
+        )
 
     def test_poll_until_requires_expected_value(self) -> None:
         result = self.run_action(
@@ -545,16 +581,19 @@ process.on('beforeExit', () => {{
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("simulated Launchplane network failure", result.stderr)
-            self.assertEqual(json.loads(response_output_path.read_text(encoding="utf-8")), [
-                {
-                    "ok": True,
-                    "result": {
-                        "refresh_status": "pass",
-                        "error_message": "",
-                        "application_id": "app-123",
-                    },
-                }
-            ])
+            self.assertEqual(
+                json.loads(response_output_path.read_text(encoding="utf-8")),
+                [
+                    {
+                        "ok": True,
+                        "result": {
+                            "refresh_status": "pass",
+                            "error_message": "",
+                            "application_id": "app-123",
+                        },
+                    }
+                ],
+            )
 
     def test_retries_launchplane_request_with_fresh_oidc_token(self) -> None:
         result = self.run_action(
