@@ -1007,6 +1007,15 @@ response `result.controller_action` is the helper contract for retry/stop
 behavior; see [merge-train-policy.md](merge-train-policy.md) for the action
 matrix and public-safe reporting fields.
 
+Mutating landing phases are guarded by immutable per-attempt Level 3 admission.
+The service recomputes current Level 2 and structural evidence under the live
+controller lease immediately before each constituent PR effect, persists the
+admission before GitHub mutation, and appends `landed`, `rejected`, or
+`reconcile_required` evidence afterward. A blocked admission returns
+`merge_train_landing_not_admitted`; unresolved effect evidence returns
+`merge_train_landing_reconcile_required`. Neither response permits provider
+replay.
+
 Every retained write-capable merge-train route acquires that same
 repository/base fence for its full mutation window. Phase-specific and legacy
 mutation calls therefore return the same lease-held or reconciliation-required
@@ -1058,6 +1067,11 @@ the route validates the linked
 stack-collapse record before the root merge and then writes stack-child
 disposition evidence after the landing record is persisted. Accepted calls
 support optional `Idempotency-Key` replay/conflict handling.
+
+Land mode is not a second authority path. It requires the same guarded
+admission store, live evidence adapter, controller lease, and append-only
+landing outcome behavior as controller mode. If those dependencies are
+unavailable, the route fails closed before GitHub mutation.
 
 `.github/workflows/merge-train-runner.yml` is the first external scheduler for
 this route. It mints a GitHub Actions OIDC token for the Launchplane service,

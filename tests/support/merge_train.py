@@ -102,6 +102,8 @@ class _FakeMergeTrainGitHubClient:
         self,
         *,
         landing_plan: MergeTrainBatchLandingPlan,
+        admission_guard: object,
+        recorded_at: str,
         checkpoint: (
             Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str], None] | None
         ) = None,
@@ -220,6 +222,8 @@ class _StaleLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
         self,
         *,
         landing_plan: MergeTrainBatchLandingPlan,
+        admission_guard: object,
+        recorded_at: str,
         checkpoint: (
             Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str], None] | None
         ) = None,
@@ -234,6 +238,8 @@ class _UnavailableLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
         self,
         *,
         landing_plan: MergeTrainBatchLandingPlan,
+        admission_guard: object,
+        recorded_at: str,
         checkpoint: (
             Callable[[MergeTrainBatchLandingPlan, MergeTrainBatchLandingEntry, str], None] | None
         ) = None,

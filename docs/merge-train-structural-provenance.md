@@ -44,11 +44,12 @@ evidence must carry non-empty exact L1 Owner event IDs and their immutable
 binding digests. It is explicitly non-authoritative, authorizes no merge or
 other effect, and cannot be replaced by a free-text evidence ID.
 
-#2085 is the first production caller and adapter for this pure boundary. It must
-derive reviewed/current deltas and combined-candidate evidence from the current
-Owner and change-impact services. #2084 supplies only the pure evaluator,
-durable Git provenance, and additive record payloads. It adds no HTTP or UI
-surface, no L3 admission authority, and no table or record family.
+The guarded merge-admission adapter is the first production caller of this pure
+boundary. It derives reviewed/current deltas and combined-candidate evidence
+from current Owner and change-impact services immediately before each batch
+entry. The structural module itself remains non-authoritative and adds no HTTP
+or UI surface; [merge-admission.md](merge-admission.md) owns the L3 record and
+provider-effect boundary.
 
 Candidate construction reads immutable GitHub commit objects for the recorded
 base and each PR head. For every non-no-op merge it resolves the result commit

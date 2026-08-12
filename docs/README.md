@@ -37,6 +37,8 @@ Use these docs as the source of truth for `launchplane`.
 - [merge-train-structural-provenance.md](merge-train-structural-provenance.md) —
   deterministic candidate, rolling-base, impact-subject, and landing-plan
   provenance consumed by merge readiness.
+- [merge-admission.md](merge-admission.md) — immutable per-attempt Level 3
+  admission, truthful landing outcomes, and append-only reconciliation.
 - [runner-lane-baseline.md](runner-lane-baseline.md) — self-hosted runner lane
   baseline, Docker credential isolation, and readiness contract.
 - [runner-host-hygiene.md](runner-host-hygiene.md) — report-only shared runner

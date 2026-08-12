@@ -629,6 +629,23 @@ persisted landing result, but the controller remains `reconcile_required` with
 the cleanup phase and candidate ref intact. The next owner resumes that exact
 phase before planning new train work.
 
+### Guarded Level 3 landing
+
+Controller landing and direct batch landing use the same per-entry guarded
+boundary documented in [merge-admission.md](merge-admission.md). Immediately
+before each provider merge, Launchplane re-resolves current Owner,
+change-impact, engineering-review, technical-check, policy, candidate, queue,
+rolling-base, head/tree, lease, and expected-effect evidence. It persists one
+immutable admission before mutation and a separate truthful landing outcome
+afterward.
+
+An existing admission is never a retry token. Missing outcomes and latest
+`reconcile_required` outcomes block another provider effect until GitHub is
+observed and append-only reconciliation establishes either exact landing or
+conclusive no effect. A provider rejection requires a fresh L2 evaluation and a
+new admission. Candidate-ref cleanup remains downstream of landing evidence and
+cannot downgrade it.
+
 Scheduler admission is a deterministic decision over the latest stored
 `launchplane_merge_train_runs` record for the repository/base branch. Dry-run
 records do not throttle the scheduler. Mutation records with `reread_required`
