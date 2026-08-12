@@ -2699,6 +2699,57 @@ class FilesystemRecordStore:
             record,
         )
 
+    def compare_and_write_dokploy_target_domains(
+        self,
+        *,
+        expected_record: DokployTargetRecord,
+        expected_target_id_record: DokployTargetIdRecord,
+        expected_provider_target_record: ProviderTargetRecord,
+        domains: tuple[str, ...],
+        updated_at: str,
+        source_label: str,
+    ) -> DokployTargetRecord:
+        replacement_record = expected_record.model_copy(
+            update={
+                "domains": domains,
+                "updated_at": updated_at,
+                "source_label": source_label,
+            }
+        )
+        with self._product_authority_bundle_lock():
+            record_id = _context_instance_record_id(
+                expected_record.context, expected_record.instance
+            )
+            current_record = self._read_model_locked(
+                DokployTargetRecord,
+                "dokploy_targets",
+                _context_instance_record_id(expected_record.context, expected_record.instance),
+            )
+            if current_record != expected_record:
+                raise ValueError("Dokploy target record changed during domain authority repair.")
+            current_target_id_record = self._read_model_locked(
+                DokployTargetIdRecord,
+                "dokploy_target_ids",
+                _context_instance_record_id(
+                    expected_target_id_record.context,
+                    expected_target_id_record.instance,
+                ),
+            )
+            if current_target_id_record != expected_target_id_record:
+                raise ValueError("Dokploy target-id record changed during domain authority repair.")
+            current_provider_target_record = self._read_model_locked(
+                ProviderTargetRecord,
+                "launchplane_provider_targets",
+                _context_instance_record_id(
+                    expected_provider_target_record.context,
+                    expected_provider_target_record.instance,
+                ),
+            )
+            if current_provider_target_record != expected_provider_target_record:
+                raise ValueError("Provider-target record changed during domain authority repair.")
+            self._write_model_locked("dokploy_targets", record_id, replacement_record)
+        return replacement_record
+
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetRecord:

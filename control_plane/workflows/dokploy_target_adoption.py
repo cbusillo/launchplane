@@ -1,4 +1,5 @@
 from collections.abc import Callable
+import re
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -22,6 +23,29 @@ class DokployTargetAdoptionRecordStore(Protocol):
 
     def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]: ...
 
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
+
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord: ...
+
+    def read_provider_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> ProviderTargetRecord: ...
+
+    def compare_and_write_dokploy_target_domains(
+        self,
+        *,
+        expected_record: DokployTargetRecord,
+        expected_target_id_record: DokployTargetIdRecord,
+        expected_provider_target_record: ProviderTargetRecord,
+        domains: tuple[str, ...],
+        updated_at: str,
+        source_label: str,
+    ) -> DokployTargetRecord: ...
+
 
 class DokployTargetAdoptionResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -34,8 +58,171 @@ class DokployTargetAdoptionResult(BaseModel):
     warnings: tuple[str, ...] = ()
 
 
+class DokployTargetDomainRepairResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    applied: bool
+    target_record: DokployTargetRecord
+    target_id_record: DokployTargetIdRecord
+    provider_target_record: ProviderTargetRecord
+    requested_domains: tuple[str, ...]
+    live_provider_domains: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
+
+
 FetchDokployTargetPayload = Callable[[str, str, DokployTargetType, str], JsonObject]
+FetchDokployTargetDomains = Callable[[str, str, DokployTargetType, str], tuple[JsonObject, ...]]
 MutateDokployPayload = Callable[[str, str, str, JsonObject], JsonObject]
+
+_DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def normalize_dokploy_domain_host(raw_host: str) -> str:
+    host = raw_host.strip().lower()
+    if not host or any(character.isspace() for character in host):
+        raise ValueError("Dokploy domain authority requires bare DNS hosts.")
+    if "://" in host or "/" in host or ":" in host or "@" in host:
+        raise ValueError("Dokploy domain authority requires bare DNS hosts, not URLs.")
+    host = host.rstrip(".")
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError as error:
+        raise ValueError("Dokploy domain authority contains an invalid DNS host.") from error
+    labels = ascii_host.split(".")
+    if (
+        len(labels) < 2
+        or len(ascii_host) > 253
+        or any(not _DNS_LABEL_PATTERN.fullmatch(label) for label in labels)
+    ):
+        raise ValueError("Dokploy domain authority contains an invalid DNS host.")
+    return ascii_host
+
+
+def normalize_dokploy_domain_hosts(raw_hosts: tuple[str, ...]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for raw_host in raw_hosts:
+        host = normalize_dokploy_domain_host(raw_host)
+        if host in normalized:
+            raise ValueError("Dokploy domain authority requires unique DNS hosts.")
+        normalized.append(host)
+    if not normalized:
+        raise ValueError("Dokploy domain authority requires at least one DNS host.")
+    return tuple(normalized)
+
+
+def repair_dokploy_target_domain_authority(
+    *,
+    record_store: DokployTargetAdoptionRecordStore,
+    host: str,
+    token: str,
+    context: str,
+    instance: str,
+    target_type: DokployTargetType,
+    target_id: str,
+    domains: tuple[str, ...],
+    expected_current_provider_target: DeployedTargetReference,
+    source_label: str = "service:dokploy-targets:setup:repair-domain-authority",
+    updated_at: str = "",
+    apply: bool = False,
+    fetch_target_payload: FetchDokployTargetPayload,
+    fetch_target_domains: FetchDokployTargetDomains,
+) -> DokployTargetDomainRepairResult:
+    normalized_context = _normalize_route_part(context, "context")
+    normalized_instance = _normalize_route_part(instance, "instance")
+    normalized_target_id = _require_non_empty(target_id, "target_id")
+    requested_domains = normalize_dokploy_domain_hosts(domains)
+    recorded_at = updated_at.strip() or utc_now_timestamp()
+
+    try:
+        target_record = record_store.read_dokploy_target_record(
+            context_name=normalized_context,
+            instance_name=normalized_instance,
+        )
+        target_id_record = record_store.read_dokploy_target_id_record(
+            context_name=normalized_context,
+            instance_name=normalized_instance,
+        )
+        provider_target_record = record_store.read_provider_target_record(
+            context_name=normalized_context,
+            instance_name=normalized_instance,
+        )
+    except FileNotFoundError as error:
+        raise ValueError(
+            "Dokploy domain authority repair requires tracked target, target-id, "
+            "and provider-target records."
+        ) from error
+
+    if target_record.target_type != target_type:
+        raise ValueError(
+            "Dokploy domain authority repair target type does not match the tracked target."
+        )
+    if target_id_record.target_id != normalized_target_id:
+        raise ValueError(
+            "Dokploy domain authority repair target id does not match the tracked target."
+        )
+    if provider_target_record.to_deployed_target_reference() != expected_current_provider_target:
+        raise ValueError(
+            "Dokploy domain authority repair provider-target expectation did not match current authority."
+        )
+    if (
+        provider_target_record.provider_id != "dokploy"
+        or provider_target_record.target_id != normalized_target_id
+        or provider_target_record.target_category != target_type
+        or provider_target_record.provider_target_type != target_type
+    ):
+        raise ValueError(
+            "Dokploy domain authority repair provider-target identity is inconsistent."
+        )
+
+    provider_payload = fetch_target_payload(host, token, target_type, normalized_target_id)
+    identity_key = "applicationId" if target_type == "application" else "composeId"
+    observed_identity = str(provider_payload.get(identity_key) or "").strip()
+    if observed_identity != normalized_target_id:
+        raise ValueError(
+            "Dokploy domain authority repair live provider target identity did not match."
+        )
+
+    live_provider_domains = normalize_dokploy_domain_hosts(
+        tuple(
+            str(domain.get("host") or "")
+            for domain in fetch_target_domains(host, token, target_type, normalized_target_id)
+        )
+    )
+    if tuple(sorted(requested_domains)) != tuple(sorted(live_provider_domains)):
+        raise ValueError(
+            "Dokploy domain authority repair requested domains did not exactly match live provider domains."
+        )
+
+    projected_target_record = target_record.model_copy(
+        update={
+            "domains": requested_domains,
+            "updated_at": recorded_at,
+            "source_label": source_label.strip(),
+        }
+    )
+    if apply:
+        target_record = record_store.compare_and_write_dokploy_target_domains(
+            expected_record=target_record,
+            expected_target_id_record=target_id_record,
+            expected_provider_target_record=provider_target_record,
+            domains=requested_domains,
+            updated_at=recorded_at,
+            source_label=source_label,
+        )
+    else:
+        target_record = projected_target_record
+
+    return DokployTargetDomainRepairResult(
+        applied=apply,
+        target_record=target_record,
+        target_id_record=target_id_record,
+        provider_target_record=provider_target_record,
+        requested_domains=requested_domains,
+        live_provider_domains=live_provider_domains,
+        warnings=()
+        if apply
+        else ("dry run only; provider was not mutated and records were not written",),
+    )
 
 
 class DokployTargetCreatePlan(BaseModel):

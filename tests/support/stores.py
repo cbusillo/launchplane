@@ -99,6 +99,9 @@ def _seed_tracked_target_records(
     target_name: str,
     domains: tuple[str, ...] = (),
     deploy_timeout_seconds: int | None = None,
+    source_type: str = "raw",
+    custom_git_url: str = "",
+    env: dict[str, str] | None = None,
 ) -> None:
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
@@ -109,6 +112,9 @@ def _seed_tracked_target_records(
                 instance=instance,
                 target_type=target_type,
                 target_name=target_name,
+                source_type=source_type,
+                custom_git_url=custom_git_url,
+                env=env or {},
                 deploy_timeout_seconds=deploy_timeout_seconds,
                 domains=domains,
                 updated_at="2026-05-01T00:00:00Z",

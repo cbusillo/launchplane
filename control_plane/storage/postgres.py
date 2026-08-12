@@ -14792,6 +14792,89 @@ class PostgresRecordStore(HumanSessionStore):
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
         self._write_row(self._dokploy_target_row(record))
 
+    def compare_and_write_dokploy_target_domains(
+        self,
+        *,
+        expected_record: DokployTargetRecord,
+        expected_target_id_record: DokployTargetIdRecord,
+        expected_provider_target_record: ProviderTargetRecord,
+        domains: tuple[str, ...],
+        updated_at: str,
+        source_label: str,
+    ) -> DokployTargetRecord:
+        replacement_record = expected_record.model_copy(
+            update={
+                "domains": domains,
+                "updated_at": updated_at,
+                "source_label": source_label,
+            }
+        )
+        statement = (
+            select(LaunchplaneDokployTargetRow)
+            .where(
+                LaunchplaneDokployTargetRow.context == expected_record.context,
+                LaunchplaneDokployTargetRow.instance == expected_record.instance,
+            )
+            .limit(1)
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(
+                    "Dokploy target record was missing during compare-and-write."
+                )
+            current_record = self._read_payload(
+                model_type=DokployTargetRecord,
+                payload=cast(_PayloadRow, row).payload,
+            )
+            if current_record != expected_record:
+                raise ValueError("Dokploy target record changed during domain authority repair.")
+            target_id_row = session.scalar(
+                select(LaunchplaneDokployTargetIdRow)
+                .where(
+                    LaunchplaneDokployTargetIdRow.context == expected_target_id_record.context,
+                    LaunchplaneDokployTargetIdRow.instance == expected_target_id_record.instance,
+                )
+                .limit(1)
+                .with_for_update()
+            )
+            if target_id_row is None:
+                raise FileNotFoundError(
+                    "Dokploy target-id record was missing during compare-and-write."
+                )
+            current_target_id_record = self._read_payload(
+                model_type=DokployTargetIdRecord,
+                payload=cast(_PayloadRow, target_id_row).payload,
+            )
+            if current_target_id_record != expected_target_id_record:
+                raise ValueError("Dokploy target-id record changed during domain authority repair.")
+            provider_row = session.scalar(
+                select(LaunchplaneProviderTargetRow)
+                .where(
+                    LaunchplaneProviderTargetRow.context == expected_provider_target_record.context,
+                    LaunchplaneProviderTargetRow.instance
+                    == expected_provider_target_record.instance,
+                )
+                .limit(1)
+                .with_for_update()
+            )
+            if provider_row is None:
+                raise FileNotFoundError(
+                    "Provider-target record was missing during compare-and-write."
+                )
+            current_provider_target_record = self._read_payload(
+                model_type=ProviderTargetRecord,
+                payload=cast(_PayloadRow, provider_row).payload,
+            )
+            if current_provider_target_record != expected_provider_target_record:
+                raise ValueError("Provider-target record changed during domain authority repair.")
+            row.updated_at = replacement_record.updated_at
+            row.payload = self._payload_dict(replacement_record)
+            session.commit()
+        return replacement_record
+
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetRecord:

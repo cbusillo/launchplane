@@ -10,11 +10,13 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.dokploy_target_adoption import (
     DokployComposeTargetCreateResult,
+    DokployTargetDomainRepairResult,
     DokployTargetAdoptionResult,
     DokployTargetCreateResult,
     adopt_dokploy_target,
     create_dokploy_application_target,
     create_dokploy_compose_target,
+    repair_dokploy_target_domain_authority,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy import api as dokploy_api
@@ -33,6 +35,7 @@ class DokployTargetSetupEnvelope(BaseModel):
         "create-compose",
         "prune-compose-domain",
         "reconcile-compose-domain",
+        "repair-domain-authority",
     ]
     product: str = "launchplane"
     context: str
@@ -88,6 +91,15 @@ class DokployTargetSetupEnvelope(BaseModel):
             raise ValueError("Dokploy target setup requires instance.")
         if self.operation == "adopt" and not self.target_id:
             raise ValueError("Dokploy target adoption requires target_id.")
+        if self.operation == "repair-domain-authority":
+            if not self.target_id:
+                raise ValueError("Dokploy domain authority repair requires target_id.")
+            if not self.domains:
+                raise ValueError("Dokploy domain authority repair requires domains.")
+            if self.expected_current_provider_target is None:
+                raise ValueError(
+                    "Dokploy domain authority repair requires expected_current_provider_target."
+                )
         if self.operation == "create-application" and not self.target_name:
             raise ValueError("Dokploy application target creation requires target_name.")
         if self.operation == "create-compose":
@@ -184,6 +196,27 @@ def fetch_dokploy_compose_domains_for_target_setup(
     return tuple(domains)
 
 
+def fetch_dokploy_target_domains_for_setup(
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+) -> tuple[dict[str, dokploy_api.JsonValue], ...]:
+    if target_type == "compose":
+        return fetch_dokploy_compose_domains_for_target_setup(
+            host=host,
+            token=token,
+            compose_id=target_id,
+        )
+    if target_type == "application":
+        return dokploy_api.fetch_dokploy_application_domains(
+            host=host,
+            token=token,
+            application_id=target_id,
+        )
+    raise click.ClickException(f"Unsupported Dokploy target type: {target_type}")
+
+
 def delete_dokploy_domain_for_target_setup(*, host: str, token: str, domain_id: str) -> None:
     dokploy_api.dokploy_request(
         host=host,
@@ -259,6 +292,7 @@ def execute_dokploy_target_setup(
         | DokployComposeTargetCreateResult
         | DokployComposeDomainReconcileResult
         | DokployComposeDomainPruneResult
+        | DokployTargetDomainRepairResult
     )
     if request.operation == "adopt":
         result = adopt_dokploy_target(
@@ -279,6 +313,25 @@ def execute_dokploy_target_setup(
             source_label="service:dokploy-targets:setup:adopt",
             apply=apply_changes,
             fetch_target_payload=fetch_dokploy_target_payload_for_setup,
+        )
+    elif request.operation == "repair-domain-authority":
+        if request.expected_current_provider_target is None:
+            raise ValueError(
+                "Dokploy domain authority repair requires expected_current_provider_target."
+            )
+        result = repair_dokploy_target_domain_authority(
+            record_store=record_store,
+            host=host,
+            token=token,
+            context=request.context,
+            instance=request.instance,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            domains=request.domains,
+            expected_current_provider_target=request.expected_current_provider_target,
+            apply=apply_changes,
+            fetch_target_payload=fetch_dokploy_target_payload_for_setup,
+            fetch_target_domains=fetch_dokploy_target_domains_for_setup,
         )
     elif request.operation == "reconcile-compose-domain":
         result = _execute_dokploy_compose_domain_reconcile(

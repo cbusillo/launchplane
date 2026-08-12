@@ -11,12 +11,16 @@ from click.testing import CliRunner, Result
 from control_plane.cli import main
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.dokploy import JsonObject
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.dokploy_target_adoption import (
     adopt_dokploy_target,
     create_dokploy_application_target,
     create_dokploy_compose_target,
+    normalize_dokploy_domain_host,
+    repair_dokploy_target_domain_authority,
 )
 from tests.support.cli import _allow_direct_db_mutation_argument
 
@@ -56,6 +60,179 @@ def _write_dokploy_managed_secrets(*, store: PostgresRecordStore) -> None:
 
 
 class DokployTargetAdoptionTests(unittest.TestCase):
+    @staticmethod
+    def _live_domains(*hosts: str) -> tuple[JsonObject, ...]:
+        return tuple({"host": host} for host in hosts)
+
+    def test_repair_domain_authority_dry_run_preserves_metadata(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            target_record = DokployTargetRecord(
+                context="synthetic-context",
+                instance="synthetic-instance",
+                target_type="application",
+                target_name="synthetic-target",
+                source_type="docker",
+                custom_git_url="synthetic-source",
+                env={"KEEP": "exact"},
+                domains=("https://old.synthetic.invalid/path",),
+                updated_at="2026-08-12T00:00:00Z",
+                source_label="synthetic-source",
+            )
+            target_id_record = DokployTargetIdRecord(
+                context=target_record.context,
+                instance=target_record.instance,
+                target_id="application-synthetic",
+                updated_at=target_record.updated_at,
+                source_label="synthetic-source",
+            )
+            store.write_dokploy_target_record(target_record)
+            store.write_dokploy_target_id_record(target_id_record)
+            provider_target = ProviderTargetRecord.from_dokploy_records(
+                target_record=target_record,
+                target_id_record=target_id_record,
+            )
+            store.write_provider_target_record(provider_target)
+            result = repair_dokploy_target_domain_authority(
+                record_store=store,
+                host="https://provider.synthetic.invalid",
+                token="synthetic-token",
+                context=target_record.context,
+                instance=target_record.instance,
+                target_type="application",
+                target_id=target_id_record.target_id,
+                domains=("new.synthetic.invalid",),
+                expected_current_provider_target=provider_target.to_deployed_target_reference(),
+                fetch_target_payload=lambda *_args: {"applicationId": target_id_record.target_id},
+                fetch_target_domains=lambda *_args: self._live_domains("new.synthetic.invalid"),
+            )
+            persisted = store.read_dokploy_target_record(
+                context_name=target_record.context,
+                instance_name=target_record.instance,
+            )
+            store.close()
+
+        self.assertFalse(result.applied)
+        self.assertEqual(result.target_record.domains, ("new.synthetic.invalid",))
+        self.assertEqual(result.target_record.source_type, target_record.source_type)
+        self.assertEqual(result.target_record.env, target_record.env)
+        self.assertEqual(persisted, target_record)
+
+    def test_repair_domain_authority_apply_compare_writes_only_allowed_fields(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            target_record = DokployTargetRecord(
+                context="synthetic-context",
+                instance="synthetic-instance",
+                target_type="compose",
+                target_name="synthetic-compose",
+                source_type="docker",
+                compose_path="synthetic-compose.yml",
+                env={"KEEP": "exact"},
+                domains=("https://old.synthetic.invalid/path",),
+                updated_at="2026-08-12T00:00:00Z",
+                source_label="synthetic-source",
+            )
+            target_id_record = DokployTargetIdRecord(
+                context=target_record.context,
+                instance=target_record.instance,
+                target_id="compose-synthetic",
+                updated_at=target_record.updated_at,
+                source_label="synthetic-source",
+            )
+            provider_target = ProviderTargetRecord.from_dokploy_records(
+                target_record=target_record,
+                target_id_record=target_id_record,
+            )
+            store.write_dokploy_target_record(target_record)
+            store.write_dokploy_target_id_record(target_id_record)
+            store.write_provider_target_record(provider_target)
+            result = repair_dokploy_target_domain_authority(
+                record_store=store,
+                host="https://provider.synthetic.invalid",
+                token="synthetic-token",
+                context=target_record.context,
+                instance=target_record.instance,
+                target_type="compose",
+                target_id=target_id_record.target_id,
+                domains=("new.synthetic.invalid",),
+                expected_current_provider_target=provider_target.to_deployed_target_reference(),
+                updated_at="2026-08-12T01:00:00Z",
+                apply=True,
+                fetch_target_payload=lambda *_args: {"composeId": target_id_record.target_id},
+                fetch_target_domains=lambda *_args: self._live_domains("new.synthetic.invalid"),
+            )
+            persisted = store.read_dokploy_target_record(
+                context_name=target_record.context,
+                instance_name=target_record.instance,
+            )
+            store.close()
+
+        self.assertTrue(result.applied)
+        self.assertEqual(persisted.domains, ("new.synthetic.invalid",))
+        self.assertEqual(persisted.source_type, target_record.source_type)
+        self.assertEqual(persisted.compose_path, target_record.compose_path)
+        self.assertEqual(persisted.env, target_record.env)
+        self.assertEqual(
+            persisted.source_label, "service:dokploy-targets:setup:repair-domain-authority"
+        )
+
+    def test_repair_domain_authority_rejects_non_exact_live_domains(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            target_record = DokployTargetRecord(
+                context="synthetic-context",
+                instance="synthetic-instance",
+                target_type="application",
+                target_name="synthetic-target",
+                updated_at="2026-08-12T00:00:00Z",
+            )
+            target_id_record = DokployTargetIdRecord(
+                context=target_record.context,
+                instance=target_record.instance,
+                target_id="application-synthetic",
+                updated_at=target_record.updated_at,
+            )
+            provider_target = ProviderTargetRecord.from_dokploy_records(
+                target_record=target_record,
+                target_id_record=target_id_record,
+            )
+            store.write_dokploy_target_record(target_record)
+            store.write_dokploy_target_id_record(target_id_record)
+            store.write_provider_target_record(provider_target)
+            with self.assertRaisesRegex(ValueError, "exactly match live provider domains"):
+                repair_dokploy_target_domain_authority(
+                    record_store=store,
+                    host="synthetic-host",
+                    token="synthetic-token",
+                    context=target_record.context,
+                    instance=target_record.instance,
+                    target_type="application",
+                    target_id=target_id_record.target_id,
+                    domains=("one.synthetic.invalid",),
+                    expected_current_provider_target=provider_target.to_deployed_target_reference(),
+                    fetch_target_payload=lambda *_args: {
+                        "applicationId": target_id_record.target_id
+                    },
+                    fetch_target_domains=lambda *_args: self._live_domains(
+                        "one.synthetic.invalid", "two.synthetic.invalid"
+                    ),
+                )
+            store.close()
+
+    def test_normalize_dokploy_domain_host_rejects_url(self) -> None:
+        with self.assertRaisesRegex(ValueError, "bare DNS hosts"):
+            normalize_dokploy_domain_host("https://synthetic.invalid/path")
+
     def test_adopt_application_target_dry_run_does_not_write_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

@@ -22,6 +22,7 @@ name: Dokploy Target Setup
           - create-compose
           - prune-compose-domain
           - reconcile-compose-domain
+          - repair-domain-authority
       context:
         description: Launchplane target context.
         required: true
@@ -38,7 +39,7 @@ name: Dokploy Target Setup
           - compose
           - application
       target_id:
-        description: Existing Dokploy target id when operation=adopt.
+        description: Existing Dokploy target id when operation=adopt or repair-domain-authority.
         required: false
         default: ""
         type: string
@@ -96,7 +97,7 @@ name: Dokploy Target Setup
         required: false
         type: string
       domain:
-        description: Optional comma-separated domain hosts to store/reconcile/prune.
+        description: Optional comma-separated domain hosts to store/reconcile/prune/repair.
         required: false
         default: ""
         type: string
@@ -116,8 +117,8 @@ name: Dokploy Target Setup
         type: string
       expected_current_provider_target_json:
         description: >-
-          Optional JSON deployed target authority that must match the existing
-          provider-target row before replacing it.
+          JSON deployed target authority required for provider-target compare-and-write
+          fencing, including repair-domain-authority.
         required: false
         default: ""
         type: string
@@ -217,6 +218,25 @@ jobs:
               >&2
             exit 1
           fi
+
+      - name: Validate domain authority repair inputs
+        if: env.OPERATION == 'repair-domain-authority'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$(printf '%s' "$TARGET_ID" | xargs)" ]; then
+            echo "target_id is required for repair-domain-authority." >&2
+            exit 1
+          fi
+          if [ -z "$(printf '%s' "$DOMAIN" | xargs)" ]; then
+            echo "domain is required for repair-domain-authority." >&2
+            exit 1
+          fi
+          if [ -z "$(printf '%s' "$EXPECTED_CURRENT_PROVIDER_TARGET_JSON" | xargs)" ]; then
+            echo "expected_current_provider_target_json is required for repair-domain-authority." >&2
+            exit 1
+          fi
+          jq -e . >/dev/null <<< "$EXPECTED_CURRENT_PROVIDER_TARGET_JSON"
 
       - name: Prepare target setup request
         id: request

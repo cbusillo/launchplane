@@ -18883,6 +18883,15 @@ def create_launchplane_fastapi_app(
             product=setup_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
+        can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (
+            can_setup_target
+            or resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="dokploy_target.repair_domain_authority",
+                product=setup_request.product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+        )
         can_plan_target = setup_request.mode == "dry-run" and (
             can_setup_target
             or resolved_authz_policy_runtime.policy.allows(
@@ -18892,7 +18901,23 @@ def create_launchplane_fastapi_app(
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
             )
         )
-        if not (can_setup_target if setup_request.mode == "apply" else can_plan_target):
+        if setup_request.operation == "repair-domain-authority":
+            authorized = (
+                can_repair_domain_authority
+                if setup_request.mode == "apply"
+                else (
+                    can_repair_domain_authority
+                    or resolved_authz_policy_runtime.policy.allows(
+                        identity=identity,
+                        action="dokploy_target.repair_domain_authority.plan",
+                        product=setup_request.product,
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    )
+                )
+            )
+        else:
+            authorized = can_setup_target if setup_request.mode == "apply" else can_plan_target
+        if not authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,

@@ -2100,6 +2100,18 @@ records are written, recover by re-running the workflow with `operation=adopt`
 and the created provider target id, not by creating a second target for the same
 lane.
 
+The same route exposes the narrow `repair-domain-authority` operation for
+application and compose targets. It reads the current target, target-id, and
+provider-target records, fences the exact target identity and expected current
+provider-target projection, reads the live Dokploy target and its domains, and
+requires the requested normalized bare DNS host tuple to exactly match the live
+provider hosts. It never mutates Dokploy. Dry-run returns the projected target
+record without writes. Apply compare-and-writes only `domains`, `updated_at`, and
+`source_label`; every other target-record field remains unchanged. The operation
+uses the dedicated `dokploy_target.repair_domain_authority` authorization action
+and remains fail-closed when any tracked or live identity/evidence is missing or
+changed.
+
 Dokploy target inspect uses the native FastAPI
 `GET /v1/dokploy-targets/inspect` route. The route is a read-only proof surface
 for provider identity before an adoption, creation, or repair: callers may pass
