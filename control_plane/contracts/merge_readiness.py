@@ -21,6 +21,7 @@ MergeReadinessState = Literal[
     "unknown",
 ]
 MergeReadinessTechnicalCheckStatus = Literal["pass", "pending", "fail", "unknown"]
+MergeReadinessAuthorityMode = Literal["required", "advisory"]
 MergeReadinessStructuralCandidateStatus = Literal[
     "exact", "recorded_rolling", "mismatch", "unknown"
 ]
@@ -573,6 +574,7 @@ class MergeReadinessResult(BaseModel):
     mode: Literal["ephemeral"] = "ephemeral"
     authoritative: Literal[False] = False
     authorizes: tuple[str, ...] = ()
+    engineering_review_authority: MergeReadinessAuthorityMode = "required"
     target: MergeReadinessTarget
     state: MergeReadinessState
     reason_codes: tuple[MergeReadinessReasonCode, ...]
@@ -629,7 +631,11 @@ class MergeReadinessResult(BaseModel):
         facet_states = (
             *(facet.state for facet in sorted_owner_facets),
             self.technical_checks.state,
-            self.engineering_review.state,
+            *(
+                ()
+                if self.engineering_review_authority == "advisory"
+                else (self.engineering_review.state,)
+            ),
             self.policy.state,
             self.candidate.state,
             self.fence.state,
@@ -667,6 +673,8 @@ def merge_readiness_digest(result: MergeReadinessResult) -> str:
         mode="json",
         exclude={"evaluated_at", "readiness_digest"},
     )
+    if payload.get("engineering_review_authority") == "required":
+        payload.pop("engineering_review_authority")
     technical_checks = payload.get("technical_checks")
     if isinstance(technical_checks, dict):
         technical_checks.pop("advisory_observations", None)

@@ -60,6 +60,10 @@ The pure evaluator consumes these current inputs:
   product/system/action/environment facets;
 - the current `EngineeringReviewDecisionRecord` plus exact qualifying run
   evidence references;
+- an explicit engineering-review authority mode. `required` includes the
+  engineering facet and policy fingerprint in aggregate readiness;
+  `advisory` preserves their independent state and reason codes without letting
+  shadow-only evidence worsen the aggregate state;
 - required technical-check state for the exact effect SHA;
 - all seven scoped policy fingerprints: `impact`, `technical_checks`,
   `engineering_review`, `ruleset`, `merge_train`, `authorization`, and
@@ -120,6 +124,13 @@ Launchplane Owner, engineering-review, and legacy shadow check contexts are
 observations only. The live adapter removes them from required technical-check
 policy and signal aggregation. Their observed names and states may be returned
 for diagnostics, but they cannot change readiness state or reason codes.
+
+Engineering-review records remain shadow-only while the repository's active
+DB-backed merge-train policy selects `engineering_review_mode = "advisory"`.
+Missing, stale, or failed shadow evidence remains visible, but it cannot
+authorize or block merge admission. A future enforcement rollout must replace
+that policy deliberately with `engineering_review_mode = "required"`; required
+mode retains exact-head, evidence, and policy fail-closed behavior.
 
 `readiness_digest` excludes both `evaluated_at` and advisory observations. Thus
 clock movement and advisory conclusion changes do not alter the authoritative

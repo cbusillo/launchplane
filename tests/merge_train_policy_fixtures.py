@@ -8,12 +8,14 @@ def build_test_merge_train_policy(
     repository: str = "cbusillo/sellyouroutboard",
     scheduler_enabled: bool = False,
     trusted_automation_github_user_ids: tuple[int, ...] = (),
+    engineering_review_mode: str = "advisory",
 ) -> MergeTrainPolicy:
     return parse_merge_train_policy_toml(
         _policy_toml(
             repository,
             scheduler_enabled=scheduler_enabled,
             trusted_automation_github_user_ids=trusted_automation_github_user_ids,
+            engineering_review_mode=engineering_review_mode,
         )
     )
 
@@ -23,13 +25,17 @@ def build_test_merge_train_policy_record(
     repository: str = "cbusillo/sellyouroutboard",
     record_id: str = "merge-train-policy-20260513T210000Z-test",
     updated_at: str = "2026-05-13T21:00:00Z",
+    engineering_review_mode: str = "advisory",
 ) -> MergeTrainPolicyRecord:
     return MergeTrainPolicyRecord(
         record_id=record_id,
         status="active",
         source="test",
         updated_at=updated_at,
-        policy=build_test_merge_train_policy(repository=repository),
+        policy=build_test_merge_train_policy(
+            repository=repository,
+            engineering_review_mode=engineering_review_mode,
+        ),
     )
 
 
@@ -50,6 +56,7 @@ def _policy_toml(
     *,
     scheduler_enabled: bool = False,
     trusted_automation_github_user_ids: tuple[int, ...] = (),
+    engineering_review_mode: str = "advisory",
 ) -> str:
     return "\n\n".join(
         (
@@ -58,6 +65,7 @@ def _policy_toml(
                 repository,
                 scheduler_enabled=scheduler_enabled,
                 trusted_automation_github_user_ids=trusted_automation_github_user_ids,
+                engineering_review_mode=engineering_review_mode,
             ),
         )
     )
@@ -68,6 +76,7 @@ def _policy_table(
     *,
     scheduler_enabled: bool = False,
     trusted_automation_github_user_ids: tuple[int, ...] = (),
+    engineering_review_mode: str = "advisory",
 ) -> str:
     scheduler_table = ""
     if scheduler_enabled:
@@ -87,6 +96,7 @@ enqueue_label = "ready-to-merge"
 blocked_label = "merge-blocked"
 stack_child_disposition_label = "stack-landed"
 merge_method = "merge"
+engineering_review_mode = "{engineering_review_mode}"
 failure_policy = "pause_train"
 
 [policies.enqueue]

@@ -872,6 +872,7 @@ export type MergeReadinessResult = {
     authorizes: Array<string>;
     candidate: MergeReadinessCandidateFacet;
     engineering_review: MergeReadinessEngineeringReviewFacet;
+    engineering_review_authority: 'required' | 'advisory';
     evaluated_at: string;
     fence: MergeReadinessFenceFacet;
     mode: 'ephemeral';

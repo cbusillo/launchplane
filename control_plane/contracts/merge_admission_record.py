@@ -404,12 +404,17 @@ def build_merge_effect_attempt_id(
 
 
 def merge_admission_binding_sha256(record: MergeAdmissionRecord) -> str:
-    return _canonical_sha256(
-        record.model_dump(
-            mode="json",
-            exclude={"admission_id", "admission_binding_sha256"},
-        )
+    payload = record.model_dump(
+        mode="json",
+        exclude={"admission_id", "admission_binding_sha256"},
     )
+    readiness = payload.get("readiness")
+    if (
+        isinstance(readiness, dict)
+        and readiness.get("engineering_review_authority") == "required"
+    ):
+        readiness.pop("engineering_review_authority")
+    return _canonical_sha256(payload)
 
 
 def merge_landing_outcome_binding_sha256(record: MergeLandingOutcomeRecord) -> str:

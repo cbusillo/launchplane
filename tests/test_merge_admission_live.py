@@ -1,16 +1,39 @@
 import unittest
+from unittest.mock import patch
 
+from control_plane.contracts.change_impact import (
+    ChangeImpactChangedFileEvidence,
+    ChangeImpactEvaluation,
+    ChangeImpactRepositoryEvidence,
+    ChangeImpactTarget,
+    ChangeImpactTargetReference,
+)
+from control_plane.contracts.merge_train_structural_provenance import (
+    MergeTrainStructuralEntryObservation,
+)
 from control_plane.merge_admission import MergeAdmissionDeniedError
-from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
+from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator, _EntryEvidence
 from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
 )
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
-from control_plane.tenant_admission_controller import TenantAdmissionControllerGitHubClient
+from control_plane.tenant_admission_controller import (
+    TenantAdmissionControllerGitHubClient,
+    TenantAdmissionTechnicalChecks,
+)
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_merge_admission_records import _guard_records
-from tests.test_merge_readiness import BASE_SHA, HEAD_SHA, REPOSITORY
+from tests.test_merge_readiness import (
+    BASE_SHA,
+    HEAD_SHA,
+    REPOSITORY,
+    TREE_SHA,
+    _evaluate,
+    _owner_decision,
+    _owner_product,
+    _policy_fingerprints,
+)
 
 
 class _StaticSnapshotReader:
@@ -31,8 +54,43 @@ class _StaticSnapshotReader:
 
 
 class _UnusedRepositoryEvidenceProvider:
-    def resolve(self, target: object) -> object:
+    def resolve(
+        self,
+        target: ChangeImpactTargetReference,
+    ) -> ChangeImpactRepositoryEvidence:
         raise AssertionError(f"queue drift should fail before repository evidence: {target}")
+
+
+class _TechnicalCheckClient(TenantAdmissionControllerGitHubClient):
+    def __init__(self) -> None:
+        super().__init__(transport=RecordingMergeTrainGitHubTransport())
+
+    def read_technical_checks(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        base_sha: str,
+        head_sha: str,
+        evaluated_at: str,
+    ) -> TenantAdmissionTechnicalChecks:
+        return TenantAdmissionTechnicalChecks(
+            head_sha=head_sha,
+            base_sha=base_sha,
+            strict=False,
+            status="unavailable",
+            evaluated_at=evaluated_at,
+        )
+
+
+class _EmptyEngineeringReviewStore:
+    @staticmethod
+    def list_engineering_review_decision_records(**_filters: object) -> tuple[()]:
+        return ()
+
+    @staticmethod
+    def list_engineering_review_authority_records(**_filters: object) -> tuple[()]:
+        return ()
 
 
 def _queued_pull_request(
@@ -55,6 +113,112 @@ def _queued_pull_request(
 
 
 class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
+    def test_repository_policy_controls_engineering_review_authority(self) -> None:
+        candidate_record, landing_record, controller_state, structural_result = _guard_records()
+        snapshot_reader = _StaticSnapshotReader(
+            MergeTrainDryRunSnapshot(
+                repository=REPOSITORY,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                pull_requests=(
+                    _queued_pull_request(
+                        number=2083,
+                        head_sha=HEAD_SHA,
+                        created_at="2026-08-11T03:00:00Z",
+                    ),
+                ),
+            )
+        )
+        target = ChangeImpactTarget(
+            repository_id="101",
+            repository_owner_id="202",
+            repository=REPOSITORY,
+            pull_request_number=2083,
+            head_sha=HEAD_SHA,
+            tree_sha=TREE_SHA,
+        )
+        entry_evidence = _EntryEvidence(
+            repository_evidence=ChangeImpactRepositoryEvidence(
+                target=target,
+                changed_files=(ChangeImpactChangedFileEvidence(path="control_plane/example.py"),),
+            ),
+            impact=ChangeImpactEvaluation(
+                status="success",
+                reason_code="test_evidence_resolved",
+                target=target,
+            ),
+            owner_decision=_owner_decision(_owner_product()),
+            observation=MergeTrainStructuralEntryObservation(
+                position=1,
+                pull_request_number=2083,
+                head_sha=HEAD_SHA,
+                head_tree_sha=TREE_SHA,
+            ),
+        )
+        engineering_store = _EmptyEngineeringReviewStore()
+
+        for mode in ("advisory", "required"):
+            with self.subTest(mode=mode):
+                captured: dict[str, object] = {}
+
+                def evaluate_readiness(**kwargs: object):  # type: ignore[no-untyped-def]
+                    captured.update(kwargs)
+                    return _evaluate(engineering_review_authority=mode)
+
+                evaluator = LiveMergeAdmissionEvaluator(
+                    store=object(),
+                    repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
+                    technical_check_client=_TechnicalCheckClient(),
+                    policy_record_provider=lambda: build_test_merge_train_policy_record(
+                        repository=REPOSITORY,
+                        engineering_review_mode=mode,
+                    ),
+                    snapshot_reader=snapshot_reader,
+                )
+                with (
+                    patch.object(
+                        LiveMergeAdmissionEvaluator,
+                        "_entry_evidence",
+                        return_value=entry_evidence,
+                    ),
+                    patch.object(
+                        LiveMergeAdmissionEvaluator,
+                        "_combined_owner_review",
+                        return_value=None,
+                    ),
+                    patch.object(
+                        LiveMergeAdmissionEvaluator,
+                        "_policy_fingerprints",
+                        return_value=_policy_fingerprints(),
+                    ),
+                    patch(
+                        "control_plane.merge_admission_live.evaluate_merge_train_structural_candidate",
+                        return_value=structural_result,
+                    ),
+                    patch(
+                        "control_plane.merge_admission_live.require_engineering_review_decision_store",
+                        return_value=engineering_store,
+                    ),
+                    patch(
+                        "control_plane.merge_admission_live.evaluate_merge_readiness_from_live_evidence",
+                        side_effect=evaluate_readiness,
+                    ),
+                ):
+                    evaluator.evaluate(
+                        candidate_record=candidate_record,
+                        landing_plan_record=landing_record,
+                        entry=landing_record.landing_plan.entries[0],
+                        observed_base_sha=BASE_SHA,
+                        observed_base_tree_sha="5" * 40,
+                        observed_head_sha=HEAD_SHA,
+                        observed_head_tree_sha=TREE_SHA,
+                        controller_state=controller_state,
+                        stack_collapse_record=None,
+                        evaluated_at="2026-08-11T03:01:00Z",
+                    )
+
+                self.assertEqual(captured["engineering_review_authority"], mode)
+
     def test_live_queue_is_rediscovered_and_inserted_pr_refuses_admission(self) -> None:
         candidate_record, landing_record, controller_state, _ = _guard_records()
         snapshot_reader = _StaticSnapshotReader(
@@ -85,7 +249,7 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
 
         evaluator = LiveMergeAdmissionEvaluator(
             store=object(),
-            repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),  # type: ignore[arg-type]
+            repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
             technical_check_client=TenantAdmissionControllerGitHubClient(
                 transport=RecordingMergeTrainGitHubTransport()
             ),
@@ -130,7 +294,7 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
         )
         evaluator = LiveMergeAdmissionEvaluator(
             store=object(),
-            repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),  # type: ignore[arg-type]
+            repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
             technical_check_client=TenantAdmissionControllerGitHubClient(
                 transport=RecordingMergeTrainGitHubTransport()
             ),
