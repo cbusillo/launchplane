@@ -15,6 +15,7 @@ _WEBHOOK_BODY_LIMIT = 2 * 1024 * 1024
 _JSON_MUTATION_ROUTES = (
     ("/v1/product-config/apply", 2 * 1024 * 1024),
     ("/v1/product-profiles/health-monitoring/apply", 64 * 1024),
+    ("/v1/product-profiles/stable-lane-repair/apply", 64 * 1024),
     ("/v1/secrets/reencrypt", 64 * 1024),
     ("/v1/tenant-admission/repository-classifications/apply", 64 * 1024),
     ("/v1/tenant-admission/repository-human-role-policies/apply", 64 * 1024),

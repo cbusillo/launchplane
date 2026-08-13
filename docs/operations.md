@@ -425,6 +425,7 @@ Current implementation scope:
 - `POST /v1/route-bindings/external/reconcile`
 - `POST /v1/provider-targets/operations`
 - `POST /v1/product-onboarding/apply`
+- `POST /v1/product-profiles/stable-lane-repair/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
 - `POST /v1/every-code/notification-policies/apply`
 - `POST /v1/public-ingress/notification-policies/apply`
