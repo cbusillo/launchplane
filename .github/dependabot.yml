@@ -3,8 +3,8 @@ version: 2
 
 updates:
   - package-ecosystem: github-actions
-    # Inline release-tag provenance comments keep full-SHA action pin updates
-    # reviewable.
+    # Covers third-party Actions. Same-repository first-party action pins are
+    # enforced and updated through `launchplane action-pins` instead.
     directory: "/"
     open-pull-requests-limit: 5
     schedule:

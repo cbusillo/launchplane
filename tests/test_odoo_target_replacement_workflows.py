@@ -3,13 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 
-from tests.support.workflows import load_workflow
+from tests.support.workflows import launchplane_request_action_reference, load_workflow
 
 
-_LAUNCHPLANE_REQUEST = (
-    "cbusillo/launchplane/.github/actions/launchplane-request@"
-    "adcf937c6aef14e02478724040852d1d2a82a850"
-)
+_LAUNCHPLANE_REQUEST = launchplane_request_action_reference()
 _PLAN_WORKER_SHA = "e605d8ab9ec26950247233c4237d65ea8b44a6d6"
 _APPLY_WORKER_SHA = "480c9280b1ae3610f05547192783da2230dc7ff5"
 
