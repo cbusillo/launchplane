@@ -52,6 +52,7 @@ from control_plane import (
     product_prelaunch_rebuild_policy as control_plane_product_prelaunch_rebuild_policy,
 )
 from control_plane import product_preview_tls as control_plane_product_preview_tls
+from control_plane import product_stable_lane_repair as control_plane_product_stable_lane_repair
 from control_plane import product_retirement as control_plane_product_retirement
 from control_plane import (
     detached_application_retirement as control_plane_detached_application_retirement,
@@ -573,6 +574,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
+    product_profile_record_sha256,
     validate_product_profile_history_transition,
 )
 from control_plane.contracts.product_retirement import (
@@ -800,6 +802,7 @@ _GITHUB_WEBHOOK_MAX_BODY_BYTES = 2 * 1024 * 1024
 _PRODUCT_CONFIG_MAX_BODY_BYTES = 2 * 1024 * 1024
 _PRODUCT_HEALTH_MONITORING_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_MAX_BODY_BYTES = 64 * 1024
+_PRODUCT_STABLE_LANE_REPAIR_MAX_BODY_BYTES = 64 * 1024
 _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES = 64 * 1024
 _REPOSITORY_HUMAN_ROLE_POLICY_MAX_BODY_BYTES = 64 * 1024
@@ -813,6 +816,7 @@ _CHANGE_IMPACT_EVALUATION_MAX_BODY_BYTES = 16 * 1024
 _CHANGE_IMPACT_POLICY_MAX_BODY_BYTES = 64 * 1024
 _PRODUCT_HEALTH_MONITORING_APPLY_ROUTE = "/v1/product-profiles/health-monitoring/apply"
 _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE = "/v1/product-profiles/prelaunch-rebuild/apply"
+_PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE = "/v1/product-profiles/stable-lane-repair/apply"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     **{
         route: ("Evidence ingress", _EVIDENCE_INGRESS_MAX_BODY_BYTES, True, False)
@@ -851,6 +855,12 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
     _PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE: (
         "Product prelaunch rebuild policy",
         _PRODUCT_PRELAUNCH_REBUILD_POLICY_MAX_BODY_BYTES,
+        True,
+        True,
+    ),
+    _PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE: (
+        "Product stable lane repair",
+        _PRODUCT_STABLE_LANE_REPAIR_MAX_BODY_BYTES,
         True,
         True,
     ),
@@ -11853,6 +11863,275 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def apply_product_stable_lane_repair(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product stable lane repair request failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product stable lane repair request failed validation.",
+            )
+        try:
+            repair_request = control_plane_product_stable_lane_repair.ProductStableLaneRepairRequest.model_validate(
+                raw_payload
+            )
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product stable lane repair request failed validation.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_onboarding.apply",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot plan or apply product stable lane repair.",
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        if repair_request.mode == "apply" and not normalized_idempotency_key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Product stable lane repair apply requires an Idempotency-Key header.",
+            )
+        database_store = require_product_stable_lane_repair_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        payload_fingerprint = ""
+
+        def prepare_product_stable_lane_repair_mutation() -> AcceptedEvidenceResponse | None:
+            preflight = database_store.prepare_db_only_mutation(
+                scope=idempotency_scope(identity),
+                route_path=_PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=payload_fingerprint,
+            )
+            if preflight.status in {"missing", "released"}:
+                return None
+            if preflight.record is None:
+                raise RuntimeError("Product stable lane repair preflight requires evidence.")
+            if preflight.status == "replayed":
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=preflight.record,
+                    route_path=_PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE,
+                )
+            if preflight.status == "conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different Launchplane request "
+                        "payload on this route."
+                    ),
+                )
+            if preflight.status == "in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product stable lane repair is already running. Retry with "
+                        "the same Idempotency-Key."
+                    ),
+                )
+            if preflight.status == "reconcile_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message="The product stable lane repair requires reconciliation before retry.",
+                )
+            raise RuntimeError(
+                f"Unsupported product stable lane repair preflight status: {preflight.status}"
+            )
+
+        if repair_request.mode == "apply":
+            payload_fingerprint = idempotency_request_fingerprint(
+                route_path=_PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE,
+                payload=cast(dict[str, object], raw_payload),
+            )
+            replay_response = prepare_product_stable_lane_repair_mutation()
+            if replay_response is not None:
+                return replay_response
+        try:
+            (
+                plan,
+                profile,
+                replacement_profile,
+                provider_target,
+                dokploy_target,
+                dokploy_target_id,
+            ) = control_plane_product_stable_lane_repair.build_product_stable_lane_repair_plan(
+                record_store=database_store,
+                request=repair_request,
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        except (
+            control_plane_product_stable_lane_repair.ProductStableLaneRepairBoundaryError
+        ) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stable_lane_repair_blocked",
+                message=str(error),
+            ) from error
+        except (ValueError, ValidationError) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stable_lane_repair_blocked",
+                message="Product stable lane repair cannot produce a valid profile transition.",
+            ) from error
+        if (
+            repair_request.mode == "apply"
+            and repair_request.reviewed_plan_sha256 != plan.plan_sha256
+        ):
+            replay_response = prepare_product_stable_lane_repair_mutation()
+            if replay_response is not None:
+                return replay_response
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message="Reviewed product stable lane repair plan no longer matches authority.",
+            )
+        if repair_request.mode == "dry-run":
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={
+                    "product_profile": repair_request.product,
+                    "context": repair_request.context,
+                    "instance": repair_request.instance,
+                },
+                result=plan.model_dump(mode="json"),
+            )
+        updated_profile = (
+            control_plane_product_stable_lane_repair.updated_product_stable_lane_repair_profile(
+                replacement_profile=replacement_profile,
+                updated_at=utc_now_timestamp(),
+            )
+        )
+        applied_plan = plan.model_copy(
+            update={
+                "applied": True,
+                "profile_sha256_after": product_profile_record_sha256(updated_profile),
+                "profile_updated_at_after": updated_profile.updated_at,
+            }
+        )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "product_profile": repair_request.product,
+                "context": repair_request.context,
+                "instance": repair_request.instance,
+            },
+            result=applied_plan.model_dump(mode="json"),
+        )
+        mutation = DbOnlyMutationRequest(
+            scope=idempotency_scope(identity),
+            route_path=_PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint=payload_fingerprint,
+            lease_owner=trace_id,
+            response_status_code=202,
+            response_trace_id=trace_id,
+            response_payload=response.model_dump(mode="json", exclude_none=True),
+            lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+        )
+        write_result = database_store.compare_and_write_product_profile_record(
+            expected_record=profile,
+            replacement_record=updated_profile,
+            mutation=mutation,
+            expected_provider_targets=(provider_target,),
+            expected_dokploy_targets=(dokploy_target,),
+            expected_dokploy_target_ids=(dokploy_target_id,),
+        )
+        if write_result.status == "replayed":
+            if write_result.idempotency_record is None:
+                raise RuntimeError("Replayed product stable lane repair requires evidence.")
+            return replay_idempotent_response(
+                trace_id=trace_id,
+                stored_record=write_result.idempotency_record,
+                route_path=_PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE,
+            )
+        if write_result.status == "idempotency_conflict":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message=(
+                    "Idempotency-Key was already used for a different Launchplane request "
+                    "payload on this route."
+                ),
+            )
+        if write_result.status == "missing":
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product profile disappeared before stable lane repair could apply.",
+            )
+        if write_result.status == "changed":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message=(
+                    "Product profile or tracked target authority changed while applying the "
+                    "reviewed stable lane repair plan."
+                ),
+            )
+        if write_result.status == "reservation_in_progress":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_in_progress",
+                message=(
+                    "A matching product stable lane repair is already running. Retry with the "
+                    "same Idempotency-Key."
+                ),
+            )
+        if write_result.status == "reconciliation_required":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_reconciliation_required",
+                message="The product stable lane repair requires reconciliation before retry.",
+            )
+        return response
+
     def require_notification_policy_database_store(
         *, record_store: object, trace_id: str, label: str
     ) -> PostgresRecordStore:
@@ -11934,6 +12213,18 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="database_required",
                 message="Product preview TLS writes require Launchplane database storage.",
+            )
+        return record_store
+
+    def require_product_stable_lane_repair_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Product stable lane repair requires Launchplane database storage.",
             )
         return record_store
 
@@ -21404,6 +21695,37 @@ def create_launchplane_fastapi_app(
         },
         operation_id="apply_product_preview_tls",
         summary="Plan or apply product preview TLS policy",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE,
+        apply_product_stable_lane_repair,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(
+                            control_plane_product_stable_lane_repair.ProductStableLaneRepairRequest
+                        )
+                    }
+                },
+            }
+        },
+        operation_id="apply_product_stable_lane_repair",
+        summary="Plan or apply a bounded product stable lane repair",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

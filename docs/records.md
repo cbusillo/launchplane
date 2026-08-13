@@ -858,6 +858,21 @@ the target product in the Launchplane service context, product-specific workflow
 authority must come from managed authz reconciliation through the service or
 operator UI, not a checked-in product catalog.
 
+Missing generic-web stable lanes can be restored through
+`POST /v1/product-profiles/stable-lane-repair/apply`. The request identifies an
+existing product, a context already owned by another stable lane, the absent
+instance, and one HTTPS base URL selected from the current tracked Dokploy
+target domains. The service derives the health URL from tracked target health
+metadata, verifies the canonical provider-target projection, and binds the plan
+to the complete product profile, provider target, Dokploy target, and Dokploy
+target-id records. Dry-run returns a canonical plan SHA-256 without mutation;
+apply requires that reviewed digest plus an idempotency key and atomically
+compare-and-writes only the product profile. Existing lanes and every unrelated
+profile field are preserved, while provider records and provider state are
+read-only. Operators use the `stable-lane-repair` operation in
+`Product Onboarding Manifest (Advanced)`; the workflow has no real product,
+context, instance, domain, or target defaults.
+
 Odoo preview certificate-policy changes use
 `POST /v1/product-profiles/preview-tls/apply`. The route reads the current
 DB-backed profile and can change only `preview.domain_certificate_type`; all
