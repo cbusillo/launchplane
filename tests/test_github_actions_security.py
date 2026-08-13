@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest import TestCase
 
+from control_plane.first_party_action_pins import build_action_pin_report
 from tests.support.workflows import WorkflowInvariantViolation
 from tests.support.workflows import check_security_policy_runs_for_all_pull_requests
 from tests.support.workflows import load_workflow
@@ -348,6 +349,74 @@ def _container_references() -> Iterator[ContainerReference]:
 
 
 class GitHubActionsSecurityTests(TestCase):
+    def test_launchplane_request_action_pins_are_content_current(self) -> None:
+        report = build_action_pin_report(Path("."))
+
+        self.assertEqual(
+            [],
+            [
+                f"{violation.location} [{violation.code}]: {violation.message}"
+                for violation in report.violations
+            ],
+        )
+
+    def test_local_launchplane_request_actions_use_trusted_same_repo_checkout(self) -> None:
+        violations: list[str] = []
+        workflow_root = Path(".github/workflows")
+        workflow_paths = sorted((*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")))
+        for path in workflow_paths:
+            workflow = load_workflow(path)
+            trigger = workflow.data.get("on")
+            if not isinstance(trigger, dict):
+                trigger = {}
+            for job_id in workflow.jobs:
+                local_steps = [
+                    step
+                    for step in workflow.steps(job_id)
+                    if step.uses == "./.github/actions/launchplane-request"
+                ]
+                if not local_steps:
+                    continue
+                checkout_steps = [
+                    step
+                    for step in workflow.steps(job_id)
+                    if step.uses.startswith("actions/checkout@")
+                ]
+                if "workflow_call" in trigger:
+                    violations.append(
+                        f"{path}:{job_id}: workflow_call jobs must use the immutable remote "
+                        "launchplane-request action because local action code can come from the caller."
+                    )
+                if len(checkout_steps) != 1:
+                    violations.append(
+                        f"{path}:{job_id}: local launchplane-request use requires exactly one "
+                        "trusted checkout step."
+                    )
+                    continue
+                checkout = checkout_steps[0]
+                if "repository" in checkout.with_values or "ref" in checkout.with_values:
+                    violations.append(
+                        f"{path}:{job_id}: local launchplane-request checkout must use the "
+                        "workflow's exact same-repository revision without repository/ref overrides."
+                    )
+
+        self.assertEqual([], violations)
+
+    def test_action_pin_security_jobs_fetch_full_history(self) -> None:
+        workflow = load_workflow(".github/workflows/security.yml")
+
+        for job_id in ("workflow_lint", "workflow_lint_fork"):
+            checkout = workflow.step_named(job_id, "Checkout")
+            self.assertIsNotNone(checkout)
+            assert checkout is not None
+            self.assertEqual(checkout.with_values.get("fetch-depth"), 0)
+
+    def test_repository_merge_policy_preserves_action_release_commits(self) -> None:
+        metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(metadata["pullRequests"]["allowedMergeMethods"], ["merge"])
+        self.assertEqual(metadata["pullRequests"]["preferredMergeMethod"], "merge")
+
     def test_product_repo_config_authority_uses_called_workflow_revision(self) -> None:
         workflow = Path(".github/workflows/reusable-product-repo-config-authority.yml").read_text(
             encoding="utf-8"
@@ -471,10 +540,17 @@ class GitHubActionsSecurityTests(TestCase):
                 violations.append(
                     f"{action.location}: remote action {source!r} must document its provenance."
                 )
+            elif source == ("cbusillo/launchplane/.github/actions/launchplane-request"):
+                if action.provenance != "launchplane-request":
+                    violations.append(
+                        f"{action.location}: first-party cross-repository action provenance "
+                        "must be 'launchplane-request'."
+                    )
             elif source.startswith(FIRST_PARTY_CROSS_REPOSITORY_ACTION_PREFIX):
                 if action.provenance != "main":
                     violations.append(
-                        f"{action.location}: first-party cross-repository action provenance must be 'main'."
+                        f"{action.location}: first-party cross-repository action provenance "
+                        "must be 'main'."
                     )
             elif source.startswith(SELF_REUSABLE_WORKFLOW_PREFIX):
                 if action.provenance != "main":
@@ -553,5 +629,7 @@ class GitHubActionsSecurityTests(TestCase):
         self.assertIn("container image", policy)
         self.assertIn("MUTABLE_REFERENCE_ALLOWLIST", policy)
         self.assertIn("Dependabot", policy)
+        self.assertIn("action-pins update", policy)
+        self.assertIn("same-repository first-party action", policy)
         self.assertIn("package-ecosystem: github-actions", dependabot)
         self.assertIn("interval: weekly", dependabot)

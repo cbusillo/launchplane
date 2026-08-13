@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 
-from tests.support.workflows import SELF_HOSTED_RUNNER, load_workflow
+from tests.support.workflows import (
+    SELF_HOSTED_RUNNER,
+    launchplane_request_action_reference,
+    load_workflow,
+)
 
 
 class ExternalRouteBindingOperatorWorkflowTests(unittest.TestCase):
@@ -29,8 +33,7 @@ class ExternalRouteBindingOperatorWorkflowTests(unittest.TestCase):
         assert current_step is not None
         self.assertEqual(
             current_step.uses,
-            "cbusillo/launchplane/.github/actions/launchplane-request@"
-            "adcf937c6aef14e02478724040852d1d2a82a850",
+            launchplane_request_action_reference(),
         )
         self.assertEqual(current_step.with_values["method"], "GET")
         self.assertEqual(current_step.with_values["expected-status"], "200,404")
@@ -43,8 +46,7 @@ class ExternalRouteBindingOperatorWorkflowTests(unittest.TestCase):
         assert reconcile_step is not None
         self.assertEqual(
             reconcile_step.uses,
-            "cbusillo/launchplane/.github/actions/launchplane-request@"
-            "adcf937c6aef14e02478724040852d1d2a82a850",
+            launchplane_request_action_reference(),
         )
         self.assertEqual(
             reconcile_step.with_values["route-path"],

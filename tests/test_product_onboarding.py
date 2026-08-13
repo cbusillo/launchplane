@@ -1248,7 +1248,10 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
             r"uses: actions/checkout@(?:v\d+(?:\.\d+){0,2}|[0-9a-f]{40})(?:\s|$)",
         )
-        self.assertIn("uses: ./.github/actions/launchplane-request", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
+            workflow_text,
+        )
         self.assertIn("route-path: /v1/drivers/odoo/artifact-publish-inputs", workflow_text)
         self.assertIn("Render authenticated Odoo route probe payloads", workflow_text)
         self.assertIn("Probe Odoo preview apply inputs route", workflow_text)
@@ -1361,7 +1364,10 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
             r"uses: actions/checkout@(?:v\d+(?:\.\d+){0,2}|[0-9a-f]{40})(?:\s|$)",
         )
-        self.assertIn("uses: ./.github/actions/launchplane-request", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
+            workflow_text,
+        )
         self.assertIn("PRODUCT: ${{ inputs.product }}", workflow_text)
         self.assertIn("CONTEXT: ${{ inputs.context }}", workflow_text)
         self.assertIn("DOMAIN: ${{ inputs.domain }}", workflow_text)
@@ -1510,7 +1516,10 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("allow_create: $allow_create", workflow_text)
         self.assertIn('allow_update: option("allow_update"; true)', workflow_text)
         self.assertIn('allow_enable_disable: option("allow_enable_disable"; false)', workflow_text)
-        self.assertIn("uses: ./.github/actions/launchplane-request", workflow_text)
+        self.assertIn(
+            "uses: cbusillo/launchplane/.github/actions/launchplane-request@",
+            workflow_text,
+        )
         self.assertIn("route-path: /v1/drivers/ingress/route-apply", workflow_text)
         self.assertIn("PRODUCT: ${{ inputs.product }}", workflow_text)
         self.assertIn("CONTEXT: ${{ inputs.context }}", workflow_text)
@@ -2293,6 +2302,10 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("Product Onboarding Manifest (Advanced)", workflow_text)
         self.assertIn("manifest_base64", workflow_text)
         self.assertIn("APPLY PRODUCT ONBOARDING", workflow_text)
+        self.assertIn("stable-lane-repair", workflow_text)
+        self.assertIn("APPLY PRODUCT STABLE LANE REPAIR", workflow_text)
+        self.assertIn("reviewed_plan_sha256", workflow_text)
+        self.assertIn("/v1/product-profiles/stable-lane-repair/apply", workflow_text)
         self.assertIn("environment: launchplane-authz-admin", workflow_text)
         self.assertIn("/v1/product-onboarding/apply", workflow_text)
         self.assertNotIn("/v1/authz-policies/managed-rule-sets/reconcile", workflow_text)

@@ -13680,6 +13680,8 @@ class PostgresRecordStore(HumanSessionStore):
         replacement_record: LaunchplaneProductProfileRecord,
         mutation: DbOnlyMutationRequest | None = None,
         expected_provider_targets: tuple[ProviderTargetRecord, ...] = (),
+        expected_dokploy_targets: tuple[DokployTargetRecord, ...] = (),
+        expected_dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = (),
     ) -> ProductProfileCompareWriteResult:
         if expected_record.product != replacement_record.product:
             raise ValueError("Product profile compare-and-write requires matching products.")
@@ -13704,6 +13706,8 @@ class PostgresRecordStore(HumanSessionStore):
                     expected_record=expected_record,
                     replacement_record=replacement_record,
                     expected_provider_targets=expected_provider_targets,
+                    expected_dokploy_targets=expected_dokploy_targets,
+                    expected_dokploy_target_ids=expected_dokploy_target_ids,
                 )
 
         reservation_insert_error: IntegrityError | None = None
@@ -13739,6 +13743,8 @@ class PostgresRecordStore(HumanSessionStore):
                     mutation_reservation=stored_reservation,
                     mutation=mutation,
                     expected_provider_targets=expected_provider_targets,
+                    expected_dokploy_targets=expected_dokploy_targets,
+                    expected_dokploy_target_ids=expected_dokploy_target_ids,
                 )
 
         with self._session_factory() as session:
@@ -13821,6 +13827,8 @@ class PostgresRecordStore(HumanSessionStore):
                 mutation_reservation=reclaimed_reservation,
                 mutation=mutation,
                 expected_provider_targets=expected_provider_targets,
+                expected_dokploy_targets=expected_dokploy_targets,
+                expected_dokploy_target_ids=expected_dokploy_target_ids,
             )
 
     def _compare_and_write_product_profile_locked(
@@ -13834,13 +13842,26 @@ class PostgresRecordStore(HumanSessionStore):
         mutation_reservation: LaunchplaneIdempotencyRecord | None = None,
         mutation: DbOnlyMutationRequest | None = None,
         expected_provider_targets: tuple[ProviderTargetRecord, ...] = (),
+        expected_dokploy_targets: tuple[DokployTargetRecord, ...] = (),
+        expected_dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = (),
     ) -> ProductProfileCompareWriteResult:
-        if expected_provider_targets:
+        if expected_provider_targets or expected_dokploy_targets or expected_dokploy_target_ids:
             self._lock_product_authority_bundle_write(session)
-            if not self._provider_target_expectations_match(
-                session=session,
-                expected_records=expected_provider_targets,
-            ):
+            target_expectations_match = (
+                self._provider_target_expectations_match(
+                    session=session,
+                    expected_records=expected_provider_targets,
+                )
+                and self._dokploy_target_expectations_match(
+                    session=session,
+                    expected_records=expected_dokploy_targets,
+                )
+                and self._dokploy_target_id_expectations_match(
+                    session=session,
+                    expected_records=expected_dokploy_target_ids,
+                )
+            )
+            if not target_expectations_match:
                 if reservation_row is not None:
                     session.delete(reservation_row)
                     session.commit()
@@ -13928,6 +13949,68 @@ class PostgresRecordStore(HumanSessionStore):
             (row.context, row.instance) for row in session.scalars(identity_statement)
         }
         return claimed_routes == set(expected_routes)
+
+    def _dokploy_target_expectations_match(
+        self,
+        *,
+        session: Any,
+        expected_records: tuple[DokployTargetRecord, ...],
+    ) -> bool:
+        expected_routes = {(record.context, record.instance): record for record in expected_records}
+        if len(expected_routes) != len(expected_records):
+            raise ValueError("Dokploy target expectations must identify unique routes.")
+        for route, expected_record in expected_routes.items():
+            statement = (
+                select(LaunchplaneDokployTargetRow)
+                .where(
+                    LaunchplaneDokployTargetRow.context == route[0],
+                    LaunchplaneDokployTargetRow.instance == route[1],
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                return False
+            current_record = self._read_payload(
+                model_type=DokployTargetRecord,
+                payload=row.payload,
+            )
+            if self._payload_dict(current_record) != self._payload_dict(expected_record):
+                return False
+        return True
+
+    def _dokploy_target_id_expectations_match(
+        self,
+        *,
+        session: Any,
+        expected_records: tuple[DokployTargetIdRecord, ...],
+    ) -> bool:
+        expected_routes = {(record.context, record.instance): record for record in expected_records}
+        if len(expected_routes) != len(expected_records):
+            raise ValueError("Dokploy target-id expectations must identify unique routes.")
+        for route, expected_record in expected_routes.items():
+            statement = (
+                select(LaunchplaneDokployTargetIdRow)
+                .where(
+                    LaunchplaneDokployTargetIdRow.context == route[0],
+                    LaunchplaneDokployTargetIdRow.instance == route[1],
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                return False
+            current_record = self._read_payload(
+                model_type=DokployTargetIdRecord,
+                payload=row.payload,
+            )
+            if self._payload_dict(current_record) != self._payload_dict(expected_record):
+                return False
+        return True
 
     def _read_product_profile_payload(
         self, payload: PayloadDict

@@ -9,6 +9,9 @@ from unittest.mock import patch
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.public_ingress_monitoring import (
@@ -73,6 +76,7 @@ from tests.http_app_test_support import (
     _post_product_prelaunch_rebuild_policy,
     _post_product_profile,
     _post_product_preview_tls,
+    _post_product_stable_lane_repair,
     _post_work_graph_issue_inbox_reconcile,
     _post_work_graph_rank,
     _product_environment_read_policy,
@@ -150,6 +154,49 @@ def _product_preview_tls_payload() -> dict[str, object]:
         "reason": "Enable trusted preview TLS.",
         "reviewed_plan_sha256": "",
     }
+
+
+def _product_stable_lane_repair_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "sellyouroutboard",
+        "context": "sellyouroutboard",
+        "instance": "prod",
+        "base_url": "https://www.sellyouroutboard.test",
+        "mode": "dry-run",
+        "reason": "Restore the missing production lane.",
+        "reviewed_plan_sha256": "",
+    }
+
+
+def _product_stable_lane_repair_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "cbusillo/launchplane",
+                    "workflow_refs": [
+                        "cbusillo/launchplane/.github/workflows/"
+                        "product-onboarding-manifest.yml@refs/heads/main"
+                    ],
+                    "event_names": ["workflow_dispatch"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["product_onboarding.apply"],
+                }
+            ]
+        }
+    )
+
+
+def _product_stable_lane_repair_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="cbusillo/launchplane",
+        workflow_ref=(
+            "cbusillo/launchplane/.github/workflows/product-onboarding-manifest.yml@refs/heads/main"
+        ),
+        event_name="workflow_dispatch",
+    )
 
 
 def _seed_product_incident_read_records(database_url: str) -> None:
@@ -2214,6 +2261,170 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_product_stable_lane_repair_dry_run_and_apply(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            profile = profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(update={"context": "sellyouroutboard"})
+                        for lane in profile.lanes
+                        if lane.instance != "prod"
+                    )
+                }
+            )
+            target = DokployTargetRecord(
+                context="sellyouroutboard",
+                instance="prod",
+                target_type="application",
+                target_name="syo-prod-app",
+                source_type="docker",
+                healthcheck_path="/api/health",
+                domains=("www.sellyouroutboard.test", "sellyouroutboard.test"),
+                updated_at="2026-08-12T00:00:00Z",
+                source_label="test:stable-lane-repair",
+            )
+            target_id = DokployTargetIdRecord(
+                context="sellyouroutboard",
+                instance="prod",
+                target_id="syo-prod-target",
+                updated_at="2026-08-12T00:00:00Z",
+                source_label="test:stable-lane-repair",
+            )
+            store.write_product_profile_record(profile)
+            store.write_dokploy_target_record(target)
+            store.write_dokploy_target_id_record(target_id)
+            store.write_provider_target_record(
+                ProviderTargetRecord.from_dokploy_records(
+                    target_record=target,
+                    target_id_record=target_id,
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_stable_lane_repair_identity()),
+                authz_policy=_product_stable_lane_repair_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            dry_run_response = await _post_product_stable_lane_repair(
+                app,
+                _product_stable_lane_repair_payload(),
+            )
+            self.assertEqual(dry_run_response.status_code, 202, dry_run_response.json())
+            plan_sha256 = dry_run_response.json()["result"]["plan_sha256"]
+            apply_payload = {
+                **_product_stable_lane_repair_payload(),
+                "mode": "apply",
+                "reviewed_plan_sha256": plan_sha256,
+            }
+            apply_response = await _post_product_stable_lane_repair(
+                app,
+                apply_payload,
+                idempotency_key="stable-lane-repair-syo-prod",
+            )
+            replay_response = await _post_product_stable_lane_repair(
+                app,
+                apply_payload,
+                idempotency_key="stable-lane-repair-syo-prod",
+            )
+            updated_profile = store.read_product_profile_record("sellyouroutboard")
+            store.close()
+
+        self.assertEqual(dry_run_response.status_code, 202)
+        self.assertEqual(apply_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(apply_response.json()["result"]["applied"])
+        self.assertEqual(replay_response.json()["result"], apply_response.json()["result"])
+        prod_lane = next(lane for lane in updated_profile.lanes if lane.instance == "prod")
+        self.assertEqual(prod_lane.context, "sellyouroutboard")
+        self.assertEqual(prod_lane.base_url, "https://www.sellyouroutboard.test")
+        self.assertEqual(prod_lane.health_url, "https://www.sellyouroutboard.test/api/health")
+
+    async def test_product_stable_lane_repair_rejects_stale_target_authority(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            profile = profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(update={"context": "sellyouroutboard"})
+                        for lane in profile.lanes
+                        if lane.instance != "prod"
+                    )
+                }
+            )
+            target = DokployTargetRecord(
+                context="sellyouroutboard",
+                instance="prod",
+                target_type="application",
+                target_name="syo-prod-app",
+                source_type="docker",
+                healthcheck_path="/api/health",
+                domains=("www.sellyouroutboard.test",),
+                updated_at="2026-08-12T00:00:00Z",
+                source_label="test:stable-lane-repair",
+            )
+            target_id = DokployTargetIdRecord(
+                context="sellyouroutboard",
+                instance="prod",
+                target_id="syo-prod-target",
+                updated_at="2026-08-12T00:00:00Z",
+                source_label="test:stable-lane-repair",
+            )
+            store.write_product_profile_record(profile)
+            store.write_dokploy_target_record(target)
+            store.write_dokploy_target_id_record(target_id)
+            store.write_provider_target_record(
+                ProviderTargetRecord.from_dokploy_records(
+                    target_record=target,
+                    target_id_record=target_id,
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_stable_lane_repair_identity()),
+                authz_policy=_product_stable_lane_repair_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            dry_run_response = await _post_product_stable_lane_repair(
+                app,
+                _product_stable_lane_repair_payload(),
+            )
+            self.assertEqual(dry_run_response.status_code, 202, dry_run_response.json())
+            plan_sha256 = dry_run_response.json()["result"]["plan_sha256"]
+            store.write_dokploy_target_record(
+                target.model_copy(
+                    update={
+                        "domains": ("changed.sellyouroutboard.test",),
+                        "updated_at": "2026-08-12T01:00:00Z",
+                    }
+                )
+            )
+            apply_response = await _post_product_stable_lane_repair(
+                app,
+                {
+                    **_product_stable_lane_repair_payload(),
+                    "mode": "apply",
+                    "reviewed_plan_sha256": plan_sha256,
+                },
+                idempotency_key="stable-lane-repair-stale-target",
+            )
+            loaded_profile = store.read_product_profile_record("sellyouroutboard")
+            store.close()
+
+        self.assertEqual(apply_response.status_code, 409)
+        self.assertEqual(apply_response.json()["error"]["code"], "stable_lane_repair_blocked")
+        self.assertFalse(any(lane.instance == "prod" for lane in loaded_profile.lanes))
+
     async def test_list_product_profiles_returns_profiles_for_driver(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -4279,6 +4490,29 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             route["requestBody"]["content"]["application/json"]["schema"]["title"],
             "ProductPreviewTlsApplyRequest",
+        )
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403", "404", "409", "503"):
+            self.assertIn(status_code, route["responses"])
+
+    async def test_openapi_includes_product_stable_lane_repair_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_product_stable_lane_repair_identity()),
+            authz_policy=_product_stable_lane_repair_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/product-profiles/stable-lane-repair/apply"]["post"]
+        self.assertEqual(route["operationId"], "apply_product_stable_lane_repair")
+        self.assertEqual(
+            route["requestBody"]["content"]["application/json"]["schema"]["title"],
+            "ProductStableLaneRepairRequest",
         )
         self.assertEqual(
             route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
