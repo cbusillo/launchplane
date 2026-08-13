@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import unittest
 from unittest.mock import patch
 
@@ -12,7 +13,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralEntryObservation,
 )
 from control_plane.merge_admission import MergeAdmissionDeniedError
-from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator, _EntryEvidence
+from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
 from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
@@ -85,12 +86,24 @@ class _TechnicalCheckClient(TenantAdmissionControllerGitHubClient):
 
 class _EmptyEngineeringReviewStore:
     @staticmethod
+    def list_engineering_review_run_records(**_filters: object) -> tuple[()]:
+        return ()
+
+    @staticmethod
     def list_engineering_review_decision_records(**_filters: object) -> tuple[()]:
         return ()
 
     @staticmethod
     def list_engineering_review_authority_records(**_filters: object) -> tuple[()]:
         return ()
+
+
+@dataclass(frozen=True)
+class _TestEntryEvidence:
+    repository_evidence: ChangeImpactRepositoryEvidence
+    impact: ChangeImpactEvaluation
+    owner_decision: object
+    observation: MergeTrainStructuralEntryObservation
 
 
 def _queued_pull_request(
@@ -137,7 +150,7 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
             head_sha=HEAD_SHA,
             tree_sha=TREE_SHA,
         )
-        entry_evidence = _EntryEvidence(
+        entry_evidence = _TestEntryEvidence(
             repository_evidence=ChangeImpactRepositoryEvidence(
                 target=target,
                 changed_files=(ChangeImpactChangedFileEvidence(path="control_plane/example.py"),),

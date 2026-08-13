@@ -409,10 +409,7 @@ def merge_admission_binding_sha256(record: MergeAdmissionRecord) -> str:
         exclude={"admission_id", "admission_binding_sha256"},
     )
     readiness = payload.get("readiness")
-    if (
-        isinstance(readiness, dict)
-        and readiness.get("engineering_review_authority") == "required"
-    ):
+    if isinstance(readiness, dict) and readiness.get("engineering_review_authority") == "required":
         readiness.pop("engineering_review_authority")
     return _canonical_sha256(payload)
 

@@ -3235,6 +3235,7 @@ function governanceReadinessFixture(
     mode: "ephemeral" as const,
     authoritative: false as const,
     authorizes: [],
+    engineering_review_authority: "required",
     target: {
       schema_version: 1,
       repository: "example/tenant-site",
