@@ -201,7 +201,7 @@ jobs:
       - name: Read scheduled merge-train targets
         if: github.event_name == 'schedule'
         id: scheduled_target_read
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ steps.scheduled_target_request.outputs.service_audience }}
@@ -324,7 +324,7 @@ jobs:
       - name: Read merge-train admission
         if: steps.admission_request.outputs.should_request == 'true'
         id: admission_read
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ steps.admission_request.outputs.service_audience }}
@@ -446,7 +446,7 @@ jobs:
       - name: Send merge-train run-once request
         if: steps.level1_request.outputs.should_request == 'true'
         id: level1_run
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ steps.admission.outputs.service_audience }}
@@ -558,7 +558,7 @@ jobs:
           steps.admission.outputs.admission_status == 'admitted' &&
           env.MERGE_TRAIN_RUNNER_MODE == 'controller'
         id: controller_run
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ steps.admission.outputs.service_audience }}
@@ -638,7 +638,7 @@ jobs:
           steps.admission.outputs.admission_status == 'admitted' &&
           env.MERGE_TRAIN_RUNNER_MODE == 'controller' &&
           steps.controller_summary.outputs.feedback_count != '0'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ steps.admission.outputs.service_audience }}
@@ -705,7 +705,7 @@ jobs:
           steps.admission.outputs.admission_status == 'admitted' &&
           env.MERGE_TRAIN_BATCH_CANDIDATE_MODE != 'none'
         id: batch_candidate_run
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ steps.admission.outputs.service_audience }}
@@ -814,7 +814,7 @@ jobs:
           steps.admission.outputs.admission_status == 'admitted' &&
           env.MERGE_TRAIN_STACK_COLLAPSE_MODE != 'none'
         id: stack_collapse_run
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ steps.admission.outputs.service_audience }}
@@ -936,7 +936,7 @@ jobs:
           steps.admission.outputs.admission_status == 'admitted' &&
           env.MERGE_TRAIN_BATCH_LANDING_MODE != 'none'
         id: batch_landing_run
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ steps.admission.outputs.service_audience }}
@@ -1052,7 +1052,7 @@ jobs:
           steps.admission.outputs.admission_status == 'admitted' &&
           env.MERGE_TRAIN_RUNNER_MODE == 'level1' &&
           steps.manual_phase_feedback.outputs.feedback_count != '0'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ steps.admission.outputs.service_audience }}

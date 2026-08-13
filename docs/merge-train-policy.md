@@ -329,7 +329,7 @@ uv run launchplane merge-train-policies build-import-request \
 ```
 
 ```yaml
-- uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+- uses: cbusillo/launchplane/.github/actions/launchplane-request@<launchplane-request-sha> # launchplane-request
   with:
     launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
     route-path: /v1/merge-train/policies/import

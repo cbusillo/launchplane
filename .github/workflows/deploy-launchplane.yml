@@ -326,7 +326,7 @@ jobs:
       - name: Read previous Launchplane runtime
         id: previous_runtime
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -544,7 +544,7 @@ jobs:
       - name: Request Launchplane self deploy
         id: self_deploy_request
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -593,7 +593,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
       - name: Wait for deployed Launchplane runtime image
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -667,7 +667,7 @@ jobs:
           exit 1
 
       - name: Verify deployed Launchplane runtime image after health
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -718,7 +718,7 @@ jobs:
           && steps.rollback_request.outputs.previous_image_reference != ''
         id: rollback_request_action
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -796,7 +796,7 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
         id: rollback_runtime
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -935,7 +935,7 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
           && steps.rollback_runtime.outcome == 'success'
           && steps.rollback_health.outcome == 'success'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -960,7 +960,7 @@ jobs:
 
       - name: Ensure runtime key-safety policy
         if: steps.runtime_key_safety.outputs.has_runtime_key_safety_policy == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -973,7 +973,7 @@ jobs:
       - name: Read deployed Launchplane runtime
         id: deployed_runtime
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}

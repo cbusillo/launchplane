@@ -20,7 +20,7 @@ an immutable `sha256` manifest digest.
 | Same-repository privileged reusable worker        | First-party immutable trust anchor | Authz administration, route-authority reconciliation, or exact-instance reviewed product-policy mutation | Repository-qualified path at a full reviewed SHA, limited to the approved dispatch wrappers |
 | GitHub-maintained action                          | GitHub-maintained                  | Checkout, artifacts, cache, runtime setup, GitHub API, CodeQL                                            | Full SHA plus a release-tag provenance comment                                              |
 | Third-party publisher                             | Third-party publisher              | Python bootstrap, registry authentication, image build and publication                                   | Full SHA plus a release-tag provenance comment                                              |
-| First-party cross-repository Launchplane action   | First-party cross-repository       | OIDC-authenticated Launchplane requests and preview-client setup                                         | Full SHA plus `# main` provenance                                                           |
+| First-party cross-repository Launchplane action   | First-party cross-repository       | OIDC-authenticated Launchplane requests and preview-client setup                                         | Content-current full SHA plus action-name provenance                                        |
 | Static workflow container image                   | Official or third-party publisher  | Workflow linting, secret/vulnerability scanning, integration services                                    | Release tag plus `@sha256:<manifest-digest>`                                                |
 
 <!-- markdownlint-enable MD013 -->
@@ -62,8 +62,8 @@ written to the workflow log by the upstream implementation.
 - A remote action must use a full 40-character lowercase commit SHA; tags,
   branches, short SHAs, and expressions are rejected.
 - Every remote pin must retain its provenance comment: an exact release tag for
-  public actions or `main` for the first-party cross-repository composite
-  actions.
+  public actions, `launchplane-request` for that first-party composite action,
+  or `main` for approved pinned reusable-workflow trust anchors.
 - The mutable remote-reference allowlist is explicitly represented by
   `MUTABLE_REFERENCE_ALLOWLIST` and is currently empty. Any temporary exception
   must be scoped to one workflow path and one literal reference, with a
@@ -96,6 +96,37 @@ The security workflow runs this policy for both same-repository and fork pull
 requests before actionlint. The unit-test suite runs it as well, so a mutable
 reference cannot pass the required CI path.
 
+## First-Party Action Content Currency
+
+Repository-qualified `launchplane-request` references are immutable, but a
+well-formed SHA is not enough: every ordinary consumer must resolve to an action
+subtree identical to the action subtree under review. The required security
+gate verifies that identity from full local git history and fails closed when a
+pinned object is unavailable, content-stale, or unreachable from the reviewed
+head. Unrelated Launchplane commits do not require a repin because the action
+subtree remains unchanged.
+
+An action change and its consumer update land in one pull request using two
+commits. The first commit contains the action implementation and tests. The
+second runs:
+
+```bash
+uv run launchplane action-pins update --release-sha <first-commit-sha>
+uv run launchplane action-pins check
+```
+
+The release SHA must be an ancestor of the pull-request head and contain the
+same action subtree as the final head. This requires merge-commit landing:
+squashing, rebasing, amending the release commit, or force-pushing after the pin
+sweep can orphan the referenced commit. Privileged reusable-workflow pins are a
+separate authorization identity and remain under their documented two-landing
+rollout; the action-pin tool refuses to update them.
+
+Local `./.github/actions/launchplane-request` references remain acceptable only
+when the job already checks out a trusted exact Launchplane revision. Do not add
+a checkout to an OIDC-capable job merely to avoid an immutable remote pin, and
+do not allow a cross-repository caller to supply the workspace action code.
+
 Detached application retirement follows a two-phase trust rollout. Phase one
 landed only the service contract, persistence, managed authz selector/secret
 routing, and a protected `workflow_call` worker. Phase two adds the thin
@@ -116,8 +147,10 @@ before any protected plan/apply run or provider mutation is possible.
 Each public action pin carries the exact release tag in an inline comment, for
 example `actions/checkout@<full-sha> # v7.0.0`. The comment makes a pin directly
 reviewable and lets Dependabot update the SHA and tag together in a normal pull
-request. First-party cross-repository pins use `# main`; Dependabot tracks the
-GitHub Actions ecosystem weekly through `.github/dependabot.yml`.
+request. Dependabot tracks third-party GitHub Actions weekly through
+`.github/dependabot.yml`; it does not update same-repository first-party action
+pins. Launchplane maintains those pins through the required content check and
+`action-pins update` command instead.
 
 Dependabot does not update container references embedded in workflow scripts.
 For those images, resolve the reviewed release manifest with

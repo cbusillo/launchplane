@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias, cast
 
+from control_plane.first_party_action_pins import (
+    discover_action_pin_sites,
+    launchplane_request_action_source,
+)
+
 
 YamlScalar: TypeAlias = str | int | bool | None
 YamlValue: TypeAlias = YamlScalar | list["YamlValue"] | dict[str, "YamlValue"]
@@ -27,6 +32,18 @@ LAUNCHPLANE_REQUEST_USES = (
 TIMING_SNAPSHOT_ARTIFACT = "unittest-timing-snapshot"
 TIMING_SNAPSHOT_PATH = "${{ runner.temp }}/unittest-timing-snapshot"
 TIMING_SNAPSHOT_HISTORY = '"${RUNNER_TEMP}/unittest-timing-snapshot/history.json"'
+
+
+def launchplane_request_action_reference(repo_root: Path = Path(".")) -> str:
+    revisions = {
+        site.revision for site in discover_action_pin_sites(repo_root) if len(site.revision) == 40
+    }
+    if len(revisions) != 1:
+        raise AssertionError(
+            "Launchplane request action consumers must share one immutable revision; "
+            f"found {sorted(revisions)}"
+        )
+    return f"{launchplane_request_action_source(repo_root)}@{next(iter(revisions))}"
 
 
 @dataclass(frozen=True)

@@ -139,7 +139,7 @@ jobs:
 
       - name: Request audited product retirement
         id: request
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@3f063c09bab63836d2b1c880ecb995786f045893 # main
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           route-path: /v1/product-retirement
