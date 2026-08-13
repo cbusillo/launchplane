@@ -4367,6 +4367,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "    environment:\n"
                 "      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?required}\n"
                 "      VERIREEL_CRON_SECRET: ${VERIREEL_CRON_SECRET:?required}\n"
+                "      VERIREEL_INDEXNOW_KEY: ${VERIREEL_INDEXNOW_KEY:?required}\n"
+                "      VERIREEL_INDEXNOW_SUBMIT_SECRET: ${VERIREEL_INDEXNOW_SUBMIT_SECRET:?required}\n"
                 "      VERIREEL_SECRETS_MASTER_KEY: ${VERIREEL_SECRETS_MASTER_KEY:?required}\n"
                 "      VERIREEL_SMOKE_MAINTENANCE_SECRET: ${VERIREEL_SMOKE_MAINTENANCE_SECRET:?required}\n"
                 "      UNCLASSIFIED_API_SECRET: ${UNCLASSIFIED_API_SECRET:?required}\n",
@@ -4381,6 +4383,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         for key in (
             "BETTER_AUTH_SECRET",
             "VERIREEL_CRON_SECRET",
+            "VERIREEL_INDEXNOW_KEY",
+            "VERIREEL_INDEXNOW_SUBMIT_SECRET",
             "VERIREEL_SECRETS_MASTER_KEY",
             "VERIREEL_SMOKE_MAINTENANCE_SECRET",
         ):
