@@ -25,7 +25,7 @@ dev = [
     "asgi-lifespan>=2.1.0",
     "httpx2>=2.10.0",
     "mypy>=2.3.0",
-    "ruff>=0.15.22",
+    "ruff>=0.16.2",
 ]
 
 [project.scripts]
