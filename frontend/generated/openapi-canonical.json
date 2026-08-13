@@ -11107,6 +11107,15 @@
           "engineering_review": {
             "$ref": "#/components/schemas/MergeReadinessEngineeringReviewFacet"
           },
+          "engineering_review_authority": {
+            "default": "required",
+            "enum": [
+              "required",
+              "advisory"
+            ],
+            "title": "Engineering Review Authority",
+            "type": "string"
+          },
           "evaluated_at": {
             "title": "Evaluated At",
             "type": "string"
@@ -55218,6 +55227,15 @@
                       },
                       "blocked_label": {
                         "title": "Blocked Label",
+                        "type": "string"
+                      },
+                      "engineering_review_mode": {
+                        "default": "advisory",
+                        "enum": [
+                          "advisory",
+                          "required"
+                        ],
+                        "title": "Engineering Review Mode",
                         "type": "string"
                       },
                       "enqueue": {

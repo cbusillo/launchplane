@@ -8,6 +8,13 @@ policy. Every record is fixed to `rollout_mode=shadow`, `authoritative=false`,
 and `enforcement_effect=none`; no gate consumer reads an approved result as
 admission evidence.
 
+Guarded merge admission may project the engineering-review facet and its policy
+fingerprint for diagnostics, but repository merge-train policy defaults
+`engineering_review_mode` to `advisory`. Missing, stale, failed, or unknown
+shadow review evidence cannot worsen aggregate merge readiness. Enforced
+fail-closed behavior requires a deliberate DB-backed merge-train policy change
+to `engineering_review_mode = "required"`.
+
 ## Server authority
 
 Policy administrators write revisioned DB-backed authority selecting the

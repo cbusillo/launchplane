@@ -653,6 +653,67 @@ class MergeReadinessFacetTests(unittest.TestCase):
         self.assertEqual(drifted.state, "unknown")
         self.assertIn("engineering_review_evidence_missing", drifted.reason_codes)
 
+    def test_advisory_engineering_review_remains_visible_without_blocking(self) -> None:
+        result = _evaluate(
+            engineering_decision=None,
+            engineering_evidence=(),
+            engineering_review_authority="advisory",
+            policy_fingerprints=_policy_fingerprints(missing="engineering_review"),
+        )
+
+        self.assertEqual(result.state, "ready")
+        self.assertEqual(result.engineering_review.state, "unknown")
+        self.assertEqual(result.policy.state, "ready")
+        self.assertIn("engineering_review_evidence_missing", result.reason_codes)
+        self.assertIn("policy_engineering_review_missing", result.reason_codes)
+        self.assertNotIn("policy_fingerprints_match", result.reason_codes)
+
+    def test_advisory_failed_engineering_review_remains_non_blocking(self) -> None:
+        result = _evaluate(
+            engineering_decision=_engineering_decision(status="changes_requested"),
+            engineering_evidence=(),
+            engineering_review_authority="advisory",
+        )
+
+        self.assertEqual(result.state, "ready")
+        self.assertEqual(result.engineering_review.state, "blocked_engineering_review")
+        self.assertIn("engineering_review_changes_requested", result.reason_codes)
+
+    def test_advisory_engineering_review_does_not_hide_other_policy_drift(self) -> None:
+        result = _evaluate(
+            engineering_decision=None,
+            engineering_evidence=(),
+            engineering_review_authority="advisory",
+            policy_fingerprints=_policy_fingerprints(drift="ruleset"),
+        )
+
+        self.assertEqual(result.state, "blocked_policy")
+        self.assertEqual(result.engineering_review.state, "unknown")
+        self.assertIn("policy_ruleset_drift", result.reason_codes)
+        self.assertNotIn("policy_fingerprints_match", result.reason_codes)
+
+    def test_required_engineering_review_still_fails_closed(self) -> None:
+        result = _evaluate(
+            engineering_decision=None,
+            engineering_evidence=(),
+            engineering_review_authority="required",
+            policy_fingerprints=_policy_fingerprints(missing="engineering_review"),
+        )
+
+        self.assertEqual(result.state, "unknown")
+        self.assertEqual(result.engineering_review.state, "unknown")
+        self.assertEqual(result.policy.state, "blocked_policy")
+
+    def test_legacy_required_readiness_payload_preserves_digest(self) -> None:
+        result = _evaluate()
+        payload = result.model_dump(mode="json")
+        payload.pop("engineering_review_authority")
+
+        restored = MergeReadinessResult.model_validate(payload)
+
+        self.assertEqual(restored.engineering_review_authority, "required")
+        self.assertEqual(restored.readiness_digest, result.readiness_digest)
+
     def test_every_policy_dimension_fails_closed_when_missing_or_drifted(self) -> None:
         for dimension in MERGE_READINESS_POLICY_DIMENSIONS:
             with self.subTest(dimension=dimension, condition="missing"):

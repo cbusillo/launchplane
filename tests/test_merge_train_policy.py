@@ -188,6 +188,14 @@ class MergeTrainPolicyTests(unittest.TestCase):
 
         self.assertNotEqual(disabled_policy.policy_sha256, enabled_policy.policy_sha256)
 
+    def test_required_engineering_review_mode_changes_policy_digest(self) -> None:
+        advisory_policy = build_test_merge_train_policy()
+        required_policy = build_test_merge_train_policy(engineering_review_mode="required")
+
+        self.assertEqual(advisory_policy.policies[0].engineering_review_mode, "advisory")
+        self.assertEqual(required_policy.policies[0].engineering_review_mode, "required")
+        self.assertNotEqual(advisory_policy.policy_sha256, required_policy.policy_sha256)
+
     def test_trusted_automation_ids_change_policy_digest(self) -> None:
         default_policy = build_test_merge_train_policy()
         trusted_policy = build_test_merge_train_policy(

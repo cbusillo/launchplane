@@ -19,6 +19,7 @@ MergeTrainActorRole = Literal["repo_owner", "repo_admin"]
 MergeTrainFailurePolicy = Literal["pause_train", "continue_after_blocking_pr"]
 MergeTrainIdentityKind = Literal["github_actions_oidc", "github_app", "github_token_secret"]
 MergeTrainMergeMethod = Literal["merge", "squash", "rebase"]
+MergeTrainEngineeringReviewMode = Literal["advisory", "required"]
 MergeTrainPolicyRecordStatus = Literal["active", "superseded"]
 MergeTrainSchedulerRunnerMode = Literal["level1", "controller"]
 MERGE_TRAIN_POLICY_TARGETS_READ_ACTION = "merge_train.policy_targets"
@@ -112,6 +113,7 @@ class MergeTrainRepositoryPolicy(BaseModel):
     blocked_label: str
     stack_child_disposition_label: str = ""
     merge_method: MergeTrainMergeMethod
+    engineering_review_mode: MergeTrainEngineeringReviewMode = "advisory"
     failure_policy: MergeTrainFailurePolicy
     enqueue: MergeTrainEnqueuePolicy
     merge_identity: MergeTrainIdentity
@@ -253,6 +255,11 @@ def merge_train_policy_sha256(policy: MergeTrainPolicy) -> str:
             "stack_child_disposition_label"
         ):
             repository_policy.pop("stack_child_disposition_label", None)
+        if (
+            isinstance(repository_policy, dict)
+            and repository_policy.get("engineering_review_mode") == "advisory"
+        ):
+            repository_policy.pop("engineering_review_mode", None)
         if isinstance(repository_policy, dict) and repository_policy.get("scheduler") == {
             "enabled": False,
             "runner_mode": "controller",

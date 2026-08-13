@@ -100,6 +100,11 @@ Each repository policy contains:
   for stack child disposition and must differ from `enqueue_label` and
   `blocked_label`.
 - `merge_method`: GitHub merge strategy, one of `merge`, `squash`, or `rebase`.
+- `engineering_review_mode`: Whether engineering-review evidence is `advisory`
+  or `required` for guarded merge admission. Existing policies default to
+  `advisory`, matching the current shadow-only review contract. A future
+  enforcement rollout must replace the active DB-backed policy deliberately
+  with `required`.
 - `failure_policy`: Whether Launchplane pauses the whole train or continues
   after marking the blocked pull request.
 - `enqueue`: Requirements for who may enqueue. Human authority remains role-based

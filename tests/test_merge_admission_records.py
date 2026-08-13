@@ -252,6 +252,35 @@ class _ProviderError(RuntimeError):
 class MergeAdmissionStoreContract:
     store: FilesystemRecordStore | PostgresRecordStore
 
+    def test_legacy_required_readiness_payload_preserves_admission_identity(self) -> None:
+        test_case = cast(unittest.TestCase, cast(object, self))
+        admission = _merge_admission()
+        payload = admission.model_dump(mode="json")
+        readiness = cast(dict[str, object], payload["readiness"])
+        readiness.pop("engineering_review_authority")
+
+        restored = type(admission).model_validate(payload)
+
+        test_case.assertEqual(restored.readiness.engineering_review_authority, "required")
+        test_case.assertEqual(
+            restored.readiness.readiness_digest, admission.readiness.readiness_digest
+        )
+        test_case.assertEqual(restored.admission_binding_sha256, admission.admission_binding_sha256)
+        test_case.assertEqual(restored.admission_id, admission.admission_id)
+
+    def test_advisory_readiness_changes_admission_identity(self) -> None:
+        test_case = cast(unittest.TestCase, cast(object, self))
+        required = _merge_admission()
+        advisory = _merge_admission(readiness=_evaluate(engineering_review_authority="advisory"))
+
+        test_case.assertNotEqual(
+            advisory.readiness.readiness_digest, required.readiness.readiness_digest
+        )
+        test_case.assertNotEqual(
+            advisory.admission_binding_sha256, required.admission_binding_sha256
+        )
+        test_case.assertNotEqual(advisory.admission_id, required.admission_id)
+
     def test_admission_create_is_append_only_and_idempotent(self) -> None:
         test_case = cast(unittest.TestCase, self)
         admission = _merge_admission()

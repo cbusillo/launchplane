@@ -137,6 +137,10 @@ class LiveMergeAdmissionEvaluator:
                 policy=policy_record.policy,
                 snapshot=snapshot,
             )
+            repository_policy = policy_record.policy.find_repository_policy(
+                repository=landing_plan.repository,
+                base_branch=landing_plan.base_branch,
+            )
         except (LookupError, ValueError, MergeTrainPolicyStoreMissingError) as error:
             raise MergeAdmissionDeniedError(
                 "Active merge-train policy no longer admits the landing-plan lineage.",
@@ -252,6 +256,7 @@ class LiveMergeAdmissionEvaluator:
             owner_decision=target_evidence.owner_decision,
             engineering_decision=engineering_decision,
             engineering_runs=engineering_runs,
+            engineering_review_authority=repository_policy.engineering_review_mode,
             technical_checks=technical_checks,
             policy_fingerprints=policy_fingerprints,
             candidate_record=candidate_record,
