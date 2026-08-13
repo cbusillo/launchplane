@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 
-from tests.support.workflows import SELF_HOSTED_RUNNER, load_workflow
+from tests.support.workflows import (
+    SELF_HOSTED_RUNNER,
+    launchplane_request_action_reference,
+    load_workflow,
+)
 
 
 class RouteBindingRefreshWorkflowTests(unittest.TestCase):
@@ -96,8 +100,7 @@ class RouteBindingRefreshWorkflowTests(unittest.TestCase):
         assert request_step is not None
         self.assertEqual(
             request_step.uses,
-            "cbusillo/launchplane/.github/actions/launchplane-request@"
-            "adcf937c6aef14e02478724040852d1d2a82a850",
+            launchplane_request_action_reference(),
         )
         self.assertEqual(
             request_step.with_values["route-path"],

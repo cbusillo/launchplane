@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from tests.support.workflows import load_workflow
+from tests.support.workflows import launchplane_request_action_reference, load_workflow
 
 
 class OdooWebsiteBootstrapOverrideWorkflowTests(unittest.TestCase):
@@ -106,7 +106,7 @@ class OdooWebsiteBootstrapOverrideWorkflowTests(unittest.TestCase):
         self.assertIn("source_label", payload_step.run)
         self.assertEqual(
             request_step.uses,
-            "cbusillo/launchplane/.github/actions/launchplane-request@adcf937c6aef14e02478724040852d1d2a82a850",
+            launchplane_request_action_reference(),
         )
         self.assertEqual(
             request_step.with_values["route-path"],
