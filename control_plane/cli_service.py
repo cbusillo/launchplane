@@ -10,6 +10,7 @@ import uuid
 
 import click
 
+from control_plane.agent_operator_contract import write_agent_operator_contract
 from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
 from control_plane.outbox_worker import (
     DEFAULT_OUTBOX_WORKER_ERROR_BACKOFF_SECONDS,
@@ -1216,4 +1217,21 @@ def service_inspect_data_freshness(
 )
 def service_export_openapi(output: Path) -> None:
     written_path = write_canonical_openapi(output)
+    click.echo(str(written_path))
+
+
+@service.command("export-agent-contract")
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Write the public-safe Launchplane agent/operator contract to this path.",
+)
+@click.option(
+    "--source-sha",
+    default=None,
+    help="Optional source commit SHA recorded as non-gating provenance.",
+)
+def service_export_agent_contract(output: Path, source_sha: str | None) -> None:
+    written_path = write_agent_operator_contract(output, source_commit_sha=source_sha)
     click.echo(str(written_path))

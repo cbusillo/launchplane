@@ -2564,6 +2564,32 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertNotIn('"examples"', json.dumps(payload, sort_keys=True))
 
+    def test_service_export_agent_contract_writes_public_semantic_artifact(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            output_path = Path(temporary_directory_name) / "agent-operator-contract.json"
+
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "export-agent-contract",
+                    "--output",
+                    str(output_path),
+                    "--source-sha",
+                    "a" * 40,
+                ],
+            )
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(result.output.strip(), str(output_path))
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["normalization_version"], 1)
+        self.assertRegex(payload["semantic_digest_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(payload["provenance"]["source_commit_sha"], "a" * 40)
+        self.assertEqual(len(payload["contract"]["operations"]), 12)
+
     def test_product_onboarding_endpoint_writes_full_launchplane_owned_bundle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
