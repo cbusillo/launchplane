@@ -52,7 +52,6 @@
         "modes": [
           "read"
         ],
-        "openapi_fingerprint_sha256": "c49fedac49b94dbc12172b8a8cf85fe3e2684565f3f072baa065e89d1ad92c9b",
         "operation_id": "read_agent_context",
         "path": "/v1/agent/context",
         "purpose": "Read public-safe Launchplane context for an agent task.",
@@ -65,6 +64,7 @@
           "503"
         ],
         "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "c49fedac49b94dbc12172b8a8cf85fe3e2684565f3f072baa065e89d1ad92c9b",
         "supported_surfaces": [
           "agent_helper",
           "read_only_service"
@@ -79,7 +79,6 @@
         "modes": [
           "preflight"
         ],
-        "openapi_fingerprint_sha256": "1f0c8b32c85ddf362d9ee75b310a9c21948d59ee50af95043e991c1ba3e1d87c",
         "operation_id": "evaluate_agent_write_intent",
         "path": "/v1/agent/write-intents/evaluate",
         "purpose": "Evaluate a bounded agent write intent before mutation.",
@@ -91,6 +90,7 @@
           "503"
         ],
         "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "1f0c8b32c85ddf362d9ee75b310a9c21948d59ee50af95043e991c1ba3e1d87c",
         "supported_surfaces": [
           "agent_helper",
           "service_api"
@@ -106,7 +106,6 @@
           "dry-run",
           "apply"
         ],
-        "openapi_fingerprint_sha256": "e333fb2783fbefcc0c15c44efb40f2ceb13a60095e4e7287a04cf89c937ca6eb",
         "operation_id": "apply_product_config",
         "path": "/v1/product-config/apply",
         "purpose": "Dry-run or apply reviewed product configuration.",
@@ -121,6 +120,7 @@
         "reviewed_evidence": [
           "reviewed_dry_run"
         ],
+        "schema_fingerprint_sha256": "e333fb2783fbefcc0c15c44efb40f2ceb13a60095e4e7287a04cf89c937ca6eb",
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
@@ -137,7 +137,6 @@
           "dry-run",
           "apply"
         ],
-        "openapi_fingerprint_sha256": "56d45106f7ec59d196201e101da8e74a63e2c697cc145200325fec68466e14b8",
         "operation_id": "apply_change_impact_policy",
         "path": "/v1/change-impact/policies/apply",
         "purpose": "Dry-run or apply a reviewed change-impact policy revision.",
@@ -151,6 +150,7 @@
           "reviewed_dry_run",
           "expected_policy_digest"
         ],
+        "schema_fingerprint_sha256": "56d45106f7ec59d196201e101da8e74a63e2c697cc145200325fec68466e14b8",
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
@@ -166,7 +166,6 @@
         "modes": [
           "read"
         ],
-        "openapi_fingerprint_sha256": "810ce55fdcb429797375cb8a624d6ee36dc20ec80bf3fb17ac0e882b174e9d18",
         "operation_id": "read_change_impact_policy",
         "path": "/v1/change-impact/policy",
         "purpose": "Read active change-impact policy revision evidence.",
@@ -177,6 +176,7 @@
           "503"
         ],
         "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "810ce55fdcb429797375cb8a624d6ee36dc20ec80bf3fb17ac0e882b174e9d18",
         "supported_surfaces": [
           "agent_helper",
           "read_only_service"
@@ -192,7 +192,6 @@
           "dry-run",
           "mutate"
         ],
-        "openapi_fingerprint_sha256": "c7351558badf1ffc4c955a82c5152bb878a2c0b652f9d8df6f2ee748e640ae83",
         "operation_id": "write_merge_train_controller_run_once",
         "path": "/v1/work-graph/merge-train/controller/run-once",
         "purpose": "Advance one merge-train controller phase with bounded recovery evidence.",
@@ -206,6 +205,7 @@
           "503"
         ],
         "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "c7351558badf1ffc4c955a82c5152bb878a2c0b652f9d8df6f2ee748e640ae83",
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
@@ -222,7 +222,6 @@
           "dry-run",
           "apply"
         ],
-        "openapi_fingerprint_sha256": "5b2b1930447b9b0b1ff88c95e9395b4bf27625922d55d7f7b642a4bcb7fa49be",
         "operation_id": "remediate_preview_pr_feedback",
         "path": "/v1/previews/pr-feedback/remediation",
         "purpose": "Dry-run or apply bounded historical preview-feedback remediation.",
@@ -237,6 +236,7 @@
         "reviewed_evidence": [
           "reviewed_dry_run"
         ],
+        "schema_fingerprint_sha256": "5b2b1930447b9b0b1ff88c95e9395b4bf27625922d55d7f7b642a4bcb7fa49be",
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
@@ -253,7 +253,6 @@
           "plan",
           "apply"
         ],
-        "openapi_fingerprint_sha256": "2557624b0cdc6c8bc56f13efbe706499eb75e859a08fa12698f42287fd36ee4d",
         "operation_id": "execute_product_retirement",
         "path": "/v1/product-retirement",
         "purpose": "Plan or apply protected product retirement.",
@@ -269,6 +268,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
+        "schema_fingerprint_sha256": "2557624b0cdc6c8bc56f13efbe706499eb75e859a08fa12698f42287fd36ee4d",
         "supported_surfaces": [
           "protected_workflow",
           "operator_ui",
@@ -285,7 +285,6 @@
           "plan",
           "apply"
         ],
-        "openapi_fingerprint_sha256": "67c78f2fad901e7f865073383374a1cdd2eb153eed16e4110c9155915e771c8b",
         "operation_id": "execute_detached_application_retirement",
         "path": "/v1/detached-application-retirement",
         "purpose": "Plan or apply detached application retirement with zero authority writes.",
@@ -301,6 +300,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
+        "schema_fingerprint_sha256": "67c78f2fad901e7f865073383374a1cdd2eb153eed16e4110c9155915e771c8b",
         "supported_surfaces": [
           "protected_workflow",
           "operator_ui",
@@ -317,7 +317,6 @@
           "dry-run",
           "apply"
         ],
-        "openapi_fingerprint_sha256": "115bc60d6691fdcbd7bc8ffd42667a523a5e89f106503083150dbb3bf4e29425",
         "operation_id": "reconcile_managed_authz_policy",
         "path": "/v1/authz-policies/managed-rule-sets/reconcile",
         "purpose": "Dry-run or apply managed authorization reconciliation.",
@@ -332,6 +331,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
+        "schema_fingerprint_sha256": "115bc60d6691fdcbd7bc8ffd42667a523a5e89f106503083150dbb3bf4e29425",
         "supported_surfaces": [
           "protected_workflow",
           "operator_ui",
@@ -348,7 +348,6 @@
           "dry-run",
           "apply"
         ],
-        "openapi_fingerprint_sha256": "31b99d73df6ce6efcf92c2c2384780949b46b225e8379ad9dc3d08e0d5a0b8e3",
         "operation_id": "apply_product_stable_lane_repair",
         "path": "/v1/product-profiles/stable-lane-repair/apply",
         "purpose": "Dry-run or apply a bounded stable-lane profile repair.",
@@ -364,6 +363,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
+        "schema_fingerprint_sha256": "31b99d73df6ce6efcf92c2c2384780949b46b225e8379ad9dc3d08e0d5a0b8e3",
         "supported_surfaces": [
           "protected_workflow",
           "operator_ui",
@@ -379,7 +379,6 @@
         "modes": [
           "read"
         ],
-        "openapi_fingerprint_sha256": "9140bde34ab5930422c2e9f654db3e7af1ede283a69bd8289c62a93931f2d11e",
         "operation_id": "read_governance_projection",
         "path": "/v1/governance/projection",
         "purpose": "Read governance evidence without granting shadow authority.",
@@ -392,6 +391,7 @@
           "503"
         ],
         "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "9140bde34ab5930422c2e9f654db3e7af1ede283a69bd8289c62a93931f2d11e",
         "supported_surfaces": [
           "read_only_service",
           "operator_ui"
@@ -422,8 +422,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "52baf0aa7f470e0fabecbf7110dd512b490f88e1"
+    "source_commit_sha": "f38b4c9aa6779a20fc472dd7617713a505829d96"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "1be9595525bf2e87aa8c658176cff0bf4f43fac99faee75e88b85e737a57f0ab"
+  "semantic_digest_sha256": "a3f2c6602376cd0cd8638283f186471fe4f8a53516f531d4ff613b9ed5203479"
 }

@@ -75,7 +75,7 @@ class AgentOperatorContractTests(unittest.TestCase):
                 operation["identity_dependencies"],
                 expected_dependencies[operation["operation_id"]],
             )
-            self.assertRegex(operation["openapi_fingerprint_sha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(operation["schema_fingerprint_sha256"], r"^[0-9a-f]{64}$")
 
         change_impact = next(
             operation

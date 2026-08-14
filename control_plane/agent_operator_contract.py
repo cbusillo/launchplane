@@ -507,7 +507,7 @@ def build_agent_operator_contract(
                     (str(status) for status in operation.get("responses", {})),
                     key=lambda status: (not status.isdigit(), status),
                 ),
-                "openapi_fingerprint_sha256": _digest(normalized_operation),
+                "schema_fingerprint_sha256": _digest(normalized_operation),
             }
         )
 
@@ -604,7 +604,7 @@ def validate_agent_operator_contract(artifact: Mapping[str, Any]) -> None:
         "idempotency",
         "reviewed_evidence",
         "response_statuses",
-        "openapi_fingerprint_sha256",
+        "schema_fingerprint_sha256",
     }
     for operation in operations:
         if not isinstance(operation, Mapping):
@@ -648,7 +648,7 @@ def validate_agent_operator_contract(artifact: Mapping[str, Any]) -> None:
                 raise AgentOperatorContractError(f"Invalid operation {field_name}")
         if not operation["identity_dependencies"]:
             raise AgentOperatorContractError("Operation has no identity dependencies")
-        fingerprint = operation["openapi_fingerprint_sha256"]
+        fingerprint = operation["schema_fingerprint_sha256"]
         if not isinstance(fingerprint, str) or not _SHA256_PATTERN.fullmatch(fingerprint):
             raise AgentOperatorContractError("Invalid operation fingerprint")
     if seen_operations != expected_operations:
