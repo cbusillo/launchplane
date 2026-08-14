@@ -104,6 +104,10 @@ def _build_export_app() -> FastAPI:
     )
 
 
+def build_deterministic_export_app() -> FastAPI:
+    return _build_export_app()
+
+
 def _scrub_openapi_payload(value: Any) -> Any:
     if isinstance(value, Mapping):
         scrubbed: dict[str, Any] = {}
@@ -118,7 +122,7 @@ def _scrub_openapi_payload(value: Any) -> Any:
 
 
 def canonical_openapi_document() -> dict[str, Any]:
-    app = _build_export_app()
+    app = build_deterministic_export_app()
     openapi_payload: dict[str, Any] = app.openapi()
     scrubbed_payload: dict[str, Any] = _scrub_openapi_payload(openapi_payload)
     info = scrubbed_payload.get("info", {})

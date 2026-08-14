@@ -12,6 +12,12 @@ Launchplane compiles product/runtime/evidence facts it owns, links back to
 source systems, and records provenance so agents can decide what to inspect or
 request next.
 
+The checked `contracts/agent-operator-contract.json` artifact is the
+machine-readable operation, workflow, lifecycle, and safety projection for
+external agent tooling. See [agent-operator-contract.md](agent-operator-contract.md)
+for generation, normalization, freshness, and ownership rules. The artifact is
+routing and safety evidence only; it never becomes live runtime authority.
+
 ## Source Of Truth
 
 - GitHub remains authoritative for issue bodies, PR review, merge state, Project

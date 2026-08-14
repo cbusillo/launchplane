@@ -48,6 +48,8 @@ Use these docs as the source of truth for `launchplane`.
   host hygiene evidence, budgets, and future apply boundary.
 - [agent-context-boundary.md](agent-context-boundary.md) — public-safe agent
   context, caller profiles, scoped intent, redaction, and provenance boundary.
+- [agent-operator-contract.md](agent-operator-contract.md) — generated,
+  public-safe agent/operator operation, workflow, lifecycle, and safety contract.
 - [engineering-review-runs.md](engineering-review-runs.md) — shadow-only review
   run records, dispatch binding, credential boundary, and worker lifecycle.
 - [engineering-review-decisions.md](engineering-review-decisions.md) — exact-head

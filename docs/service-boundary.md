@@ -524,6 +524,16 @@ browser client binding. Generated request, success, validation, and error
 bindings are the API boundary consumed by the UI. Handwritten frontend types
 remain only for UI view models and explicit normalization.
 
+The same canonical export also feeds the narrower checked
+`contracts/agent-operator-contract.json` artifact. Run
+`uv run launchplane service export-agent-contract --output contracts/agent-operator-contract.json`
+to project only the explicit agent/operator allow-list plus the semantic
+lifecycle, deploy, reconciliation, workflow, and governance overlay. The
+artifact carries a semantic digest and non-gating source revision. The existing
+`pnpm --dir frontend check:openapi-drift` gate regenerates it in a temporary
+path and compares only its normalization version and semantic digest, so
+unrelated OpenAPI or provenance-only changes do not create consumer drift.
+
 The browser client keeps those four write paths in one generated-type-checked
 allowlist. The shared mutation transport serializes cookie-backed writes,
 refreshes the single-use CSRF token immediately before every attempt, and copies

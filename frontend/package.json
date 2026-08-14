@@ -10,7 +10,8 @@
   "scripts": {
     "build": "pnpm typecheck && vite build && node scripts/assert-production-fixtures.mjs",
     "dev": "vite --host 127.0.0.1",
-    "generate:openapi": "uv run launchplane service export-openapi --output generated/openapi-canonical.json && node scripts/build-openapi-ui-schema.mjs && node scripts/generate-openapi-types.mjs",
+    "generate:agent-contract": "uv run launchplane service export-agent-contract --output ../contracts/agent-operator-contract.json",
+    "generate:openapi": "uv run launchplane service export-openapi --output generated/openapi-canonical.json && node scripts/build-openapi-ui-schema.mjs && node scripts/generate-openapi-types.mjs && pnpm generate:agent-contract",
     "preview": "vite preview --host 127.0.0.1",
     "check:openapi-drift": "node scripts/check-openapi-drift.mjs",
     "test": "node --experimental-strip-types --import ./tests/register-typescript.mjs --test tests/*.test.mjs",

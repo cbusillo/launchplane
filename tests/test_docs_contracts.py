@@ -137,6 +137,11 @@ class DocsContractsTests(TestCase):
         metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
         ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
         service_boundary = Path("docs/service-boundary.md").read_text(encoding="utf-8")
+        agent_context_boundary = Path("docs/agent-context-boundary.md").read_text(encoding="utf-8")
+        agent_operator_contract = Path("docs/agent-operator-contract.md").read_text(
+            encoding="utf-8"
+        )
+        docs_index = Path("docs/README.md").read_text(encoding="utf-8")
         canonical_openapi = json.loads(
             Path("frontend/generated/openapi-canonical.json").read_text(encoding="utf-8")
         )
@@ -152,6 +157,7 @@ class DocsContractsTests(TestCase):
         )
         action_model = Path("frontend/src/action-model.ts").read_text(encoding="utf-8")
         frontend_package = json.loads(Path("frontend/package.json").read_text(encoding="utf-8"))
+        openapi_drift = Path("frontend/scripts/check-openapi-drift.mjs").read_text(encoding="utf-8")
 
         self.assertEqual(
             "uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json",
@@ -165,11 +171,40 @@ class DocsContractsTests(TestCase):
             "pnpm --dir frontend check:openapi-drift",
             metadata["qualityGate"]["openapi"]["frontendDrift"],
         )
+        self.assertEqual(
+            "contracts/agent-operator-contract.json",
+            metadata["qualityGate"]["agentContract"]["artifact"],
+        )
+        self.assertEqual(
+            "uv run launchplane service export-agent-contract --output contracts/agent-operator-contract.json",
+            metadata["qualityGate"]["agentContract"]["export"],
+        )
+        self.assertEqual(
+            "pnpm --dir frontend check:openapi-drift",
+            metadata["qualityGate"]["agentContract"]["drift"],
+        )
         self.assertIn(
             "`uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`",
             service_boundary,
         )
         self.assertIn("`pnpm --dir frontend check:openapi-drift`", service_boundary)
+        self.assertIn(
+            "`uv run launchplane service export-agent-contract --output contracts/agent-operator-contract.json`",
+            service_boundary,
+        )
+        self.assertIn("agent-operator-contract.md", docs_index)
+        self.assertIn("contracts/agent-operator-contract.json", agent_context_boundary)
+        self.assertIn("`semantic_digest_sha256`", agent_operator_contract)
+        self.assertIn("`normalization_version`", agent_operator_contract)
+        self.assertEqual(
+            "uv run launchplane service export-agent-contract --output ../contracts/agent-operator-contract.json",
+            frontend_package["scripts"]["generate:agent-contract"],
+        )
+        self.assertIn(
+            "pnpm generate:agent-contract",
+            frontend_package["scripts"]["generate:openapi"],
+        )
+        self.assertIn("checkedAgentContract.schema_version", openapi_drift)
         self.assertIn("Install uv", ci_workflow)
         self.assertIn("Install Python", ci_workflow)
         read_operations = canonical_openapi["x-launchplane-ui-read-operations"]

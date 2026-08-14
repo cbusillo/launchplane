@@ -64,6 +64,11 @@
       "frontendGenerate": "pnpm --dir frontend generate:openapi",
       "frontendDrift": "pnpm --dir frontend check:openapi-drift"
     },
+    "agentContract": {
+      "artifact": "contracts/agent-operator-contract.json",
+      "export": "uv run launchplane service export-agent-contract --output contracts/agent-operator-contract.json",
+      "drift": "pnpm --dir frontend check:openapi-drift"
+    },
     "audit": {
       "pythonDependencies": "uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2025-183",
       "container": "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v \"${RUNNER_TEMP}/trivy-cache:/root/.cache\" ghcr.io/aquasecurity/trivy:0.70.0 image --scanners vulnerability --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 launchplane-ci:test",
