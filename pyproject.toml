@@ -16,7 +16,7 @@ dependencies = [
     "pyjwt[crypto]>=2.13.0",
     "requests>=2.34.2",
     "sqlalchemy>=2.0.52",
-    "uvicorn>=0.52.2",
+    "uvicorn>=0.52.3",
     "alembic>=1.19.1",
 ]
 
