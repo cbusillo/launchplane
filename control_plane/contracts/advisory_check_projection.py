@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Final, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -48,6 +49,21 @@ class AdvisoryCheckProjection(BaseModel):
             raise ValueError("Advisory check projection repository must use owner/name.")
         if self.details_url.strip() != self.details_url or not self.details_url:
             raise ValueError("Advisory check projection requires a canonical details URL.")
+        parsed_details_url = urlsplit(self.details_url)
+        if (
+            parsed_details_url.scheme not in {"http", "https"}
+            or not parsed_details_url.netloc
+            or parsed_details_url.username is not None
+            or parsed_details_url.password is not None
+            or any(character.isspace() or ord(character) < 32 for character in self.details_url)
+        ):
+            raise ValueError("Advisory check projection requires an absolute public details URL.")
+        try:
+            parsed_details_url.port
+        except ValueError as error:
+            raise ValueError(
+                "Advisory check projection requires a valid details URL port."
+            ) from error
         if self.title.strip() != self.title or self.summary.strip() != self.summary:
             raise ValueError("Advisory check projection text must be canonical.")
         return self

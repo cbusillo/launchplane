@@ -155,6 +155,24 @@ export function parseAppRoute(pathname: string): AppRoute {
   return { kind: "not-found", path: pathname };
 }
 
+export function ownerAcceptanceLookupFromSearch(search: string): {
+  repository: string;
+  pullRequest: string;
+  requested: boolean;
+  valid: boolean;
+} {
+  const searchParams = new URLSearchParams(search);
+  const repository = searchParams.get("repository")?.trim() ?? "";
+  const pullRequest = searchParams.get("pull_request")?.trim() ?? "";
+  return {
+    repository,
+    pullRequest,
+    requested: Boolean(repository || pullRequest),
+    valid:
+      /^[^/\s]+\/[^/\s]+$/.test(repository) && /^[1-9][0-9]*$/.test(pullRequest),
+  };
+}
+
 export function routeProductKey(route: AppRoute): string {
   return route.kind === "product-workspace" ||
     route.kind === "product-activity" ||

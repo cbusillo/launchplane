@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   engineeringPath,
   engineeringViewLabel,
+  ownerAcceptanceLookupFromSearch,
   parseAppRoute,
 } from "../src/route-model.ts";
 
@@ -45,4 +46,22 @@ test("engineering labels are route-specific", () => {
   assert.equal(engineeringViewLabel("tenant-admission"), "Tenant admission");
   assert.equal(engineeringViewLabel("owner-acceptance"), "Owner product review");
   assert.equal(engineeringViewLabel("governance-projection"), "Governance evidence");
+});
+
+test("Owner acceptance deep-link query selects one exact lookup", () => {
+  assert.deepEqual(
+    ownerAcceptanceLookupFromSearch(
+      "fixture=products&repository=example%2Fcontrol-plane&pull_request=308",
+    ),
+    {
+      repository: "example/control-plane",
+      pullRequest: "308",
+      requested: true,
+      valid: true,
+    },
+  );
+  assert.equal(
+    ownerAcceptanceLookupFromSearch("fixture=products&repository=example%2Fcontrol-plane").valid,
+    false,
+  );
 });

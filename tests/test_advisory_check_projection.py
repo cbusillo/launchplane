@@ -6,11 +6,13 @@ from control_plane.advisory_check_projection import (
     AdvisoryCheckProjectionError,
     write_advisory_check_projection,
 )
+from control_plane.contracts.change_impact import ChangeImpactTarget
 from control_plane.contracts.advisory_check_projection import (
     AdvisoryCheckProjection,
     OWNER_ACCEPTANCE_CHECK_NAME,
 )
 from control_plane.github_app_identity import GitHubAppInstallationToken
+from control_plane.owner_acceptance_projection import owner_acceptance_workbench_url
 
 
 HEAD_SHA = "a" * 40
@@ -57,6 +59,40 @@ def _check_run(*, external_id: str = EXTERNAL_ID, app_id: int = 42) -> dict[str,
 
 
 class AdvisoryCheckProjectionTests(unittest.TestCase):
+    def test_owner_acceptance_details_url_is_server_owned_and_encoded(self) -> None:
+        target = ChangeImpactTarget(
+            repository_id="123",
+            repository_owner_id="456",
+            repository="example/repo",
+            pull_request_number=7,
+            head_sha=HEAD_SHA,
+            tree_sha="c" * 40,
+        )
+
+        self.assertEqual(
+            owner_acceptance_workbench_url(
+                public_origin="https://ops.example.test/",
+                target=target,
+            ),
+            "https://ops.example.test/ui/engineering/owner-acceptance?repository=example%2Frepo&pull_request=7",
+        )
+
+    def test_owner_acceptance_details_url_rejects_invalid_origin(self) -> None:
+        target = ChangeImpactTarget(
+            repository_id="123",
+            repository_owner_id="456",
+            repository="example/repo",
+            pull_request_number=7,
+            head_sha=HEAD_SHA,
+            tree_sha="c" * 40,
+        )
+
+        with self.assertRaisesRegex(ValueError, "valid browser public origin"):
+            owner_acceptance_workbench_url(
+                public_origin="https://github.com/example/repo/pull/7",
+                target=target,
+            )
+
     def test_replays_identical_exact_projection_without_write(self) -> None:
         calls: list[dict[str, object]] = []
 

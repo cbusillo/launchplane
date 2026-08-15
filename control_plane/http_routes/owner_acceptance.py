@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 from typing import Annotated, Literal, cast
 
 from fastapi import Depends, Header, Path, Query
@@ -59,6 +60,9 @@ from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity,
 from control_plane.workflows.launchplane import github_api_request
 
 
+logger = logging.getLogger(__name__)
+
+
 OWNER_ACCEPTANCE_EVALUATION_ROUTE = "/v1/owner-acceptance/evaluation"
 OWNER_ACCEPTANCE_EVENTS_ROUTE = "/v1/owner-acceptance/events"
 OWNER_ACCEPTANCE_EVENT_ROUTE = "/v1/owner-acceptance/events/{event_id}"
@@ -75,6 +79,7 @@ class OwnerAcceptanceRouteDependencies:
     read_write_identity: Callable[..., LaunchplaneIdentity] | None = None
     github_app_token: Callable[[str, str], GitHubAppInstallationToken] | None = None
     github_api: Callable[..., object] = github_api_request
+    public_origin: str | None = None
 
 
 class OwnerAcceptanceEventEnvelope(BaseModel):
@@ -272,6 +277,25 @@ def _validate_projection_target(
             raise ValueError("Owner acceptance projection target changed during evaluation.")
 
 
+def _resolve_owner_acceptance_projection_state(
+    *,
+    store: object,
+    target: ChangeImpactTargetReference,
+    repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider,
+) -> tuple[OwnerAcceptanceDecision, ChangeImpactTarget]:
+    initial_evidence = repository_evidence_provider.resolve(target)
+    decision = evaluate_owner_acceptance(
+        store=store,
+        target=target,
+        repository_evidence_provider=repository_evidence_provider,
+    )
+    evidence = repository_evidence_provider.resolve(target)
+    if initial_evidence.target != evidence.target:
+        raise ValueError("Owner acceptance projection target changed during evaluation.")
+    _validate_projection_target(decision, evidence.target)
+    return decision, evidence.target
+
+
 def register_owner_acceptance_routes(
     app: ApiRouteRegistrar,
     *,
@@ -306,6 +330,54 @@ def register_owner_acceptance_routes(
             event_write_authorized=event_write_authorized,
             bindings=bindings,
         )
+
+    def project_current_decision(
+        *,
+        target: ChangeImpactTargetReference,
+        record_store: object,
+    ) -> tuple[OwnerAcceptanceDecision, AdvisoryCheckProjectionResult]:
+        if dependencies.github_app_token is None:
+            raise ValueError("Owner acceptance projection identity is unavailable.")
+        if dependencies.public_origin is None:
+            raise ValueError("Owner acceptance projection public origin is unavailable.")
+        decision, resolved_target = _resolve_owner_acceptance_projection_state(
+            store=record_store,
+            target=target,
+            repository_evidence_provider=dependencies.repository_evidence_provider,
+        )
+        installation_token = dependencies.github_app_token(
+            resolved_target.repository,
+            resolved_target.repository_id,
+        )
+        try:
+            result = project_owner_acceptance_decision(
+                decision=decision,
+                target=resolved_target,
+                public_origin=dependencies.public_origin,
+                installation_token=installation_token,
+                api_request=dependencies.github_api,
+            )
+        finally:
+            revoke_installation_token(
+                installation_token=installation_token,
+                api_request=dependencies.github_api,
+            )
+        return decision, result
+
+    def project_current_decision_best_effort(
+        *,
+        target: ChangeImpactTargetReference,
+        record_store: object,
+    ) -> None:
+        if dependencies.github_app_token is None or dependencies.public_origin is None:
+            return
+        try:
+            project_current_decision(target=target, record_store=record_store)
+        except Exception:
+            logger.warning(
+                "Owner acceptance advisory projection failed after event write.",
+                exc_info=True,
+            )
 
     def evaluate(
         repository: Annotated[
@@ -463,6 +535,10 @@ def register_owner_acceptance_routes(
                 code="database_storage_required",
                 message=str(error),
             ) from error
+        project_current_decision_best_effort(
+            target=envelope.target,
+            record_store=record_store,
+        )
         return OwnerAcceptanceEventResponse(
             trace_id=trace_id,
             write_status=result.status,
@@ -650,34 +726,10 @@ def register_owner_acceptance_routes(
                 message="Caller cannot project Owner acceptance decisions.",
             )
         try:
-            if dependencies.github_app_token is None:
-                raise ValueError("Owner acceptance projection identity is unavailable.")
-            initial_evidence = dependencies.repository_evidence_provider.resolve(request.target)
-            decision = evaluate_owner_acceptance(
-                store=record_store,
+            decision, result = project_current_decision(
                 target=request.target,
-                repository_evidence_provider=dependencies.repository_evidence_provider,
+                record_store=record_store,
             )
-            evidence = dependencies.repository_evidence_provider.resolve(request.target)
-            if initial_evidence.target != evidence.target:
-                raise ValueError("Owner acceptance projection target changed during evaluation.")
-            _validate_projection_target(decision, evidence.target)
-            installation_token = dependencies.github_app_token(
-                evidence.target.repository,
-                evidence.target.repository_id,
-            )
-            try:
-                result = project_owner_acceptance_decision(
-                    decision=decision,
-                    target=evidence.target,
-                    installation_token=installation_token,
-                    api_request=dependencies.github_api,
-                )
-            finally:
-                revoke_installation_token(
-                    installation_token=installation_token,
-                    api_request=dependencies.github_api,
-                )
         except (OwnerAcceptanceEvaluationUnavailableError, TypeError, ValueError) as error:
             raise common.http_error(
                 status_code=503,

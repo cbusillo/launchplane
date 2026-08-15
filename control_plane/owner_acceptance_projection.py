@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import hashlib
 import json
+from urllib.parse import quote, urlsplit
 
 from control_plane.advisory_check_projection import write_advisory_check_projection
 from control_plane.contracts.advisory_check_projection import (
@@ -17,17 +18,22 @@ from control_plane.workflows.launchplane import github_api_request
 
 
 GitHubApiRequest = Callable[..., object]
+OWNER_ACCEPTANCE_WORKBENCH_PATH = "/ui/engineering/owner-acceptance"
 
 
 def project_owner_acceptance_decision(
     *,
     decision: OwnerAcceptanceDecision,
     target: ChangeImpactTarget,
+    public_origin: str,
     installation_token: GitHubAppInstallationToken,
     api_request: GitHubApiRequest = github_api_request,
 ) -> AdvisoryCheckProjectionResult:
     external_id = owner_acceptance_projection_sha256(decision)
-    details_url = f"https://github.com/{target.repository}/pull/{target.pull_request_number}"
+    details_url = owner_acceptance_workbench_url(
+        public_origin=public_origin,
+        target=target,
+    )
     return write_advisory_check_projection(
         projection=AdvisoryCheckProjection(
             name=OWNER_ACCEPTANCE_CHECK_NAME,
@@ -41,6 +47,47 @@ def project_owner_acceptance_decision(
         ),
         installation_token=installation_token,
         api_request=api_request,
+    )
+
+
+def owner_acceptance_workbench_url(
+    *,
+    public_origin: str,
+    target: ChangeImpactTarget,
+) -> str:
+    origin = public_origin.strip()
+    try:
+        parsed_origin = urlsplit(origin)
+    except ValueError as error:
+        raise ValueError(
+            "Owner acceptance projection requires a valid browser public origin."
+        ) from error
+    if (
+        parsed_origin.scheme not in {"http", "https"}
+        or not parsed_origin.netloc
+        or parsed_origin.path not in {"", "/"}
+        or parsed_origin.query
+        or parsed_origin.fragment
+        or parsed_origin.username is not None
+        or parsed_origin.password is not None
+    ):
+        raise ValueError("Owner acceptance projection requires a valid browser public origin.")
+    try:
+        if parsed_origin.port is not None and not 1 <= parsed_origin.port <= 65535:
+            raise ValueError
+    except ValueError as error:
+        raise ValueError(
+            "Owner acceptance projection requires a valid browser public origin."
+        ) from error
+    if any(character.isspace() or ord(character) < 32 for character in origin):
+        raise ValueError("Owner acceptance projection requires a valid browser public origin.")
+    if target.repository.count("/") != 1 or any(
+        not part or part != part.strip() for part in target.repository.split("/", 1)
+    ):
+        raise ValueError("Owner acceptance projection requires a valid repository target.")
+    return (
+        f"{origin.rstrip('/')}{OWNER_ACCEPTANCE_WORKBENCH_PATH}"
+        f"?repository={quote(target.repository, safe='')}&pull_request={target.pull_request_number}"
     )
 
 
