@@ -12,6 +12,22 @@ export * from "./route-model";
 const NAVIGATION_EVENT = "launchplane:navigation";
 
 export function useAppRoute(): AppRoute {
+  const locationKey = useLocationKey();
+  return useMemo(() => {
+    const location = new URL(locationKey, window.location.origin);
+    return parseAppRoute(location.pathname);
+  }, [locationKey]);
+}
+
+export function useAppSearchParams(): URLSearchParams {
+  const locationKey = useLocationKey();
+  return useMemo(
+    () => new URLSearchParams(new URL(locationKey, window.location.origin).search),
+    [locationKey],
+  );
+}
+
+function useLocationKey(): string {
   const [locationKey, setLocationKey] = useState(currentLocationKey);
 
   useEffect(() => {
@@ -24,10 +40,7 @@ export function useAppRoute(): AppRoute {
     };
   }, []);
 
-  return useMemo(() => {
-    const location = new URL(locationKey, window.location.origin);
-    return parseAppRoute(location.pathname);
-  }, [locationKey]);
+  return locationKey;
 }
 
 export function navigateTo(path: string, replace = false): void {

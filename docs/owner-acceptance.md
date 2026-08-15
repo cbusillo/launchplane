@@ -76,6 +76,14 @@ Owner requirement, Owner membership, and prior events from server-owned
 providers and storage. The pure read remains outside the browser-mutation
 surface and cannot consume a request body.
 
+The Owner workbench also accepts `repository` and `pull_request` query
+parameters at `/ui/engineering/owner-acceptance`. A server-issued advisory
+check details link uses the configured browser public origin and those exact
+parameters, so opening the link expands Exact lookup, prefills the repository
+and pull-request fields, and evaluates the target automatically. The browser
+still sends only the exact repository and PR reference to the evaluation API;
+fixture navigation remains preserved for local UI rehearsal.
+
 The response includes `viewer_capabilities.event_write_authorized`, a
 server-issued route-level capability for the evaluated identity. It allows the
 workbench to render explicit read-only engineering visibility instead of
@@ -386,6 +394,13 @@ the stable `launchplane/owner-acceptance` GitHub App check run. The caller
 supplies only repository and pull-request reference. Launchplane derives every
 product decision and exact binding, rechecks the current target before the
 provider write, and uses the decision digest as the check-run `external_id`.
+
+After a successful browser Owner event write, Launchplane best-effort
+re-evaluates the current exact target and refreshes this same App-owned check
+run. Projection or token-revocation failure is logged as advisory delivery
+failure only: the persisted human event and its `202` response are not rolled
+back or rewritten. Browsers never receive projection credentials or projection
+authority.
 
 The completed check conclusion is always `neutral`; the output lists the
 aggregate state plus each affected product and binding. The check remains

@@ -57,6 +57,7 @@ def _app(
     authorization_allows: Callable[..., bool] | None = None,
     github_app_token: Callable[[str, str], GitHubAppInstallationToken] | None = None,
     github_api: Callable[..., object] | None = None,
+    public_origin: str | None = None,
 ) -> FastAPI:
     resolved_identity = identity or _human()
     resolved_browser_identity = browser_identity or resolved_identity
@@ -79,6 +80,7 @@ def _app(
                 repository_evidence_provider or _EvidenceProvider(_repository_evidence())
             ),
             github_app_token=github_app_token,
+            public_origin=public_origin,
             **({"github_api": github_api} if github_api is not None else {}),
         ),
     )
@@ -121,6 +123,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                     expires_at="2026-08-07T15:00:00Z",
                 ),
                 github_api=github_api,
+                public_origin="https://ops.example.test",
             )
 
             async with lifespan_client(app) as client:
@@ -139,8 +142,120 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["decision"]["status"], "pending")
         self.assertEqual(payload["result"]["name"], "launchplane/owner-acceptance")
         self.assertEqual(payload["result"]["conclusion"], "neutral")
+        self.assertEqual(
+            calls[-2]["body"]["details_url"],
+            "https://ops.example.test/ui/engineering/owner-acceptance?repository=example%2Fweb&pull_request=2022",
+        )
         self.assertEqual(calls[-2]["body"]["conclusion"], "neutral")
         self.assertEqual(calls[-1]["method"], "DELETE")
+
+    async def test_successful_event_best_effort_projects_current_decision(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            calls: list[dict[str, Any]] = []
+
+            def github_api(**kwargs):  # type: ignore[no-untyped-def]
+                calls.append(kwargs)
+                if kwargs.get("method") == "DELETE":
+                    return None
+                if kwargs.get("method") == "POST":
+                    body = kwargs["body"]
+                    return {
+                        "id": 92,
+                        "name": body["name"],
+                        "head_sha": body["head_sha"],
+                        "status": body["status"],
+                        "conclusion": body["conclusion"],
+                        "external_id": body["external_id"],
+                        "details_url": body["details_url"],
+                        "output": body["output"],
+                        "app": {"id": 42},
+                    }
+                return {"check_runs": []}
+
+            app = _app(
+                store=store,
+                github_app_token=lambda _repository, _repository_id: GitHubAppInstallationToken(
+                    token="installation-token",
+                    app_id=42,
+                    installation_id=77,
+                    repository_id=int(REPOSITORY_ID),
+                    repository=REPOSITORY,
+                    expires_at="2026-08-07T15:00:00Z",
+                ),
+                github_api=github_api,
+                public_origin="https://ops.example.test",
+            )
+
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                response = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": {"repository": REPOSITORY, "pull_request_number": 2022},
+                        "action": "accepted",
+                        "expected_binding_sha256": evaluated.json()["decision"]["binding"][
+                            "binding_sha256"
+                        ],
+                    },
+                    headers={"Idempotency-Key": "accept-and-project"},
+                )
+                event_count = len(store.list_owner_acceptance_event_records())
+
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(event_count, 1)
+        projection_body = next(call for call in calls if call.get("method") == "POST")["body"]
+        self.assertEqual(
+            projection_body["details_url"],
+            "https://ops.example.test/ui/engineering/owner-acceptance?repository=example%2Fweb&pull_request=2022",
+        )
+        self.assertEqual(projection_body["output"]["title"], "Owner acceptance: accepted")
+
+    async def test_event_response_and_persisted_event_survive_projection_failure(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+
+            def failing_github_api(**_kwargs):  # type: ignore[no-untyped-def]
+                raise RuntimeError("GitHub is unavailable")
+
+            app = _app(
+                store=store,
+                github_app_token=lambda _repository, _repository_id: GitHubAppInstallationToken(
+                    token="installation-token",
+                    app_id=42,
+                    installation_id=77,
+                    repository_id=int(REPOSITORY_ID),
+                    repository=REPOSITORY,
+                    expires_at="2026-08-07T15:00:00Z",
+                ),
+                github_api=failing_github_api,
+                public_origin="https://ops.example.test",
+            )
+
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                response = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": {"repository": REPOSITORY, "pull_request_number": 2022},
+                        "action": "accepted",
+                        "expected_binding_sha256": evaluated.json()["decision"]["binding"][
+                            "binding_sha256"
+                        ],
+                    },
+                    headers={"Idempotency-Key": "accept-with-projection-failure"},
+                )
+                event_count = len(store.list_owner_acceptance_event_records())
+
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["write_status"], "written")
+        self.assertEqual(event_count, 1)
 
     async def test_projection_rejects_head_drift_before_github_write(self) -> None:
         class _DriftingProvider(_EvidenceProvider):

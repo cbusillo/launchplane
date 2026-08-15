@@ -21097,6 +21097,7 @@ def create_launchplane_fastapi_app(
                 api_request=github_api_request,
             ),
             github_api=github_api_request,
+            public_origin=(human_session_manager.public_origin if human_session_manager else None),
         ),
     )
     register_governance_projection_routes(

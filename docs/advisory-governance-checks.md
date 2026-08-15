@@ -52,10 +52,22 @@ reference. Launchplane evaluates current Owner acceptance from server-owned
 evidence, re-resolves the exact target, and rejects any mid-flight head, tree,
 repository-id, or owner-id drift before writing GitHub.
 
+Owner acceptance `details_url` values point to the server-derived Launchplane
+Owner workbench, not directly to GitHub. Launchplane validates the configured
+browser public origin and URL-encodes the exact repository and pull-request
+query parameters before constructing `/ui/engineering/owner-acceptance`; an
+invalid origin or target fails the projection closed. Opening that link expands
+Exact lookup and automatically evaluates the same target in the browser.
+
 Each check run stores the Launchplane decision digest as `external_id`.
 Identical state replays without a write. Changed binding or decision state on
 the same head updates the App-owned check run. A changed head receives its own
 new check run and cannot reuse evidence from the prior head.
+
+Successful browser Owner event writes also trigger a best-effort refresh of the
+current App-owned check. This delivery attempt is non-authoritative: projection
+or token-revocation failure does not roll back the persisted event or alter its
+successful API response, and browser sessions do not gain projection authority.
 
 ## No Feedback Loop
 

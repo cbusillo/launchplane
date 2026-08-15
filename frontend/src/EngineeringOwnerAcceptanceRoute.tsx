@@ -39,6 +39,8 @@ import { formatTime } from "./format";
 import { StatusIcon } from "./status-ui";
 import { safeExternalUrl } from "./url";
 import { useBrowserOperationController } from "./use-browser-operation";
+import { useAppSearchParams } from "./router";
+import { ownerAcceptanceLookupFromSearch } from "./route-model";
 import {
   ownerAcceptanceFailure,
   ownerAcceptanceFailureCertainty,
@@ -65,6 +67,8 @@ export function EngineeringOwnerAcceptanceRoute({
 }: {
   fixtureMode: DevFixtureMode;
 }) {
+  const searchParams = useAppSearchParams();
+  const lookup = ownerAcceptanceLookupFromSearch(searchParams.toString());
   const [statusFilter, setStatusFilter] = useState<OwnerAcceptanceStatusFilter>("all");
   const [repositoryFilter, setRepositoryFilter] = useState("");
   const [repositoryDraft, setRepositoryDraft] = useState("");
@@ -170,9 +174,17 @@ export function EngineeringOwnerAcceptanceRoute({
         {(data) => <OwnerAcceptanceCurrentItems data={data} fixtureMode={fixtureMode} />}
       </EngineeringResourceGate>
 
-      <details className="engineering-owner-acceptance-lookup-fallback">
+      <details
+        className="engineering-owner-acceptance-lookup-fallback"
+        open={lookup.requested || undefined}
+      >
         <summary>Exact lookup fallback</summary>
-        <OwnerAcceptanceLookupPane fixtureMode={fixtureMode} />
+        <OwnerAcceptanceLookupPane
+          autoLookup={lookup.valid}
+          fixtureMode={fixtureMode}
+          initialPullRequest={lookup.pullRequest}
+          initialRepository={lookup.repository}
+        />
       </details>
 
       <EngineeringResourceGate
@@ -383,9 +395,19 @@ function OwnerAcceptanceCurrentItemCard({
   );
 }
 
-function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMode }) {
-  const [repository, setRepository] = useState("");
-  const [prNumber, setPrNumber] = useState("");
+function OwnerAcceptanceLookupPane({
+  autoLookup,
+  fixtureMode,
+  initialPullRequest,
+  initialRepository,
+}: {
+  autoLookup: boolean;
+  fixtureMode: DevFixtureMode;
+  initialPullRequest: string;
+  initialRepository: string;
+}) {
+  const [repository, setRepository] = useState(initialRepository);
+  const [prNumber, setPrNumber] = useState(initialPullRequest);
   const [decision, setDecision] = useState<OwnerAcceptanceDecision | null>(null);
   const [viewerCapabilities, setViewerCapabilities] =
     useState<OwnerAcceptanceViewerCapabilities | null>(null);
@@ -393,10 +415,11 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const lastAutoLookupRef = useRef("");
 
-  const handleLookup = useCallback(async () => {
-    const repo = repository.trim();
-    const pr = parseInt(prNumber, 10);
+  const runLookup = useCallback(async (repositoryValue: string, prValue: string) => {
+    const repo = repositoryValue.trim();
+    const pr = parseInt(prValue, 10);
     if (!repo || !pr || pr < 1) return;
 
     abortRef.current?.abort();
@@ -438,7 +461,27 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
         setLoading(false);
       }
     }
-  }, [repository, prNumber, fixtureMode]);
+  }, [fixtureMode]);
+
+  const handleLookup = useCallback(
+    () => runLookup(repository, prNumber),
+    [prNumber, repository, runLookup],
+  );
+
+  useEffect(() => {
+    setRepository(initialRepository);
+    setPrNumber(initialPullRequest);
+    if (!autoLookup) {
+      lastAutoLookupRef.current = "";
+      return;
+    }
+    const lookupKey = `${initialRepository}:${initialPullRequest}`;
+    if (lastAutoLookupRef.current === lookupKey) {
+      return;
+    }
+    lastAutoLookupRef.current = lookupKey;
+    void runLookup(initialRepository, initialPullRequest);
+  }, [autoLookup, initialPullRequest, initialRepository, runLookup]);
 
   const refreshCurrentEvaluation = useCallback(async (reviewedBinding: OwnerAcceptanceBinding) => {
     const repo = reviewedBinding.repository;
@@ -509,7 +552,7 @@ function OwnerAcceptanceLookupPane({ fixtureMode }: { fixtureMode: DevFixtureMod
           className="button"
           type="button"
           disabled={!isValid || loading}
-          onClick={handleLookup}
+          onClick={() => void handleLookup()}
           aria-label="Look up current Owner acceptance evaluation"
         >
           {loading ? "Loading…" : "Look up"}

@@ -902,6 +902,31 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
+  test("Owner acceptance deep link opens and evaluates the exact target", async ({ page }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/engineering/owner-acceptance?fixture=products&repository=example%2Fcontrol-plane&pull_request=308",
+    );
+
+    await expect(page.getByText("Exact lookup — Current evaluation")).toBeVisible();
+    await expect(
+      page.getByRole("textbox", { name: "Repository (owner/repo)" }),
+    ).toHaveValue("example/control-plane");
+    await expect(
+      page.getByRole("spinbutton", { name: "Pull request number" }),
+    ).toHaveValue("308");
+    await expect(page.getByLabel("Current evaluation result")).toBeVisible();
+    await expect(
+      page.getByLabel("Exact PR lookup").getByText("Owner product review: pending"),
+    ).toBeVisible();
+    const repositoryInput = page.getByRole("textbox", { name: "Repository (owner/repo)" });
+    await repositoryInput.fill("example/another-repo");
+    await expect(repositoryInput).toHaveValue("example/another-repo");
+    await assertDocumentBasics(page);
+    diagnostics.assertClean();
+  });
+
   test("engineering viewer sees Current evidence without Owner controls", async ({
     page,
   }, testInfo) => {
