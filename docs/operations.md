@@ -366,6 +366,42 @@ former replaces the previous process-local apply lock. Both require an
   explaining that cleanup won. Provider read failures remain fail-closed. Do not
   reproduce this transition with direct SQL or provider-side deletion.
 
+### Generic-web deploy recovery dry-run
+
+Stage 1 recovery for legacy generic-web deploys is read-only. Operators call
+`POST /v1/admin/generic-web/deploy-recovery/dry-run` with the exact original
+`GenericWebDeployEnvelope` under `original_deploy`, the original
+`Idempotency-Key`, the product and instance, and a non-empty reason. The service
+authorizes `generic_web_deploy.execute` for the current product/context/instance
+before looking up any reservation. After lookup, it derives the original
+operation target from the stored reconciliation snapshot, or from an exact
+typed completed response, and authorizes the stored product/context/instance
+again before returning evidence.
+
+The lookup is existing-only and database-backed. It fingerprints the exact
+original payload using `/v1/drivers/generic-web/deploy`, searches across the
+original GitHub Actions scope, and fails closed for a missing, conflicting, or
+multi-scope match. It never probes through the normal deploy route: calling
+`/v1/drivers/generic-web/deploy` can reserve and start a new production deploy
+when the assumed legacy reservation does not exist.
+
+Dry-run uses the reservation's stored reconciliation and provider-target
+identities to inspect the original provider operation. Reconciliation identity,
+product, instance, provider-target, or completed-response drift returns a
+conflict before provider inspection; provider read uncertainty alone produces
+`hold_unknown`. It does not reserve,
+release, supersede, retry, adopt, or write deployment, inventory, idempotency,
+or provider state. The bounded response reports only reservation state and
+timestamps, hashed identifiers, provider outcome/status, retry safety, one of
+`replay_completed`, `wait_for_active_lease`, `adopt_observed`,
+`retry_original_operation`, or `hold_unknown`, and a canonical recovery digest.
+Raw scopes, idempotency keys, reconciliation keys, provider-target keys,
+original payloads, target URLs, and provider payloads are never returned.
+
+There is no recovery apply endpoint in Stage 1. A later stage must bind any
+mutation to reviewed dry-run evidence and revalidate the reservation atomically;
+until then, the recovery digest is evidence only and authorizes no mutation.
+
 ## Target Launchplane Ingress
 
 The target communication model is:
