@@ -401,8 +401,17 @@ Before appending a browser Owner event, Launchplane replaces the exact-head
 check with an `action_required` **updating decision** projection. If that
 conservative projection or its token lifecycle fails, the event is not
 persisted. After append, Launchplane projects the resulting decision against the
-exact target bound into the stored event. If final projection fails, the
-conservative non-green check remains and the route returns
+current exact target and ledger. Human event writes for one immutable repository
+id and pull request are serialized through a store-backed projection lock. A
+repository-id change is rejected and retried before entering the critical
+section, and the freshly resolved event binding must still match that lock
+before the conservative projection or append can occur. A rename remains on
+the same lock. Final projection is verified against a second current-state
+evaluation before the lock is released.
+PostgreSQL lock waiters use dedicated unpooled advisory-lock connections so they
+cannot exhaust the record-store pool needed by the lock holder. If final
+projection, token cleanup, or current-state confirmation fails, Launchplane
+restores the conservative non-green check before the route returns
 `503 owner_acceptance_projection_reconciliation_required`; retrying with the
 same idempotency key replays the immutable event and retries projection. The
 explicit projection endpoint provides the same reconciliation path. Browsers

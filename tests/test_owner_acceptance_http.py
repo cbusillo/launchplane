@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 from typing import Any, Callable, cast
+import asyncio
 import unittest
 
 from fastapi import FastAPI, HTTPException
@@ -28,6 +30,7 @@ from control_plane.service_auth import (
     LaunchplaneIdentity,
     TerminalAgentIdentity,
 )
+from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.http import lifespan_client
 from tests.test_owner_acceptance import (
     PRODUCT,
@@ -97,6 +100,41 @@ class _GitHubCheckApi:
         return self.check_run
 
 
+class _BlockingAcceptedProjectionApi(_GitHubCheckApi):
+    def __init__(self) -> None:
+        super().__init__()
+        self.block_accepted_projection = True
+        self.accepted_projection_entered = Event()
+        self.release_accepted_projection = Event()
+
+    def __call__(self, **kwargs: Any) -> object:
+        body = kwargs.get("body")
+        if (
+            isinstance(body, dict)
+            and isinstance(body.get("output"), dict)
+            and body["output"].get("title") == "Owner acceptance: accepted"
+            and self.block_accepted_projection
+        ):
+            self.accepted_projection_entered.set()
+            if not self.release_accepted_projection.wait(timeout=10):
+                raise RuntimeError("timed out waiting to release accepted projection")
+        return super().__call__(**kwargs)
+
+
+class _FailingDeleteApi(_GitHubCheckApi):
+    def __init__(self, *, fail_delete_numbers: tuple[int, ...]) -> None:
+        super().__init__()
+        self.delete_count = 0
+        self.fail_delete_numbers = set(fail_delete_numbers)
+
+    def __call__(self, **kwargs: Any) -> object:
+        if kwargs.get("method") == "DELETE":
+            self.delete_count += 1
+            if self.delete_count in self.fail_delete_numbers:
+                raise RuntimeError("GitHub token revocation is unavailable")
+        return super().__call__(**kwargs)
+
+
 def _app(
     *,
     store: object,
@@ -135,6 +173,14 @@ def _app(
         ),
     )
     return app
+
+
+def _postgres_store(root: Path) -> PostgresRecordStore:
+    source_store = _store(root / "filesystem")
+    store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{root / 'records.sqlite3'}")
+    store.ensure_schema()
+    store.import_core_records_from_filesystem(source_store)
+    return store
 
 
 class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -325,6 +371,202 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [body["conclusion"] for body in github_api.successful_write_bodies],
             ["action_required", "success"],
+        )
+
+    async def test_final_token_revoke_failure_restores_conservative_projection(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            github_api = _FailingDeleteApi(fail_delete_numbers=(2,))
+            app = _app(store=store, github_api=github_api)
+
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                response = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": {
+                            "repository": REPOSITORY,
+                            "pull_request_number": 2022,
+                        },
+                        "action": "accepted",
+                        "expected_binding_sha256": evaluated.json()["decision"]["binding"][
+                            "binding_sha256"
+                        ],
+                    },
+                    headers={"Idempotency-Key": "accept-with-revoke-failure"},
+                )
+                event_count = len(store.list_owner_acceptance_event_records())
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "owner_acceptance_projection_reconciliation_required",
+        )
+        self.assertEqual(event_count, 1)
+        assert github_api.check_run is not None
+        self.assertEqual(github_api.check_run["conclusion"], "action_required")
+        self.assertEqual(
+            github_api.check_run["output"]["title"],
+            "Owner acceptance: updating decision",
+        )
+        self.assertEqual(
+            [body["conclusion"] for body in github_api.successful_write_bodies],
+            ["action_required", "success", "action_required"],
+        )
+
+    async def test_concurrent_negative_event_cannot_restore_stale_success(self) -> None:
+        for store_kind in ("filesystem", "sqlite"):
+            with self.subTest(store=store_kind), TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = _store(root) if store_kind == "filesystem" else _postgres_store(root)
+                github_api = _BlockingAcceptedProjectionApi()
+                app = _app(store=store, github_api=github_api)
+
+                async with lifespan_client(app) as client:
+                    evaluated = await client.get(
+                        OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                        params={"repository": REPOSITORY, "pull_request_number": 2022},
+                    )
+                    binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
+                    accepted_task = asyncio.create_task(
+                        client.post(
+                            OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                            json={
+                                "target": {
+                                    "repository": REPOSITORY,
+                                    "pull_request_number": 2022,
+                                },
+                                "action": "accepted",
+                                "expected_binding_sha256": binding_sha256,
+                            },
+                            headers={"Idempotency-Key": "concurrent-accepted"},
+                        )
+                    )
+                    entered = await asyncio.to_thread(
+                        github_api.accepted_projection_entered.wait,
+                        10,
+                    )
+                    self.assertIs(entered, True)
+                    changes_task = asyncio.create_task(
+                        client.post(
+                            OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                            json={
+                                "target": {
+                                    "repository": REPOSITORY,
+                                    "pull_request_number": 2022,
+                                },
+                                "action": "changes_requested",
+                                "expected_binding_sha256": binding_sha256,
+                                "reason": "A concurrent product correction is required.",
+                            },
+                            headers={"Idempotency-Key": "concurrent-changes-requested"},
+                        )
+                    )
+                    await asyncio.sleep(0.1)
+                    self.assertIs(changes_task.done(), False)
+                    github_api.release_accepted_projection.set()
+                    accepted, changes_requested = await asyncio.gather(
+                        accepted_task,
+                        changes_task,
+                    )
+                    events = sorted(
+                        store.list_owner_acceptance_event_records(),
+                        key=lambda event: event.subject_sequence,
+                    )
+
+                self.assertEqual(accepted.status_code, 202, accepted.text)
+                self.assertEqual(changes_requested.status_code, 202, changes_requested.text)
+                self.assertEqual(
+                    [event.action for event in events],
+                    ["accepted", "changes_requested"],
+                )
+                assert github_api.check_run is not None
+                self.assertEqual(github_api.check_run["conclusion"], "action_required")
+                self.assertEqual(
+                    github_api.check_run["output"]["title"],
+                    "Owner acceptance: changes requested",
+                )
+
+    async def test_projection_endpoint_cannot_overwrite_concurrent_negative_event(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            github_api = _BlockingAcceptedProjectionApi()
+            github_api.block_accepted_projection = False
+            app = _app(store=store, github_api=github_api)
+
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
+                accepted = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": {
+                            "repository": REPOSITORY,
+                            "pull_request_number": 2022,
+                        },
+                        "action": "accepted",
+                        "expected_binding_sha256": binding_sha256,
+                    },
+                    headers={"Idempotency-Key": "projection-race-accepted"},
+                )
+                self.assertEqual(accepted.status_code, 202, accepted.text)
+                assert github_api.check_run is not None
+                github_api.check_run["external_id"] = "0" * 64
+                github_api.block_accepted_projection = True
+                github_api.accepted_projection_entered.clear()
+                github_api.release_accepted_projection.clear()
+                projection_task = asyncio.create_task(
+                    client.post(
+                        OWNER_ACCEPTANCE_PROJECT_ROUTE,
+                        json={
+                            "target": {
+                                "repository": REPOSITORY,
+                                "pull_request_number": 2022,
+                            }
+                        },
+                    )
+                )
+                entered = await asyncio.to_thread(
+                    github_api.accepted_projection_entered.wait,
+                    10,
+                )
+                self.assertIs(entered, True)
+                changes_task = asyncio.create_task(
+                    client.post(
+                        OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                        json={
+                            "target": {
+                                "repository": REPOSITORY,
+                                "pull_request_number": 2022,
+                            },
+                            "action": "changes_requested",
+                            "expected_binding_sha256": binding_sha256,
+                            "reason": "The projected approval is no longer current.",
+                        },
+                        headers={"Idempotency-Key": "projection-race-changes"},
+                    )
+                )
+                await asyncio.sleep(0.1)
+                self.assertIs(changes_task.done(), False)
+                github_api.release_accepted_projection.set()
+                projected, changes_requested = await asyncio.gather(
+                    projection_task,
+                    changes_task,
+                )
+
+        self.assertEqual(projected.status_code, 200, projected.text)
+        self.assertEqual(changes_requested.status_code, 202, changes_requested.text)
+        assert github_api.check_run is not None
+        self.assertEqual(github_api.check_run["conclusion"], "action_required")
+        self.assertEqual(
+            github_api.check_run["output"]["title"],
+            "Owner acceptance: changes requested",
         )
 
     async def test_projection_rejects_head_drift_before_github_write(self) -> None:

@@ -216,11 +216,13 @@ def _seed_owner_store(
     root: Path,
     *,
     owner_policy: ProductOwnerPolicyRecord | None = None,
+    include_owner_policy: bool = True,
     preview_enabled: bool = False,
 ) -> FilesystemRecordStore:
     store = FilesystemRecordStore(state_dir=root)
     store.write_change_impact_policy_record(_impact_policy())
-    store.write_product_owner_policy_record(owner_policy or _owner_policy())
+    if include_owner_policy:
+        store.write_product_owner_policy_record(owner_policy or _owner_policy())
     store.write_product_owner_requirement_record(_owner_requirement())
     store.write_product_profile_record(_preview_profile(enabled=preview_enabled))
     return store
@@ -385,35 +387,51 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                 self.assertEqual(facet.owner_status, scenario)
                 self.assertEqual(facet.state, "blocked_owner_evidence")
                 self.assertIn(expected_reasons[scenario], facet.reason_codes)
+                self.assertNotEqual(evaluation.readiness.state, "ready")
+                self.assertIn(expected_reasons[scenario], evaluation.readiness.reason_codes)
 
-    def test_unavailable_owner_authority_is_fail_closed(self) -> None:
-        with TemporaryDirectory() as directory:
-            owner_policy = _owner_policy(
-                owners=(
-                    ProductOwnerGrant(
-                        identity=ProductOwnerIdentity(
-                            provider="github",
-                            provider_subject_id=str(OWNER_GITHUB_ID),
+    def test_denied_and_unavailable_owner_authority_are_fail_closed(self) -> None:
+        scenarios = {
+            "denied": (
+                _owner_policy(
+                    owners=(
+                        ProductOwnerGrant(
+                            identity=ProductOwnerIdentity(
+                                provider="github",
+                                provider_subject_id=str(OWNER_GITHUB_ID),
+                            ),
+                            repository_ids=("9999",),
+                            environments=("pull_request",),
                         ),
-                        repository_ids=("9999",),
-                        environments=("pull_request",),
-                    ),
+                    )
+                ),
+                True,
+                "owner_authority_denied",
+            ),
+            "unavailable": (None, False, "owner_authority_unavailable"),
+        }
+        for scenario, (owner_policy, include_owner_policy, reason_code) in scenarios.items():
+            with self.subTest(scenario=scenario), TemporaryDirectory() as directory:
+                store = _seed_owner_store(
+                    Path(directory),
+                    owner_policy=owner_policy,
+                    include_owner_policy=include_owner_policy,
                 )
-            )
-            store = _seed_owner_store(Path(directory), owner_policy=owner_policy)
-            evidence = _owner_repository_evidence()
-            evaluation = _evaluate_owner_live(
-                store=store,
-                provider=_EvidenceProvider(evidence),
-                evidence=evidence,
-            )
-            facet = _owner_facet(evaluation)
+                evidence = _owner_repository_evidence()
+                evaluation = _evaluate_owner_live(
+                    store=store,
+                    provider=_EvidenceProvider(evidence),
+                    evidence=evidence,
+                )
+                facet = _owner_facet(evaluation)
 
-        self.assertEqual(facet.owner_status, "unavailable")
-        self.assertEqual(facet.owner_reason_code, "owner_authority_unavailable")
-        self.assertEqual(facet.state, "blocked_owner_evidence")
-        self.assertIn("owner_authority_unavailable", facet.reason_codes)
-        self.assertEqual(facet.event_id, "")
+                self.assertEqual(facet.owner_status, "unavailable")
+                self.assertEqual(facet.owner_reason_code, reason_code)
+                self.assertEqual(facet.state, "blocked_owner_evidence")
+                self.assertIn(reason_code, facet.reason_codes)
+                self.assertNotEqual(evaluation.readiness.state, "ready")
+                self.assertIn(reason_code, evaluation.readiness.reason_codes)
+                self.assertEqual(facet.event_id, "")
 
     def test_accepted_exact_binding_is_live_and_admissible(self) -> None:
         with TemporaryDirectory() as directory:
@@ -472,6 +490,8 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     facet.binding_sha256,
                     accepted.record.binding.binding_sha256,
                 )
+                self.assertNotEqual(evaluation.readiness.state, "ready")
+                self.assertIn("owner_acceptance_stale", evaluation.readiness.reason_codes)
 
     def test_preview_generation_drift_stales_persisted_acceptance(self) -> None:
         with TemporaryDirectory() as directory:
@@ -485,6 +505,15 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                 action="accepted",
                 source_event_id="accepted-preview-generation-one",
             )
+            accepted_evaluation = _evaluate_owner_live(
+                store=store,
+                provider=provider,
+                evidence=evidence,
+            )
+            accepted_facet = _owner_facet(accepted_evaluation)
+            self.assertEqual(accepted_facet.state, "ready")
+            self.assertEqual(accepted_evaluation.readiness.state, "ready")
+            self.assertIsNotNone(accepted.record.binding.preview)
             _write_preview_evidence(
                 store,
                 generation_id="preview-generic-web-a-pr-2022-generation-0002",
@@ -502,6 +531,8 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
         self.assertEqual(facet.owner_reason_code, "acceptance_stale")
         self.assertEqual(facet.event_id, accepted.record.event_id)
         self.assertNotEqual(facet.binding_sha256, accepted.record.binding.binding_sha256)
+        self.assertNotEqual(evaluation.readiness.state, "ready")
+        self.assertIn("owner_acceptance_stale", evaluation.readiness.reason_codes)
 
     def test_owner_policy_and_requirement_drift_stale_acceptance(self) -> None:
         for drift_kind in ("policy", "requirement"):
@@ -553,6 +584,8 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     facet.binding_sha256,
                     accepted.record.binding.binding_sha256,
                 )
+                self.assertNotEqual(evaluation.readiness.state, "ready")
+                self.assertIn("owner_acceptance_stale", evaluation.readiness.reason_codes)
 
 
 class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):

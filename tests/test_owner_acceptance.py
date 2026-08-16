@@ -807,6 +807,36 @@ class OwnerAcceptanceTests(unittest.TestCase):
             with self.assertRaises(OwnerAcceptanceEventConflictError):
                 store.write_owner_acceptance_event_record(conflicting)
 
+    def test_before_write_can_reject_resolved_binding_before_append(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            provider = _EvidenceProvider(_repository_evidence())
+            expected_binding_sha256 = _expected_binding_sha256(store=store, provider=provider)
+            observed_records: list[OwnerAcceptanceEventRecord] = []
+
+            def reject_before_write(record: OwnerAcceptanceEventRecord) -> None:
+                observed_records.append(record)
+                raise RuntimeError("resolved binding changed outside the held lock")
+
+            with self.assertRaisesRegex(RuntimeError, "outside the held lock"):
+                record_owner_acceptance_event(
+                    store=store,
+                    repository_evidence_provider=provider,
+                    target=target,
+                    identity=_human(),
+                    action="accepted",
+                    expected_binding_sha256=expected_binding_sha256,
+                    source_event_kind="browser_api",
+                    source_event_id="reject-before-write",
+                    occurred_at="2026-08-07T12:00:00Z",
+                    before_write=reject_before_write,
+                )
+
+            self.assertEqual(len(observed_records), 1)
+            self.assertEqual(observed_records[0].binding.repository_id, REPOSITORY_ID)
+            self.assertEqual(store.list_owner_acceptance_event_records(), ())
+
     def test_complete_human_transition_table_and_resolution_evidence(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))

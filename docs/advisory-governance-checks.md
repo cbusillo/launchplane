@@ -67,8 +67,16 @@ new check run and cannot reuse evidence from the prior head.
 Browser Owner event writes first replace the exact-head check with a
 conservative `action_required` state. Failure to establish that non-green state
 blocks the immutable append. Launchplane then projects the stored event's final
-decision against its exact bound target; final delivery failure leaves the
-conservative check in place and returns a reconciliation-required error.
+decision from a fresh current-ledger evaluation while holding a store-backed
+immutable-repository-id projection lock for the pull request. Repository-id
+changes are rejected and retried before the critical section, and the resolved
+event binding must still match the held lock before projection or append.
+Repository renames remain serialized by the stable id. A second evaluation
+confirms that the projected state stayed current before the lock is released.
+PostgreSQL waiters use dedicated unpooled advisory-lock connections rather than
+consuming the record-store pool. Final delivery, token cleanup, or confirmation
+failure restores the conservative check and returns a reconciliation-required
+error.
 Idempotent replay and the explicit projection endpoint can safely retry the
 final projection. This sequence remains non-authoritative for admission, and
 browser sessions do not gain projection authority.

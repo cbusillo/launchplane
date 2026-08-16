@@ -12,6 +12,7 @@ from alembic.config import Config as AlembicConfig
 from click.testing import CliRunner
 from sqlalchemy import create_engine, inspect, insert, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.pool import NullPool
 from sqlalchemy.sql.schema import Index
 
 from control_plane.cli import main
@@ -1630,6 +1631,19 @@ def _merge_train_stack_collapse_plan_record(
 
 
 class PostgresRecordStoreTests(unittest.TestCase):
+    def test_owner_acceptance_projection_lock_does_not_consume_record_pool(self) -> None:
+        store = PostgresRecordStore(
+            database_url="postgresql+psycopg://test:test@127.0.0.1:1/launchplane"
+        )
+        try:
+            assert store._owner_acceptance_projection_lock_engine is not None
+            self.assertIsInstance(
+                store._owner_acceptance_projection_lock_engine.pool,
+                NullPool,
+            )
+        finally:
+            store.close()
+
     def test_postgres_metadata_index_names_fit_identifier_limit(self) -> None:
         index_names = tuple(
             index.name
