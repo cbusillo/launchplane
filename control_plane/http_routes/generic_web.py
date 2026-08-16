@@ -29,7 +29,7 @@ from control_plane.generic_web_deploy_http import (
     resolve_generic_web_deploy_lane,
 )
 from control_plane.generic_web_deploy_provider_adapter import (
-    _GenericWebDeployProviderMutationAdapter,
+    GenericWebDeployProviderMutationAdapter,
 )
 from control_plane.generic_web_deploy_recovery_http import (
     GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE as _GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
@@ -1324,7 +1324,7 @@ def build_generic_web_write_route_handlers(
             route_path=_GENERIC_WEB_DEPLOY_ROUTE,
             payload=cast(dict[str, object], raw_payload),
         )
-        adapter = _GenericWebDeployProviderMutationAdapter(
+        adapter = GenericWebDeployProviderMutationAdapter(
             control_plane_root=dependencies.control_plane_root,
             record_store=record_store,
             deploy_request=deploy_request,
