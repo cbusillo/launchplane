@@ -1,0 +1,39 @@
+---
+name: Generic-web deploy recovery dry run
+description: Inspect one exact legacy generic-web deploy reservation through Launchplane.
+
+inputs:
+  launchplane-url:
+    description: Base URL for the Launchplane service.
+    required: true
+  request-json:
+    description: Exact legacy deploy coordinates and operator reason as JSON.
+    required: true
+  audience:
+    description: Optional GitHub OIDC audience. Defaults to the service URL host.
+    required: false
+    default: ""
+  timeout-ms:
+    description: Launchplane request timeout in milliseconds.
+    required: false
+    default: "120000"
+
+outputs:
+  recovery_digest:
+    description: Canonical digest binding the observed recovery plan.
+  proposed_action:
+    description: Recovery action proposed by Launchplane.
+  reservation_state:
+    description: Current durable reservation state.
+  provider_outcome:
+    description: Bounded provider inspection outcome.
+  provider_status:
+    description: Bounded provider status.
+  retry_safe:
+    description: Whether retrying the original operation is safe.
+  observed_at:
+    description: Timestamp for the dry-run observation.
+
+runs:
+  using: node24
+  main: dist/index.mjs
