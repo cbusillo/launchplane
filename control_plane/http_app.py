@@ -80,7 +80,10 @@ from control_plane.github_app_identity import (
     mint_repository_installation_token,
     resolve_advisory_github_app_identity,
 )
-from control_plane.owner_acceptance import evaluate_owner_acceptance
+from control_plane.owner_acceptance import (
+    OwnerAcceptanceEvaluationUnavailableError,
+    evaluate_owner_acceptance,
+)
 from control_plane.owner_acceptance_projection import (
     owner_acceptance_workbench_reference_url,
     project_owner_acceptance_decision,
@@ -17417,7 +17420,13 @@ def create_launchplane_fastapi_app(
                         _LOGGER.exception(
                             "Owner acceptance GitHub projection refresh failed during preview feedback."
                         )
-            except (click.ClickException, LookupError, TypeError, ValueError):
+            except (
+                OwnerAcceptanceEvaluationUnavailableError,
+                click.ClickException,
+                LookupError,
+                TypeError,
+                ValueError,
+            ):
                 owner_review_status = "unavailable"
         try:
             feedback_record = build_preview_pr_feedback_record(
