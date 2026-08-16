@@ -4,10 +4,11 @@ title: Owner Acceptance
 
 ## Purpose
 
-Owner acceptance is a shadow-only exact-change ledger for product/system Owner
-review of pull requests. Every affected product receives an independent binding
-and decision. It does not authorize production, merge trains, tenant admission,
-promotion, GitHub required checks, or manager-preview flows.
+Owner acceptance is Launchplane's authoritative exact-change product decision for
+pull requests. Every affected product receives an independent binding and decision.
+A current accepted decision is required by merge readiness; it does not replace
+technical checks, engineering review, merge admission, landing, or production
+authorization.
 
 The persisted human action remains `accepted` because the event records the
 Owner's durable product judgment. The workbench presents that action as
@@ -77,8 +78,8 @@ providers and storage. The pure read remains outside the browser-mutation
 surface and cannot consume a request body.
 
 The Owner workbench also accepts `repository` and `pull_request` query
-parameters at `/ui/engineering/owner-acceptance`. A server-issued advisory
-check details link uses the configured browser public origin and those exact
+parameters at `/ui/engineering/owner-acceptance`. A server-issued GitHub check
+details link uses the configured browser public origin and those exact
 parameters, so opening the link expands Exact lookup, prefills the repository
 and pull-request fields, and evaluates the target automatically. The browser
 still sends only the exact repository and PR reference to the evaluation API;
@@ -113,7 +114,7 @@ exact-change-only acceptance.
 ## Admissibility
 
 A recorded event is immutable. Admissibility is a separate, recomputed judgment
-about whether that history is *currently* usable. `OwnerAcceptanceDecision` and
+about whether that history is _currently_ usable. `OwnerAcceptanceDecision` and
 each product decision expose `admissible`, which is true only when the status is
 `accepted` and every current check passes.
 
@@ -156,29 +157,28 @@ revision makes the historical event inadmissible instead of silently valid.
 `403 owner_acceptance_self_review_denied` when the rule denies the write, and
 viewer eligibility mirrors the same rule with reason code `self_review_denied`.
 
-## Non-Authority Semantics
+## Authority Semantics
 
-Stored human actions and their digests never change. API projections add
-machine-readable non-authority descriptors:
+Stored human actions and their digests never change. API projections expose
+machine-readable review semantics through `human_action_semantics` on decisions
+and event responses.
 
-- decisions expose `human_action_semantics` (for example
-  `product_review_accepted`) and `authorizes`, which is always empty;
-- event responses expose the same pair under `semantics`.
-
-The contract rejects any decision that claims authority or claims admissibility
-without a current acceptance, so a client cannot read Owner product review as
-merge readiness, landed state, or production authorization.
+The contract rejects admissibility without a current acceptance. Acceptance is
+authoritative for the Owner facet while remaining distinct from aggregate merge
+readiness, the one-attempt admission record, provider landing, and production
+authorization.
 
 For every successfully impact-resolved product change, the response includes a
 deterministic `products` entry for each affected product in change-impact order;
 single-product changes therefore contain one entry. Early engineering-only,
 stale-impact, and unavailable-impact results contain no product entries. Each
 entry carries its own status, reason, binding, and current event. The top-level
-status is the worst current product status using this precedence: `unavailable`, `stale`,
-`revoked`, `changes_requested`, `pending`, `accepted`, `not_required`. Ties use
-the existing product order. The singular top-level binding and event mirror
-that governing product for compatibility. Aggregate acceptance is therefore
-`accepted` only when every affected product is currently accepted.
+status is the worst current product status using this precedence:
+`unavailable`, `stale`, `revoked`, `changes_requested`, `pending`, `accepted`,
+`not_required`. Ties use the existing product order. The singular top-level
+binding and event mirror that governing product for compatibility. Aggregate
+acceptance is therefore `accepted` only when every affected product is currently
+accepted.
 
 Products removed from later current change-impact evidence stop governing the
 read result; evaluation does not write synthetic ledger events. Products added
@@ -316,6 +316,7 @@ state under clock skew.
 
 **Ledger status:** Each entry carries a `ledger_status` and `next_action`
 derived from the latest recorded event action:
+
 - `accepted` → `accepted`
 - `changes_requested` → `changes_requested`
 - `revoked` → `revoked`
@@ -353,8 +354,8 @@ server-issued decisions and binding-scoped Owner controls directly on each PR.
 It also displays queue entries from `GET /v1/owner-acceptance/queue` with:
 
 - loading, error, denied, and empty states via `EngineeringResourceGate`;
-- a boundary note explaining shadow mode, automatic Current discovery, and the
-  separate ledger-only recorded derivation;
+- a boundary note explaining Launchplane authority, automatic Current
+  discovery, and the separate ledger-only recorded derivation;
 - server-side filters by status (exact) and repository (substring);
 - per-entry recorded binding and event provenance with `verification_required`
   framing — rows are labeled **Recorded**, not Current;
@@ -376,8 +377,9 @@ evidence. Launchplane re-evaluates the binding and the authenticated GitHub
 human's current Owner membership at write time. Request-changes and revoke
 require a reason, revoke requires explicit confirmation, replay preserves the
 same idempotency key, and `409 owner_acceptance_binding_changed` refreshes the
-Current item without auto-resubmitting. Every receipt remains shadow,
-non-authoritative, and has no merge or production enforcement effect.
+Current item without auto-resubmitting. Every receipt confirms an authoritative
+Owner decision and explains that Launchplane will recompute exact-head merge
+readiness while production authorization remains separate.
 When the current identical-binding state is `changes_requested`, choosing
 accepted reveals required resolution-summary and evidence-reference fields; the
 browser cannot submit that reversal until both are present.
@@ -402,19 +404,19 @@ failure only: the persisted human event and its `202` response are not rolled
 back or rewritten. Browsers never receive projection credentials or projection
 authority.
 
-The completed check conclusion is always `neutral`; the output lists the
-aggregate state plus each affected product and binding. The check remains
-shadow-only, is excluded from Launchplane merge/admission technical inputs, and
-cannot become Owner authority.
+The completed check conclusion is `success` for accepted or not-required state,
+`action_required` for pending, stale, revoked, or changes-requested state, and
+`failure` when authoritative evidence is unavailable. The output lists the
+aggregate state plus each affected product and binding. The check is excluded
+from Launchplane technical-check inputs and cannot replace the Launchplane decision.
 
 ## Combined Governance Read Model
 
 `GET /v1/governance/projection` and the Governance evidence workbench preserve
 the current Owner evaluation and immutable event history alongside separate L2
-readiness, L3 admission, landing outcome, and advisory facets. This projection
-does not reinterpret Owner `accepted`; it continues to expose
-`human_action_semantics=product_review_accepted` and `authorizes=[]` even when
-later machine evidence is ready, admitted, or landed.
+readiness, L3 admission, landing outcome, and projection facets. The Level 1
+facet is authoritative Owner acceptance and preserves the immutable event history;
+later readiness, admission, and landing records remain independent evidence.
 
 ## Out Of Scope
 

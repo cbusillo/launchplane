@@ -120,10 +120,11 @@ unscoped facet is `unknown` and fails closed.
 
 ## Advisory Checks
 
-Launchplane Owner, engineering-review, and legacy shadow check contexts are
-observations only. The live adapter removes them from required technical-check
-policy and signal aggregation. Their observed names and states may be returned
-for diagnostics, but they cannot change readiness state or reason codes.
+The `launchplane/owner-acceptance`, `launchplane/engineering-review`, and legacy
+`launchplane/engineering-review-shadow` check contexts are observations only.
+The live adapter removes them from required technical-check policy and signal
+aggregation. Their observed names and states may be returned for diagnostics,
+but they cannot change readiness state or reason codes.
 
 Engineering-review records remain shadow-only while the repository's active
 DB-backed merge-train policy selects `engineering_review_mode = "advisory"`.

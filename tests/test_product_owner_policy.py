@@ -27,7 +27,7 @@ from control_plane.product_owner_service import (
     apply_product_owner_policy,
     apply_product_owner_requirement,
     apply_product_owner_routing,
-    evaluate_product_owner_shadow_authority,
+    evaluate_product_owner_authority,
     get_product_owner_read_model,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -233,7 +233,7 @@ class ProductOwnerPolicyTests(unittest.TestCase):
     def test_requirement_is_separate_and_routing_is_not_authority(self) -> None:
         policy = _policy()
         actor = ProductOwnerActorIdentity(provider="github", provider_subject_id="1001")
-        not_required = evaluate_product_owner_shadow_authority(
+        not_required = evaluate_product_owner_authority(
             context=_context(),
             actor=actor,
             policies=(policy,),
@@ -251,9 +251,8 @@ class ProductOwnerPolicyTests(unittest.TestCase):
             ),
         )
         self.assertEqual(not_required.decision, "not_required")
-        self.assertFalse(not_required.authoritative)
 
-        routed_non_owner = evaluate_product_owner_shadow_authority(
+        routed_non_owner = evaluate_product_owner_authority(
             context=_context(),
             actor=ProductOwnerActorIdentity(provider="github", provider_subject_id="9999"),
             policies=(policy,),
@@ -277,7 +276,7 @@ class ProductOwnerPolicyTests(unittest.TestCase):
         self.assertEqual(routed_non_owner.decision, "denied")
         self.assertEqual(routed_non_owner.reason_code, "actor_not_current_owner")
 
-        missing_provenance = evaluate_product_owner_shadow_authority(
+        missing_provenance = evaluate_product_owner_authority(
             context=_context(),
             actor=actor,
             policies=(policy,),
@@ -297,7 +296,7 @@ class ProductOwnerPolicyTests(unittest.TestCase):
         current = second.model_copy(update={"status": "active"})
         history = first.model_copy(update={"status": "superseded"})
 
-        removed = evaluate_product_owner_shadow_authority(
+        removed = evaluate_product_owner_authority(
             context=_context(),
             actor=ProductOwnerActorIdentity(provider="github", provider_subject_id="1001"),
             policies=(history, current),
@@ -310,7 +309,7 @@ class ProductOwnerPolicyTests(unittest.TestCase):
         )
         self.assertEqual(removed.reason_code, "actor_not_current_owner")
 
-        stale = evaluate_product_owner_shadow_authority(
+        stale = evaluate_product_owner_authority(
             context=_context(),
             actor=ProductOwnerActorIdentity(provider="github", provider_subject_id="1002"),
             policies=(history, current),
@@ -323,7 +322,7 @@ class ProductOwnerPolicyTests(unittest.TestCase):
         )
         self.assertEqual(stale.reason_code, "stale_policy")
 
-        stale_requirement = evaluate_product_owner_shadow_authority(
+        stale_requirement = evaluate_product_owner_authority(
             context=_context(),
             actor=ProductOwnerActorIdentity(provider="github", provider_subject_id="1002"),
             policies=(history, current),
@@ -336,7 +335,7 @@ class ProductOwnerPolicyTests(unittest.TestCase):
         )
         self.assertEqual(stale_requirement.reason_code, "stale_requirement")
 
-        cross_product = evaluate_product_owner_shadow_authority(
+        cross_product = evaluate_product_owner_authority(
             context=_context().model_copy(update={"product": "product-beta"}),
             actor=ProductOwnerActorIdentity(provider="github", provider_subject_id="1002"),
             policies=(history, current),
@@ -345,7 +344,7 @@ class ProductOwnerPolicyTests(unittest.TestCase):
         )
         self.assertEqual(cross_product.reason_code, "owner_policy_unavailable")
 
-        unlisted_human = evaluate_product_owner_shadow_authority(
+        unlisted_human = evaluate_product_owner_authority(
             context=_context(),
             actor=ProductOwnerActorIdentity(provider="github", provider_subject_id="9999"),
             policies=(history, current),
@@ -353,7 +352,7 @@ class ProductOwnerPolicyTests(unittest.TestCase):
             routings=(),
         )
         self.assertEqual(unlisted_human.reason_code, "actor_not_current_owner")
-        self.assertFalse(unlisted_human.authoritative)
+        self.assertEqual(unlisted_human.decision, "denied")
 
     def test_policy_scope_without_current_owner_is_unavailable(self) -> None:
         uncovered_policy = ProductOwnerPolicyRecord(
@@ -371,7 +370,7 @@ class ProductOwnerPolicyTests(unittest.TestCase):
             source="test",
             reason="Leave the evaluated repository outside the policy scope.",
         )
-        evaluation = evaluate_product_owner_shadow_authority(
+        evaluation = evaluate_product_owner_authority(
             context=_context(),
             actor=ProductOwnerActorIdentity(provider="github", provider_subject_id="1001"),
             policies=(uncovered_policy,),
@@ -386,7 +385,7 @@ class ProductOwnerPolicyTests(unittest.TestCase):
         original_digest = policy.policy_digest
         policy.owners = (_grant("9999"),)
         actor = ProductOwnerActorIdentity(provider="github", provider_subject_id="9999")
-        evaluation = evaluate_product_owner_shadow_authority(
+        evaluation = evaluate_product_owner_authority(
             context=_context(),
             actor=actor,
             policies=(policy,),
@@ -557,14 +556,14 @@ class ProductOwnerPolicyTests(unittest.TestCase):
                     expected_current_routing_digest="f" * 64,
                 )
 
-    def test_shadow_evaluation_rejects_noncurrent_or_future_authority(self) -> None:
+    def test_authority_evaluation_rejects_noncurrent_or_future_authority(self) -> None:
         requirement = _requirement()
         gap_policy = _policy(
             revision=2,
             subjects=("1001",),
             supersedes_record_id=_policy().record_id,
         )
-        gap = evaluate_product_owner_shadow_authority(
+        gap = evaluate_product_owner_authority(
             context=_context(),
             actor=ProductOwnerActorIdentity(provider="github", provider_subject_id="1001"),
             policies=(gap_policy,),
@@ -584,7 +583,7 @@ class ProductOwnerPolicyTests(unittest.TestCase):
             source="test",
             reason="Future requirement must not become current early.",
         )
-        future = evaluate_product_owner_shadow_authority(
+        future = evaluate_product_owner_authority(
             context=_context(),
             actor=ProductOwnerActorIdentity(provider="github", provider_subject_id="1001"),
             policies=(_policy(),),

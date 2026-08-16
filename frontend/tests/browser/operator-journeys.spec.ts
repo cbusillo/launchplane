@@ -748,18 +748,18 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByRole("heading", { level: 1, name: "Governance evidence" }),
     ).toBeFocused();
-    await expect(page.getByRole("region", { name: "Level 1 historical Owner judgment" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Level 1 authoritative Owner acceptance" })).toBeVisible();
     await expect(page.getByRole("region", { name: "Level 2 current merge readiness" })).toBeVisible();
     await expect(page.getByRole("region", { name: "Level 3 immutable merge admission" })).toBeVisible();
     await expect(page.getByRole("region", { name: "Separate landing outcome" })).toBeVisible();
-    await expect(page.getByRole("region", { name: "Neutral advisory observations" })).toBeVisible();
-    const owner = page.getByRole("region", { name: "Level 1 historical Owner judgment" });
-    await expect(owner).toContainText("Owner product judgment");
-    await expect(owner).toContainText("authorizes: []");
+    await expect(page.getByRole("region", { name: "GitHub status observations" })).toBeVisible();
+    const owner = page.getByRole("region", { name: "Level 1 authoritative Owner acceptance" });
+    await expect(owner).toContainText("Owner acceptance");
+    await expect(owner).toContainText("authoritative product decision");
     await expect(owner).toContainText("product_review_accepted");
     await expect(page.getByText("No admission recorded", { exact: true })).toBeVisible();
     await expect(page.getByText("Not Observed · None target", { exact: true })).toBeVisible();
-    await expect(page.getByText("Neutral · non-blocking", { exact: true })).toBeVisible();
+    await expect(page.getByText("Non-authoritative", { exact: true })).toBeVisible();
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "governance-evidence-independent-facets");
     diagnostics.assertClean();
@@ -772,7 +772,7 @@ test.describe("operator journeys", () => {
 
     await page.goto("/ui/engineering/governance-projection?fixture=products&scenario=15");
 
-    const owner = page.getByRole("region", { name: "Level 1 historical Owner judgment" });
+    const owner = page.getByRole("region", { name: "Level 1 authoritative Owner acceptance" });
     await expect(owner.getByText("Revoked", { exact: true }).first()).toBeVisible();
     await expect(page.getByRole("region", { name: "Level 3 immutable merge admission" })).toContainText("Recorded for current target");
     await expect(page.getByRole("region", { name: "Separate landing outcome" })).toContainText("Landed · Current target");
@@ -804,7 +804,7 @@ test.describe("operator journeys", () => {
     await expect(page.getByText("preview_isolation_insufficient", { exact: true }).first()).toBeVisible();
     await page.getByRole("button", { name: "Refresh governance" }).click();
     await expect(page.getByText("Cached evidence", { exact: true })).toBeVisible();
-    await expect(page.getByRole("region", { name: "Level 1 historical Owner judgment" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Level 1 authoritative Owner acceptance" })).toBeVisible();
 
     await page.goto("/ui/engineering/governance-projection?fixture=denied");
     await expect(page.getByText("Access denied", { exact: true })).toBeVisible();
@@ -828,7 +828,7 @@ test.describe("operator journeys", () => {
       page.getByRole("link", { name: "Owner product review", exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByText("Shadow mode — product review evidence only"),
+      page.getByText("Launchplane is the Owner-review authority"),
     ).toBeVisible();
     const recordedHistory = page.getByLabel("Recorded Owner acceptance history");
     await expect(recordedHistory.getByText(/Recorded/).first()).toBeVisible();
@@ -946,20 +946,20 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("current Owner acceptance item records an exact shadow action", async ({ page }) => {
+  test("current Owner acceptance item records an authoritative exact action", async ({ page }) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/engineering/owner-acceptance?fixture=products");
 
     const panel = page.getByRole("region", { name: /Owner product review for/ });
     await expect(panel).toBeVisible();
-    await expect(panel.getByText("Product review only.", { exact: true })).toBeVisible();
-    await expect(panel.getByText(/does not indicate that technical checks passed/i)).toBeVisible();
-    await expect(panel.getByText(/make the pull request merge-ready/i)).toBeVisible();
-    await expect(panel.getByText(/or authorize production/i)).toBeVisible();
+    await expect(panel.getByText("Authoritative Owner decision.", { exact: true })).toBeVisible();
+    await expect(panel.getByText(/technical checks, engineering review, merge admission/i)).toBeVisible();
+    await expect(panel.getByText(/production authorization remain separate/i)).toBeVisible();
     await panel.getByRole("button", { name: "Record product review" }).click();
-    await expect(panel.getByText(/recorded in shadow mode/i)).toBeVisible();
-    await expect(panel.getByText(/No merge or production authority/i)).toBeVisible();
+    await expect(page.getByText("Owner product review: accepted", { exact: true }).first()).toBeVisible();
+    await expect(panel.getByText(/authoritative Owner decision recorded/i)).toBeVisible();
+    await expect(panel.getByText(/recompute exact-head merge readiness/i)).toBeVisible();
     diagnostics.assertClean();
   });
 
@@ -978,6 +978,9 @@ test.describe("operator journeys", () => {
       .fill("Please clarify the product behavior.");
     await submit.click();
 
+    await expect(
+      page.getByText("Owner product review: changes requested", { exact: true }).first(),
+    ).toBeVisible();
     await expect(panel.getByText("Resolution evidence required.", { exact: true })).toBeVisible();
     await expect(submit).toBeDisabled();
     await panel
@@ -991,7 +994,7 @@ test.describe("operator journeys", () => {
     await submit.click();
 
     await expect(panel.getByText("Resolution evidence required.", { exact: true })).toHaveCount(0);
-    await expect(panel.getByText(/recorded in shadow mode/i)).toBeVisible();
+    await expect(panel.getByText(/authoritative Owner decision recorded/i)).toBeVisible();
     diagnostics.assertClean();
   });
 
@@ -1123,7 +1126,21 @@ test.describe("operator journeys", () => {
     });
     await expect(activeLink).toBeVisible();
     await expect(activeLink).toHaveAttribute("aria-current", "page");
+    await expect(page.getByText("Owner product review: pending", { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole("region", { name: /Owner product review for/ })).toBeVisible();
+    await assertDocumentBasics(page);
 
+    diagnostics.assertClean();
+  });
+
+  test("Owner acceptance denied state exposes no action surface", async ({ page }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/owner-acceptance?fixture=denied");
+
+    await expect(page.getByText("Access denied", { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "Record product review" })).toHaveCount(0);
+    await assertDocumentBasics(page);
     diagnostics.assertClean();
   });
 

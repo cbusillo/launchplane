@@ -52,7 +52,7 @@ from control_plane.contracts.product_owner import (
     product_owner_scoped_policy_fingerprint,
 )
 from control_plane.product_owner_service import (
-    evaluate_product_owner_shadow_authority,
+    evaluate_product_owner_authority,
     require_product_owner_policy_read_store,
     require_product_owner_requirement_read_store,
 )
@@ -215,7 +215,7 @@ def evaluate_owner_acceptance_viewer_eligibility(
                         )
                     policies = policy_cache[cache_key]
                     requirements = requirement_cache[cache_key]
-                    authority = evaluate_product_owner_shadow_authority(
+                    authority = evaluate_product_owner_authority(
                         context=ProductOwnerActionContext(
                             product=binding.product,
                             system=binding.system,
@@ -861,7 +861,7 @@ def _binding_from_impact(
     )
     authority = None
     for owner_actor in owner_actors:
-        candidate = evaluate_product_owner_shadow_authority(
+        candidate = evaluate_product_owner_authority(
             context=context,
             actor=owner_actor,
             policies=policies,
@@ -940,7 +940,7 @@ def _binding_from_impact(
             "Owner acceptance binding changed; evaluate the exact change again before recording."
         )
     if actor is not None:
-        actor_authority = evaluate_product_owner_shadow_authority(
+        actor_authority = evaluate_product_owner_authority(
             context=context,
             actor=actor,
             policies=policies,

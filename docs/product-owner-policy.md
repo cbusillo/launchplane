@@ -4,10 +4,9 @@ title: Product Owner Policy
 
 ## Purpose
 
-Launchplane has an additive, shadow-only product/system Owner policy. It models
-future human Owner authority without changing any current authorization,
-promotion, tenant-admission, manager-preview, technical-waiver, or trusted-
-maintenance decision.
+Launchplane owns the authoritative product/system Owner policy used by exact-change
+Owner acceptance. The policy remains independent from production authorization,
+promotion, technical checks, engineering review, and provider landing effects.
 
 The contract has one human `Owner` class. Membership and evaluated actors are
 bound only to an immutable, positive numeric GitHub user ID. GitHub Actions,
@@ -23,14 +22,14 @@ Three independently revisioned record streams prevent accidental authority:
 - `ProductOwnerPolicyRecord` grants Owner membership. It does not make any
   action require an Owner.
 - `ProductOwnerRequirementRecord` lists the actions, repositories, and
-  environments that would require an Owner. It contains no identities.
+  environments that require an Owner. It contains no identities.
 - `ProductOwnerRoutingRecord` records preferred Owner routing. It is persisted
   with `authoritative=false` and never participates in membership evaluation.
 
 Launchplane authz grants control who may invoke the read and policy-admin APIs.
 They never satisfy an Owner requirement. Administrative roles are not part of
 Owner actor identity and cannot influence evaluation. A GitHub human who also
-has Launchplane administration satisfies a shadow Owner action only when that
+has Launchplane administration satisfies an Owner action only when that
 human's immutable GitHub ID appears in the current product/system policy and
 matches the action's repository and environment scope.
 
@@ -66,23 +65,17 @@ exact binding and stales prior evidence rather than silently reinterpreting it.
 
 ## Current-Policy Evaluation
 
-Shadow evaluation resolves only active records for the exact product/system
+Authority evaluation resolves only active records for the exact product/system
 scope. When an explicit requirement matches, evidence is checked against the
 current policy revision and digest. Stale revisions, removed Owners, another
 product's Owners, and identities present only in preferred routing do not
-satisfy the shadow action.
+satisfy the required action.
 
 If a current policy exists but no current Owner grant covers the requested
 repository and environment, evaluation returns `unavailable` with
 `policy_scope_not_covered`. This is distinct from `actor_not_current_owner`,
 which means the policy scope is covered but the evaluated GitHub human is not
 one of its current Owners.
-
-Every evaluation response is explicit about its boundary:
-
-- `mode=shadow`
-- `authoritative=false`
-- `enforcement_effect=none`
 
 When one current Owner would satisfy the quorum, the read model returns every
 current Owner in scope as the notification audience. Preferred routing only
@@ -99,8 +92,8 @@ Filesystem rehearsal records live under:
 
 PostgreSQL uses tables with the same names. Each stream has one active-record
 partial unique index, a unique scope/revision index, a current-history index,
-and a record-id primary key. The requirement table enforces shadow mode and the
-routing table enforces non-authority at the database layer.
+and a record-id primary key. Owner requirements are authoritative by definition;
+preferred routing remains non-authoritative and is enforced as such at the database layer.
 
 Successor revisions must have a non-decreasing `effective_at`. An incoming
 active revision must already be effective when applied; future scheduling
@@ -116,6 +109,13 @@ Migration `b2d4f6a8c0e2` writes the fail-closed `review_age`, `self_review`, and
 self-describing. Because those fields are outside `policy_digest`, the backfill
 cannot change any persisted digest.
 
+Migration `f0a2c4e6b8d1` removes the legacy requirement `enforcement_mode` column
+without promoting old requirements into authority. It archives every exact
+pre-cutover row, replaces each product/system scope with an empty successor
+revision, and requires an operator to create the first explicit authoritative
+requirement revision. Existing Owner acceptance events remain immutable and
+become stale against the empty successor until that deliberate cutover occurs.
+
 ## HTTP API
 
 Reads:
@@ -123,7 +123,7 @@ Reads:
 - `GET /v1/product-owner/policy`
 - `GET /v1/product-owner/requirement`
 - `GET /v1/product-owner/routing`
-- `GET /v1/product-owner/shadow-evaluation`
+- `GET /v1/product-owner/evaluation`
 
 CAS apply/dry-run endpoints:
 
@@ -131,14 +131,13 @@ CAS apply/dry-run endpoints:
 - `POST /v1/product-owner/requirements/apply`
 - `POST /v1/product-owner/routing/apply`
 
-The three write actions are classified as `policy_admin`. The shadow read action
-remains observational. Generated OpenAPI is the contract source for clients.
+The three write actions are classified as `policy_admin`. Authority evaluation
+remains a read action; only a browser-authenticated current Owner can write an
+acceptance event. Generated OpenAPI is the contract source for clients.
 
-## Rollback Boundary
+## Unconfigured Repositories
 
-Legacy repository-human admission, manager-preview, technical-waiver, and
-trusted-maintenance readers remain fully operational and unchanged. This slice
-does not delete manager, delegate, or technical-waiver vocabulary, records, or
-code. A later, separately reviewed cutover may consume Owner decisions only
-after shadow evidence proves equivalence and the migration plan explicitly
-defines rollback.
+Repositories without active change-impact, Owner policy, and Owner requirement
+records do not expose an interactive Owner action. Their evaluation is either
+`not_required` or fail-closed `unavailable`; Launchplane never falls back to a
+non-authoritative approval path.

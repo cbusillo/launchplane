@@ -88,7 +88,7 @@ def _app(
 
 
 class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
-    async def test_projects_current_owner_decision_as_neutral_github_app_check(self) -> None:
+    async def test_projects_pending_owner_decision_as_action_required_check(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
             calls: list[dict[str, Any]] = []
@@ -141,12 +141,12 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["decision"]["status"], "pending")
         self.assertEqual(payload["result"]["name"], "launchplane/owner-acceptance")
-        self.assertEqual(payload["result"]["conclusion"], "neutral")
+        self.assertEqual(payload["result"]["conclusion"], "action_required")
         self.assertEqual(
             calls[-2]["body"]["details_url"],
             "https://ops.example.test/ui/engineering/owner-acceptance?repository=example%2Fweb&pull_request=2022",
         )
-        self.assertEqual(calls[-2]["body"]["conclusion"], "neutral")
+        self.assertEqual(calls[-2]["body"]["conclusion"], "action_required")
         self.assertEqual(calls[-1]["method"], "DELETE")
 
     async def test_successful_event_best_effort_projects_current_decision(self) -> None:

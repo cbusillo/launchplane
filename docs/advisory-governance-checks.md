@@ -1,11 +1,11 @@
 ---
-title: Advisory Governance Check Projection
+title: Governance Check Projection
 ---
 
 ## Purpose
 
 Launchplane projects its server-owned engineering review and Owner acceptance
-decisions into GitHub as advisory check runs. GitHub is a visibility surface,
+decisions into GitHub as check runs. GitHub is a visibility and routing surface,
 not an authority source. The projection cannot authorize merge, tenant
 admission, promotion, or production deployment.
 
@@ -14,11 +14,11 @@ The two stable check names are:
 - `launchplane/engineering-review`
 - `launchplane/owner-acceptance`
 
-Both check runs complete with GitHub conclusion `neutral`. Their title and
-summary expose the current Launchplane decision, exact binding digest, and the
-fixed `mode=shadow`, `authoritative=false`, `enforcement_effect=none` contract.
-Owner projection uses one stable aggregate check and lists each affected
-product decision in the output instead of creating product-derived check names.
+Engineering review remains a neutral advisory observation. Owner acceptance uses
+`success`, `action_required`, or `failure` to make current, pending/stale, and
+unavailable states unmistakable. Its summary routes the reviewer to Launchplane,
+the only Owner action surface. Owner projection uses one stable aggregate check
+and lists each affected product decision instead of product-derived check names.
 
 ## GitHub App Identity
 
@@ -74,10 +74,11 @@ successful API response, and browser sessions do not gain projection authority.
 Launchplane-owned governance check names are excluded from merge-train check-run
 aggregation and from tenant-admission commit-status, check-run, and required-
 check inputs. The legacy `launchplane/engineering-review-shadow` status is also
-excluded from tenant admission during cutover. Tests prove that merge and
-admission results are unchanged when advisory checks are present, pending, or
-failed.
+excluded from tenant admission during its separate cutover. Tests prove that merge
+and admission results are unchanged when GitHub projections are present, pending,
+or failed.
 
-GitHub rulesets must not make these advisory names required while the contracts
-remain shadow-only. Ruleset and CODEOWNERS drift detection and reconciliation
-belong to the downstream projection workstream.
+Do not make the Owner projection a required GitHub status until the separate
+ruleset reconciliation work proves refresh behavior for every staleness source.
+Launchplane recomputes the authoritative Owner decision immediately before
+admission; the GitHub check remains a routing and visibility projection.

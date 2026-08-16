@@ -185,7 +185,7 @@ class GovernanceProjectionTests(unittest.TestCase):
             projection.target.head_sha,
         )
 
-    def test_scenario_25_owner_accepted_remains_product_judgment_only(self) -> None:
+    def test_scenario_25_owner_accepted_is_authoritative_level_one(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
             provider = _EvidenceProvider(_repository_evidence())
@@ -225,9 +225,8 @@ class GovernanceProjectionTests(unittest.TestCase):
             projection.owner_judgment.current.human_action_semantics,
             "product_review_accepted",
         )
-        self.assertEqual(projection.owner_judgment.authorizes, ())
-        self.assertEqual(projection.owner_judgment.current.authorizes, ())
-        self.assertEqual(projection.owner_judgment.history[0].authorizes, ())
+        self.assertTrue(projection.owner_judgment.authoritative)
+        self.assertEqual(projection.owner_judgment.mode, "owner_acceptance")
         self.assertEqual(projection.owner_judgment.history[0].target_status, "current")
         self.assertEqual(projection.owner_judgment.history[0].decision_relationship, "current")
         self.assertEqual(projection.merge_admission.status, "not_recorded")

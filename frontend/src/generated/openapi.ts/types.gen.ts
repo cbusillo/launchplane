@@ -544,7 +544,6 @@ export type GitHubIssueInboxRepositoryGroup = {
 export type GovernanceAdvisoryObservation = {
     authoritative: false;
     authorizes: Array<string>;
-    neutral: true;
     observation: MergeReadinessAdvisoryObservation;
     observation_scope: 'current_readiness' | 'admission_readiness';
 };
@@ -580,7 +579,6 @@ export type GovernanceMergeReadinessFacet = {
 };
 
 export type GovernanceOwnerHistoryEntry = {
-    authorizes: Array<string>;
     decision_relationship: 'current' | 'historical';
     human_action_semantics: 'none' | 'product_review_accepted' | 'product_review_changes_requested' | 'product_review_revoked' | 'product_review_superseded' | 'product_review_invalidated';
     record: OwnerAcceptanceEventRecord;
@@ -588,12 +586,11 @@ export type GovernanceOwnerHistoryEntry = {
 };
 
 export type GovernanceOwnerJudgmentFacet = {
-    authoritative: false;
-    authorizes: Array<string>;
+    authoritative: true;
     current: OwnerAcceptanceDecision;
     history: Array<GovernanceOwnerHistoryEntry>;
     level: 1;
-    mode: 'historical_product_judgment';
+    mode: 'owner_acceptance';
 };
 
 export type GovernanceProjection = {
@@ -1232,14 +1229,11 @@ export type OwnerAcceptanceCurrentItemsRepositoryFailure = {
 };
 
 export type OwnerAcceptanceCurrentItemsResponse = {
-    authoritative: false;
     candidate_count: number;
     derivation: 'active_change_impact_open_pull_requests';
-    enforcement_effect: 'none';
     evaluated_count: number;
     generated_at: string;
     items: Array<OwnerAcceptanceCurrentItem>;
-    mode: 'shadow';
     repository_count: number;
     repository_failure_count: number;
     repository_failures: Array<OwnerAcceptanceCurrentItemsRepositoryFailure>;
@@ -1252,14 +1246,10 @@ export type OwnerAcceptanceCurrentItemsResponse = {
 
 export type OwnerAcceptanceDecision = {
     admissible: boolean;
-    authoritative: false;
-    authorizes: Array<string>;
     binding: OwnerAcceptanceBinding | null;
     current_event: OwnerAcceptanceEventRecord | null;
-    enforcement_effect: 'none';
     evaluated_at: string;
     human_action_semantics: 'none' | 'product_review_accepted' | 'product_review_changes_requested' | 'product_review_revoked' | 'product_review_superseded' | 'product_review_invalidated';
-    mode: 'shadow';
     products: Array<OwnerAcceptanceProductDecision>;
     reason_code: 'engineering_only' | 'acceptance_missing' | 'acceptance_valid' | 'changes_requested' | 'acceptance_revoked' | 'acceptance_stale' | 'change_impact_unavailable' | 'change_impact_stale' | 'multi_product_unsupported' | 'owner_authority_unavailable' | 'owner_authority_denied' | 'preview_evidence_unavailable' | 'preview_evidence_stale' | 'owner_review_expired' | 'preview_isolation_insufficient' | 'contributing_identity_unknown' | 'self_review_denied' | 'review_context_missing';
     schema_version: number;
@@ -1307,7 +1297,6 @@ export type OwnerAcceptanceEventResponse = {
 };
 
 export type OwnerAcceptanceEventSemantics = {
-    authorizes: Array<string>;
     human_action_semantics: 'none' | 'product_review_accepted' | 'product_review_changes_requested' | 'product_review_revoked' | 'product_review_superseded' | 'product_review_invalidated';
 };
 
@@ -1343,7 +1332,6 @@ export type OwnerAcceptancePreviewIsolationBinding = {
 export type OwnerAcceptanceProductDecision = {
     action: string;
     admissible: boolean;
-    authorizes: Array<string>;
     binding: OwnerAcceptanceBinding | null;
     current_event: OwnerAcceptanceEventRecord | null;
     environment: string;
@@ -1357,13 +1345,10 @@ export type OwnerAcceptanceProductDecision = {
 
 export type OwnerAcceptanceQueueEntry = {
     action: string;
-    authoritative: false;
-    enforcement_effect: 'none';
     environment: string;
     latest_binding: OwnerAcceptanceBinding;
     latest_event: OwnerAcceptanceEventRecord;
     ledger_status: 'not_required' | 'pending' | 'accepted' | 'changes_requested' | 'revoked' | 'stale' | 'unavailable';
-    mode: 'shadow';
     next_action: string;
     occurred_at: string;
     product: string;
@@ -1372,19 +1357,16 @@ export type OwnerAcceptanceQueueEntry = {
     repository_id: string;
     schema_version: number;
     system: string;
-    verification_required: true;
+    verification_required: boolean;
 };
 
 export type OwnerAcceptanceQueueResponse = {
-    authoritative: false;
     candidate: number;
     derivation: 'ledger_only';
-    enforcement_effect: 'none';
     entries: Array<OwnerAcceptanceQueueEntry>;
     entry_count: number;
     generated_at: string;
     has_more: boolean;
-    mode: 'shadow';
     status: 'ok';
     total: number;
     trace_id: string;

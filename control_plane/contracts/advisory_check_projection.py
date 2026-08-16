@@ -19,6 +19,7 @@ LAUNCHPLANE_PROJECTED_CHECK_NAMES = frozenset(
 )
 
 AdvisoryCheckProjectionStatus = Literal["projected", "updated", "replayed"]
+AdvisoryCheckConclusion = Literal["neutral", "success", "failure", "action_required"]
 
 
 class AdvisoryCheckProjection(BaseModel):
@@ -33,6 +34,7 @@ class AdvisoryCheckProjection(BaseModel):
     details_url: str
     title: str = Field(min_length=1, max_length=255)
     summary: str = Field(min_length=1, max_length=65535)
+    conclusion: AdvisoryCheckConclusion = "neutral"
 
     @model_validator(mode="after")
     def _validate_projection(self) -> "AdvisoryCheckProjection":
@@ -80,7 +82,7 @@ class AdvisoryCheckProjectionResult(BaseModel):
     app_id: int = Field(ge=1)
     installation_id: int = Field(ge=1)
     check_run_id: int = Field(ge=1)
-    conclusion: Literal["neutral"] = "neutral"
+    conclusion: AdvisoryCheckConclusion
 
 
 def is_launchplane_projected_check(name: str) -> bool:

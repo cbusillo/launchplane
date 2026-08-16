@@ -8,6 +8,7 @@ from urllib.parse import quote, urlsplit
 from control_plane.advisory_check_projection import write_advisory_check_projection
 from control_plane.contracts.advisory_check_projection import (
     AdvisoryCheckProjection,
+    AdvisoryCheckConclusion,
     AdvisoryCheckProjectionResult,
     OWNER_ACCEPTANCE_CHECK_NAME,
 )
@@ -44,6 +45,7 @@ def project_owner_acceptance_decision(
             details_url=details_url,
             title=f"Owner acceptance: {decision.status.replace('_', ' ')}",
             summary=_summary(decision),
+            conclusion=_conclusion(decision),
         ),
         installation_token=installation_token,
         api_request=api_request,
@@ -54,6 +56,19 @@ def owner_acceptance_workbench_url(
     *,
     public_origin: str,
     target: ChangeImpactTarget,
+) -> str:
+    return owner_acceptance_workbench_reference_url(
+        public_origin=public_origin,
+        repository=target.repository,
+        pull_request_number=target.pull_request_number,
+    )
+
+
+def owner_acceptance_workbench_reference_url(
+    *,
+    public_origin: str,
+    repository: str,
+    pull_request_number: int,
 ) -> str:
     origin = public_origin.strip()
     try:
@@ -81,13 +96,15 @@ def owner_acceptance_workbench_url(
         ) from error
     if any(character.isspace() or ord(character) < 32 for character in origin):
         raise ValueError("Owner acceptance projection requires a valid browser public origin.")
-    if target.repository.count("/") != 1 or any(
-        not part or part != part.strip() for part in target.repository.split("/", 1)
+    if repository.count("/") != 1 or any(
+        not part or part != part.strip() for part in repository.split("/", 1)
     ):
         raise ValueError("Owner acceptance projection requires a valid repository target.")
+    if pull_request_number < 1:
+        raise ValueError("Owner acceptance projection requires a positive pull request number.")
     return (
         f"{origin.rstrip('/')}{OWNER_ACCEPTANCE_WORKBENCH_PATH}"
-        f"?repository={quote(target.repository, safe='')}&pull_request={target.pull_request_number}"
+        f"?repository={quote(repository, safe='')}&pull_request={pull_request_number}"
     )
 
 
@@ -104,8 +121,8 @@ def owner_acceptance_projection_sha256(decision: OwnerAcceptanceDecision) -> str
 
 def _summary(decision: OwnerAcceptanceDecision) -> str:
     lines = [
-        "Launchplane advisory projection; mode=shadow, authoritative=false, "
-        "enforcement_effect=none.",
+        "Launchplane is the authoritative Owner-review system. This GitHub check is a "
+        "routing and status projection only; record decisions in Launchplane.",
         "",
         f"Aggregate decision: **{decision.status.replace('_', ' ')}**",
         f"Reason code: `{decision.reason_code}`",
@@ -123,3 +140,11 @@ def _summary(decision: OwnerAcceptanceDecision) -> str:
     else:
         lines.extend(("", "No product-specific Owner decision is currently required."))
     return "\n".join(lines)
+
+
+def _conclusion(decision: OwnerAcceptanceDecision) -> AdvisoryCheckConclusion:
+    if decision.status in {"accepted", "not_required"}:
+        return "success"
+    if decision.status == "unavailable":
+        return "failure"
+    return "action_required"

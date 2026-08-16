@@ -155,12 +155,12 @@ export function EngineeringOwnerAcceptanceRoute({
       title="Owner product review"
       view="owner-acceptance"
     >
-      <EngineeringBoundaryNote title="Shadow mode — product review evidence only">
-        Owner product review is separate from technical checks, engineering review, merge
-        readiness and admission, and production authorization. All decisions are{" "}
-        <code>mode: shadow</code>, <code>authoritative: false</code>,{" "}
-        <code>enforcement_effect: none</code>. Current items come from open pull requests in
-        repositories with active change-impact policy records and are evaluated server-side.
+      <EngineeringBoundaryNote title="Launchplane is the Owner-review authority">
+        Owner acceptance is required for product-impacting changes and is evaluated against the
+        exact pull request head, tree, serving preview, artifact, runtime identity, impact policy,
+        and Owner policy. It remains separate from technical checks, engineering review, merge
+        admission, landing, and production authorization. Current items come from open pull requests
+        in repositories with active change-impact policy records and are evaluated server-side.
         Recorded entries are{" "}
         <strong>Recorded</strong> — derived from the persisted acceptance event ledger
         with no live GitHub calls. Recorded queue rows remain read-only.
@@ -232,9 +232,6 @@ function ownerAcceptanceCurrentItemsForFixture(
   return {
     status: "ok",
     trace_id: `fixture-owner-acceptance-current-${fixtureMode}`,
-    mode: "shadow",
-    authoritative: false,
-    enforcement_effect: "none",
     derivation: "active_change_impact_open_pull_requests",
     generated_at: decision.evaluated_at,
     viewer_capabilities: ownerAcceptanceFixtureViewerCapabilities(decision, fixtureMode),
@@ -836,7 +833,6 @@ function OwnerAcceptanceActionPanel({
               : payload.action === "revoked"
                 ? ("product_review_revoked" as const)
                 : ("product_review_changes_requested" as const),
-          authorizes: [],
         },
         decision: {
           ...decision,
@@ -913,7 +909,7 @@ function OwnerAcceptanceActionPanel({
         <div><strong>{binding.product}</strong><span>{binding.system} · {binding.action} · {binding.environment}</span></div>
         <code>{binding.binding_sha256.slice(0, 12)}</code>
       </header>
-      <p><strong>Product review only.</strong> Record your judgment of this exact change. This does not indicate that technical checks passed, make the pull request merge-ready, or authorize production. Launchplane revalidates the exact change and your Owner authority at write time.</p>
+      <p><strong>Authoritative Owner decision.</strong> Record your judgment of this exact change. Acceptance satisfies the Owner prerequisite only when the binding remains current; technical checks, engineering review, merge admission, landing, and production authorization remain separate. Launchplane revalidates the exact change and your Owner authority at write time.</p>
       {!eligibility.can_accept ? <p className="engineering-owner-action-message" role="status">You contributed to this exact change, so product policy prevents you from accepting it. You may still request changes or revoke prior acceptance.</p> : null}
       <label>
         <span>Product review action</span>
@@ -955,7 +951,7 @@ function OwnerAcceptanceActionPanel({
         {busy ? <button className="button" type="button" onClick={operation.cancel}>Cancel wait</button> : null}
       </div>
       {failure && failure.code !== "owner_acceptance_binding_changed" ? <p className="engineering-owner-action-message" role="alert">{failure.message}{failure.traceId ? <code>{failure.traceId}</code> : null}</p> : null}
-      {operation.state.receipt ? <p className="engineering-owner-action-message" data-tone="success" role="status">{operation.state.receipt.replayed ? "Owner product review was already recorded (idempotent replay)." : "Owner product review recorded in shadow mode."} No merge or production authority was granted.<code>{operation.state.receipt.traceId}</code></p> : null}
+      {operation.state.receipt ? <p className="engineering-owner-action-message" data-tone="success" role="status">{operation.state.receipt.replayed ? "Owner decision was already recorded (idempotent replay)." : "Authoritative Owner decision recorded."} Launchplane will recompute exact-head merge readiness; production authorization remains separate.<code>{operation.state.receipt.traceId}</code></p> : null}
       {operation.state.requiresIdempotencyContinuity ? <p className="engineering-owner-action-message" role="status">Outcome uncertain. Retry only this unchanged action; the idempotency key is preserved.</p> : null}
     </section>
   );
@@ -1042,16 +1038,8 @@ function OwnerAcceptanceContent({
           {data.trace_id ? <code>{data.trace_id}</code> : null}
         </div>
         <div>
-          <span>Mode</span>
-          <strong>{data.mode}</strong>
-        </div>
-        <div>
-          <span>Authoritative</span>
-          <strong>{String(data.authoritative)}</strong>
-        </div>
-        <div>
-          <span>Enforcement</span>
-          <strong>{data.enforcement_effect}</strong>
+          <span>Authority</span>
+          <strong>Launchplane Owner acceptance</strong>
         </div>
         {data.truncated ? (
           <div>
@@ -1162,8 +1150,7 @@ function OwnerAcceptanceEntryCard({ entry }: { entry: OwnerAcceptanceQueueEntry 
       </header>
 
       <div className="engineering-chip-row">
-        <span data-mode={entry.mode}>{entry.mode}</span>
-        <span>enforcement: {entry.enforcement_effect}</span>
+        <span data-mode="recorded">recorded ledger</span>
         <span>verification required: {String(entry.verification_required)}</span>
         {entry.occurred_at ? (
           <span>Recorded {formatTime(entry.occurred_at)}</span>

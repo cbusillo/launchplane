@@ -6981,12 +6981,6 @@
             "title": "Authorizes",
             "type": "array"
           },
-          "neutral": {
-            "const": true,
-            "default": true,
-            "title": "Neutral",
-            "type": "boolean"
-          },
           "observation": {
             "$ref": "#/components/schemas/MergeReadinessAdvisoryObservation"
           },
@@ -7002,7 +6996,6 @@
         "required": [
           "authoritative",
           "authorizes",
-          "neutral",
           "observation",
           "observation_scope"
         ],
@@ -7219,14 +7212,6 @@
       "GovernanceOwnerHistoryEntry": {
         "additionalProperties": false,
         "properties": {
-          "authorizes": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Authorizes",
-            "type": "array"
-          },
           "decision_relationship": {
             "enum": [
               "current",
@@ -7260,7 +7245,6 @@
           }
         },
         "required": [
-          "authorizes",
           "decision_relationship",
           "human_action_semantics",
           "record",
@@ -7273,18 +7257,10 @@
         "additionalProperties": false,
         "properties": {
           "authoritative": {
-            "const": false,
-            "default": false,
+            "const": true,
+            "default": true,
             "title": "Authoritative",
             "type": "boolean"
-          },
-          "authorizes": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Authorizes",
-            "type": "array"
           },
           "current": {
             "$ref": "#/components/schemas/OwnerAcceptanceDecision"
@@ -7304,15 +7280,14 @@
             "type": "integer"
           },
           "mode": {
-            "const": "historical_product_judgment",
-            "default": "historical_product_judgment",
+            "const": "owner_acceptance",
+            "default": "owner_acceptance",
             "title": "Mode",
             "type": "string"
           }
         },
         "required": [
           "authoritative",
-          "authorizes",
           "current",
           "history",
           "level",
@@ -11399,12 +11374,6 @@
       "OwnerAcceptanceCurrentItemsResponse": {
         "additionalProperties": false,
         "properties": {
-          "authoritative": {
-            "const": false,
-            "default": false,
-            "title": "Authoritative",
-            "type": "boolean"
-          },
           "candidate_count": {
             "title": "Candidate Count",
             "type": "integer"
@@ -11413,12 +11382,6 @@
             "const": "active_change_impact_open_pull_requests",
             "default": "active_change_impact_open_pull_requests",
             "title": "Derivation",
-            "type": "string"
-          },
-          "enforcement_effect": {
-            "const": "none",
-            "default": "none",
-            "title": "Enforcement Effect",
             "type": "string"
           },
           "evaluated_count": {
@@ -11435,12 +11398,6 @@
             },
             "title": "Items",
             "type": "array"
-          },
-          "mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Mode",
-            "type": "string"
           },
           "repository_count": {
             "title": "Repository Count",
@@ -11480,14 +11437,11 @@
           }
         },
         "required": [
-          "authoritative",
           "candidate_count",
           "derivation",
-          "enforcement_effect",
           "evaluated_count",
           "generated_at",
           "items",
-          "mode",
           "repository_count",
           "repository_failure_count",
           "repository_failures",
@@ -11507,20 +11461,6 @@
             "default": false,
             "title": "Admissible",
             "type": "boolean"
-          },
-          "authoritative": {
-            "const": false,
-            "default": false,
-            "title": "Authoritative",
-            "type": "boolean"
-          },
-          "authorizes": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Authorizes",
-            "type": "array"
           },
           "binding": {
             "anyOf": [
@@ -11542,12 +11482,6 @@
               }
             ]
           },
-          "enforcement_effect": {
-            "const": "none",
-            "default": "none",
-            "title": "Enforcement Effect",
-            "type": "string"
-          },
           "evaluated_at": {
             "title": "Evaluated At",
             "type": "string"
@@ -11563,12 +11497,6 @@
               "product_review_invalidated"
             ],
             "title": "Human Action Semantics",
-            "type": "string"
-          },
-          "mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Mode",
             "type": "string"
           },
           "products": {
@@ -11625,14 +11553,10 @@
         },
         "required": [
           "admissible",
-          "authoritative",
-          "authorizes",
           "binding",
           "current_event",
-          "enforcement_effect",
           "evaluated_at",
           "human_action_semantics",
-          "mode",
           "products",
           "reason_code",
           "schema_version",
@@ -11866,17 +11790,8 @@
       },
       "OwnerAcceptanceEventSemantics": {
         "additionalProperties": false,
-        "description": "Machine-readable projection of a stored human product-review action.\n\nThe stored enum and every persisted digest stay unchanged. This projection\nexists so no API client can read Owner product review as merge readiness,\nlanded state, or production authorization.",
+        "description": "Machine-readable projection of a stored human product-review action.\n\nThe stored enum and every persisted digest stay unchanged. Acceptance is an\nauthoritative merge-admission prerequisite, while technical readiness,\nlanding, and production authorization remain separate decisions.",
         "properties": {
-          "authorizes": {
-            "default": [],
-            "description": "Always empty. Owner product review authorizes nothing on its own.",
-            "items": {
-              "type": "string"
-            },
-            "title": "Authorizes",
-            "type": "array"
-          },
           "human_action_semantics": {
             "enum": [
               "none",
@@ -11891,7 +11806,6 @@
           }
         },
         "required": [
-          "authorizes",
           "human_action_semantics"
         ],
         "title": "OwnerAcceptanceEventSemantics",
@@ -12057,14 +11971,6 @@
             "title": "Admissible",
             "type": "boolean"
           },
-          "authorizes": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Authorizes",
-            "type": "array"
-          },
           "binding": {
             "anyOf": [
               {
@@ -12157,7 +12063,6 @@
         "required": [
           "action",
           "admissible",
-          "authorizes",
           "binding",
           "current_event",
           "environment",
@@ -12176,18 +12081,6 @@
         "properties": {
           "action": {
             "title": "Action",
-            "type": "string"
-          },
-          "authoritative": {
-            "const": false,
-            "default": false,
-            "title": "Authoritative",
-            "type": "boolean"
-          },
-          "enforcement_effect": {
-            "const": "none",
-            "default": "none",
-            "title": "Enforcement Effect",
             "type": "string"
           },
           "environment": {
@@ -12211,12 +12104,6 @@
               "unavailable"
             ],
             "title": "Ledger Status",
-            "type": "string"
-          },
-          "mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Mode",
             "type": "string"
           },
           "next_action": {
@@ -12253,7 +12140,6 @@
             "type": "string"
           },
           "verification_required": {
-            "const": true,
             "default": true,
             "title": "Verification Required",
             "type": "boolean"
@@ -12261,13 +12147,10 @@
         },
         "required": [
           "action",
-          "authoritative",
-          "enforcement_effect",
           "environment",
           "latest_binding",
           "latest_event",
           "ledger_status",
-          "mode",
           "next_action",
           "occurred_at",
           "product",
@@ -12284,12 +12167,6 @@
       "OwnerAcceptanceQueueResponse": {
         "additionalProperties": false,
         "properties": {
-          "authoritative": {
-            "const": false,
-            "default": false,
-            "title": "Authoritative",
-            "type": "boolean"
-          },
           "candidate": {
             "title": "Candidate",
             "type": "integer"
@@ -12298,12 +12175,6 @@
             "const": "ledger_only",
             "default": "ledger_only",
             "title": "Derivation",
-            "type": "string"
-          },
-          "enforcement_effect": {
-            "const": "none",
-            "default": "none",
-            "title": "Enforcement Effect",
             "type": "string"
           },
           "entries": {
@@ -12325,12 +12196,6 @@
             "title": "Has More",
             "type": "boolean"
           },
-          "mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Mode",
-            "type": "string"
-          },
           "status": {
             "const": "ok",
             "default": "ok",
@@ -12351,15 +12216,12 @@
           }
         },
         "required": [
-          "authoritative",
           "candidate",
           "derivation",
-          "enforcement_effect",
           "entries",
           "entry_count",
           "generated_at",
           "has_more",
-          "mode",
           "status",
           "total",
           "trace_id",

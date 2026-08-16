@@ -113,17 +113,17 @@ export function EngineeringGovernanceProjectionRoute({
           />
         ) : undefined
       }
-      description="Inspect historical Owner product judgment, current ephemeral merge readiness, immutable admission, separate landing outcome, and neutral advisory observations for one pull request."
+      description="Inspect authoritative Owner acceptance, current ephemeral merge readiness, immutable admission, separate landing outcome, and GitHub status projections for one pull request."
       icon={ShieldCheck}
       title="Governance evidence"
       view="governance-projection"
     >
-      <EngineeringBoundaryNote title="Independent evidence — no fused approval verdict">
-        Level 1 records product judgment and exposes <code>authorizes: []</code>.
+      <EngineeringBoundaryNote title="Independent evidence — one authoritative Owner decision">
+        Level 1 records authoritative Owner acceptance for the exact change.
         Level 2 remains <code>mode: ephemeral</code>, <code>authoritative: false</code>,
         and authorizes no effect. Level 3 admits one exact attempt; it does not mean
         the provider effect landed. Landing outcome is an independent durable fact.
-        Advisory GitHub checks are neutral visibility only.
+        GitHub checks route reviewers and mirror status; decisions remain in Launchplane.
       </EngineeringBoundaryNote>
 
       <GovernanceLookupForm
@@ -218,15 +218,15 @@ function GovernanceWorkbench({ projection }: { projection: GovernanceProjection 
 function GovernanceOwnerFacet({ projection }: { projection: GovernanceProjection }) {
   const owner = projection.owner_judgment;
   return (
-    <section className="governance-facet" aria-label="Level 1 historical Owner judgment">
+    <section className="governance-facet" aria-label="Level 1 authoritative Owner acceptance">
       <GovernanceFacetHeader
-        eyebrow="Level 1 · historical"
-        label="Owner product judgment"
+        eyebrow="Level 1 · authoritative"
+        label="Owner acceptance"
         status={ownerTone(owner.current.status)}
         value={humanize(owner.current.status)}
       />
       <p className="governance-authority-note">
-        Owner <code>accepted</code> means product judgment only. <code>authorizes: []</code>.
+        Owner <code>accepted</code> is the authoritative product decision for this exact change.
         It never means merge-ready, admitted, landed, release-authorized, or
         production-authorized.
       </p>
@@ -426,18 +426,19 @@ function GovernanceAdvisoryFacet({ projection }: { projection: GovernanceProject
   return (
     <section
       className="governance-facet governance-advisory"
-      aria-label="Neutral advisory observations"
+      aria-label="GitHub status observations"
       data-advisory="true"
     >
       <GovernanceFacetHeader
         eyebrow="Visibility only"
-        label="Advisory GitHub observations"
+        label="GitHub status observations"
         status="skipped"
-        value="Neutral · non-blocking"
+        value="Non-authoritative"
       />
       <p className="governance-authority-note">
-        These check observations are explicitly neutral, non-authoritative, and excluded
-        from required technical checks.
+        These check observations may be success, action required, failure, or neutral.
+        Launchplane remains authoritative, and the observed checks are excluded from
+        technical-check evidence.
       </p>
       {projection.advisory_observations.length ? (
         <ul className="governance-advisory-list">

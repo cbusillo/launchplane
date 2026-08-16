@@ -15,10 +15,9 @@ PRODUCT_OWNER_REQUIREMENT_READ_ACTION = "product_owner_requirement.read"
 PRODUCT_OWNER_REQUIREMENT_WRITE_ACTION = "product_owner_requirement.write"
 PRODUCT_OWNER_ROUTING_READ_ACTION = "product_owner_routing.read"
 PRODUCT_OWNER_ROUTING_WRITE_ACTION = "product_owner_routing.write"
-PRODUCT_OWNER_SHADOW_READ_ACTION = "product_owner_shadow.read"
 
 ProductOwnerRecordStatus = Literal["active", "superseded"]
-ProductOwnerShadowDecision = Literal[
+ProductOwnerAuthorityDecision = Literal[
     "authorized",
     "denied",
     "not_required",
@@ -465,7 +464,6 @@ class ProductOwnerRequirementRecord(BaseModel):
     system: str
     requirement_revision: int = Field(ge=1)
     requirements: tuple[ProductOwnerRequirement, ...] = ()
-    enforcement_mode: Literal["shadow"] = "shadow"
     effective_at: str
     source: str
     reason: str
@@ -608,14 +606,11 @@ class ProductOwnerActionContext(BaseModel):
         return self
 
 
-class ProductOwnerShadowEvaluation(BaseModel):
+class ProductOwnerAuthorityEvaluation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    mode: Literal["shadow"] = "shadow"
-    authoritative: Literal[False] = False
-    enforcement_effect: Literal["none"] = "none"
-    decision: ProductOwnerShadowDecision
+    decision: ProductOwnerAuthorityDecision
     reason_code: str
     context: ProductOwnerActionContext
     actor_identity_id: str

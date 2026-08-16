@@ -24,9 +24,9 @@ uses the GitHub token source declared by that repository policy.
 
 The response preserves these independent facts:
 
-- **Level 1 Owner product judgment:** current product-review evaluation plus
-  immutable stored events. `accepted` remains product judgment,
-  `human_action_semantics=product_review_accepted`, and `authorizes=[]`. Each
+- **Level 1 Owner acceptance:** the authoritative current product-review decision
+  plus immutable stored events. `accepted` retains
+  `human_action_semantics=product_review_accepted`. Each
   event is explicitly classified as current or historical for the resolved
   head/tree and as current or historical to the folded decision.
 - **Level 2 merge readiness:** current ephemeral readiness with every Owner,
@@ -42,10 +42,10 @@ The response preserves these independent facts:
   evidence is `not_observed`, never landed, and recorded outcomes carry the
   same current/historical target classification as their admission. Landing
   observations are `authoritative=false` and `authorizes=[]`.
-- **Advisory observations:** reserved Launchplane GitHub check observations
+- **GitHub projection observations:** reserved Launchplane GitHub check observations
   copied from current Level 2 evidence or, when no current readiness result is
-  available, the admitted Level 2 snapshot. They remain neutral,
-  non-authoritative, and authorize nothing.
+  available, the admitted Level 2 snapshot. They remain non-authoritative routing
+  evidence and authorize nothing; Owner checks may visibly require action.
 
 Historical Level 1 evidence remains visible after current policy, authority,
 age, self-review, preview isolation, or binding changes make it inadmissible.
@@ -68,11 +68,11 @@ Owner, admission, and outcome records remain visible in both cases.
 
 `/ui/engineering/governance-projection` renders five separately named regions:
 
-1. historical Owner product judgment;
+1. authoritative current Owner acceptance with immutable history;
 2. current ephemeral merge readiness and every sub-facet reason;
 3. immutable merge admission;
 4. separate landing outcome;
-5. neutral advisory observations.
+5. non-authoritative GitHub status observations.
 
 The same vocabulary and hierarchy are preserved on desktop and narrow
 viewports. Text and semantic headings identify historical/current,

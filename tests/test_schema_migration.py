@@ -11,6 +11,7 @@ from alembic import command
 from sqlalchemy import create_engine, inspect, text
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.product_owner import ProductOwnerRequirementRecord
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.schema_adoption import (
@@ -920,6 +921,10 @@ class SchemaMigrationTests(unittest.TestCase):
         )
         self.assertEqual(role_primary_key["constrained_columns"], ["record_id"])
         self.assertEqual(waiver_primary_key["constrained_columns"], ["event_id"])
+        self.assertNotIn(
+            "enforcement_mode",
+            owner_columns["launchplane_product_owner_requirements"],
+        )
         self.assertTrue(role_indexes["launchplane_repo_human_role_revision_uidx"]["unique"])
         self.assertTrue(role_indexes["launchplane_repo_human_role_active_uidx"]["unique"])
         self.assertEqual(
@@ -992,6 +997,122 @@ class SchemaMigrationTests(unittest.TestCase):
         )
         for table_name in owner_table_names:
             self.assertNotIn(table_name, downgraded_table_names)
+
+    def test_owner_authority_migration_archives_legacy_requirements(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            config = _alembic_config(database_url)
+            command.upgrade(config, "e9b1d3f5a7c0")
+            legacy_payload = {
+                "schema_version": 1,
+                "record_id": "legacy-owner-requirement",
+                "status": "active",
+                "product": "example-site",
+                "system": "web",
+                "requirement_revision": 1,
+                "requirements": [
+                    {
+                        "schema_version": 1,
+                        "action": "pull_request.owner_acceptance",
+                        "repository_ids": ["101"],
+                        "environments": ["preview"],
+                        "quorum": 1,
+                    }
+                ],
+                "enforcement_mode": "shadow",
+                "effective_at": "2026-08-15T12:00:00Z",
+                "source": "test",
+                "reason": "Exercise the authority cutover migration.",
+                "supersedes_record_id": None,
+                "requirement_digest": "a" * 64,
+            }
+            engine = create_engine(database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO launchplane_product_owner_requirements (
+                                record_id, product, system, status,
+                                requirement_revision, enforcement_mode,
+                                effective_at, source, supersedes_record_id,
+                                requirement_digest, payload
+                            ) VALUES (
+                                :record_id, :product, :system, 'active',
+                                1, 'shadow', :effective_at, 'test', NULL,
+                                :requirement_digest, :payload
+                            )
+                            """
+                        ),
+                        {
+                            "record_id": legacy_payload["record_id"],
+                            "product": legacy_payload["product"],
+                            "system": legacy_payload["system"],
+                            "effective_at": legacy_payload["effective_at"],
+                            "requirement_digest": legacy_payload["requirement_digest"],
+                            "payload": json.dumps(legacy_payload),
+                        },
+                    )
+            finally:
+                engine.dispose()
+
+            command.upgrade(config, "f0a2c4e6b8d1")
+            engine = create_engine(database_url)
+            try:
+                with engine.connect() as connection:
+                    archived = (
+                        connection.execute(
+                            text(
+                                """
+                            SELECT requirement_digest, payload
+                            FROM launchplane_product_owner_requirement_authority_migrations
+                            WHERE record_id = :record_id
+                            """
+                            ),
+                            {"record_id": legacy_payload["record_id"]},
+                        )
+                        .mappings()
+                        .one()
+                    )
+                    current = (
+                        connection.execute(
+                            text(
+                                """
+                            SELECT requirement_revision, requirement_digest, payload
+                            FROM launchplane_product_owner_requirements
+                            WHERE product = :product AND system = :system
+                            """
+                            ),
+                            {
+                                "product": legacy_payload["product"],
+                                "system": legacy_payload["system"],
+                            },
+                        )
+                        .mappings()
+                        .one()
+                    )
+            finally:
+                engine.dispose()
+
+        archived_payload = (
+            json.loads(archived["payload"])
+            if isinstance(archived["payload"], str)
+            else archived["payload"]
+        )
+        current_payload = (
+            json.loads(current["payload"])
+            if isinstance(current["payload"], str)
+            else current["payload"]
+        )
+        self.assertEqual(archived["requirement_digest"], "a" * 64)
+        self.assertEqual(archived_payload, legacy_payload)
+        current_record = ProductOwnerRequirementRecord.model_validate(current_payload)
+        self.assertEqual(current_record.requirement_revision, 2)
+        self.assertEqual(current_record.requirements, ())
+        self.assertEqual(current_record.supersedes_record_id, "legacy-owner-requirement")
+        self.assertEqual(current_record.source, "migration:owner-authority-cutover")
+        self.assertNotEqual(current["requirement_digest"], archived["requirement_digest"])
 
     def test_owner_acceptance_migration_upgrades_and_downgrades(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1293,7 +1414,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "e9b1d3f5a7c0")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "f0a2c4e6b8d1")
         self.assertEqual(
             column_types[("launchplane_merge_admissions", "payload")],
             ("jsonb",),

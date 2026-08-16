@@ -178,9 +178,7 @@ def _stored_dependency() -> ChangeImpactStoredEvidence:
     return ChangeImpactStoredEvidence(
         record_id="dependency-record-1",
         component="generic-web-runtime",
-        affected_products=(
-            ChangeImpactProductScope(product="generic-web-a", system="web"),
-        ),
+        affected_products=(ChangeImpactProductScope(product="generic-web-a", system="web"),),
         kind="dependency",
         reason="Launchplane storage maps the component to product A.",
     )
@@ -231,7 +229,7 @@ def _app(
 
 
 class ChangeImpactHttpTests(unittest.IsolatedAsyncioTestCase):
-    async def test_apply_read_and_server_derived_evaluate_are_shadow_only(self) -> None:
+    async def test_apply_read_and_server_derived_evaluate_are_authoritative(self) -> None:
         with TemporaryDirectory() as directory:
             store = _ChangeImpactStore(Path(directory), (_stored_dependency(),))
             provider = _EvidenceProvider(_repository_evidence())
@@ -250,7 +248,7 @@ class ChangeImpactHttpTests(unittest.IsolatedAsyncioTestCase):
                     params={"repository_id": REPOSITORY_ID},
                 )
                 self.assertEqual(read_response.status_code, 200, read_response.text)
-                self.assertFalse(read_response.json()["read_model"]["authoritative"])
+                self.assertNotIn("authoritative", read_response.json()["read_model"])
 
                 evaluated = await client.post(
                     CHANGE_IMPACT_EVALUATION_ROUTE,
@@ -261,7 +259,7 @@ class ChangeImpactHttpTests(unittest.IsolatedAsyncioTestCase):
                             "repository": REPOSITORY,
                             "pull_request_number": 2000,
                         },
-                        "metadata": {"request_id": "request-1", "reason": "shadow check"},
+                        "metadata": {"request_id": "request-1", "reason": "impact check"},
                     },
                 )
                 self.assertEqual(evaluated.status_code, 200, evaluated.text)
@@ -270,7 +268,7 @@ class ChangeImpactHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(evaluation["engineering_review_tier"], "routine")
                 self.assertEqual(evaluation["required_engineering_review_count"], 1)
                 self.assertEqual(evaluation["owner_impact"], "required")
-                self.assertFalse(evaluation["authoritative"])
+                self.assertNotIn("authoritative", evaluation)
 
             self.assertEqual(len(provider.calls), 1)
             self.assertEqual(

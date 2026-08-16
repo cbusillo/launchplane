@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from click import ClickException, Command
 from click.testing import CliRunner
@@ -2282,6 +2282,33 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "control_plane.workflows.preview_pr_feedback.create_github_issue_comment",
                 return_value={"id": 987, "html_url": "https://github.example/comment"},
             ) as create_comment,
+            patch(
+                "control_plane.http_app.evaluate_owner_acceptance",
+                return_value=MagicMock(
+                    status="pending",
+                    products=(MagicMock(),),
+                    binding=MagicMock(
+                        repository_id="101",
+                        repository_owner_id="100",
+                        repository="cbusillo/sellyouroutboard",
+                        pull_request_number=42,
+                        head_sha="a" * 40,
+                        tree_sha="b" * 40,
+                    ),
+                ),
+            ) as evaluate_owner_acceptance,
+            patch(
+                "control_plane.http_app.resolve_advisory_github_app_identity",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "control_plane.http_app.mint_repository_installation_token",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "control_plane.http_app.project_owner_acceptance_decision",
+                return_value=MagicMock(),
+            ) as project_owner_acceptance,
         ):
             root = Path(temporary_directory_name)
             state_dir = root / "state"
@@ -2336,6 +2363,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 authz_policy=policy,
                 control_plane_root_path=root,
+                human_session_manager=MagicMock(public_origin="https://launchplane.example.test"),
             )
             status_code, payload = _invoke_app(
                 app,
@@ -2361,9 +2389,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "https://pr-42.syo-preview.example.test",
         )
         self.assertEqual(payload["result"]["delivery_status"], "delivered", payload)
+        target = evaluate_owner_acceptance.call_args.kwargs["target"]
+        self.assertEqual(target.repository, "cbusillo/sellyouroutboard")
+        self.assertEqual(target.pull_request_number, 42)
+        projected_target = project_owner_acceptance.call_args.kwargs["target"]
+        self.assertEqual(projected_target.repository, "cbusillo/sellyouroutboard")
+        self.assertEqual(projected_target.pull_request_number, 42)
         create_comment.assert_called_once()
         self.assertIn(
             "https://pr-42.syo-preview.example.test",
+            create_comment.call_args.kwargs["body"],
+        )
+        self.assertIn(
+            "repository=cbusillo%2Fsellyouroutboard&pull_request=42",
             create_comment.call_args.kwargs["body"],
         )
 

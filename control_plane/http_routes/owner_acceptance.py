@@ -147,24 +147,14 @@ class OwnerAcceptanceEvaluationResponse(BaseModel):
 class OwnerAcceptanceEventSemantics(BaseModel):
     """Machine-readable projection of a stored human product-review action.
 
-    The stored enum and every persisted digest stay unchanged. This projection
-    exists so no API client can read Owner product review as merge readiness,
-    landed state, or production authorization.
+    The stored enum and every persisted digest stay unchanged. Acceptance is an
+    authoritative merge-admission prerequisite, while technical readiness,
+    landing, and production authorization remain separate decisions.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     human_action_semantics: OwnerAcceptanceHumanActionSemantics
-    authorizes: tuple[str, ...] = Field(
-        default=(),
-        description="Always empty. Owner product review authorizes nothing on its own.",
-    )
-
-    @model_validator(mode="after")
-    def _validate_semantics(self) -> "OwnerAcceptanceEventSemantics":
-        if self.authorizes:
-            raise ValueError("Owner product review never authorizes merge, release, or production")
-        return self
 
 
 class OwnerAcceptanceEventResponse(BaseModel):
@@ -192,9 +182,6 @@ class OwnerAcceptanceQueueResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    mode: Literal["shadow"] = "shadow"
-    authoritative: Literal[False] = False
-    enforcement_effect: Literal["none"] = "none"
     derivation: Literal["ledger_only"] = "ledger_only"
     generated_at: str
     total: int
@@ -210,9 +197,6 @@ class OwnerAcceptanceCurrentItemsResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    mode: Literal["shadow"] = "shadow"
-    authoritative: Literal[False] = False
-    enforcement_effect: Literal["none"] = "none"
     derivation: Literal["active_change_impact_open_pull_requests"] = (
         "active_change_impact_open_pull_requests"
     )
@@ -375,7 +359,7 @@ def register_owner_acceptance_routes(
             project_current_decision(target=target, record_store=record_store)
         except Exception:
             logger.warning(
-                "Owner acceptance advisory projection failed after event write.",
+                "Owner acceptance GitHub projection failed after event write.",
                 exc_info=True,
             )
 

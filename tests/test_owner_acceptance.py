@@ -491,7 +491,9 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 owner_policy_digest=_owner_policy().policy_digest,
                 owner_requirement_record_id=_owner_requirement().record_id,
                 owner_requirement_revision=1,
-                owner_requirement_digest=_owner_requirement().requirement_digest,
+                owner_requirement_digest=(
+                    "8aadfe5b7b0291143ec9e0f653e1978c9cc081d12e36e86b49d87e4a7015e356"
+                ),
             )
 
             self.assertEqual(
@@ -774,15 +776,15 @@ class OwnerAcceptanceTests(unittest.TestCase):
             self.assertEqual(result.record.subject_sequence, 1)
             self.assertEqual(
                 result.record.acceptance_id,
-                "owner-acceptance-1cc2c18bea5c40c21cb1a9ba02ffe2a0",
+                "owner-acceptance-0dab839e317015df00d2c5caa0639130",
             )
             self.assertEqual(
                 result.record.event_id,
-                "owner-acceptance-event-b961f97ffb3c028a1cd19c0f8b951f8e",
+                "owner-acceptance-event-ba52f0656d92980fcf96fa9b2fe905fa",
             )
             self.assertEqual(
                 owner_acceptance_event_replay_digest(result.record),
-                "07145b7467300ec9d5bea196fed65f36315ca6dc867a21633396ecf657e1ca62",
+                "e40b805ee28da0d7107f836dff824fa6fda4a258aad20d432cb6e76637a47c85",
             )
 
             replay = record_owner_acceptance_event(

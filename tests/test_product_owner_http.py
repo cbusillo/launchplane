@@ -20,7 +20,7 @@ from control_plane.http_routes.product_owner import (
     PRODUCT_OWNER_POLICY_READ_ROUTE,
     PRODUCT_OWNER_REQUIREMENT_APPLY_ROUTE,
     PRODUCT_OWNER_ROUTING_APPLY_ROUTE,
-    PRODUCT_OWNER_SHADOW_EVALUATION_ROUTE,
+    PRODUCT_OWNER_AUTHORITY_EVALUATION_ROUTE,
     ProductOwnerWriteRouteDependencies,
     register_product_owner_read_routes,
     register_product_owner_write_routes,
@@ -101,7 +101,7 @@ def _requirement() -> ProductOwnerRequirementRecord:
 
 
 class ProductOwnerHttpTests(unittest.IsolatedAsyncioTestCase):
-    async def test_apply_read_and_shadow_routes_are_additive_and_non_authoritative(self) -> None:
+    async def test_apply_read_and_authority_routes_share_current_records(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(Path(directory))
             identity_holder: list[LaunchplaneIdentity] = [_human(1001)]
@@ -190,9 +190,9 @@ class ProductOwnerHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(read_response.status_code, 200, read_response.text)
                 read_model = read_response.json()["read_model"]
-                self.assertEqual(read_model["mode"], "shadow")
-                self.assertFalse(read_model["authoritative"])
-                self.assertEqual(read_model["enforcement_effect"], "none")
+                self.assertNotIn("mode", read_model)
+                self.assertNotIn("authoritative", read_model)
+                self.assertNotIn("enforcement_effect", read_model)
 
                 evaluation_params: dict[str, str | int] = {
                     "product": PRODUCT,
@@ -206,18 +206,18 @@ class ProductOwnerHttpTests(unittest.IsolatedAsyncioTestCase):
                     "claimed_requirement_digest": requirement.requirement_digest,
                 }
                 preferred = await client.get(
-                    PRODUCT_OWNER_SHADOW_EVALUATION_ROUTE,
+                    PRODUCT_OWNER_AUTHORITY_EVALUATION_ROUTE,
                     params=evaluation_params,
                 )
                 self.assertEqual(preferred.status_code, 200, preferred.text)
                 preferred_evaluation = preferred.json()["evaluation"]
                 self.assertEqual(preferred_evaluation["decision"], "authorized")
                 self.assertTrue(preferred_evaluation["actor_is_preferred"])
-                self.assertFalse(preferred_evaluation["authoritative"])
+                self.assertNotIn("authoritative", preferred_evaluation)
 
                 identity_holder[0] = _human(1002)
                 non_preferred = await client.get(
-                    PRODUCT_OWNER_SHADOW_EVALUATION_ROUTE,
+                    PRODUCT_OWNER_AUTHORITY_EVALUATION_ROUTE,
                     params=evaluation_params,
                 )
                 self.assertEqual(non_preferred.status_code, 200, non_preferred.text)
@@ -226,7 +226,7 @@ class ProductOwnerHttpTests(unittest.IsolatedAsyncioTestCase):
 
                 identity_holder[0] = _human(9999, role="admin")
                 admin = await client.get(
-                    PRODUCT_OWNER_SHADOW_EVALUATION_ROUTE,
+                    PRODUCT_OWNER_AUTHORITY_EVALUATION_ROUTE,
                     params=evaluation_params,
                 )
                 self.assertEqual(admin.status_code, 200, admin.text)
@@ -258,7 +258,7 @@ class ProductOwnerHttpTests(unittest.IsolatedAsyncioTestCase):
                     with self.subTest(identity=type(non_human_identity).__name__):
                         identity_holder[0] = non_human_identity
                         rejected = await client.get(
-                            PRODUCT_OWNER_SHADOW_EVALUATION_ROUTE,
+                            PRODUCT_OWNER_AUTHORITY_EVALUATION_ROUTE,
                             params=evaluation_params,
                         )
                         self.assertEqual(rejected.status_code, 403, rejected.text)
@@ -269,7 +269,7 @@ class ProductOwnerHttpTests(unittest.IsolatedAsyncioTestCase):
 
                 identity_holder[0] = _human(1001, role="admin")
                 listed_admin = await client.get(
-                    PRODUCT_OWNER_SHADOW_EVALUATION_ROUTE,
+                    PRODUCT_OWNER_AUTHORITY_EVALUATION_ROUTE,
                     params=evaluation_params,
                 )
                 self.assertEqual(listed_admin.status_code, 200, listed_admin.text)
@@ -350,14 +350,13 @@ class ProductOwnerHttpTests(unittest.IsolatedAsyncioTestCase):
             schema = app.openapi()
         self.assertIn(PRODUCT_OWNER_POLICY_READ_ROUTE, schema["paths"])
         self.assertIn(PRODUCT_OWNER_POLICY_APPLY_ROUTE, schema["paths"])
-        self.assertIn(PRODUCT_OWNER_SHADOW_EVALUATION_ROUTE, schema["paths"])
+        self.assertIn(PRODUCT_OWNER_AUTHORITY_EVALUATION_ROUTE, schema["paths"])
         self.assertEqual(action_safety("product_owner_policy.write"), "policy_admin")
         self.assertEqual(action_safety("product_owner_requirement.write"), "policy_admin")
         self.assertEqual(action_safety("product_owner_routing.write"), "policy_admin")
         self.assertEqual(action_safety("product_owner_policy.read"), "read")
         self.assertEqual(action_safety("product_owner_requirement.read"), "read")
         self.assertEqual(action_safety("product_owner_routing.read"), "read")
-        self.assertEqual(action_safety("product_owner_shadow.read"), "read")
 
 
 if __name__ == "__main__":

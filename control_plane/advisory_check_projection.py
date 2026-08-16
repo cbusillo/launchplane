@@ -88,7 +88,7 @@ def write_advisory_check_projection(
     body = {
         "name": projection.name,
         "status": "completed",
-        "conclusion": "neutral",
+        "conclusion": projection.conclusion,
         "external_id": projection.external_id,
         "details_url": projection.details_url,
         "output": {"title": projection.title, "summary": projection.summary},
@@ -138,7 +138,7 @@ def _matches_projection(check_run: dict[str, object], projection: AdvisoryCheckP
     output = check_run.get("output")
     return (
         str(check_run.get("status") or "") == "completed"
-        and str(check_run.get("conclusion") or "") == "neutral"
+        and str(check_run.get("conclusion") or "") == projection.conclusion
         and str(check_run.get("external_id") or "") == projection.external_id
         and str(check_run.get("details_url") or "") == projection.details_url
         and isinstance(output, dict)
@@ -175,7 +175,7 @@ def _result(
         != projection.external_id
         or _app_id(check_run.get("app")) != installation_token.app_id
         or str(check_run.get("status") or "") != "completed"
-        or str(check_run.get("conclusion") or "") != "neutral"
+        or str(check_run.get("conclusion") or "") != projection.conclusion
         or str(check_run.get("details_url") or "") != projection.details_url
     ):
         raise AdvisoryCheckProjectionError(
@@ -193,6 +193,7 @@ def _result(
             "GitHub advisory check run response requires id.",
             error_type=AdvisoryCheckProjectionError,
         ),
+        conclusion=projection.conclusion,
     )
 
 

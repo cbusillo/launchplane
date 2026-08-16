@@ -2886,9 +2886,6 @@ function _ownerAcceptanceQueueEntry(
     system: binding.system,
     action: binding.action,
     environment: binding.environment,
-    mode: "shadow" as const,
-    authoritative: false as const,
-    enforcement_effect: "none" as const,
     verification_required: true as const,
     ledger_status,
     next_action,
@@ -2905,15 +2902,12 @@ export function ownerAcceptanceForFixture(
 
   if (fixture === "empty") {
     return {
-      authoritative: false,
       candidate: 0,
       derivation: "ledger_only",
-      enforcement_effect: "none",
       entries: [],
       entry_count: 0,
       generated_at: OBSERVED_AT,
       has_more: false,
-      mode: "shadow",
       status: "ok",
       total: 0,
       trace_id: "fixture-owner-acceptance-empty",
@@ -2981,15 +2975,12 @@ export function ownerAcceptanceForFixture(
   const entries = fixture === "missing" ? allEntries.slice(0, 1) : allEntries;
 
   return {
-    authoritative: false,
     candidate: entries.length,
     derivation: "ledger_only",
-    enforcement_effect: "none",
     entries,
     entry_count: entries.length,
     generated_at: OBSERVED_AT,
     has_more: false,
-    mode: "shadow",
     status: "ok",
     total: entries.length,
     trace_id: "fixture-owner-acceptance",
@@ -3008,16 +2999,12 @@ export function ownerAcceptanceEvaluationForFixture(
   });
   return {
     schema_version: 1,
-    mode: "shadow",
-    authoritative: false,
-    enforcement_effect: "none",
     status: "pending",
     reason_code: "acceptance_missing",
     binding,
     current_event: null,
     admissible: false,
     human_action_semantics: "none",
-    authorizes: [],
     products: [
       {
         schema_version: 1,
@@ -3031,7 +3018,6 @@ export function ownerAcceptanceEvaluationForFixture(
         current_event: null,
         admissible: false,
         human_action_semantics: "none",
-        authorizes: [],
       },
     ],
     evaluated_at: OBSERVED_AT,
@@ -3088,7 +3074,6 @@ export function governanceProjectionForFixture(
     admissible: currentStatus === "accepted",
     human_action_semantics:
       scenario === "15" ? "product_review_revoked" : "product_review_accepted",
-    authorizes: [],
   };
   const products: OwnerAcceptanceProductDecision[] =
     scenario === "24"
@@ -3105,9 +3090,6 @@ export function governanceProjectionForFixture(
       : [product];
   const decision: OwnerAcceptanceDecision = {
     schema_version: 1,
-    mode: "shadow",
-    authoritative: false,
-    enforcement_effect: "none",
     status: currentStatus,
     reason_code: currentReason,
     binding,
@@ -3115,7 +3097,6 @@ export function governanceProjectionForFixture(
     admissible: currentStatus === "accepted",
     human_action_semantics:
       scenario === "15" ? "product_review_revoked" : "product_review_accepted",
-    authorizes: [],
     products,
     evaluated_at: OBSERVED_AT,
   };
@@ -3144,9 +3125,8 @@ export function governanceProjectionForFixture(
       },
       owner_judgment: {
         level: 1,
-        mode: "historical_product_judgment",
-        authoritative: false,
-        authorizes: [],
+        mode: "owner_acceptance",
+        authoritative: true,
         current: decision,
         history: [
           {
@@ -3154,7 +3134,6 @@ export function governanceProjectionForFixture(
             human_action_semantics: "product_review_accepted",
             target_status: "current",
             decision_relationship: scenario === "15" ? "historical" : "current",
-            authorizes: [],
           },
           ...(scenario === "15"
             ? [
@@ -3163,7 +3142,6 @@ export function governanceProjectionForFixture(
                   human_action_semantics: "product_review_revoked" as const,
                   target_status: "current" as const,
                   decision_relationship: "current" as const,
-                  authorizes: [],
                 },
               ]
             : []),
@@ -3204,7 +3182,6 @@ export function governanceProjectionForFixture(
             state: "neutral",
             app_id: 42,
           },
-          neutral: true,
           authoritative: false,
           authorizes: [],
         },
@@ -3215,7 +3192,6 @@ export function governanceProjectionForFixture(
             state: "neutral",
             app_id: 42,
           },
-          neutral: true,
           authoritative: false,
           authorizes: [],
         },

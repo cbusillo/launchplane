@@ -1274,10 +1274,6 @@ class LaunchplaneProductOwnerRequirementRow(Base):
             name="launchplane_product_owner_requirement_revision_ck",
         ),
         CheckConstraint(
-            "enforcement_mode = 'shadow'",
-            name="launchplane_product_owner_requirement_shadow_ck",
-        ),
-        CheckConstraint(
             "(requirement_revision = 1 AND supersedes_record_id IS NULL) OR "
             "(requirement_revision > 1 AND supersedes_record_id IS NOT NULL)",
             name="launchplane_product_owner_requirement_supersedes_ck",
@@ -1311,7 +1307,6 @@ class LaunchplaneProductOwnerRequirementRow(Base):
     system: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     requirement_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    enforcement_mode: Mapped[str] = mapped_column(String, nullable=False)
     effective_at: Mapped[str] = mapped_column(String, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False)
     supersedes_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -16498,7 +16493,6 @@ class PostgresRecordStore(HumanSessionStore):
             system=record.system,
             status=record.status,
             requirement_revision=record.requirement_revision,
-            enforcement_mode=record.enforcement_mode,
             effective_at=record.effective_at,
             source=record.source,
             supersedes_record_id=record.supersedes_record_id,

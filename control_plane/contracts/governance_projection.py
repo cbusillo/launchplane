@@ -38,12 +38,9 @@ class GovernanceOwnerHistoryEntry(BaseModel):
     human_action_semantics: OwnerAcceptanceHumanActionSemantics
     target_status: Literal["current", "historical"]
     decision_relationship: Literal["current", "historical"]
-    authorizes: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_entry(self) -> "GovernanceOwnerHistoryEntry":
-        if self.authorizes:
-            raise ValueError("Historical Owner product review authorizes no effect")
         expected_semantics = owner_acceptance_human_action_semantics(self.record.action)
         if self.human_action_semantics != expected_semantics:
             raise ValueError("Owner history semantics must match the stored event")
@@ -54,16 +51,13 @@ class GovernanceOwnerJudgmentFacet(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     level: Literal[1] = 1
-    mode: Literal["historical_product_judgment"] = "historical_product_judgment"
-    authoritative: Literal[False] = False
-    authorizes: tuple[str, ...] = ()
+    mode: Literal["owner_acceptance"] = "owner_acceptance"
+    authoritative: Literal[True] = True
     current: OwnerAcceptanceDecision
     history: tuple[GovernanceOwnerHistoryEntry, ...] = ()
 
     @model_validator(mode="after")
     def _validate_facet(self) -> "GovernanceOwnerJudgmentFacet":
-        if self.authorizes:
-            raise ValueError("Level 1 Owner product judgment authorizes no effect")
         ordered = tuple(
             sorted(
                 self.history,
@@ -166,7 +160,6 @@ class GovernanceAdvisoryObservation(BaseModel):
 
     observation_scope: GovernanceAdvisoryObservationScope
     observation: MergeReadinessAdvisoryObservation
-    neutral: Literal[True] = True
     authoritative: Literal[False] = False
     authorizes: tuple[str, ...] = ()
 
