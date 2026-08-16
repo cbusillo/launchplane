@@ -45,7 +45,7 @@ from control_plane.workflows.odoo_generic_web_post_deploy import (
 
 __all__ = [
     "_GenericWebDeployProviderInspection",
-    "_GenericWebDeployProviderMutationAdapter",
+    "GenericWebDeployProviderMutationAdapter",
 ]
 
 
@@ -58,7 +58,7 @@ class _GenericWebDeployProviderInspection:
     post_deploy_unobserved: bool = False
 
 
-class _GenericWebDeployProviderMutationAdapter:
+class GenericWebDeployProviderMutationAdapter:
     def __init__(
         self,
         *,

@@ -34,7 +34,7 @@ from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane import secrets as control_plane_secrets
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_deploy_provider_adapter import (
-    _GenericWebDeployProviderMutationAdapter,
+    GenericWebDeployProviderMutationAdapter,
 )
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
@@ -480,8 +480,8 @@ class GenericWebDeployTests(unittest.TestCase):
         store: _GenericWebDeployStore,
         provider: _FakeGenericWebDeployProvider,
         deploy_request: GenericWebDeployRequest | None = None,
-    ) -> _GenericWebDeployProviderMutationAdapter:
-        adapter = _GenericWebDeployProviderMutationAdapter(
+    ) -> GenericWebDeployProviderMutationAdapter:
+        adapter = GenericWebDeployProviderMutationAdapter(
             control_plane_root=Path("."),
             record_store=store,
             deploy_request=GenericWebDeployEnvelope(
