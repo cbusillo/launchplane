@@ -51,6 +51,15 @@ class GenericWebDeployRecoveryDryRunRequest(BaseModel):
         return self
 
 
+class GenericWebDeployRecoveryApplyRequest(GenericWebDeployRecoveryDryRunRequest):
+    expected_recovery_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _validate_apply_request(self) -> "GenericWebDeployRecoveryApplyRequest":
+        self.expected_recovery_digest = self.expected_recovery_digest.strip()
+        return self
+
+
 class GenericWebDeployRecoveryDryRunResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -74,6 +83,25 @@ class GenericWebDeployRecoveryDryRunResponse(BaseModel):
     retry_safe: bool
     proposed_action: GenericWebDeployRecoveryAction
     recovery_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class GenericWebDeployRecoveryApplyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    status: Literal["accepted"] = "accepted"
+    mode: Literal["apply"] = "apply"
+    trace_id: str
+    product: str
+    context: str
+    instance: str
+    reservation_state: Literal["completed", "reconcile_required"]
+    reservation_attempt: int = Field(ge=1)
+    recovery_action: GenericWebDeployRecoveryAction
+    recovery_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    provider_outcome: GenericWebDeployRecoveryProviderOutcome
+    provider_status: str = Field(default="", max_length=128)
+    retry_safe: bool
 
 
 def generic_web_deploy_recovery_identifier_sha256(value: str) -> str:

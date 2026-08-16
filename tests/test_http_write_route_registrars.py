@@ -38,6 +38,27 @@ class FastApiWriteRouteRegistrarTests(unittest.TestCase):
         for status_code in ("400", "401", "403", "404", "409", "503"):
             self.assertIn(status_code, route["responses"])
 
+    def test_generic_web_deploy_recovery_apply_openapi_contract(self) -> None:
+        route = self.app.openapi()["paths"]["/v1/admin/generic-web/deploy-recovery/apply"]["post"]
+
+        self.assertEqual(route["operationId"], "apply_generic_web_deploy_recovery")
+        self.assertEqual(
+            route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/GenericWebDeployRecoveryApplyRequest",
+        )
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/GenericWebDeployRecoveryApplyResponse",
+        )
+        idempotency_header = next(
+            parameter
+            for parameter in route["parameters"]
+            if parameter["in"] == "header" and parameter["name"] == "Idempotency-Key"
+        )
+        self.assertTrue(idempotency_header["required"])
+        for status_code in ("400", "401", "403", "404", "409", "503"):
+            self.assertIn(status_code, route["responses"])
+
     def test_evidence_write_routes_preserve_contracts_and_ownership(self) -> None:
         expected_routes = (
             ("/v1/evidence/backup-gates", "write_backup_gate_evidence"),
@@ -124,6 +145,11 @@ class FastApiWriteRouteRegistrarTests(unittest.TestCase):
                 "GenericWebDeployRecoveryDryRunResponse",
             ),
             (
+                "/v1/admin/generic-web/deploy-recovery/apply",
+                "apply_generic_web_deploy_recovery",
+                "GenericWebDeployRecoveryApplyResponse",
+            ),
+            (
                 "/v1/drivers/generic-web/prod-promotion",
                 "apply_generic_web_prod_promotion",
                 "GenericWebProdPromotionResponse",
@@ -172,7 +198,7 @@ class FastApiWriteRouteRegistrarTests(unittest.TestCase):
             self.assertEqual(route.response_model.__name__, response_model)
             expected_module = (
                 "control_plane.generic_web_deploy_recovery_http"
-                if route.path == "/v1/admin/generic-web/deploy-recovery/dry-run"
+                if route.path.startswith("/v1/admin/generic-web/deploy-recovery/")
                 else "control_plane.http_routes.generic_web"
             )
             self.assertEqual(route.endpoint.__module__, expected_module)
@@ -188,6 +214,7 @@ class FastApiWriteRouteRegistrarTests(unittest.TestCase):
             ("POST", "/v1/drivers/generic-web/preview-destroy"),
             ("POST", "/v1/drivers/generic-web/deploy"),
             ("POST", "/v1/admin/generic-web/deploy-recovery/dry-run"),
+            ("POST", "/v1/admin/generic-web/deploy-recovery/apply"),
             ("POST", "/v1/drivers/generic-web/prod-promotion"),
             ("POST", "/v1/drivers/generic-web/prod-promotion-workflow"),
             ("POST", "/v1/drivers/generic-web/stable-verification"),

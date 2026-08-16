@@ -16,6 +16,7 @@ from control_plane.provider_operations import (
     ProviderOperationLease,
     ProviderTargetSupersession,
     run_durable_provider_operation,
+    resume_acquired_provider_operation,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.storage.postgres import PostgresRecordStore
@@ -167,6 +168,140 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             )
             self.assertEqual(len(adapter.provider_operation_keys), 1)
             self.assertTrue(adapter.provider_operation_keys[0].startswith("provider-operation:"))
+
+    def test_resume_acquired_running_reservation_completes_without_reserve_or_release(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            adapter = _FakeAdapter()
+            reservation = fixture.store.reserve_mutation(
+                scope=_SCOPE,
+                route_path=_ROUTE,
+                idempotency_key=_KEY,
+                request_fingerprint=_FINGERPRINT,
+                lease_owner="recovery-instance",
+                lease_seconds=300,
+                reconciliation_key=_RECONCILIATION_KEY,
+                provider_target_key=adapter.target_key(),
+            ).record
+            with (
+                patch.object(
+                    fixture.store, "reserve_mutation", side_effect=AssertionError("reserve")
+                ),
+                patch.object(
+                    fixture.store,
+                    "release_reserved_mutation",
+                    side_effect=AssertionError("release"),
+                ),
+            ):
+                result = resume_acquired_provider_operation(
+                    store=fixture.store,
+                    reservation=reservation,
+                    response_trace_id="recovery-trace",
+                    adapter=adapter,
+                )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(adapter.apply_calls, 1)
+            self.assertEqual(fixture.stored().state, "completed")
+
+    def test_resume_acquired_preserves_reconcile_required_on_pre_effect_rejection(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            adapter = _FakeAdapter(
+                apply_error=ProviderMutationRejectedError(ValueError("invalid request"))
+            )
+            reservation = fixture.store.reserve_mutation(
+                scope=_SCOPE,
+                route_path=_ROUTE,
+                idempotency_key=_KEY,
+                request_fingerprint=_FINGERPRINT,
+                lease_owner="recovery-instance",
+                lease_seconds=300,
+                reconciliation_key=_RECONCILIATION_KEY,
+                provider_target_key=adapter.target_key(),
+            ).record
+            with patch.object(
+                fixture.store,
+                "release_reserved_mutation",
+                side_effect=AssertionError("release"),
+            ):
+                result = resume_acquired_provider_operation(
+                    store=fixture.store,
+                    reservation=reservation,
+                    response_trace_id="recovery-trace",
+                    adapter=adapter,
+                )
+
+            self.assertEqual(result.status, "reconcile_required")
+            self.assertEqual(fixture.stored().state, "reconcile_required")
+
+    def test_resume_acquired_preserves_reconcile_required_on_non_durable_outcome(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            adapter = _FakeAdapter(
+                apply_outcome=ProviderMutationOutcome(
+                    response_status_code=202,
+                    response_payload={"status": "accepted"},
+                    durable=False,
+                    provider_effect_performed=False,
+                )
+            )
+            reservation = fixture.store.reserve_mutation(
+                scope=_SCOPE,
+                route_path=_ROUTE,
+                idempotency_key=_KEY,
+                request_fingerprint=_FINGERPRINT,
+                lease_owner="recovery-instance",
+                lease_seconds=300,
+                reconciliation_key=_RECONCILIATION_KEY,
+                provider_target_key=adapter.target_key(),
+            ).record
+            with patch.object(
+                fixture.store,
+                "release_reserved_mutation",
+                side_effect=AssertionError("release"),
+            ):
+                result = resume_acquired_provider_operation(
+                    store=fixture.store,
+                    reservation=reservation,
+                    response_trace_id="recovery-trace",
+                    adapter=adapter,
+                )
+
+            self.assertEqual(result.status, "reconcile_required")
+            self.assertEqual(fixture.stored().state, "reconcile_required")
+
+    def test_resume_acquired_rejects_adapter_identity_drift(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            adapter = _FakeAdapter()
+            reservation = fixture.store.reserve_mutation(
+                scope=_SCOPE,
+                route_path=_ROUTE,
+                idempotency_key=_KEY,
+                request_fingerprint=_FINGERPRINT,
+                lease_owner="recovery-instance",
+                lease_seconds=300,
+                reconciliation_key=_RECONCILIATION_KEY,
+                provider_target_key=adapter.target_key(),
+            ).record
+            mismatched = reservation.model_copy(
+                update={"provider_target_key": "provider-target:other"}
+            )
+
+            with self.assertRaisesRegex(ValueError, "target identity does not match"):
+                resume_acquired_provider_operation(
+                    store=fixture.store,
+                    reservation=mismatched,
+                    response_trace_id="recovery-trace",
+                    adapter=adapter,
+                )
 
     def test_long_apply_renews_lease_and_completes_with_latest_reservation(self) -> None:
         with TemporaryDirectory() as directory:
