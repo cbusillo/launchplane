@@ -12,6 +12,7 @@ from pydantic import BaseModel, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from control_plane.contracts.generic_web_deploy_recovery import (
+    GenericWebDeployRecoveryApplyResponse,
     GenericWebDeployRecoveryDryRunResponse,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -32,8 +33,10 @@ from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
 )
 from control_plane.generic_web_deploy_recovery_http import (
+    GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE as _GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE,
     GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE as _GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
     GenericWebDeployRecoveryDependencies,
+    build_generic_web_deploy_recovery_apply_handler,
     build_generic_web_deploy_recovery_dry_run_handler,
 )
 from control_plane.generic_web_preview_http import (
@@ -310,6 +313,7 @@ class GenericWebWriteRouteHandlers:
     apply_generic_web_preview_destroy: Callable[..., Any]
     apply_generic_web_deploy: Callable[..., Any]
     dry_run_generic_web_deploy_recovery: Callable[..., Any]
+    apply_generic_web_deploy_recovery: Callable[..., Any]
     apply_generic_web_prod_promotion: Callable[..., Any]
     dispatch_generic_web_prod_promotion_workflow: Callable[..., Any]
     apply_generic_web_stable_verification: Callable[..., Any]
@@ -343,6 +347,17 @@ def build_generic_web_write_route_handlers(
     dependencies: GenericWebWriteRouteDependencies,
 ) -> GenericWebWriteRouteHandlers:
     dry_run_generic_web_deploy_recovery = build_generic_web_deploy_recovery_dry_run_handler(
+        dependencies=GenericWebDeployRecoveryDependencies(
+            read_write_identity=dependencies.read_write_identity,
+            get_record_store=dependencies.get_record_store,
+            next_trace_id=dependencies.next_trace_id,
+            authorization_allows=dependencies.authorization_allows,
+            http_error=dependencies.http_error,
+            control_plane_root=dependencies.control_plane_root,
+            idempotency_request_fingerprint=dependencies.idempotency_request_fingerprint,
+        )
+    )
+    apply_generic_web_deploy_recovery = build_generic_web_deploy_recovery_apply_handler(
         dependencies=GenericWebDeployRecoveryDependencies(
             read_write_identity=dependencies.read_write_identity,
             get_record_store=dependencies.get_record_store,
@@ -1949,6 +1964,7 @@ def build_generic_web_write_route_handlers(
         apply_generic_web_preview_destroy=apply_generic_web_preview_destroy,
         apply_generic_web_deploy=apply_generic_web_deploy,
         dry_run_generic_web_deploy_recovery=dry_run_generic_web_deploy_recovery,
+        apply_generic_web_deploy_recovery=apply_generic_web_deploy_recovery,
         apply_generic_web_prod_promotion=apply_generic_web_prod_promotion,
         dispatch_generic_web_prod_promotion_workflow=dispatch_generic_web_prod_promotion_workflow,
         apply_generic_web_stable_verification=apply_generic_web_stable_verification,
@@ -2137,6 +2153,25 @@ def register_generic_web_write_routes(
         response_model_exclude_none=True,
         operation_id="dry_run_generic_web_deploy_recovery",
         summary="Inspect an existing generic web deploy reservation without writing",
+        responses={
+            400: {"model": dependencies.error_response_model},
+            401: {"model": dependencies.error_response_model},
+            403: {"model": dependencies.error_response_model},
+            404: {"model": dependencies.error_response_model},
+            409: {"model": dependencies.error_response_model},
+            503: {"model": dependencies.error_response_model},
+        },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE,
+        handlers.apply_generic_web_deploy_recovery,
+        methods=["POST"],
+        status_code=202,
+        response_model=GenericWebDeployRecoveryApplyResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_generic_web_deploy_recovery",
+        summary="Apply a reviewed generic web deploy recovery",
         responses={
             400: {"model": dependencies.error_response_model},
             401: {"model": dependencies.error_response_model},

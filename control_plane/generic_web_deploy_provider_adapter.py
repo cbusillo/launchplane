@@ -119,6 +119,17 @@ class GenericWebDeployProviderMutationAdapter:
             provider_effect_phase=provider_effect_phase,
             reconciliation_key=reconciliation_key,
         )
+        return self.provider_observation_from_inspection(
+            provider_operation_key=provider_operation_key,
+            inspection=inspection,
+        )
+
+    def provider_observation_from_inspection(
+        self,
+        *,
+        provider_operation_key: str,
+        inspection: _GenericWebDeployProviderInspection,
+    ) -> ProviderObservation:
         observation = inspection.observation
         if observation.outcome != "present" or inspection.resolved_deploy_target is None:
             return ProviderObservation(

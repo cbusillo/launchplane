@@ -366,9 +366,9 @@ former replaces the previous process-local apply lock. Both require an
   explaining that cleanup won. Provider read failures remain fail-closed. Do not
   reproduce this transition with direct SQL or provider-side deletion.
 
-### Generic-web deploy recovery dry-run
+### Generic-web deploy recovery dry-run/apply
 
-Stage 1 recovery for legacy generic-web deploys is read-only. Operators call
+Legacy generic-web deploy recovery starts read-only. Operators call
 `POST /v1/admin/generic-web/deploy-recovery/dry-run` with the exact original
 `GenericWebDeployEnvelope` under `original_deploy`, the original
 `Idempotency-Key`, the product and instance, and a non-empty reason. The service
@@ -398,9 +398,27 @@ timestamps, hashed identifiers, provider outcome/status, retry safety, one of
 Raw scopes, idempotency keys, reconciliation keys, provider-target keys,
 original payloads, target URLs, and provider payloads are never returned.
 
-There is no recovery apply endpoint in Stage 1. A later stage must bind any
-mutation to reviewed dry-run evidence and revalidate the reservation atomically;
-until then, the recovery digest is evidence only and authorizes no mutation.
+Stage 2 apply is explicit and digest-gated. Operators call
+`POST /v1/admin/generic-web/deploy-recovery/apply` with the same request body as
+the dry-run plus `expected_recovery_digest`. The service recomputes a fresh
+inspection and requires an exact digest match before it writes anything. The
+digest intentionally excludes `observed_at`, so routine database observation
+time changes do not stale a reviewed recovery; all reservation identity,
+provider classification, action, request, and bounded provider observation
+inputs remain part of the digest.
+
+Apply never creates a new reservation, releases a reservation, or supersedes a
+provider target. If the reviewed reservation is an expired `running` mutation,
+apply first CAS-transitions that exact reservation to `reconcile_required` via
+the durable mutation store, then uses the existing exact-match adoption or retry
+methods. `adopt_observed` stores deployment/inventory evidence from the reviewed
+inspection without re-observing the provider. `retry_original_operation` resumes
+the already-acquired reservation path and preserves `reconcile_required` for
+pre-effect rejection, lease loss, uncertain, or non-durable outcomes. Successful
+apply preserves the original deploy response evidence and adds only bounded
+recovery metadata, `recovery_digest` and `recovery_action`, so a lost-response
+apply retry can replay safely without exposing raw scope, key, target, or
+provider payload data.
 
 ## Target Launchplane Ingress
 
