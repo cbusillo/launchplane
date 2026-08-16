@@ -47,6 +47,7 @@ class GenericWebProviderReconciliationTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
+    product: str = ""
     context: str
     instance: str
     provider_id: str
@@ -88,9 +89,12 @@ def build_generic_web_provider_target_key(
 
 def build_generic_web_provider_reconciliation_key(
     resolved_deploy_target: GenericWebResolvedDeployTarget,
+    *,
+    product: str = "",
 ) -> str:
     ship_request = resolved_deploy_target.ship_request
     snapshot = GenericWebProviderReconciliationTarget(
+        product=product.strip(),
         context=ship_request.context,
         instance=ship_request.instance,
         provider_id=ship_request.provider_id,
@@ -107,6 +111,23 @@ def build_generic_web_provider_reconciliation_key(
     return f"{_GENERIC_WEB_RECONCILIATION_KEY_PREFIX}{encoded.rstrip('=')}"
 
 
+def decode_generic_web_provider_reconciliation_target(
+    reconciliation_key: str,
+) -> GenericWebProviderReconciliationTarget:
+    normalized_key = reconciliation_key.strip()
+    if not normalized_key.startswith(_GENERIC_WEB_RECONCILIATION_KEY_PREFIX):
+        raise ValueError("Generic web provider reconciliation key is invalid.")
+    encoded = normalized_key.removeprefix(_GENERIC_WEB_RECONCILIATION_KEY_PREFIX)
+    try:
+        decoded = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        snapshot = GenericWebProviderReconciliationTarget.model_validate_json(decoded)
+    except Exception as error:
+        raise ValueError("Generic web provider reconciliation key is invalid.") from error
+    if not snapshot.context.strip() or not snapshot.instance.strip():
+        raise ValueError("Generic web provider reconciliation target identity is incomplete.")
+    return snapshot
+
+
 def resolve_generic_web_provider_reconciliation_target(
     *,
     reconciliation_key: str,
@@ -118,15 +139,7 @@ def resolve_generic_web_provider_reconciliation_target(
     lane: ProductLaneProfile,
     request_deploy_reference: str = "",
 ) -> GenericWebResolvedDeployTarget:
-    normalized_key = reconciliation_key.strip()
-    if not normalized_key.startswith(_GENERIC_WEB_RECONCILIATION_KEY_PREFIX):
-        raise ValueError("Generic web provider reconciliation key is invalid.")
-    encoded = normalized_key.removeprefix(_GENERIC_WEB_RECONCILIATION_KEY_PREFIX)
-    try:
-        decoded = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
-        snapshot = GenericWebProviderReconciliationTarget.model_validate_json(decoded)
-    except Exception as error:
-        raise ValueError("Generic web provider reconciliation key is invalid.") from error
+    snapshot = decode_generic_web_provider_reconciliation_target(reconciliation_key)
     context_name = lane.context.strip()
     instance_name = lane.instance.strip()
     if snapshot.context != context_name or snapshot.instance != instance_name:

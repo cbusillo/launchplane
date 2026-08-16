@@ -445,6 +445,13 @@ MutationReconciliationSupersessionStatus = Literal[
     "lease_active",
     "grace_active",
 ]
+ExistingMutationReservationLookupStatus = Literal[
+    "found",
+    "missing",
+    "conflict",
+    "ambiguous",
+    "hold_unknown",
+]
 
 
 class ProductProfileCompareWriteResult(NamedTuple):
@@ -481,6 +488,12 @@ class PublicIngressTransitionWriteResult(NamedTuple):
 class MutationReservationResult(NamedTuple):
     status: MutationReservationDecision
     record: LaunchplaneIdempotencyRecord
+
+
+class ExistingMutationReservationLookupResult(NamedTuple):
+    status: ExistingMutationReservationLookupStatus
+    record: LaunchplaneIdempotencyRecord | None
+    observed_at: str
 
 
 class MutationReservationUpdateResult(NamedTuple):
@@ -4651,6 +4664,147 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 return None
             return self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+
+    def lookup_existing_mutation_reservation(
+        self,
+        *,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> ExistingMutationReservationLookupResult:
+        normalized_route_path = route_path.strip()
+        normalized_idempotency_key = idempotency_key.strip()
+        normalized_request_fingerprint = request_fingerprint.strip()
+        if not normalized_route_path:
+            raise ValueError("Existing mutation lookup requires route_path.")
+        if not normalized_idempotency_key:
+            raise ValueError("Existing mutation lookup requires idempotency_key.")
+        if not normalized_request_fingerprint:
+            raise ValueError("Existing mutation lookup requires request_fingerprint.")
+        statement = (
+            select(LaunchplaneIdempotencyRow)
+            .where(
+                LaunchplaneIdempotencyRow.route_path == normalized_route_path,
+                LaunchplaneIdempotencyRow.idempotency_key == normalized_idempotency_key,
+            )
+            .order_by(LaunchplaneIdempotencyRow.scope)
+            .limit(2)
+        )
+        with self._session_factory() as session:
+            observed_at = self._database_mutation_timestamp(session)
+            rows = tuple(session.scalars(statement))
+            if not rows:
+                return ExistingMutationReservationLookupResult(
+                    status="missing",
+                    record=None,
+                    observed_at=observed_at,
+                )
+            records: list[LaunchplaneIdempotencyRecord] = []
+            for row in rows:
+                raw_payload = row.payload
+                if not isinstance(raw_payload, dict) or (
+                    raw_payload.get("scope") != row.scope
+                    or raw_payload.get("route_path") != row.route_path
+                    or raw_payload.get("idempotency_key") != row.idempotency_key
+                    or raw_payload.get("request_fingerprint") != row.request_fingerprint
+                ):
+                    return ExistingMutationReservationLookupResult(
+                        status="conflict",
+                        record=None,
+                        observed_at=observed_at,
+                    )
+                try:
+                    record = self._read_payload(
+                        model_type=LaunchplaneIdempotencyRecord,
+                        payload=raw_payload,
+                    )
+                except ValueError:
+                    if raw_payload.get("state") == "running":
+                        return ExistingMutationReservationLookupResult(
+                            status="hold_unknown",
+                            record=None,
+                            observed_at=observed_at,
+                        )
+                    return ExistingMutationReservationLookupResult(
+                        status="conflict",
+                        record=None,
+                        observed_at=observed_at,
+                    )
+                canonical_payload = record.model_dump(mode="json")
+                integrity_fields = (
+                    "record_id",
+                    "scope",
+                    "route_path",
+                    "idempotency_key",
+                    "request_fingerprint",
+                    "state",
+                    "lease_owner",
+                    "lease_expires_at",
+                    "attempt",
+                    "reconciliation_key",
+                    "provider_target_key",
+                    "provider_effect_phase",
+                    "provider_effect_started_at",
+                    "created_at",
+                    "updated_at",
+                    "response_status_code",
+                    "response_trace_id",
+                    "recorded_at",
+                    "response_payload",
+                )
+                row_projection = {
+                    "record_id": row.record_id,
+                    "scope": row.scope,
+                    "route_path": row.route_path,
+                    "idempotency_key": row.idempotency_key,
+                    "request_fingerprint": row.request_fingerprint,
+                    "state": row.state,
+                    "lease_owner": row.lease_owner,
+                    "lease_expires_at": row.lease_expires_at,
+                    "attempt": row.attempt,
+                    "reconciliation_key": row.reconciliation_key,
+                    "provider_target_key": row.provider_target_key,
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                    "response_status_code": row.response_status_code,
+                    "response_trace_id": row.response_trace_id,
+                    "recorded_at": row.recorded_at,
+                }
+                if any(
+                    raw_payload.get(field_name) != canonical_payload[field_name]
+                    for field_name in integrity_fields
+                ) or any(
+                    canonical_payload[field_name] != field_value
+                    for field_name, field_value in row_projection.items()
+                ):
+                    return ExistingMutationReservationLookupResult(
+                        status="conflict",
+                        record=None,
+                        observed_at=observed_at,
+                    )
+                records.append(record)
+            matches = tuple(
+                record
+                for record in records
+                if record.request_fingerprint == normalized_request_fingerprint
+            )
+            if len(matches) != len(records):
+                return ExistingMutationReservationLookupResult(
+                    status="conflict",
+                    record=None,
+                    observed_at=observed_at,
+                )
+            if len(matches) != 1:
+                return ExistingMutationReservationLookupResult(
+                    status="ambiguous",
+                    record=None,
+                    observed_at=observed_at,
+                )
+            return ExistingMutationReservationLookupResult(
+                status="found",
+                record=matches[0],
+                observed_at=observed_at,
+            )
 
     def prepare_db_only_mutation(
         self,
