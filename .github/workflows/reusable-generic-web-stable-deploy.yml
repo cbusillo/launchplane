@@ -94,7 +94,7 @@ jobs:
               exit 1
             fi
           done
-          run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          run_scope="${GITHUB_RUN_ID}:1"
           {
             echo "product=$PRODUCT"
             echo "instance=$INSTANCE"

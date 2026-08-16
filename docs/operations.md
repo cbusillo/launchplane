@@ -295,6 +295,11 @@ former replaces the previous process-local apply lock. Both require an
 - A concurrent request with the same key while the effect runs returns `409
   mutation_in_progress`; a completed effect replays; a different request
   fingerprint returns `409 idempotency_key_reused`.
+- GitHub workflow retries must preserve the original operation key. The generic
+  web stable-deploy workflow keeps the first-attempt `:<run_id>:1` suffix on
+  every rerun so **Re-run failed jobs** can reconcile or replay the existing
+  provider operation instead of colliding with its target fence under a new
+  key.
 - A stable provider-target key identifies the mutation target independently of
   request timeout or deploy settings. A partial unique database fence allows
   only one `running` or `reconcile_required` mutation for that target, including
