@@ -4278,6 +4278,223 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(replayed.record.state, "completed")
         self.assertEqual(replayed.record.response_trace_id, "trace-mutation-completed")
 
+    def test_existing_mutation_lookup_crosses_scope_and_rejects_ambiguity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            with patch.object(
+                store,
+                "_database_mutation_timestamp",
+                return_value="2026-08-16T16:00:00Z",
+            ):
+                first = store.reserve_mutation(
+                    scope="github-actions:attempt-1",
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="legacy-deploy-key",
+                    request_fingerprint="exact-original-fingerprint",
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                )
+                found = store.lookup_existing_mutation_reservation(
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="legacy-deploy-key",
+                    request_fingerprint="exact-original-fingerprint",
+                )
+                conflict = store.lookup_existing_mutation_reservation(
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="legacy-deploy-key",
+                    request_fingerprint="different-fingerprint",
+                )
+                store.reserve_mutation(
+                    scope="github-actions:attempt-2",
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="legacy-deploy-key",
+                    request_fingerprint="exact-original-fingerprint",
+                    lease_owner="worker-b",
+                    lease_seconds=300,
+                )
+                ambiguous = store.lookup_existing_mutation_reservation(
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="legacy-deploy-key",
+                    request_fingerprint="exact-original-fingerprint",
+                )
+            store.close()
+
+        self.assertEqual(first.status, "acquired")
+        self.assertEqual(found.status, "found")
+        self.assertIsNotNone(found.record)
+        assert found.record is not None
+        self.assertEqual(found.record.scope, "github-actions:attempt-1")
+        self.assertEqual(found.observed_at, "2026-08-16T16:00:00Z")
+        self.assertEqual(conflict.status, "conflict")
+        self.assertIsNone(conflict.record)
+        self.assertEqual(ambiguous.status, "ambiguous")
+        self.assertIsNone(ambiguous.record)
+
+    def test_existing_mutation_lookup_rejects_payload_projection_drift(self) -> None:
+        for field_name, corrupt_value, corrupt_row in (
+            ("record_id", "corrupt-record", False),
+            ("scope", "github-actions:corrupt", False),
+            ("route_path", "/v1/drivers/generic-web/other", False),
+            ("idempotency_key", "corrupt-key", False),
+            ("request_fingerprint", "corrupt-fingerprint", False),
+            ("state", "reconcile_required", True),
+            ("lease_owner", "worker-corrupt", False),
+            ("lease_expires_at", "2099-08-16T18:00:00Z", False),
+            ("attempt", 2, False),
+            ("reconciliation_key", "reconciliation-corrupt", False),
+            ("provider_target_key", "provider-target-corrupt", False),
+            ("provider_effect_phase", " target_update ", False),
+            ("provider_effect_started_at", "2026-08-16T16:00:00+00:00", False),
+            ("created_at", "2026-08-16T15:59:59Z", False),
+            ("updated_at", "2026-08-16T16:00:01Z", False),
+            ("response_status_code", 201, False),
+            ("response_trace_id", "trace-corrupt", False),
+            ("recorded_at", "2026-08-16T16:00:02Z", False),
+            ("response_payload", "not-a-payload", False),
+        ):
+            with (
+                self.subTest(field_name=field_name),
+                TemporaryDirectory() as temporary_directory_name,
+            ):
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(
+                        Path(temporary_directory_name) / "launchplane.sqlite3"
+                    )
+                )
+                store.ensure_schema()
+                with patch.object(
+                    store,
+                    "_database_mutation_timestamp",
+                    side_effect=(
+                        "2026-08-16T16:00:00Z",
+                        "2026-08-16T16:00:10Z",
+                        "2026-08-16T16:01:00Z",
+                        "2026-08-16T16:02:00Z",
+                    ),
+                ):
+                    running = store.reserve_mutation(
+                        scope="github-actions:attempt-1",
+                        route_path="/v1/drivers/generic-web/deploy",
+                        idempotency_key="legacy-deploy-key",
+                        request_fingerprint="exact-original-fingerprint",
+                        lease_owner="worker-a",
+                        lease_seconds=300,
+                        reconciliation_key="reconciliation-key",
+                        provider_target_key="provider-target-key",
+                    ).record
+                    checkpointed = store.checkpoint_mutation_provider_effect(
+                        reservation=running,
+                        effect_phase="target_update",
+                        lease_seconds=300,
+                    )
+                    assert checkpointed.record is not None
+                    completion = complete_launchplane_mutation_reservation(
+                        checkpointed.record,
+                        response_status_code=202,
+                        response_trace_id="trace-completed",
+                        completed_at="2026-08-16T16:01:00Z",
+                        response_payload={"status": "accepted"},
+                    )
+                    completed = store.complete_mutation_reservation(completion=completion)
+                    assert completed.record is not None
+                    reservation = completed.record
+                corrupt_payload = reservation.model_dump(mode="json")
+                with store._session_factory() as session:
+                    values: dict[str, object]
+                    if corrupt_row:
+                        values = {field_name: corrupt_value}
+                    else:
+                        corrupt_payload[field_name] = corrupt_value
+                        values = {"payload": corrupt_payload}
+                    session.execute(
+                        update(LaunchplaneIdempotencyRow)
+                        .where(LaunchplaneIdempotencyRow.record_id == reservation.record_id)
+                        .values(**values)
+                    )
+                    session.commit()
+
+                result = store.lookup_existing_mutation_reservation(
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="legacy-deploy-key",
+                    request_fingerprint="exact-original-fingerprint",
+                )
+                store.close()
+
+            self.assertEqual(result.status, "conflict")
+            self.assertIsNone(result.record)
+
+    def test_existing_mutation_lookup_reads_at_most_two_candidate_payloads(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            for attempt in range(3):
+                store.reserve_mutation(
+                    scope=f"github-actions:attempt-{attempt}",
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="legacy-deploy-key",
+                    request_fingerprint="exact-original-fingerprint",
+                    lease_owner=f"worker-{attempt}",
+                    lease_seconds=300,
+                )
+            with patch.object(store, "_read_payload", wraps=store._read_payload) as read_payload:
+                result = store.lookup_existing_mutation_reservation(
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="legacy-deploy-key",
+                    request_fingerprint="exact-original-fingerprint",
+                )
+            store.close()
+
+        self.assertEqual(result.status, "ambiguous")
+        self.assertEqual(read_payload.call_count, 2)
+
+    def test_existing_mutation_lookup_holds_on_malformed_running_lease_timestamp(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            reservation = store.reserve_mutation(
+                scope="github-actions:attempt-1",
+                route_path="/v1/drivers/generic-web/deploy",
+                idempotency_key="legacy-deploy-key",
+                request_fingerprint="exact-original-fingerprint",
+                lease_owner="worker-a",
+                lease_seconds=300,
+            ).record
+            corrupt_payload = reservation.model_dump(mode="json")
+            corrupt_payload["lease_expires_at"] = "not-a-timestamp"
+            with store._session_factory() as session:
+                session.execute(
+                    update(LaunchplaneIdempotencyRow)
+                    .where(LaunchplaneIdempotencyRow.record_id == reservation.record_id)
+                    .values(
+                        lease_expires_at="not-a-timestamp",
+                        payload=corrupt_payload,
+                    )
+                )
+                session.commit()
+
+            result = store.lookup_existing_mutation_reservation(
+                route_path=reservation.route_path,
+                idempotency_key=reservation.idempotency_key,
+                request_fingerprint=reservation.request_fingerprint,
+            )
+            store.close()
+
+        self.assertEqual(result.status, "hold_unknown")
+        self.assertIsNone(result.record)
+
     def test_active_reconciliation_key_fences_other_idempotency_keys(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

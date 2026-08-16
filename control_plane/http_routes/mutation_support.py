@@ -11,6 +11,9 @@ from control_plane.generic_web_promotion_http import (
     GENERIC_WEB_PROD_PROMOTION_ROUTE,
     GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
 )
+from control_plane.provider_operations import (
+    provider_operation_response_payload as provider_operation_response_payload,
+)
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
@@ -64,19 +67,6 @@ def accepted_evidence_response(
         replayed=True if replayed else None,
         original_trace_id=original_trace_id or None,
     )
-
-
-def provider_operation_response_payload(
-    *,
-    trace_id: str,
-    records: Mapping[str, object],
-    result: dict[str, object],
-) -> dict[str, object]:
-    return accepted_evidence_response(
-        trace_id=trace_id,
-        records=records,
-        result=result,
-    ).model_dump(mode="json", exclude_none=True)
 
 
 def idempotency_capable_store(record_store: object) -> IdempotencyCapableStore | None:

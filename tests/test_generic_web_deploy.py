@@ -33,7 +33,9 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane import secrets as control_plane_secrets
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
-from control_plane.http_routes.generic_web import _GenericWebDeployProviderMutationAdapter
+from control_plane.generic_web_deploy_provider_adapter import (
+    _GenericWebDeployProviderMutationAdapter,
+)
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
     GenericWebDeployStore,
@@ -515,6 +517,41 @@ class GenericWebDeployTests(unittest.TestCase):
             short_timeout.reconciliation_key(),
             long_timeout.reconciliation_key(),
         )
+
+    def test_provider_inspection_does_not_materialize_observed_records(self) -> None:
+        profile = _profile()
+        store = _GenericWebDeployStore(profile)
+        provider = _FakeGenericWebDeployProvider()
+        provider.observation = GenericWebProviderDeploymentObservation(
+            outcome="present",
+            deployment_status="success",
+            deployment_id="deployment-provider-1",
+            started_at="2026-08-16T15:00:00Z",
+            finished_at="2026-08-16T15:01:00Z",
+        )
+        adapter = self._provider_mutation_adapter(
+            profile=profile,
+            store=store,
+            provider=provider,
+        )
+        reconciliation_key = adapter.reconciliation_key()
+        provider_target_key = adapter.target_key()
+
+        with patch(
+            "control_plane.generic_web_deploy_provider_adapter.record_observed_generic_web_deploy"
+        ) as materialize:
+            inspection = adapter.inspect(
+                provider_operation_key="provider-operation:test-inspection",
+                provider_effect_phase="deploy_trigger",
+                reconciliation_key=reconciliation_key,
+                expected_provider_target_key=provider_target_key,
+            )
+
+        self.assertEqual(inspection.observation.outcome, "present")
+        self.assertTrue(inspection.identity_matches)
+        materialize.assert_not_called()
+        self.assertEqual(store.deployments, [])
+        self.assertEqual(store.inventories, [])
 
     def test_normalize_generic_web_artifact_id_qualifies_bare_release_tag(self) -> None:
         artifact_id = normalize_generic_web_artifact_id(

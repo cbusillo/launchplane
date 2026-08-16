@@ -16,6 +16,7 @@ than repeating the effect; provider-specific reconciliation stays behind the
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import hashlib
 from threading import Event, Lock, Thread
@@ -48,6 +49,20 @@ DurableProviderOperationStatus = Literal[
     "in_progress",
     "reconcile_required",
 ]
+
+
+def provider_operation_response_payload(
+    *,
+    trace_id: str,
+    records: Mapping[str, object],
+    result: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "status": "accepted",
+        "trace_id": trace_id,
+        "records": dict(records),
+        "result": result,
+    }
 
 
 class ProviderMutationRejectedError(Exception):
