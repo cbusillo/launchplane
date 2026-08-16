@@ -738,8 +738,9 @@ function ownerAcceptanceFixtureViewerCapabilities(
   fixtureMode: DevFixtureMode,
 ): OwnerAcceptanceViewerCapabilities {
   const eventWriteAuthorized = fixtureMode !== "empty";
-  const currentOwner =
-    new URLSearchParams(window.location.search).get("viewer") !== "non-owner";
+  const viewer = new URLSearchParams(window.location.search).get("viewer");
+  const currentOwner = viewer !== "non-owner";
+  const canAccept = currentOwner && viewer !== "contributor";
   return {
     event_write_authorized: eventWriteAuthorized,
     bindings: eventWriteAuthorized
@@ -754,12 +755,14 @@ function ownerAcceptanceFixtureViewerCapabilities(
                   action: product.action,
                   environment: product.environment,
                   can_submit_event: currentOwner,
-                  can_accept: currentOwner,
+                  can_accept: canAccept,
                   can_request_changes: currentOwner,
                   can_revoke: currentOwner,
-                  reason_code: currentOwner
+                  reason_code: canAccept
                     ? "current_product_owner"
-                    : "not_current_product_owner",
+                    : currentOwner
+                      ? "self_review_denied"
+                      : "not_current_product_owner",
                 } satisfies OwnerAcceptanceViewerBindingEligibility,
               ]
             : [],
@@ -941,7 +944,7 @@ function OwnerAcceptanceActionPanel({
           ));
           if (response) {
             onDecision(response.decision);
-            setAction("accepted");
+            setAction(ownerAcceptanceDefaultAction(eligibility));
             setReason("");
             setResolutionSummary("");
             setResolutionReferences("");

@@ -55,7 +55,10 @@ from control_plane.owner_acceptance_current_items import (
     OwnerAcceptanceCurrentItemsRepositoryFailure,
     build_owner_acceptance_current_items,
 )
-from control_plane.owner_acceptance_projection import project_owner_acceptance_decision
+from control_plane.owner_acceptance_projection import (
+    project_owner_acceptance_decision,
+    project_owner_acceptance_update_in_progress,
+)
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.workflows.launchplane import github_api_request
 
@@ -69,6 +72,10 @@ OWNER_ACCEPTANCE_EVENT_ROUTE = "/v1/owner-acceptance/events/{event_id}"
 OWNER_ACCEPTANCE_QUEUE_ROUTE = "/v1/owner-acceptance/queue"
 OWNER_ACCEPTANCE_CURRENT_ITEMS_ROUTE = "/v1/owner-acceptance/current-items"
 OWNER_ACCEPTANCE_PROJECT_ROUTE = "/v1/owner-acceptance/project"
+
+
+class OwnerAcceptanceProjectionUnavailableError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,28 +322,23 @@ def register_owner_acceptance_routes(
             bindings=bindings,
         )
 
-    def project_current_decision(
+    def project_decision(
         *,
-        target: ChangeImpactTargetReference,
-        record_store: object,
-    ) -> tuple[OwnerAcceptanceDecision, AdvisoryCheckProjectionResult]:
+        decision: OwnerAcceptanceDecision,
+        target: ChangeImpactTarget,
+    ) -> AdvisoryCheckProjectionResult:
         if dependencies.github_app_token is None:
             raise ValueError("Owner acceptance projection identity is unavailable.")
         if dependencies.public_origin is None:
             raise ValueError("Owner acceptance projection public origin is unavailable.")
-        decision, resolved_target = _resolve_owner_acceptance_projection_state(
-            store=record_store,
-            target=target,
-            repository_evidence_provider=dependencies.repository_evidence_provider,
-        )
         installation_token = dependencies.github_app_token(
-            resolved_target.repository,
-            resolved_target.repository_id,
+            target.repository,
+            target.repository_id,
         )
         try:
-            result = project_owner_acceptance_decision(
+            return project_owner_acceptance_decision(
                 decision=decision,
-                target=resolved_target,
+                target=target,
                 public_origin=dependencies.public_origin,
                 installation_token=installation_token,
                 api_request=dependencies.github_api,
@@ -346,21 +348,44 @@ def register_owner_acceptance_routes(
                 installation_token=installation_token,
                 api_request=dependencies.github_api,
             )
-        return decision, result
 
-    def project_current_decision_best_effort(
+    def project_current_decision(
         *,
         target: ChangeImpactTargetReference,
         record_store: object,
-    ) -> None:
-        if dependencies.github_app_token is None or dependencies.public_origin is None:
-            return
+    ) -> tuple[OwnerAcceptanceDecision, AdvisoryCheckProjectionResult]:
+        decision, resolved_target = _resolve_owner_acceptance_projection_state(
+            store=record_store,
+            target=target,
+            repository_evidence_provider=dependencies.repository_evidence_provider,
+        )
+        return decision, project_decision(decision=decision, target=resolved_target)
+
+    def project_update_in_progress(
+        *,
+        target: ChangeImpactTarget,
+        source_event_id: str,
+    ) -> AdvisoryCheckProjectionResult:
+        if dependencies.github_app_token is None:
+            raise ValueError("Owner acceptance projection identity is unavailable.")
+        if dependencies.public_origin is None:
+            raise ValueError("Owner acceptance projection public origin is unavailable.")
+        installation_token = dependencies.github_app_token(
+            target.repository,
+            target.repository_id,
+        )
         try:
-            project_current_decision(target=target, record_store=record_store)
-        except Exception:
-            logger.warning(
-                "Owner acceptance GitHub projection failed after event write.",
-                exc_info=True,
+            return project_owner_acceptance_update_in_progress(
+                target=target,
+                source_event_id=source_event_id,
+                public_origin=dependencies.public_origin,
+                installation_token=installation_token,
+                api_request=dependencies.github_api,
+            )
+        finally:
+            revoke_installation_token(
+                installation_token=installation_token,
+                api_request=dependencies.github_api,
             )
 
     def evaluate(
@@ -458,6 +483,29 @@ def register_owner_acceptance_routes(
                 message="Caller cannot write Owner acceptance events.",
             )
         try:
+            _, projection_target = _resolve_owner_acceptance_projection_state(
+                store=record_store,
+                target=envelope.target,
+                repository_evidence_provider=dependencies.repository_evidence_provider,
+            )
+        except (OwnerAcceptanceEvaluationUnavailableError, TypeError, ValueError) as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="owner_acceptance_projection_unavailable",
+                message=str(error),
+            ) from error
+
+        def project_conservative_check() -> None:
+            try:
+                project_update_in_progress(
+                    target=projection_target,
+                    source_event_id=idempotency_key,
+                )
+            except Exception as error:
+                raise OwnerAcceptanceProjectionUnavailableError(str(error)) from error
+
+        try:
             result: OwnerAcceptanceWriteResult = record_owner_acceptance_event(
                 store=record_store,
                 repository_evidence_provider=dependencies.repository_evidence_provider,
@@ -469,7 +517,18 @@ def register_owner_acceptance_routes(
                 source_event_id=idempotency_key,
                 reason=envelope.reason,
                 resolution=envelope.resolution,
+                before_write=project_conservative_check,
             )
+        except OwnerAcceptanceProjectionUnavailableError as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="owner_acceptance_projection_unavailable",
+                message=(
+                    "Owner acceptance GitHub status could not be made fail-closed; "
+                    "no event was persisted."
+                ),
+            ) from error
         except OwnerAcceptanceSelfReviewDeniedError as error:
             raise common.http_error(
                 status_code=403,
@@ -519,10 +578,32 @@ def register_owner_acceptance_routes(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        project_current_decision_best_effort(
-            target=envelope.target,
-            record_store=record_store,
+        binding = result.record.binding
+        final_target = ChangeImpactTarget(
+            repository_id=binding.repository_id,
+            repository_owner_id=binding.repository_owner_id,
+            repository=binding.repository,
+            pull_request_number=binding.pull_request_number,
+            head_sha=binding.head_sha,
+            tree_sha=binding.tree_sha,
         )
+        try:
+            project_decision(decision=result.decision, target=final_target)
+        except Exception as error:
+            logger.error(
+                "Owner acceptance event persisted but final GitHub projection failed.",
+                exc_info=True,
+            )
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="owner_acceptance_projection_reconciliation_required",
+                message=(
+                    "Owner acceptance event was persisted, but the final GitHub status "
+                    "projection requires reconciliation. Retry with the same Idempotency-Key "
+                    "or use the Owner acceptance projection endpoint."
+                ),
+            ) from error
         return OwnerAcceptanceEventResponse(
             trace_id=trace_id,
             write_status=result.status,

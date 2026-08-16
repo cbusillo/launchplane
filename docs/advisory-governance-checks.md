@@ -64,10 +64,14 @@ Identical state replays without a write. Changed binding or decision state on
 the same head updates the App-owned check run. A changed head receives its own
 new check run and cannot reuse evidence from the prior head.
 
-Successful browser Owner event writes also trigger a best-effort refresh of the
-current App-owned check. This delivery attempt is non-authoritative: projection
-or token-revocation failure does not roll back the persisted event or alter its
-successful API response, and browser sessions do not gain projection authority.
+Browser Owner event writes first replace the exact-head check with a
+conservative `action_required` state. Failure to establish that non-green state
+blocks the immutable append. Launchplane then projects the stored event's final
+decision against its exact bound target; final delivery failure leaves the
+conservative check in place and returns a reconciliation-required error.
+Idempotent replay and the explicit projection endpoint can safely retry the
+final projection. This sequence remains non-authoritative for admission, and
+browser sessions do not gain projection authority.
 
 ## No Feedback Loop
 

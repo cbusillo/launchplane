@@ -1,7 +1,10 @@
 from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.change_impact import (
     ChangeImpactChangedFileEvidence,
     ChangeImpactEvaluation,
@@ -12,19 +15,51 @@ from control_plane.contracts.change_impact import (
 from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralEntryObservation,
 )
-from control_plane.merge_admission import MergeAdmissionDeniedError
+from control_plane.contracts.merge_readiness import MergeReadinessOwnerFacet
+from control_plane.contracts.owner_acceptance import OwnerAcceptanceAction
+from control_plane.contracts.product_owner import (
+    ProductOwnerGrant,
+    ProductOwnerIdentity,
+    ProductOwnerPolicyRecord,
+)
+from control_plane.merge_admission import MergeAdmissionDeniedError, MergeAdmissionEvaluation
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
 from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
 )
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from control_plane.owner_acceptance import (
+    OwnerAcceptanceWriteResult,
+    build_owner_acceptance_system_event,
+    evaluate_owner_acceptance,
+    record_owner_acceptance_event,
+)
+from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.tenant_admission_controller import (
     TenantAdmissionControllerGitHubClient,
+    TenantAdmissionRequiredTechnicalCheck,
+    TenantAdmissionTechnicalCheckSignal,
     TenantAdmissionTechnicalChecks,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_merge_admission_records import _guard_records
+from tests.test_owner_acceptance import (
+    BASE_SHA as OWNER_BASE_SHA,
+    HEAD_SHA as OWNER_HEAD_SHA,
+    OWNER_GITHUB_ID,
+    REPOSITORY as OWNER_REPOSITORY,
+    TREE_SHA as OWNER_TREE_SHA,
+    _EvidenceProvider,
+    _human,
+    _impact_policy,
+    _owner_policy,
+    _owner_requirement,
+    _preview_profile,
+    _repository_evidence,
+    _write_preview_evidence,
+)
 from tests.test_merge_readiness import (
     BASE_SHA,
     HEAD_SHA,
@@ -84,6 +119,36 @@ class _TechnicalCheckClient(TenantAdmissionControllerGitHubClient):
         )
 
 
+class _PassingTechnicalCheckClient(TenantAdmissionControllerGitHubClient):
+    def __init__(self) -> None:
+        super().__init__(transport=RecordingMergeTrainGitHubTransport())
+
+    def read_technical_checks(
+        self,
+        *,
+        repository: str,
+        base_branch: str,
+        base_sha: str,
+        head_sha: str,
+        evaluated_at: str,
+    ) -> TenantAdmissionTechnicalChecks:
+        return TenantAdmissionTechnicalChecks(
+            head_sha=head_sha,
+            base_sha=base_sha,
+            strict=False,
+            status="pass",
+            required_checks=(TenantAdmissionRequiredTechnicalCheck(name="ci-gate"),),
+            signals=(
+                TenantAdmissionTechnicalCheckSignal(
+                    source="check_run",
+                    name="ci-gate",
+                    state="pass",
+                ),
+            ),
+            evaluated_at=evaluated_at,
+        )
+
+
 class _EmptyEngineeringReviewStore:
     @staticmethod
     def list_engineering_review_run_records(**_filters: object) -> tuple[()]:
@@ -123,6 +188,371 @@ def _queued_pull_request(
         mergeable="mergeable",
         required_checks_status="pass",
     )
+
+
+def _authz_policy_record() -> LaunchplaneAuthzPolicyRecord:
+    return LaunchplaneAuthzPolicyRecord(
+        record_id="authz-policy-live-owner-tests",
+        source="test",
+        updated_at="2026-08-11T03:00:00Z",
+        policy=LaunchplaneAuthzPolicy(),
+    )
+
+
+def _owner_repository_evidence(
+    *,
+    head_sha: str = OWNER_HEAD_SHA,
+    tree_sha: str = OWNER_TREE_SHA,
+) -> ChangeImpactRepositoryEvidence:
+    evidence = _repository_evidence(head=head_sha)
+    return evidence.model_copy(
+        update={
+            "target": evidence.target.model_copy(update={"tree_sha": tree_sha}),
+        }
+    )
+
+
+def _seed_owner_store(
+    root: Path,
+    *,
+    owner_policy: ProductOwnerPolicyRecord | None = None,
+    preview_enabled: bool = False,
+) -> FilesystemRecordStore:
+    store = FilesystemRecordStore(state_dir=root)
+    store.write_change_impact_policy_record(_impact_policy())
+    store.write_product_owner_policy_record(owner_policy or _owner_policy())
+    store.write_product_owner_requirement_record(_owner_requirement())
+    store.write_product_profile_record(_preview_profile(enabled=preview_enabled))
+    return store
+
+
+def _record_owner_action(
+    *,
+    store: FilesystemRecordStore,
+    provider: _EvidenceProvider,
+    action: OwnerAcceptanceAction,
+    source_event_id: str,
+    reason: str = "",
+) -> OwnerAcceptanceWriteResult:
+    decision = evaluate_owner_acceptance(
+        store=store,
+        repository_evidence_provider=provider,
+        target=ChangeImpactTargetReference(
+            repository=OWNER_REPOSITORY,
+            pull_request_number=2022,
+        ),
+        evaluated_at="2026-08-11T03:00:00Z",
+    )
+    if decision.binding is None:
+        raise AssertionError("Expected a current Owner acceptance binding")
+    return record_owner_acceptance_event(
+        store=store,
+        repository_evidence_provider=provider,
+        target=ChangeImpactTargetReference(
+            repository=OWNER_REPOSITORY,
+            pull_request_number=2022,
+        ),
+        identity=_human(),
+        action=action,
+        expected_binding_sha256=decision.binding.binding_sha256,
+        source_event_kind="browser_api",
+        source_event_id=source_event_id,
+        reason=reason,
+        occurred_at="2026-08-11T03:00:00Z",
+    )
+
+
+def _evaluate_owner_live(
+    *,
+    store: FilesystemRecordStore,
+    provider: _EvidenceProvider,
+    evidence: ChangeImpactRepositoryEvidence,
+) -> MergeAdmissionEvaluation:
+    policy_record = build_test_merge_train_policy_record(repository=OWNER_REPOSITORY)
+    candidate_record, landing_record, controller_state, _ = _guard_records(
+        policy_sha256=policy_record.policy_sha256,
+        repository=OWNER_REPOSITORY,
+        pull_request_number=2022,
+        base_sha=OWNER_BASE_SHA,
+        head_sha=evidence.target.head_sha,
+        tree_sha=evidence.target.tree_sha,
+    )
+    evaluator = LiveMergeAdmissionEvaluator(
+        store=store,
+        repository_evidence_provider=provider,
+        technical_check_client=_PassingTechnicalCheckClient(),
+        policy_record_provider=lambda: policy_record,
+        snapshot_reader=_StaticSnapshotReader(
+            MergeTrainDryRunSnapshot(
+                repository=OWNER_REPOSITORY,
+                base_branch="main",
+                base_sha=OWNER_BASE_SHA,
+                pull_requests=(
+                    _queued_pull_request(
+                        number=2022,
+                        head_sha=evidence.target.head_sha,
+                        created_at="2026-08-11T03:00:00Z",
+                    ),
+                ),
+            )
+        ),
+    )
+    with (
+        patch(
+            "control_plane.merge_admission_live.read_active_authz_policy_record",
+            return_value=_authz_policy_record(),
+        ),
+        patch(
+            "control_plane.merge_admission_live.require_engineering_review_decision_store",
+            return_value=_EmptyEngineeringReviewStore(),
+        ),
+    ):
+        return evaluator.evaluate(
+            candidate_record=candidate_record,
+            landing_plan_record=landing_record,
+            entry=landing_record.landing_plan.entries[0],
+            observed_base_sha=OWNER_BASE_SHA,
+            observed_base_tree_sha="5" * 40,
+            observed_head_sha=evidence.target.head_sha,
+            observed_head_tree_sha=evidence.target.tree_sha,
+            controller_state=controller_state,
+            stack_collapse_record=None,
+            evaluated_at="2026-08-11T03:01:00Z",
+        )
+
+
+def _owner_facet(evaluation: MergeAdmissionEvaluation) -> MergeReadinessOwnerFacet:
+    if len(evaluation.readiness.owner_facets) != 1:
+        raise AssertionError("Expected one Owner readiness facet")
+    return evaluation.readiness.owner_facets[0]
+
+
+class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
+    def test_pending_changes_requested_revoked_and_stale_owner_states(self) -> None:
+        scenarios = ("pending", "changes_requested", "revoked", "stale")
+        expected_reasons = {
+            "pending": "owner_acceptance_missing",
+            "changes_requested": "owner_changes_requested",
+            "revoked": "owner_acceptance_revoked",
+            "stale": "owner_acceptance_stale",
+        }
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario), TemporaryDirectory() as directory:
+                store = _seed_owner_store(Path(directory))
+                evidence = _owner_repository_evidence()
+                provider = _EvidenceProvider(evidence)
+                if scenario == "changes_requested":
+                    _record_owner_action(
+                        store=store,
+                        provider=provider,
+                        action="changes_requested",
+                        source_event_id="changes-requested",
+                        reason="Owner requested a product correction.",
+                    )
+                elif scenario in {"revoked", "stale"}:
+                    accepted = _record_owner_action(
+                        store=store,
+                        provider=provider,
+                        action="accepted",
+                        source_event_id=f"accepted-before-{scenario}",
+                    )
+                    if scenario == "revoked":
+                        _record_owner_action(
+                            store=store,
+                            provider=provider,
+                            action="revoked",
+                            source_event_id="revoked",
+                            reason="Owner withdrew product acceptance.",
+                        )
+                    else:
+                        store.write_owner_acceptance_event_record(
+                            build_owner_acceptance_system_event(
+                                binding=accepted.record.binding,
+                                action="invalidated",
+                                occurred_at="2026-08-11T03:00:30Z",
+                                source_event_id="invalidate-accepted-binding",
+                                reason="Current evidence invalidated the prior acceptance.",
+                            )
+                        )
+
+                evaluation = _evaluate_owner_live(
+                    store=store,
+                    provider=provider,
+                    evidence=evidence,
+                )
+                facet = _owner_facet(evaluation)
+
+                self.assertEqual(facet.owner_status, scenario)
+                self.assertEqual(facet.state, "blocked_owner_evidence")
+                self.assertIn(expected_reasons[scenario], facet.reason_codes)
+
+    def test_unavailable_owner_authority_is_fail_closed(self) -> None:
+        with TemporaryDirectory() as directory:
+            owner_policy = _owner_policy(
+                owners=(
+                    ProductOwnerGrant(
+                        identity=ProductOwnerIdentity(
+                            provider="github",
+                            provider_subject_id=str(OWNER_GITHUB_ID),
+                        ),
+                        repository_ids=("9999",),
+                        environments=("pull_request",),
+                    ),
+                )
+            )
+            store = _seed_owner_store(Path(directory), owner_policy=owner_policy)
+            evidence = _owner_repository_evidence()
+            evaluation = _evaluate_owner_live(
+                store=store,
+                provider=_EvidenceProvider(evidence),
+                evidence=evidence,
+            )
+            facet = _owner_facet(evaluation)
+
+        self.assertEqual(facet.owner_status, "unavailable")
+        self.assertEqual(facet.owner_reason_code, "owner_authority_unavailable")
+        self.assertEqual(facet.state, "blocked_owner_evidence")
+        self.assertIn("owner_authority_unavailable", facet.reason_codes)
+        self.assertEqual(facet.event_id, "")
+
+    def test_accepted_exact_binding_is_live_and_admissible(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _seed_owner_store(Path(directory))
+            evidence = _owner_repository_evidence()
+            provider = _EvidenceProvider(evidence)
+            accepted = _record_owner_action(
+                store=store,
+                provider=provider,
+                action="accepted",
+                source_event_id="accepted-exact-binding",
+            )
+            evaluation = _evaluate_owner_live(
+                store=store,
+                provider=provider,
+                evidence=evidence,
+            )
+            facet = _owner_facet(evaluation)
+
+        self.assertEqual(facet.owner_status, "accepted")
+        self.assertEqual(facet.owner_reason_code, "acceptance_valid")
+        self.assertEqual(facet.state, "ready")
+        self.assertEqual(facet.event_id, accepted.record.event_id)
+        self.assertEqual(facet.binding_sha256, accepted.record.binding.binding_sha256)
+        self.assertEqual(evaluation.structural_result.status, "exact")
+        self.assertEqual(evaluation.readiness.state, "ready")
+
+    def test_head_and_tree_drift_stale_persisted_acceptance(self) -> None:
+        drifted_evidence = {
+            "head": _owner_repository_evidence(head_sha="c" * 40),
+            "tree": _owner_repository_evidence(tree_sha="d" * 40),
+        }
+        for drift_kind, current_evidence in drifted_evidence.items():
+            with self.subTest(drift=drift_kind), TemporaryDirectory() as directory:
+                store = _seed_owner_store(Path(directory))
+                provider = _EvidenceProvider(_owner_repository_evidence())
+                accepted = _record_owner_action(
+                    store=store,
+                    provider=provider,
+                    action="accepted",
+                    source_event_id=f"accepted-before-{drift_kind}-drift",
+                )
+                provider.evidence = current_evidence
+                evaluation = _evaluate_owner_live(
+                    store=store,
+                    provider=provider,
+                    evidence=current_evidence,
+                )
+                facet = _owner_facet(evaluation)
+
+                self.assertEqual(facet.owner_status, "stale")
+                self.assertEqual(facet.owner_reason_code, "acceptance_stale")
+                self.assertIn("owner_acceptance_stale", facet.reason_codes)
+                self.assertEqual(facet.event_id, accepted.record.event_id)
+                self.assertNotEqual(
+                    facet.binding_sha256,
+                    accepted.record.binding.binding_sha256,
+                )
+
+    def test_preview_generation_drift_stales_persisted_acceptance(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _seed_owner_store(Path(directory), preview_enabled=True)
+            evidence = _owner_repository_evidence()
+            provider = _EvidenceProvider(evidence)
+            _write_preview_evidence(store)
+            accepted = _record_owner_action(
+                store=store,
+                provider=provider,
+                action="accepted",
+                source_event_id="accepted-preview-generation-one",
+            )
+            _write_preview_evidence(
+                store,
+                generation_id="preview-generic-web-a-pr-2022-generation-0002",
+                artifact_id="artifact-generic-web-a-pr-2022-v2",
+                image_digest="c" * 64,
+            )
+            evaluation = _evaluate_owner_live(
+                store=store,
+                provider=provider,
+                evidence=evidence,
+            )
+            facet = _owner_facet(evaluation)
+
+        self.assertEqual(facet.owner_status, "stale")
+        self.assertEqual(facet.owner_reason_code, "acceptance_stale")
+        self.assertEqual(facet.event_id, accepted.record.event_id)
+        self.assertNotEqual(facet.binding_sha256, accepted.record.binding.binding_sha256)
+
+    def test_owner_policy_and_requirement_drift_stale_acceptance(self) -> None:
+        for drift_kind in ("policy", "requirement"):
+            with self.subTest(drift=drift_kind), TemporaryDirectory() as directory:
+                store = _seed_owner_store(Path(directory))
+                evidence = _owner_repository_evidence()
+                provider = _EvidenceProvider(evidence)
+                accepted = _record_owner_action(
+                    store=store,
+                    provider=provider,
+                    action="accepted",
+                    source_event_id=f"accepted-before-{drift_kind}-drift",
+                )
+                if drift_kind == "policy":
+                    current_policy = store.list_product_owner_policy_records(status="active")[0]
+                    store.compare_and_write_product_owner_policy_record(
+                        _owner_policy(
+                            revision=2,
+                            supersedes_record_id=current_policy.record_id,
+                        ),
+                        expected_current_record_id=current_policy.record_id,
+                        expected_current_policy_digest=current_policy.policy_digest,
+                    )
+                else:
+                    current_requirement = store.list_product_owner_requirement_records(
+                        status="active"
+                    )[0]
+                    store.compare_and_write_product_owner_requirement_record(
+                        _owner_requirement(
+                            revision=2,
+                            supersedes_record_id=current_requirement.record_id,
+                        ),
+                        expected_current_record_id=current_requirement.record_id,
+                        expected_current_requirement_digest=(
+                            current_requirement.requirement_digest
+                        ),
+                    )
+                evaluation = _evaluate_owner_live(
+                    store=store,
+                    provider=provider,
+                    evidence=evidence,
+                )
+                facet = _owner_facet(evaluation)
+
+                self.assertEqual(facet.owner_status, "stale")
+                self.assertEqual(facet.owner_reason_code, "acceptance_stale")
+                self.assertEqual(facet.event_id, accepted.record.event_id)
+                self.assertNotEqual(
+                    facet.binding_sha256,
+                    accepted.record.binding.binding_sha256,
+                )
 
 
 class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):

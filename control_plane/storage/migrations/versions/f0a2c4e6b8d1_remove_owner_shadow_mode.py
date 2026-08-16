@@ -24,9 +24,7 @@ _ARCHIVE_TABLE = "launchplane_product_owner_requirement_authority_migrations"
 _COLUMN = "enforcement_mode"
 _CHECK = "launchplane_product_owner_requirement_shadow_ck"
 _MIGRATION_SOURCE = "migration:owner-authority-cutover"
-_MIGRATION_REASON = (
-    "Require an explicit Owner requirement revision before authority is active."
-)
+_MIGRATION_REASON = "Require an explicit Owner requirement revision before authority is active."
 
 
 def _columns() -> set[str]:
@@ -116,7 +114,7 @@ def _archive_and_replace_requirements() -> None:
 
     connection.execute(sa.delete(table))
     for (product, system), previous in latest_by_scope.items():
-        revision = _revision(previous["requirement_revision"]) + 1
+        revision = 1
         payload: dict[str, object] = {
             "schema_version": 1,
             "record_id": _record_id(product=product, system=system, revision=revision),
@@ -128,7 +126,7 @@ def _archive_and_replace_requirements() -> None:
             "effective_at": str(previous["effective_at"]),
             "source": _MIGRATION_SOURCE,
             "reason": _MIGRATION_REASON,
-            "supersedes_record_id": str(previous["record_id"]),
+            "supersedes_record_id": None,
         }
         digest = _canonical_digest(payload)
         payload["requirement_digest"] = digest

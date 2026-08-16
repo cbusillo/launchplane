@@ -397,12 +397,16 @@ supplies only repository and pull-request reference. Launchplane derives every
 product decision and exact binding, rechecks the current target before the
 provider write, and uses the decision digest as the check-run `external_id`.
 
-After a successful browser Owner event write, Launchplane best-effort
-re-evaluates the current exact target and refreshes this same App-owned check
-run. Projection or token-revocation failure is logged as advisory delivery
-failure only: the persisted human event and its `202` response are not rolled
-back or rewritten. Browsers never receive projection credentials or projection
-authority.
+Before appending a browser Owner event, Launchplane replaces the exact-head
+check with an `action_required` **updating decision** projection. If that
+conservative projection or its token lifecycle fails, the event is not
+persisted. After append, Launchplane projects the resulting decision against the
+exact target bound into the stored event. If final projection fails, the
+conservative non-green check remains and the route returns
+`503 owner_acceptance_projection_reconciliation_required`; retrying with the
+same idempotency key replays the immutable event and retries projection. The
+explicit projection endpoint provides the same reconciliation path. Browsers
+never receive projection credentials or projection authority.
 
 The completed check conclusion is `success` for accepted or not-required state,
 `action_required` for pending, stale, revoked, or changes-requested state, and

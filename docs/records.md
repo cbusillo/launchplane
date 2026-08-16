@@ -250,9 +250,10 @@ the exact Owner acceptance binding; preferred routing never grants authority.
 The authority-cutover migration archives exact pre-cutover requirement rows in
 `launchplane_product_owner_requirement_authority_migrations`. Runtime readers
 and writers do not consume that table. Each migrated scope receives an empty
-successor requirement revision, preserving revision lineage while requiring an
-explicit operator-supplied authoritative requirement before Owner actions can
-govern a repository.
+revision-1 baseline, intentionally resetting the executable revision stream
+while preserving the prior chain in the archive. The next supported write can
+append revision 2, so Owner actions cannot govern a repository until an operator
+supplies an explicit authoritative requirement.
 
 The PostgreSQL tables are `launchplane_product_owner_policies`,
 `launchplane_product_owner_requirements`, and

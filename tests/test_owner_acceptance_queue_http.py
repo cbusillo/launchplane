@@ -41,6 +41,7 @@ from tests.test_owner_acceptance import (
     _repository_evidence,
     _store,
 )
+from tests.test_owner_acceptance_http import _GitHubCheckApi, _installation_token
 
 
 def _http_error(**kwargs: object) -> HTTPException:
@@ -72,6 +73,9 @@ def _app(
             repository_evidence_provider=(
                 repository_evidence_provider or _EvidenceProvider(_repository_evidence())
             ),
+            github_app_token=_installation_token,
+            github_api=_GitHubCheckApi(),
+            public_origin="https://ops.example.test",
         ),
     )
     return app

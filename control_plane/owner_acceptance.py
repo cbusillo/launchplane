@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import NamedTuple, Protocol, cast
 
@@ -36,8 +37,10 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceSourceEventKind,
     OwnerAcceptanceViewerBindingEligibility,
     OwnerAcceptanceViewerEligibilityReason,
+    owner_acceptance_event_replay_digest,
     owner_acceptance_human_action_semantics,
     owner_acceptance_runtime_identity_binding,
+    validate_owner_acceptance_event_transition,
 )
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -333,6 +336,7 @@ def record_owner_acceptance_event(
     reason: str = "",
     resolution: OwnerAcceptanceResolutionEvidence | None = None,
     occurred_at: str = "",
+    before_write: Callable[[], None] | None = None,
 ) -> OwnerAcceptanceWriteResult:
     if action not in {"accepted", "changes_requested", "revoked"}:
         raise OwnerAcceptanceAuthorizationError("Human route cannot write system-only events.")
@@ -471,6 +475,33 @@ def record_owner_acceptance_event(
         raise OwnerAcceptanceEvaluationUnavailableError(
             "Preview-bound Owner acceptance cannot downgrade to an exact-change-only binding."
         )
+    existing = next(
+        (event for event in target_events if event.event_id == record.event_id),
+        None,
+    )
+    if existing is not None:
+        if owner_acceptance_event_replay_digest(existing) != owner_acceptance_event_replay_digest(
+            record
+        ):
+            raise OwnerAcceptanceEventConflictError(
+                "Owner acceptance event replay changed the persisted payload."
+            )
+    else:
+        previous = (
+            max(prior_events, key=lambda event: event.subject_sequence) if prior_events else None
+        )
+        validate_owner_acceptance_event_transition(
+            previous=previous,
+            proposed=record.model_copy(
+                update={
+                    "subject_sequence": (
+                        previous.subject_sequence + 1 if previous is not None else 1
+                    )
+                }
+            ),
+        )
+    if before_write is not None:
+        before_write()
     write_status = event_store.write_owner_acceptance_event_record(record)
     record = event_store.read_owner_acceptance_event_record(record.event_id)
     folded_events = (

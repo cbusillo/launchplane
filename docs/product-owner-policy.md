@@ -112,9 +112,10 @@ cannot change any persisted digest.
 Migration `f0a2c4e6b8d1` removes the legacy requirement `enforcement_mode` column
 without promoting old requirements into authority. It archives every exact
 pre-cutover row, replaces each product/system scope with an empty successor
-revision, and requires an operator to create the first explicit authoritative
-requirement revision. Existing Owner acceptance events remain immutable and
-become stale against the empty successor until that deliberate cutover occurs.
+revision-1 baseline, and requires an operator to create the first explicit
+authoritative requirement revision. Existing Owner acceptance events remain
+immutable and become stale against the empty baseline until that deliberate
+cutover occurs.
 
 ## HTTP API
 

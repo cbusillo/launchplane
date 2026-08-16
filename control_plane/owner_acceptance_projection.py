@@ -52,6 +52,43 @@ def project_owner_acceptance_decision(
     )
 
 
+def project_owner_acceptance_update_in_progress(
+    *,
+    target: ChangeImpactTarget,
+    source_event_id: str,
+    public_origin: str,
+    installation_token: GitHubAppInstallationToken,
+    api_request: GitHubApiRequest = github_api_request,
+) -> AdvisoryCheckProjectionResult:
+    details_url = owner_acceptance_workbench_url(
+        public_origin=public_origin,
+        target=target,
+    )
+    return write_advisory_check_projection(
+        projection=AdvisoryCheckProjection(
+            name=OWNER_ACCEPTANCE_CHECK_NAME,
+            repository=target.repository,
+            repository_id=target.repository_id,
+            head_sha=target.head_sha,
+            external_id=owner_acceptance_update_projection_sha256(
+                target=target,
+                source_event_id=source_event_id,
+            ),
+            details_url=details_url,
+            title="Owner acceptance: updating decision",
+            summary=(
+                "Launchplane is updating the authoritative Owner-review decision. "
+                "GitHub success is intentionally withheld until the current decision "
+                "is projected. Reconcile from the Launchplane Owner-review workbench "
+                "if this check remains action required."
+            ),
+            conclusion="action_required",
+        ),
+        installation_token=installation_token,
+        api_request=api_request,
+    )
+
+
 def owner_acceptance_workbench_url(
     *,
     public_origin: str,
@@ -114,6 +151,25 @@ def owner_acceptance_projection_sha256(decision: OwnerAcceptanceDecision) -> str
         exclude={"evaluated_at"},
         exclude_none=True,
     )
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def owner_acceptance_update_projection_sha256(
+    *,
+    target: ChangeImpactTarget,
+    source_event_id: str,
+) -> str:
+    payload = {
+        "kind": "owner_acceptance_update_in_progress",
+        "repository": target.repository,
+        "repository_id": target.repository_id,
+        "pull_request_number": target.pull_request_number,
+        "head_sha": target.head_sha,
+        "tree_sha": target.tree_sha,
+        "source_event_id": source_event_id,
+    }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()

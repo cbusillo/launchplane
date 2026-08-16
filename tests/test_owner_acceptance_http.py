@@ -48,6 +48,55 @@ def _http_error(**kwargs: object) -> HTTPException:
     return HTTPException(status_code=int(str(kwargs["status_code"])), detail=kwargs)
 
 
+def _installation_token(
+    _repository: str,
+    _repository_id: str,
+) -> GitHubAppInstallationToken:
+    return GitHubAppInstallationToken(
+        token="installation-token",
+        app_id=42,
+        installation_id=77,
+        repository_id=int(REPOSITORY_ID),
+        repository=REPOSITORY,
+        expires_at="2026-08-07T15:00:00Z",
+    )
+
+
+class _GitHubCheckApi:
+    def __init__(self, *, fail_read_numbers: tuple[int, ...] = ()) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.check_run: dict[str, Any] | None = None
+        self.successful_write_bodies: list[dict[str, Any]] = []
+        self.read_count = 0
+        self.fail_read_numbers = set(fail_read_numbers)
+
+    def __call__(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        method = str(kwargs.get("method") or "GET")
+        if method == "DELETE":
+            return None
+        if method == "GET":
+            self.read_count += 1
+            if self.read_count in self.fail_read_numbers:
+                raise RuntimeError("GitHub is unavailable")
+            return {"check_runs": [self.check_run] if self.check_run is not None else []}
+        body = dict(kwargs["body"])
+        self.successful_write_bodies.append(body)
+        if method == "POST":
+            self.check_run = {
+                "id": 91,
+                **body,
+                "app": {"id": 42},
+            }
+        else:
+            assert self.check_run is not None
+            self.check_run = {
+                **self.check_run,
+                **body,
+            }
+        return self.check_run
+
+
 def _app(
     *,
     store: object,
@@ -61,6 +110,7 @@ def _app(
 ) -> FastAPI:
     resolved_identity = identity or _human()
     resolved_browser_identity = browser_identity or resolved_identity
+    resolved_github_api = github_api or _GitHubCheckApi()
     common = ReadRouteDependencies(
         read_identity=lambda: resolved_identity,
         get_record_store=lambda: store,
@@ -79,9 +129,9 @@ def _app(
             repository_evidence_provider=(
                 repository_evidence_provider or _EvidenceProvider(_repository_evidence())
             ),
-            github_app_token=github_app_token,
-            public_origin=public_origin,
-            **({"github_api": github_api} if github_api is not None else {}),
+            github_app_token=github_app_token or _installation_token,
+            public_origin=public_origin or "https://ops.example.test",
+            github_api=resolved_github_api,
         ),
     )
     return app
@@ -149,42 +199,14 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[-2]["body"]["conclusion"], "action_required")
         self.assertEqual(calls[-1]["method"], "DELETE")
 
-    async def test_successful_event_best_effort_projects_current_decision(self) -> None:
+    async def test_successful_event_projects_conservative_then_final_decision(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
-            calls: list[dict[str, Any]] = []
-
-            def github_api(**kwargs):  # type: ignore[no-untyped-def]
-                calls.append(kwargs)
-                if kwargs.get("method") == "DELETE":
-                    return None
-                if kwargs.get("method") == "POST":
-                    body = kwargs["body"]
-                    return {
-                        "id": 92,
-                        "name": body["name"],
-                        "head_sha": body["head_sha"],
-                        "status": body["status"],
-                        "conclusion": body["conclusion"],
-                        "external_id": body["external_id"],
-                        "details_url": body["details_url"],
-                        "output": body["output"],
-                        "app": {"id": 42},
-                    }
-                return {"check_runs": []}
+            github_api = _GitHubCheckApi()
 
             app = _app(
                 store=store,
-                github_app_token=lambda _repository, _repository_id: GitHubAppInstallationToken(
-                    token="installation-token",
-                    app_id=42,
-                    installation_id=77,
-                    repository_id=int(REPOSITORY_ID),
-                    repository=REPOSITORY,
-                    expires_at="2026-08-07T15:00:00Z",
-                ),
                 github_api=github_api,
-                public_origin="https://ops.example.test",
             )
 
             async with lifespan_client(app) as client:
@@ -207,32 +229,27 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(event_count, 1)
-        projection_body = next(call for call in calls if call.get("method") == "POST")["body"]
+        self.assertEqual(
+            [body["conclusion"] for body in github_api.successful_write_bodies],
+            ["action_required", "success"],
+        )
+        self.assertEqual(
+            [body["output"]["title"] for body in github_api.successful_write_bodies],
+            ["Owner acceptance: updating decision", "Owner acceptance: accepted"],
+        )
+        projection_body = github_api.successful_write_bodies[-1]
         self.assertEqual(
             projection_body["details_url"],
             "https://ops.example.test/ui/engineering/owner-acceptance?repository=example%2Fweb&pull_request=2022",
         )
-        self.assertEqual(projection_body["output"]["title"], "Owner acceptance: accepted")
 
-    async def test_event_response_and_persisted_event_survive_projection_failure(self) -> None:
+    async def test_prewrite_projection_failure_blocks_event_append(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
-
-            def failing_github_api(**_kwargs):  # type: ignore[no-untyped-def]
-                raise RuntimeError("GitHub is unavailable")
-
+            github_api = _GitHubCheckApi(fail_read_numbers=(1,))
             app = _app(
                 store=store,
-                github_app_token=lambda _repository, _repository_id: GitHubAppInstallationToken(
-                    token="installation-token",
-                    app_id=42,
-                    installation_id=77,
-                    repository_id=int(REPOSITORY_ID),
-                    repository=REPOSITORY,
-                    expires_at="2026-08-07T15:00:00Z",
-                ),
-                github_api=failing_github_api,
-                public_origin="https://ops.example.test",
+                github_api=github_api,
             )
 
             async with lifespan_client(app) as client:
@@ -253,9 +270,62 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 event_count = len(store.list_owner_acceptance_event_records())
 
-        self.assertEqual(response.status_code, 202, response.text)
-        self.assertEqual(response.json()["write_status"], "written")
-        self.assertEqual(event_count, 1)
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "owner_acceptance_projection_unavailable",
+        )
+        self.assertEqual(event_count, 0)
+
+    async def test_final_projection_failure_requires_idempotent_reconciliation(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            github_api = _GitHubCheckApi(fail_read_numbers=(2,))
+            app = _app(store=store, github_api=github_api)
+
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                request = {
+                    "target": {"repository": REPOSITORY, "pull_request_number": 2022},
+                    "action": "accepted",
+                    "expected_binding_sha256": evaluated.json()["decision"]["binding"][
+                        "binding_sha256"
+                    ],
+                }
+                failed = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json=request,
+                    headers={"Idempotency-Key": "accept-with-projection-failure"},
+                )
+                event_count_after_failure = len(store.list_owner_acceptance_event_records())
+                assert github_api.check_run is not None
+                conclusion_after_failure = github_api.check_run["conclusion"]
+                reconciled = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json=request,
+                    headers={"Idempotency-Key": "accept-with-projection-failure"},
+                )
+                event_count_after_replay = len(store.list_owner_acceptance_event_records())
+
+        self.assertEqual(failed.status_code, 503, failed.text)
+        self.assertEqual(
+            failed.json()["detail"]["code"],
+            "owner_acceptance_projection_reconciliation_required",
+        )
+        self.assertEqual(event_count_after_failure, 1)
+        self.assertEqual(conclusion_after_failure, "action_required")
+        self.assertEqual(reconciled.status_code, 202, reconciled.text)
+        self.assertEqual(reconciled.json()["write_status"], "replayed")
+        self.assertEqual(event_count_after_replay, 1)
+        assert github_api.check_run is not None
+        self.assertEqual(github_api.check_run["conclusion"], "success")
+        self.assertEqual(
+            [body["conclusion"] for body in github_api.successful_write_bodies],
+            ["action_required", "success"],
+        )
 
     async def test_projection_rejects_head_drift_before_github_write(self) -> None:
         class _DriftingProvider(_EvidenceProvider):
@@ -600,7 +670,8 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         for action, expected_status in (("changes_requested", "changes_requested"),):
             with self.subTest(action=action), TemporaryDirectory() as directory:
                 store = _store(Path(directory))
-                app = _app(store=store)
+                github_api = _GitHubCheckApi()
+                app = _app(store=store, github_api=github_api)
                 async with lifespan_client(app) as client:
                     evaluated = await client.get(
                         OWNER_ACCEPTANCE_EVALUATION_ROUTE,
@@ -634,6 +705,8 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(written.status_code, 202, written.text)
                     self.assertEqual(written.json()["decision"]["status"], expected_status)
+                    assert github_api.check_run is not None
+                    self.assertEqual(github_api.check_run["conclusion"], "action_required")
 
                     evaluated = await client.get(
                         OWNER_ACCEPTANCE_EVALUATION_ROUTE,
@@ -644,7 +717,8 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
 
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
-            app = _app(store=store)
+            github_api = _GitHubCheckApi()
+            app = _app(store=store, github_api=github_api)
             async with lifespan_client(app) as client:
                 evaluated = await client.get(OWNER_ACCEPTANCE_EVALUATION_ROUTE, params=target)
                 binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
@@ -658,6 +732,8 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                     headers={"Idempotency-Key": "accept-before-revoke"},
                 )
                 self.assertEqual(accepted.status_code, 202, accepted.text)
+                assert github_api.check_run is not None
+                self.assertEqual(github_api.check_run["conclusion"], "success")
 
                 missing_reason = await client.post(
                     OWNER_ACCEPTANCE_EVENTS_ROUTE,
@@ -682,6 +758,8 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(revoked.status_code, 202, revoked.text)
                 self.assertEqual(revoked.json()["decision"]["status"], "revoked")
+                assert github_api.check_run is not None
+                self.assertEqual(github_api.check_run["conclusion"], "action_required")
 
     async def test_changes_requested_resolution_requires_structured_evidence(self) -> None:
         with TemporaryDirectory() as directory:

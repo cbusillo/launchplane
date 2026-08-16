@@ -1020,6 +1020,31 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
+  test("contributing Owner resets to an allowed action after submission", async ({ page }) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto(
+      "/ui/engineering/owner-acceptance?fixture=products&viewer=contributor",
+    );
+
+    const panel = page.getByRole("region", { name: /Owner product review for/ });
+    const action = panel.getByRole("combobox");
+    const reason = panel.getByRole("textbox", { name: "Reason" });
+    const submit = panel.getByRole("button", { name: "Record product review" });
+    await expect(panel.getByText(/policy prevents you from accepting/i)).toBeVisible();
+    await expect(action).toHaveValue("changes_requested");
+    await expect(action.locator('option[value="accepted"]')).toHaveCount(0);
+    await reason.fill("The product flow still needs correction.");
+    await submit.click();
+
+    await expect(action).toHaveValue("changes_requested");
+    await expect(reason).toHaveValue("");
+    await expect(submit).toBeDisabled();
+    await reason.fill("A second product issue remains.");
+    await expect(submit).toBeEnabled();
+    diagnostics.assertClean();
+  });
+
   test("request changes and revoke require explicit human input", async ({ page }) => {
     const diagnostics = monitorBrowser(page);
 
