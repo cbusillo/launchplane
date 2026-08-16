@@ -23,7 +23,7 @@ from control_plane.generic_web_deploy_http import (
     resolve_generic_web_deploy_lane,
 )
 from control_plane.generic_web_deploy_provider_adapter import (
-    _GenericWebDeployProviderMutationAdapter,
+    GenericWebDeployProviderMutationAdapter,
 )
 from control_plane.http_routes.support import AuthorizationAllows, HttpErrorFactory
 from control_plane.provider_operations import build_provider_operation_key
@@ -360,7 +360,7 @@ def build_generic_web_deploy_recovery_dry_run_handler(
                         code="reservation_target_conflict",
                         message="Generic web deploy recovery reservation identity is incomplete.",
                     ) from error
-                adapter = _GenericWebDeployProviderMutationAdapter(
+                adapter = GenericWebDeployProviderMutationAdapter(
                     control_plane_root=dependencies.control_plane_root,
                     record_store=record_store,
                     deploy_request=recovery_request.original_deploy,
