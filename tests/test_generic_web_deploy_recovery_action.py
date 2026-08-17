@@ -202,12 +202,16 @@ import('./{ACTION_ENTRYPOINT.as_posix()}');
 
         required_fragments = (
             "recovery_request_json:",
-            "if: ${{ inputs.recovery_request_json == '' }}",
-            "if: ${{ inputs.recovery_request_json != '' }}",
+            "github.event.inputs.original_run_id == ''",
+            "github.event.inputs.original_run_id != ''",
+            "name: Resolve Launchplane recovery request",
+            "ORIGINAL_RUN_ATTEMPT: ${{ github.event.inputs.original_run_attempt }}",
+            "ORIGINAL_RUN_ID: ${{ github.event.inputs.original_run_id }}",
+            "REASON: ${{ github.event.inputs.reason }}",
             "name: Request Launchplane recovery dry run",
             "uses: cbusillo/launchplane/.github/actions/"
             "generic-web-deploy-recovery-dry-run@b2055d2944626234664390d6fcd96975ded38511",
-            "request-json: ${{ inputs.recovery_request_json }}",
+            "request-json: ${{ steps.request.outputs.request }}",
             "Recovery digest:",
             "Proposed action:",
             "Reservation state:",
