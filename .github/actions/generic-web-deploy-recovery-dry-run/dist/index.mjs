@@ -3,6 +3,7 @@ const environment = runtime.env;
 const requestKeys = new Set([
   "artifact_id",
   "instance",
+  "launchplane_url",
   "original_run_attempt",
   "original_run_id",
   "product",
@@ -68,6 +69,7 @@ function parseRequest(value) {
 
 function configureRequestAction() {
   const request = parseRequest(requiredInput("request-json"));
+  const launchplaneUrl = input("launchplane-url") || requestString(request, "launchplane_url");
   const product = requestString(request, "product");
   const instance = requestString(request, "instance");
   const artifactId = requestString(request, "artifact_id");
@@ -100,7 +102,7 @@ function configureRequestAction() {
     reason,
   };
 
-  environment[environmentKey("launchplane-url")] = requiredInput("launchplane-url");
+  environment[environmentKey("launchplane-url")] = launchplaneUrl;
   environment[environmentKey("route-path")] =
     "/v1/admin/generic-web/deploy-recovery/dry-run";
   environment[environmentKey("payload")] = JSON.stringify(payload);
