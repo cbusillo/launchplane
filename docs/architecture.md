@@ -46,8 +46,9 @@ pull requests, labels, checks, PR comments, releases, and CI execution.
 
 Product/system human ownership is represented by additive Launchplane records.
 Owner membership, Owner requirements, and preferred routing are separate
-revision streams. Their current implementation is shadow-only and cannot alter
-legacy repository-human admission or any production authorization result; see
+revision streams. Owner requirements and exact-change acceptance are authoritative
+for Launchplane merge readiness; preferred routing cannot grant authority and
+production authorization remains separate. See
 `docs/product-owner-policy.md`.
 
 This repository is the product boundary today. Keep reusable nouns in

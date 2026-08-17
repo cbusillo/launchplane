@@ -4,7 +4,11 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import fcntl
 import hashlib
+from pathlib import Path
+from threading import Lock
+import time
 from typing import Any, Literal, NamedTuple, Protocol, TypeVar, cast, overload
 
 from pydantic import BaseModel
@@ -31,6 +35,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
@@ -314,6 +319,9 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
+
+_SQLITE_OWNER_ACCEPTANCE_PROJECTION_LOCKS_GUARD = Lock()
+_SQLITE_OWNER_ACCEPTANCE_PROJECTION_LOCKS: dict[str, Lock] = {}
 ConnectionFactory = Callable[[], Any]
 PayloadDict = dict[str, Any]
 PayloadJsonType = JSON().with_variant(JSONB(), "postgresql")
@@ -1287,10 +1295,6 @@ class LaunchplaneProductOwnerRequirementRow(Base):
             name="launchplane_product_owner_requirement_revision_ck",
         ),
         CheckConstraint(
-            "enforcement_mode = 'shadow'",
-            name="launchplane_product_owner_requirement_shadow_ck",
-        ),
-        CheckConstraint(
             "(requirement_revision = 1 AND supersedes_record_id IS NULL) OR "
             "(requirement_revision > 1 AND supersedes_record_id IS NOT NULL)",
             name="launchplane_product_owner_requirement_supersedes_ck",
@@ -1324,7 +1328,6 @@ class LaunchplaneProductOwnerRequirementRow(Base):
     system: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     requirement_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    enforcement_mode: Mapped[str] = mapped_column(String, nullable=False)
     effective_at: Mapped[str] = mapped_column(String, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False)
     supersedes_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -3460,6 +3463,14 @@ class PostgresRecordStore(HumanSessionStore):
         self.database_url = database_url
         self._engine = _build_engine(database_url, connection_factory=connection_factory)
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
+        lock_engine_kwargs: dict[str, Any] = {"poolclass": NullPool}
+        if connection_factory is not None:
+            lock_engine_kwargs["creator"] = connection_factory
+        self._owner_acceptance_projection_lock_engine = (
+            create_engine(database_url, **lock_engine_kwargs)
+            if self._engine.url.get_backend_name() == "postgresql"
+            else None
+        )
 
     @property
     def backend_name(self) -> str:
@@ -3518,6 +3529,8 @@ class PostgresRecordStore(HumanSessionStore):
         return revisions[0]
 
     def close(self) -> None:
+        if self._owner_acceptance_projection_lock_engine is not None:
+            self._owner_acceptance_projection_lock_engine.dispose()
         self._engine.dispose()
 
     def __del__(self) -> None:
@@ -8612,6 +8625,77 @@ class PostgresRecordStore(HumanSessionStore):
                         "Manager preview approval event replay changed the persisted payload."
                     )
                 return "replayed"
+
+    @contextmanager
+    def owner_acceptance_projection_lock(
+        self,
+        *,
+        repository_id: str,
+        pull_request_number: int,
+    ) -> Iterator[None]:
+        normalized_repository_id = repository_id.strip()
+        if not normalized_repository_id or pull_request_number < 1:
+            raise ValueError("Owner acceptance projection lock requires an exact pull request")
+        lock_subject = f"repository-id:{normalized_repository_id}:{pull_request_number}"
+        if self._engine.url.get_backend_name() == "sqlite":
+            database = self._engine.url.database
+            database_identity = (
+                str(Path(database).expanduser().resolve())
+                if database and database != ":memory:"
+                else f"memory:{id(self._engine)}"
+            )
+            lock_key = f"{database_identity}:{lock_subject}"
+            with _SQLITE_OWNER_ACCEPTANCE_PROJECTION_LOCKS_GUARD:
+                thread_lock = _SQLITE_OWNER_ACCEPTANCE_PROJECTION_LOCKS.setdefault(
+                    lock_key,
+                    Lock(),
+                )
+            with thread_lock:
+                if not database or database == ":memory:":
+                    yield
+                    return
+                lock_digest = hashlib.sha256(lock_key.encode("utf-8")).hexdigest()
+                database_path = Path(database).expanduser().resolve()
+                lock_path = database_path.parent / (
+                    f".{database_path.name}.owner-acceptance-{lock_digest}.lock"
+                )
+                with lock_path.open("a+b") as lock_file:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                    try:
+                        yield
+                    finally:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            return
+        lock_engine = self._owner_acceptance_projection_lock_engine
+        if lock_engine is None:
+            raise RuntimeError("PostgreSQL projection lock engine is unavailable")
+        lock_name = f"launchplane:owner-acceptance-projection:{lock_subject}"
+        while True:
+            with lock_engine.connect() as connection:
+                acquired = bool(
+                    connection.scalar(
+                        text("select pg_try_advisory_lock(hashtextextended(:lock_name, 0))"),
+                        {"lock_name": lock_name},
+                    )
+                )
+                if acquired:
+                    connection.commit()
+                    try:
+                        yield
+                    finally:
+                        unlocked = bool(
+                            connection.scalar(
+                                text("select pg_advisory_unlock(hashtextextended(:lock_name, 0))"),
+                                {"lock_name": lock_name},
+                            )
+                        )
+                        connection.commit()
+                        if not unlocked:
+                            raise RuntimeError(
+                                "PostgreSQL Owner acceptance projection lock cleanup failed"
+                            )
+                    return
+            time.sleep(0.05)
 
     def write_owner_acceptance_event_record(
         self, record: OwnerAcceptanceEventRecord
@@ -16652,7 +16736,6 @@ class PostgresRecordStore(HumanSessionStore):
             system=record.system,
             status=record.status,
             requirement_revision=record.requirement_revision,
-            enforcement_mode=record.enforcement_mode,
             effective_at=record.effective_at,
             source=record.source,
             supersedes_record_id=record.supersedes_record_id,

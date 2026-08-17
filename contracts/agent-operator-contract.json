@@ -7,8 +7,9 @@
       },
       "governance": {
         "authorization_admission_and_landing_are_independent": true,
-        "shadow_evidence_authoritative": false,
-        "shadow_evidence_role": "advisory_only"
+        "engineering_review_advisory": true,
+        "github_projection_role": "routing_and_status_only",
+        "owner_acceptance_authoritative": true
       },
       "product_lifecycle": {
         "active_automation_states": [
@@ -176,7 +177,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "810ce55fdcb429797375cb8a624d6ee36dc20ec80bf3fb17ac0e882b174e9d18",
+        "schema_fingerprint_sha256": "5aaa63991adeec924cd6ad00b45e79f0ad9813bcc541dfe512d2ad78a5c34911",
         "supported_surfaces": [
           "agent_helper",
           "read_only_service"
@@ -381,7 +382,7 @@
         ],
         "operation_id": "read_governance_projection",
         "path": "/v1/governance/projection",
-        "purpose": "Read governance evidence without granting shadow authority.",
+        "purpose": "Read governance evidence without granting mutation authority.",
         "response_statuses": [
           "200",
           "400",
@@ -391,7 +392,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "9140bde34ab5930422c2e9f654db3e7af1ede283a69bd8289c62a93931f2d11e",
+        "schema_fingerprint_sha256": "28daa2b5e8010b8460a67bc7e4ea45f12cc8be3fb3d3d76e075222eef9226b8c",
         "supported_surfaces": [
           "read_only_service",
           "operator_ui"
@@ -422,8 +423,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "ef953b66251d8dce8f87405e54e6150d8e4b19a1"
+    "source_commit_sha": "3f8e22ff1762be0b81d5eeb19f237a14b6a8bd4f"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "a3f2c6602376cd0cd8638283f186471fe4f8a53516f531d4ff613b9ed5203479"
+  "semantic_digest_sha256": "5ca368e08c9d1d094eba3ed5cf47a789b144bb81e6ff8722138440ebaff23b64"
 }

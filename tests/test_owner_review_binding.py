@@ -586,7 +586,7 @@ class OwnerReviewAuthorityLossTests(unittest.TestCase):
 
 
 class OwnerReviewNonAuthorityProjectionTests(unittest.TestCase):
-    def test_decision_projects_product_review_semantics_and_authorizes_nothing(self) -> None:
+    def test_decision_projects_authoritative_product_review_semantics(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
             provider = _EvidenceProvider(_repository_evidence())
@@ -596,20 +596,22 @@ class OwnerReviewNonAuthorityProjectionTests(unittest.TestCase):
                 written.decision.human_action_semantics,
                 "product_review_accepted",
             )
-            self.assertEqual(written.decision.authorizes, ())
+            self.assertTrue(written.decision.admissible)
             self.assertEqual(written.record.action, "accepted")
             self.assertEqual(
                 owner_acceptance_human_action_semantics("accepted"),
                 "product_review_accepted",
             )
 
-    def test_decision_cannot_claim_authority(self) -> None:
+    def test_decision_rejects_removed_compatibility_authorizes_field(self) -> None:
         with self.assertRaises(ValueError):
-            OwnerAcceptanceDecision(
-                status="accepted",
-                reason_code="acceptance_valid",
-                evaluated_at=REVIEWED_AT,
-                authorizes=("merge",),
+            OwnerAcceptanceDecision.model_validate(
+                {
+                    "status": "accepted",
+                    "reason_code": "acceptance_valid",
+                    "evaluated_at": REVIEWED_AT,
+                    "authorizes": ["merge"],
+                }
             )
 
     def test_only_a_currently_accepted_review_can_be_admissible(self) -> None:

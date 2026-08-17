@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal, Protocol, cast
+from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -49,10 +49,7 @@ class OwnerAcceptanceQueueEntry(BaseModel):
     system: str
     action: str
     environment: str
-    mode: Literal["shadow"] = "shadow"
-    authoritative: Literal[False] = False
-    enforcement_effect: Literal["none"] = "none"
-    verification_required: Literal[True] = True
+    verification_required: bool = True
     ledger_status: OwnerAcceptanceDecisionStatus
     next_action: str
     latest_event: OwnerAcceptanceEventRecord

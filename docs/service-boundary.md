@@ -3521,7 +3521,7 @@ The first explicit drivers should be:
 
 Repo-specific variation should stay thin and declarative where possible.
 
-## Product Owner Shadow API
+## Product Owner Authority API
 
 The product Owner API is an additive policy-administration and read-model
 surface. Policy, requirement, and preferred-routing revisions are written
@@ -3529,15 +3529,15 @@ through separate endpoints and separate authz actions. Their write actions are
 classified as `policy_admin`; an invocation grant authorizes the API call but
 never satisfies an Owner requirement.
 
-Shadow evaluation derives human identity only from immutable provider subject
+Authority evaluation derives human identity only from immutable provider subject
 identity. It does not consume global-admin, bootstrap-admin, manager,
-delegation, repository-permission, or routing state as Owner authority. Every
-response declares `authoritative=false` and `enforcement_effect=none`, so no
-existing service route may use it as an authorization verdict in this slice.
+delegation, repository-permission, or routing state as Owner authority. Matching
+product Owner requirements feed the exact Owner acceptance decision consumed by
+Launchplane merge readiness.
 
 See `docs/product-owner-policy.md` for routes and persisted record contracts.
 
-## Owner Acceptance Shadow API
+## Owner Acceptance API
 
 `GET /v1/owner-acceptance/evaluation` accepts only `repository` and
 `pull_request_number` query parameters. Launchplane derives repository
@@ -3584,13 +3584,15 @@ invalid reaffirmations, unreasoned revocations, and unsupported transitions
 return a conflict. Current state folds by sequence only, while timestamps remain
 audit and display fields.
 
-The ledger is append-only and shadow-only. Changed bound evidence or changed
+The ledger is append-only and authoritative for the Owner merge-readiness facet.
+Changed bound evidence or changed
 Owner policy/requirement/membership makes prior acceptance stale for the new
 binding. Evaluation returns one decision per affected product and is accepted
 only when all are current; dropped products stop governing without a read-side
-write. GitHub projection, frontend workbench, tenant-admission consumers,
-production authorization, and legacy manager cleanup remain out of scope. See
-`docs/owner-acceptance.md` for the full record and migration boundary.
+write. The GitHub projection and frontend workbench route reviewers without
+becoming authority. Tenant-admission consumers, production authorization, and
+legacy manager cleanup remain out of scope. See `docs/owner-acceptance.md` for
+the full record and migration boundary.
 
 `GET /v1/governance/projection` accepts only repository, pull request number,
 and base branch scope. It requires Owner-acceptance, engineering-review
@@ -3600,7 +3602,7 @@ the route fails closed rather than returning a partially authorized projection.
 It returns one read-only model containing immutable Owner
 history, current Owner evaluation, current ephemeral merge readiness when an
 active landing lineage exists, latest immutable merge admission, separate
-landing outcome, and neutral advisory observations. It reuses the guarded
+landing outcome, and non-authoritative GitHub status observations. It reuses the guarded
 landing readiness evaluator instead of duplicating readiness logic in the HTTP
 or frontend layers, binds the requested branch to the current pull request base
 ref, and resolves the repository policy's declared GitHub token source. The
@@ -3609,7 +3611,7 @@ effect, classifies historical head/tree evidence explicitly, and never
 interprets a missing landing outcome as landed. See
 `docs/governance-evidence.md`.
 
-## Change Impact Shadow API
+## Change Impact API
 
 `POST /v1/change-impact/evaluation` accepts only a repository/pull-request
 target reference plus optional non-authoritative metadata. Launchplane uses its
@@ -3622,9 +3624,9 @@ require trusted same-component dependency evidence. Missing extension records,
 stale heads, incomplete provider evidence, and provider failures cannot fall
 back to caller input and therefore fail closed.
 
-The response remains shadow-only with exact policy revision/digest and
-repository/PR/head/tree binding. See `docs/change-impact-policy.md` for the
-policy, evidence, and persistence contracts.
+The response is the authoritative Owner-impact classification with exact policy
+revision/digest and repository/PR/head/tree binding. See
+`docs/change-impact-policy.md` for the policy, evidence, and persistence contracts.
 
 ## Out Of Scope For This First Slice
 

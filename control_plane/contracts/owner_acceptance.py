@@ -748,27 +748,24 @@ class OwnerAcceptanceEventRecord(BaseModel):
 def owner_acceptance_human_action_semantics(
     action: OwnerAcceptanceAction | None,
 ) -> OwnerAcceptanceHumanActionSemantics:
-    """Project a stored human action into machine-readable non-authority semantics.
+    """Project a stored human action into machine-readable review semantics.
 
-    The stored enum never changes. This projection exists so an API or UI client
-    cannot read L1 ``accepted`` as merge readiness, landed state, or production
-    authorization.
+    The stored enum never changes. Owner acceptance is an authoritative prerequisite
+    for merge admission, but remains distinct from technical readiness, landing, and
+    production authorization.
     """
     if action is None:
         return "none"
     return _HUMAN_ACTION_SEMANTICS[action]
 
 
-def _validate_non_authority(
+def _validate_decision(
     *,
     admissible: bool,
     status: OwnerAcceptanceDecisionStatus,
-    authorizes: tuple[str, ...],
     current_event: "OwnerAcceptanceEventRecord | None",
     human_action_semantics: OwnerAcceptanceHumanActionSemantics,
 ) -> None:
-    if authorizes:
-        raise ValueError("Owner product review never authorizes merge, release, or production")
     if admissible and status != "accepted":
         raise ValueError("Only a currently accepted Owner product review can be admissible")
     expected_semantics = owner_acceptance_human_action_semantics(
@@ -792,16 +789,14 @@ class OwnerAcceptanceProductDecision(BaseModel):
     current_event: OwnerAcceptanceEventRecord | None = None
     admissible: bool = False
     human_action_semantics: OwnerAcceptanceHumanActionSemantics = "none"
-    authorizes: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_product_decision(self) -> "OwnerAcceptanceProductDecision":
         if self.schema_version != 1:
             raise ValueError("Unsupported Owner acceptance product decision schema version.")
-        _validate_non_authority(
+        _validate_decision(
             admissible=self.admissible,
             status=self.status,
-            authorizes=self.authorizes,
             current_event=self.current_event,
             human_action_semantics=self.human_action_semantics,
         )
@@ -883,16 +878,12 @@ class OwnerAcceptanceDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = Field(default=1, ge=1)
-    mode: Literal["shadow"] = "shadow"
-    authoritative: Literal[False] = False
-    enforcement_effect: Literal["none"] = "none"
     status: OwnerAcceptanceDecisionStatus
     reason_code: OwnerAcceptanceReasonCode
     binding: OwnerAcceptanceBinding | None = None
     current_event: OwnerAcceptanceEventRecord | None = None
     admissible: bool = False
     human_action_semantics: OwnerAcceptanceHumanActionSemantics = "none"
-    authorizes: tuple[str, ...] = ()
     products: tuple[OwnerAcceptanceProductDecision, ...] = ()
     evaluated_at: str
 
@@ -900,10 +891,9 @@ class OwnerAcceptanceDecision(BaseModel):
     def _validate_decision(self) -> "OwnerAcceptanceDecision":
         if self.schema_version != 1:
             raise ValueError("Unsupported Owner acceptance decision schema version.")
-        _validate_non_authority(
+        _validate_decision(
             admissible=self.admissible,
             status=self.status,
-            authorizes=self.authorizes,
             current_event=self.current_event,
             human_action_semantics=self.human_action_semantics,
         )
@@ -990,6 +980,7 @@ def owner_acceptance_event_replay_digest(record: OwnerAcceptanceEventRecord) -> 
     authorization = payload.get("authorization")
     if isinstance(authorization, dict):
         authorization.pop("authorized_at", None)
+        authorization.pop("owner_login", None)
     return _canonical_sha256(payload)
 
 

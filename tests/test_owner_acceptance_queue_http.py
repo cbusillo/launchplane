@@ -41,6 +41,7 @@ from tests.test_owner_acceptance import (
     _repository_evidence,
     _store,
 )
+from tests.test_owner_acceptance_http import _GitHubCheckApi, _installation_token
 
 
 def _http_error(**kwargs: object) -> HTTPException:
@@ -72,6 +73,9 @@ def _app(
             repository_evidence_provider=(
                 repository_evidence_provider or _EvidenceProvider(_repository_evidence())
             ),
+            github_app_token=_installation_token,
+            github_api=_GitHubCheckApi(),
+            public_origin="https://ops.example.test",
         ),
     )
     return app
@@ -188,9 +192,9 @@ class OwnerAcceptanceQueueHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200, response.text)
             payload = response.json()
             self.assertEqual(payload["status"], "ok")
-            self.assertEqual(payload["mode"], "shadow")
-            self.assertIs(payload["authoritative"], False)
-            self.assertEqual(payload["enforcement_effect"], "none")
+            self.assertNotIn("mode", payload)
+            self.assertNotIn("authoritative", payload)
+            self.assertNotIn("enforcement_effect", payload)
             self.assertEqual(payload["derivation"], "ledger_only")
             self.assertEqual(payload["total"], 0)
             self.assertEqual(payload["candidate"], 0)
@@ -250,9 +254,9 @@ class OwnerAcceptanceQueueHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(entry["pull_request_number"], 2022)
             self.assertEqual(entry["repository_id"], REPOSITORY_ID)
             self.assertEqual(entry["product"], PRODUCT)
-            self.assertEqual(entry["mode"], "shadow")
-            self.assertIs(entry["authoritative"], False)
-            self.assertEqual(entry["enforcement_effect"], "none")
+            self.assertNotIn("mode", entry)
+            self.assertNotIn("authoritative", entry)
+            self.assertNotIn("enforcement_effect", entry)
             self.assertIs(entry["verification_required"], True)
             self.assertEqual(entry["ledger_status"], "accepted")
             self.assertIn("next_action", entry)

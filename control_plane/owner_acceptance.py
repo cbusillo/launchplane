@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from typing import NamedTuple, Protocol, cast
 
@@ -36,8 +38,10 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceSourceEventKind,
     OwnerAcceptanceViewerBindingEligibility,
     OwnerAcceptanceViewerEligibilityReason,
+    owner_acceptance_event_replay_digest,
     owner_acceptance_human_action_semantics,
     owner_acceptance_runtime_identity_binding,
+    validate_owner_acceptance_event_transition,
 )
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -52,7 +56,7 @@ from control_plane.contracts.product_owner import (
     product_owner_scoped_policy_fingerprint,
 )
 from control_plane.product_owner_service import (
-    evaluate_product_owner_shadow_authority,
+    evaluate_product_owner_authority,
     require_product_owner_policy_read_store,
     require_product_owner_requirement_read_store,
 )
@@ -84,6 +88,10 @@ class OwnerAcceptanceSelfReviewDeniedError(PermissionError):
 
 class OwnerAcceptanceReviewContextUnavailableError(OwnerAcceptanceEvaluationUnavailableError):
     """Raised when server-owned reviewed base/authorship context cannot be bound."""
+
+
+class OwnerAcceptanceAuthorityDeniedError(PermissionError):
+    """Raised when configured Owner authority explicitly excludes the target scope."""
 
 
 _PREVIEW_ISOLATION_BY_TRANSPORT_MODE: dict[str, ProductOwnerPreviewIsolationClass] = {
@@ -120,6 +128,15 @@ class OwnerAcceptanceEventStore(Protocol):
     ) -> OwnerAcceptanceEventRecord: ...
 
 
+class OwnerAcceptanceProjectionLockStore(Protocol):
+    def owner_acceptance_projection_lock(
+        self,
+        *,
+        repository_id: str,
+        pull_request_number: int,
+    ) -> AbstractContextManager[None]: ...
+
+
 class OwnerAcceptancePreviewReadStore(Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
@@ -139,6 +156,14 @@ class OwnerAcceptanceWriteResult(NamedTuple):
     status: OwnerAcceptanceEventWriteStatus
     record: OwnerAcceptanceEventRecord
     decision: OwnerAcceptanceDecision
+
+
+def require_owner_acceptance_projection_lock_store(
+    store: object,
+) -> OwnerAcceptanceProjectionLockStore:
+    if callable(getattr(store, "owner_acceptance_projection_lock", None)):
+        return cast(OwnerAcceptanceProjectionLockStore, store)
+    raise TypeError("record store does not support Owner acceptance projection locking")
 
 
 class OwnerAcceptanceImpactEvidence(NamedTuple):
@@ -215,7 +240,7 @@ def evaluate_owner_acceptance_viewer_eligibility(
                         )
                     policies = policy_cache[cache_key]
                     requirements = requirement_cache[cache_key]
-                    authority = evaluate_product_owner_shadow_authority(
+                    authority = evaluate_product_owner_authority(
                         context=ProductOwnerActionContext(
                             product=binding.product,
                             system=binding.system,
@@ -333,6 +358,7 @@ def record_owner_acceptance_event(
     reason: str = "",
     resolution: OwnerAcceptanceResolutionEvidence | None = None,
     occurred_at: str = "",
+    before_write: Callable[[OwnerAcceptanceEventRecord], None] | None = None,
 ) -> OwnerAcceptanceWriteResult:
     if action not in {"accepted", "changes_requested", "revoked"}:
         raise OwnerAcceptanceAuthorizationError("Human route cannot write system-only events.")
@@ -471,6 +497,33 @@ def record_owner_acceptance_event(
         raise OwnerAcceptanceEvaluationUnavailableError(
             "Preview-bound Owner acceptance cannot downgrade to an exact-change-only binding."
         )
+    existing = next(
+        (event for event in target_events if event.event_id == record.event_id),
+        None,
+    )
+    if existing is not None:
+        if owner_acceptance_event_replay_digest(existing) != owner_acceptance_event_replay_digest(
+            record
+        ):
+            raise OwnerAcceptanceEventConflictError(
+                "Owner acceptance event replay changed the persisted payload."
+            )
+    else:
+        previous = (
+            max(prior_events, key=lambda event: event.subject_sequence) if prior_events else None
+        )
+        validate_owner_acceptance_event_transition(
+            previous=previous,
+            proposed=record.model_copy(
+                update={
+                    "subject_sequence": (
+                        previous.subject_sequence + 1 if previous is not None else 1
+                    )
+                }
+            ),
+        )
+    if before_write is not None:
+        before_write(record)
     write_status = event_store.write_owner_acceptance_event_record(record)
     record = event_store.read_owner_acceptance_event_record(record.event_id)
     folded_events = (
@@ -705,6 +758,15 @@ def _evaluate_owner_acceptance_product(
                 evaluated_at=evaluated_at,
             )
         return _product_decision(affected_product=affected_product, decision=decision)
+    except OwnerAcceptanceAuthorityDeniedError:
+        return _product_decision(
+            affected_product=affected_product,
+            decision=_decision(
+                status="unavailable",
+                reason_code="owner_authority_denied",
+                evaluated_at=evaluated_at,
+            ),
+        )
     if subject is None:
         return _product_decision(
             affected_product=affected_product,
@@ -860,8 +922,9 @@ def _binding_from_impact(
         for owner in active_policies[0].owners
     )
     authority = None
+    authority_denied = False
     for owner_actor in owner_actors:
-        candidate = evaluate_product_owner_shadow_authority(
+        candidate = evaluate_product_owner_authority(
             context=context,
             actor=owner_actor,
             policies=policies,
@@ -876,10 +939,16 @@ def _binding_from_impact(
         if candidate.decision == "authorized":
             authority = candidate
             break
+        if candidate.decision == "denied" or candidate.reason_code == "policy_scope_not_covered":
+            authority_denied = True
     if authority is None:
         if expected_binding_sha256:
             raise OwnerAcceptanceBindingConflictError(
                 "Owner acceptance binding changed; evaluate the exact change again before recording."
+            )
+        if authority_denied:
+            raise OwnerAcceptanceAuthorityDeniedError(
+                "Configured product Owner authority does not cover this exact scope."
             )
         return None
     if (
@@ -940,7 +1009,7 @@ def _binding_from_impact(
             "Owner acceptance binding changed; evaluate the exact change again before recording."
         )
     if actor is not None:
-        actor_authority = evaluate_product_owner_shadow_authority(
+        actor_authority = evaluate_product_owner_authority(
             context=context,
             actor=actor,
             policies=policies,

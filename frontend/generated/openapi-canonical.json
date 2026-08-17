@@ -75,8 +75,12 @@
             "type": "integer"
           },
           "conclusion": {
-            "const": "neutral",
-            "default": "neutral",
+            "enum": [
+              "neutral",
+              "success",
+              "failure",
+              "action_required"
+            ],
             "title": "Conclusion",
             "type": "string"
           },
@@ -122,7 +126,8 @@
           "external_id",
           "app_id",
           "installation_id",
-          "check_run_id"
+          "check_run_id",
+          "conclusion"
         ],
         "title": "AdvisoryCheckProjectionResult",
         "type": "object"
@@ -1535,18 +1540,6 @@
             "title": "Affected Products",
             "type": "array"
           },
-          "authoritative": {
-            "const": false,
-            "default": false,
-            "title": "Authoritative",
-            "type": "boolean"
-          },
-          "enforcement_effect": {
-            "const": "none",
-            "default": "none",
-            "title": "Enforcement Effect",
-            "type": "string"
-          },
           "engineering_review_tier": {
             "default": "sensitive",
             "enum": [
@@ -1563,12 +1556,6 @@
             },
             "title": "Matched Evidence",
             "type": "array"
-          },
-          "mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Mode",
-            "type": "string"
           },
           "owner_impact": {
             "default": "unknown",
@@ -1904,12 +1891,6 @@
       "ChangeImpactPolicyReadModel": {
         "additionalProperties": false,
         "properties": {
-          "authoritative": {
-            "const": false,
-            "default": false,
-            "title": "Authoritative",
-            "type": "boolean"
-          },
           "current_policy": {
             "anyOf": [
               {
@@ -1919,18 +1900,6 @@
                 "type": "null"
               }
             ]
-          },
-          "enforcement_effect": {
-            "const": "none",
-            "default": "none",
-            "title": "Enforcement Effect",
-            "type": "string"
-          },
-          "mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Mode",
-            "type": "string"
           },
           "policy_history_count": {
             "default": 0,
@@ -8561,12 +8530,6 @@
             "title": "Authorizes",
             "type": "array"
           },
-          "neutral": {
-            "const": true,
-            "default": true,
-            "title": "Neutral",
-            "type": "boolean"
-          },
           "observation": {
             "$ref": "#/components/schemas/MergeReadinessAdvisoryObservation"
           },
@@ -8781,14 +8744,6 @@
       "GovernanceOwnerHistoryEntry": {
         "additionalProperties": false,
         "properties": {
-          "authorizes": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Authorizes",
-            "type": "array"
-          },
           "decision_relationship": {
             "enum": [
               "current",
@@ -8834,18 +8789,10 @@
         "additionalProperties": false,
         "properties": {
           "authoritative": {
-            "const": false,
-            "default": false,
+            "const": true,
+            "default": true,
             "title": "Authoritative",
             "type": "boolean"
-          },
-          "authorizes": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Authorizes",
-            "type": "array"
           },
           "current": {
             "$ref": "#/components/schemas/OwnerAcceptanceDecision"
@@ -8865,8 +8812,8 @@
             "type": "integer"
           },
           "mode": {
-            "const": "historical_product_judgment",
-            "default": "historical_product_judgment",
+            "const": "owner_acceptance",
+            "default": "owner_acceptance",
             "title": "Mode",
             "type": "string"
           }
@@ -14257,12 +14204,6 @@
       "OwnerAcceptanceCurrentItemsResponse": {
         "additionalProperties": false,
         "properties": {
-          "authoritative": {
-            "const": false,
-            "default": false,
-            "title": "Authoritative",
-            "type": "boolean"
-          },
           "candidate_count": {
             "title": "Candidate Count",
             "type": "integer"
@@ -14271,12 +14212,6 @@
             "const": "active_change_impact_open_pull_requests",
             "default": "active_change_impact_open_pull_requests",
             "title": "Derivation",
-            "type": "string"
-          },
-          "enforcement_effect": {
-            "const": "none",
-            "default": "none",
-            "title": "Enforcement Effect",
             "type": "string"
           },
           "evaluated_count": {
@@ -14293,12 +14228,6 @@
             },
             "title": "Items",
             "type": "array"
-          },
-          "mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Mode",
-            "type": "string"
           },
           "repository_count": {
             "title": "Repository Count",
@@ -14361,20 +14290,6 @@
             "title": "Admissible",
             "type": "boolean"
           },
-          "authoritative": {
-            "const": false,
-            "default": false,
-            "title": "Authoritative",
-            "type": "boolean"
-          },
-          "authorizes": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Authorizes",
-            "type": "array"
-          },
           "binding": {
             "anyOf": [
               {
@@ -14395,12 +14310,6 @@
               }
             ]
           },
-          "enforcement_effect": {
-            "const": "none",
-            "default": "none",
-            "title": "Enforcement Effect",
-            "type": "string"
-          },
           "evaluated_at": {
             "title": "Evaluated At",
             "type": "string"
@@ -14416,12 +14325,6 @@
               "product_review_invalidated"
             ],
             "title": "Human Action Semantics",
-            "type": "string"
-          },
-          "mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Mode",
             "type": "string"
           },
           "products": {
@@ -14728,17 +14631,8 @@
       },
       "OwnerAcceptanceEventSemantics": {
         "additionalProperties": false,
-        "description": "Machine-readable projection of a stored human product-review action.\n\nThe stored enum and every persisted digest stay unchanged. This projection\nexists so no API client can read Owner product review as merge readiness,\nlanded state, or production authorization.",
+        "description": "Machine-readable projection of a stored human product-review action.\n\nThe stored enum and every persisted digest stay unchanged. Acceptance is an\nauthoritative merge-admission prerequisite, while technical readiness,\nlanding, and production authorization remain separate decisions.",
         "properties": {
-          "authorizes": {
-            "default": [],
-            "description": "Always empty. Owner product review authorizes nothing on its own.",
-            "items": {
-              "type": "string"
-            },
-            "title": "Authorizes",
-            "type": "array"
-          },
           "human_action_semantics": {
             "enum": [
               "none",
@@ -14913,14 +14807,6 @@
             "title": "Admissible",
             "type": "boolean"
           },
-          "authorizes": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Authorizes",
-            "type": "array"
-          },
           "binding": {
             "anyOf": [
               {
@@ -15075,18 +14961,6 @@
             "title": "Action",
             "type": "string"
           },
-          "authoritative": {
-            "const": false,
-            "default": false,
-            "title": "Authoritative",
-            "type": "boolean"
-          },
-          "enforcement_effect": {
-            "const": "none",
-            "default": "none",
-            "title": "Enforcement Effect",
-            "type": "string"
-          },
           "environment": {
             "title": "Environment",
             "type": "string"
@@ -15108,12 +14982,6 @@
               "unavailable"
             ],
             "title": "Ledger Status",
-            "type": "string"
-          },
-          "mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Mode",
             "type": "string"
           },
           "next_action": {
@@ -15150,7 +15018,6 @@
             "type": "string"
           },
           "verification_required": {
-            "const": true,
             "default": true,
             "title": "Verification Required",
             "type": "boolean"
@@ -15176,12 +15043,6 @@
       "OwnerAcceptanceQueueResponse": {
         "additionalProperties": false,
         "properties": {
-          "authoritative": {
-            "const": false,
-            "default": false,
-            "title": "Authoritative",
-            "type": "boolean"
-          },
           "candidate": {
             "title": "Candidate",
             "type": "integer"
@@ -15190,12 +15051,6 @@
             "const": "ledger_only",
             "default": "ledger_only",
             "title": "Derivation",
-            "type": "string"
-          },
-          "enforcement_effect": {
-            "const": "none",
-            "default": "none",
-            "title": "Enforcement Effect",
             "type": "string"
           },
           "entries": {
@@ -15216,12 +15071,6 @@
           "has_more": {
             "title": "Has More",
             "type": "boolean"
-          },
-          "mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Mode",
-            "type": "string"
           },
           "status": {
             "const": "ok",
@@ -21487,6 +21336,163 @@
         "title": "ProductOwnerActionContext",
         "type": "object"
       },
+      "ProductOwnerAuthorityEvaluation": {
+        "additionalProperties": false,
+        "properties": {
+          "actor_identity_id": {
+            "title": "Actor Identity Id",
+            "type": "string"
+          },
+          "actor_is_preferred": {
+            "default": false,
+            "title": "Actor Is Preferred",
+            "type": "boolean"
+          },
+          "context": {
+            "$ref": "#/components/schemas/ProductOwnerActionContext"
+          },
+          "decision": {
+            "enum": [
+              "authorized",
+              "denied",
+              "not_required",
+              "unavailable"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "notify_owner_identity_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Notify Owner Identity Ids",
+            "type": "array"
+          },
+          "policy_digest": {
+            "default": "",
+            "title": "Policy Digest",
+            "type": "string"
+          },
+          "policy_record_id": {
+            "default": "",
+            "title": "Policy Record Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Revision"
+          },
+          "quorum": {
+            "const": 1,
+            "default": 1,
+            "title": "Quorum",
+            "type": "integer"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "requirement_digest": {
+            "default": "",
+            "title": "Requirement Digest",
+            "type": "string"
+          },
+          "requirement_record_id": {
+            "default": "",
+            "title": "Requirement Record Id",
+            "type": "string"
+          },
+          "requirement_revision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requirement Revision"
+          },
+          "routing_digest": {
+            "default": "",
+            "title": "Routing Digest",
+            "type": "string"
+          },
+          "routing_record_id": {
+            "default": "",
+            "title": "Routing Record Id",
+            "type": "string"
+          },
+          "routing_revision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Routing Revision"
+          },
+          "satisfying_owner_identity_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Satisfying Owner Identity Ids",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "decision",
+          "reason_code",
+          "context",
+          "actor_identity_id"
+        ],
+        "title": "ProductOwnerAuthorityEvaluation",
+        "type": "object"
+      },
+      "ProductOwnerAuthorityEvaluationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "evaluation": {
+            "$ref": "#/components/schemas/ProductOwnerAuthorityEvaluation"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "evaluation"
+        ],
+        "title": "ProductOwnerAuthorityEvaluationResponse",
+        "type": "object"
+      },
       "ProductOwnerGrant": {
         "additionalProperties": false,
         "properties": {
@@ -21790,12 +21796,6 @@
       "ProductOwnerReadModel": {
         "additionalProperties": false,
         "properties": {
-          "authoritative": {
-            "const": false,
-            "default": false,
-            "title": "Authoritative",
-            "type": "boolean"
-          },
           "current_policy": {
             "anyOf": [
               {
@@ -21825,18 +21825,6 @@
                 "type": "null"
               }
             ]
-          },
-          "enforcement_effect": {
-            "const": "none",
-            "default": "none",
-            "title": "Enforcement Effect",
-            "type": "string"
-          },
-          "mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Mode",
-            "type": "string"
           },
           "policy_history_count": {
             "default": 0,
@@ -22041,12 +22029,6 @@
         "properties": {
           "effective_at": {
             "title": "Effective At",
-            "type": "string"
-          },
-          "enforcement_mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Enforcement Mode",
             "type": "string"
           },
           "product": {
@@ -22363,181 +22345,6 @@
           }
         },
         "title": "ProductOwnerSelfReviewPolicy",
-        "type": "object"
-      },
-      "ProductOwnerShadowEvaluation": {
-        "additionalProperties": false,
-        "properties": {
-          "actor_identity_id": {
-            "title": "Actor Identity Id",
-            "type": "string"
-          },
-          "actor_is_preferred": {
-            "default": false,
-            "title": "Actor Is Preferred",
-            "type": "boolean"
-          },
-          "authoritative": {
-            "const": false,
-            "default": false,
-            "title": "Authoritative",
-            "type": "boolean"
-          },
-          "context": {
-            "$ref": "#/components/schemas/ProductOwnerActionContext"
-          },
-          "decision": {
-            "enum": [
-              "authorized",
-              "denied",
-              "not_required",
-              "unavailable"
-            ],
-            "title": "Decision",
-            "type": "string"
-          },
-          "enforcement_effect": {
-            "const": "none",
-            "default": "none",
-            "title": "Enforcement Effect",
-            "type": "string"
-          },
-          "mode": {
-            "const": "shadow",
-            "default": "shadow",
-            "title": "Mode",
-            "type": "string"
-          },
-          "notify_owner_identity_ids": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Notify Owner Identity Ids",
-            "type": "array"
-          },
-          "policy_digest": {
-            "default": "",
-            "title": "Policy Digest",
-            "type": "string"
-          },
-          "policy_record_id": {
-            "default": "",
-            "title": "Policy Record Id",
-            "type": "string"
-          },
-          "policy_revision": {
-            "anyOf": [
-              {
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Policy Revision"
-          },
-          "quorum": {
-            "const": 1,
-            "default": 1,
-            "title": "Quorum",
-            "type": "integer"
-          },
-          "reason_code": {
-            "title": "Reason Code",
-            "type": "string"
-          },
-          "requirement_digest": {
-            "default": "",
-            "title": "Requirement Digest",
-            "type": "string"
-          },
-          "requirement_record_id": {
-            "default": "",
-            "title": "Requirement Record Id",
-            "type": "string"
-          },
-          "requirement_revision": {
-            "anyOf": [
-              {
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Requirement Revision"
-          },
-          "routing_digest": {
-            "default": "",
-            "title": "Routing Digest",
-            "type": "string"
-          },
-          "routing_record_id": {
-            "default": "",
-            "title": "Routing Record Id",
-            "type": "string"
-          },
-          "routing_revision": {
-            "anyOf": [
-              {
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Routing Revision"
-          },
-          "satisfying_owner_identity_ids": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Satisfying Owner Identity Ids",
-            "type": "array"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "decision",
-          "reason_code",
-          "context",
-          "actor_identity_id"
-        ],
-        "title": "ProductOwnerShadowEvaluation",
-        "type": "object"
-      },
-      "ProductOwnerShadowEvaluationResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "evaluation": {
-            "$ref": "#/components/schemas/ProductOwnerShadowEvaluation"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "trace_id",
-          "evaluation"
-        ],
-        "title": "ProductOwnerShadowEvaluationResponse",
         "type": "object"
       },
       "ProductPreviewProfile": {
@@ -59847,6 +59654,195 @@
         "summary": "Apply product onboarding records"
       }
     },
+    "/v1/product-owner/evaluation": {
+      "get": {
+        "operationId": "read_product_owner_authority_evaluation",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "system",
+            "required": true,
+            "schema": {
+              "title": "System",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "repository_id",
+            "required": true,
+            "schema": {
+              "title": "Repository Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "required": true,
+            "schema": {
+              "title": "Action",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "claimed_policy_revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Claimed Policy Revision"
+            }
+          },
+          {
+            "in": "query",
+            "name": "claimed_policy_digest",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Claimed Policy Digest",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "claimed_requirement_revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Claimed Requirement Revision"
+            }
+          },
+          {
+            "in": "query",
+            "name": "claimed_requirement_digest",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Claimed Requirement Digest",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductOwnerAuthorityEvaluationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Evaluate current product Owner authority"
+      }
+    },
     "/v1/product-owner/policies/apply": {
       "post": {
         "operationId": "apply_product_owner_policy",
@@ -60042,7 +60038,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Read the shadow product Owner policy bundle"
+        "summary": "Read the product Owner policy bundle"
       }
     },
     "/v1/product-owner/requirement": {
@@ -60150,7 +60146,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Read the shadow product Owner requirement bundle"
+        "summary": "Read the product Owner requirement bundle"
       }
     },
     "/v1/product-owner/requirements/apply": {
@@ -60439,195 +60435,6 @@
           }
         },
         "summary": "Apply or dry-run non-authoritative product Owner routing"
-      }
-    },
-    "/v1/product-owner/shadow-evaluation": {
-      "get": {
-        "operationId": "read_product_owner_shadow_evaluation",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "product",
-            "required": true,
-            "schema": {
-              "title": "Product",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "system",
-            "required": true,
-            "schema": {
-              "title": "System",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "repository_id",
-            "required": true,
-            "schema": {
-              "title": "Repository Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "environment",
-            "required": true,
-            "schema": {
-              "title": "Environment",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "action",
-            "required": true,
-            "schema": {
-              "title": "Action",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "claimed_policy_revision",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Claimed Policy Revision"
-            }
-          },
-          {
-            "in": "query",
-            "name": "claimed_policy_digest",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Claimed Policy Digest",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "claimed_requirement_revision",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Claimed Requirement Revision"
-            }
-          },
-          {
-            "in": "query",
-            "name": "claimed_requirement_digest",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Claimed Requirement Digest",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProductOwnerShadowEvaluationResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Evaluate product Owner authority without changing enforcement"
       }
     },
     "/v1/product-profiles": {

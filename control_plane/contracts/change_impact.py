@@ -74,9 +74,14 @@ def _normalize_timestamp(value: str, field_name: str) -> str:
         raise ValueError(f"{field_name} must be an ISO-8601 timestamp") from error
     if parsed.tzinfo is None:
         raise ValueError(f"{field_name} must include a timezone")
-    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace(
-        "+00:00",
-        "Z",
+    return (
+        parsed.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace(
+            "+00:00",
+            "Z",
+        )
     )
 
 
@@ -375,9 +380,7 @@ class ChangeImpactEvaluationRequest(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     target: ChangeImpactTargetReference
-    metadata: ChangeImpactEvaluationMetadata = Field(
-        default_factory=ChangeImpactEvaluationMetadata
-    )
+    metadata: ChangeImpactEvaluationMetadata = Field(default_factory=ChangeImpactEvaluationMetadata)
 
     @model_validator(mode="after")
     def _validate_request(self) -> "ChangeImpactEvaluationRequest":
@@ -506,9 +509,6 @@ class ChangeImpactEvaluation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = Field(default=1, ge=1)
-    mode: Literal["shadow"] = "shadow"
-    authoritative: Literal[False] = False
-    enforcement_effect: Literal["none"] = "none"
     status: ChangeImpactDecisionStatus
     reason_code: str
     target: ChangeImpactTarget

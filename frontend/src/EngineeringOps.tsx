@@ -27,7 +27,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 const ENGINEERING_SURFACES = [
   {
     detail:
-      "Inspect historical Owner judgment, current readiness, immutable admission, landing outcome, and advisory observations without fusing authority.",
+      "Inspect authoritative Owner acceptance, current readiness, immutable admission, landing outcome, and GitHub observations without fusing the layers.",
     icon: ShieldCheck,
     label: "Read only",
     title: "Governance evidence",

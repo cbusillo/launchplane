@@ -147,54 +147,63 @@ def mint_repository_installation_token(
         "GitHub App installation token response requires token.",
         error_type=GitHubAppIdentityError,
     )
-    expires_at = required_string_text(
-        token_payload.get("expires_at"),
-        "GitHub App installation token response requires expires_at.",
-        error_type=GitHubAppIdentityError,
-    )
-    if _parse_github_timestamp(expires_at) <= issued_at + timedelta(minutes=1):
-        raise GitHubAppIdentityError(
-            "GitHub App installation token expiry is not safely in the future."
-        )
-    _validate_permissions(token_payload.get("permissions"), label="installation token")
-    repositories = token_payload.get("repositories")
-    if not isinstance(repositories, list) or len(repositories) != 1:
-        raise GitHubAppIdentityError(
-            "GitHub App installation token must be scoped to exactly one repository."
-        )
-    repository_payload = json_object(
-        repositories[0],
-        "GitHub App installation token repository",
-        error_type=GitHubAppIdentityError,
-    )
-    observed_repository_id = required_positive_int(
-        repository_payload.get("id"),
-        "GitHub App installation token repository requires id.",
-        error_type=GitHubAppIdentityError,
-    )
-    if observed_repository_id != int(repository_id):
-        raise GitHubAppIdentityError(
-            "GitHub App installation token repository does not match exact repository id."
-        )
-    if (
-        required_string_text(
-            repository_payload.get("full_name"),
-            "GitHub App installation token repository requires full_name.",
+    try:
+        expires_at = required_string_text(
+            token_payload.get("expires_at"),
+            "GitHub App installation token response requires expires_at.",
             error_type=GitHubAppIdentityError,
-        ).casefold()
-        != normalized_repository.casefold()
-    ):
-        raise GitHubAppIdentityError(
-            "GitHub App installation token repository does not match exact repository name."
         )
-    return GitHubAppInstallationToken(
-        token=token,
-        app_id=identity.app_id,
-        installation_id=installation_id,
-        repository_id=observed_repository_id,
-        repository=normalized_repository,
-        expires_at=expires_at,
-    )
+        if _parse_github_timestamp(expires_at) <= issued_at + timedelta(minutes=1):
+            raise GitHubAppIdentityError(
+                "GitHub App installation token expiry is not safely in the future."
+            )
+        _validate_permissions(token_payload.get("permissions"), label="installation token")
+        repositories = token_payload.get("repositories")
+        if not isinstance(repositories, list) or len(repositories) != 1:
+            raise GitHubAppIdentityError(
+                "GitHub App installation token must be scoped to exactly one repository."
+            )
+        repository_payload = json_object(
+            repositories[0],
+            "GitHub App installation token repository",
+            error_type=GitHubAppIdentityError,
+        )
+        observed_repository_id = required_positive_int(
+            repository_payload.get("id"),
+            "GitHub App installation token repository requires id.",
+            error_type=GitHubAppIdentityError,
+        )
+        if observed_repository_id != int(repository_id):
+            raise GitHubAppIdentityError(
+                "GitHub App installation token repository does not match exact repository id."
+            )
+        if (
+            required_string_text(
+                repository_payload.get("full_name"),
+                "GitHub App installation token repository requires full_name.",
+                error_type=GitHubAppIdentityError,
+            ).casefold()
+            != normalized_repository.casefold()
+        ):
+            raise GitHubAppIdentityError(
+                "GitHub App installation token repository does not match exact repository name."
+            )
+        return GitHubAppInstallationToken(
+            token=token,
+            app_id=identity.app_id,
+            installation_id=installation_id,
+            repository_id=observed_repository_id,
+            repository=normalized_repository,
+            expires_at=expires_at,
+        )
+    except Exception as validation_error:
+        try:
+            _revoke_installation_token_value(token=token, api_request=api_request)
+        except Exception as revocation_error:
+            validation_error.add_note(
+                f"GitHub App installation token revocation also failed: {revocation_error}"
+            )
+        raise
 
 
 def revoke_installation_token(
@@ -202,10 +211,21 @@ def revoke_installation_token(
     installation_token: GitHubAppInstallationToken,
     api_request: GitHubApiRequest = github_api_request,
 ) -> None:
+    _revoke_installation_token_value(
+        token=installation_token.token,
+        api_request=api_request,
+    )
+
+
+def _revoke_installation_token_value(
+    *,
+    token: str,
+    api_request: GitHubApiRequest,
+) -> None:
     response = _github_api_request(
         api_request,
         path="/installation/token",
-        token=installation_token.token,
+        token=token,
         method="DELETE",
     )
     if response is not None:

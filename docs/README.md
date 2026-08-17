@@ -54,11 +54,11 @@ Use these docs as the source of truth for `launchplane`.
   run records, dispatch binding, credential boundary, and worker lifecycle.
 - [engineering-review-decisions.md](engineering-review-decisions.md) — exact-head
   classification plus independent-run evaluation and shadow GitHub projection.
-- [product-owner-policy.md](product-owner-policy.md) — additive shadow-mode
+- [product-owner-policy.md](product-owner-policy.md) — authoritative
   product/system Owner membership, requirement, routing, and evaluation contract.
-- [owner-acceptance.md](owner-acceptance.md) — shadow-only exact-change Owner
+- [owner-acceptance.md](owner-acceptance.md) — authoritative exact-change Owner
   acceptance binding, event ledger, and human-only API boundary.
-- [change-impact-policy.md](change-impact-policy.md) — additive shadow-mode
+- [change-impact-policy.md](change-impact-policy.md) — authoritative
   affected-product, Owner-impact, and engineering-review classification
   contract.
 - [operations.md](operations.md) — operator workflows and runtime boundary rules.

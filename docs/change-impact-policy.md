@@ -4,11 +4,11 @@ title: Change Impact Policy
 
 ## Purpose
 
-Launchplane now has an additive, shadow-only change-impact classifier for pull
+Launchplane has an authoritative change-impact classifier for pull
 requests. It derives affected products, Owner acceptance impact, and engineering
 review tier from Launchplane policy plus trusted repository and change evidence.
 Public callers submit only a repository/pull-request target reference and
-non-authoritative request metadata. They cannot submit changed files, dependency
+request metadata. They cannot submit changed files, dependency
 or reviewer facts, head/tree expectations, product impact, sensitive areas, or
 review tiers.
 
@@ -78,8 +78,9 @@ Every evaluation returns:
 - exact repository/PR/head/tree and policy provenance;
 - explicit unknown evidence when classification fails closed.
 
-The current API is shadow-only: `mode=shadow`, `authoritative=false`, and
-`enforcement_effect=none`. It does not alter required GitHub checks.
+The evaluation is the authoritative source for which product Owner decisions are
+required by Launchplane merge readiness. GitHub checks only project the resulting
+state and are never accepted as substitute evidence.
 
 ## HTTP API
 
@@ -92,7 +93,7 @@ CAS apply/dry-run endpoint:
 
 - `POST /v1/change-impact/policies/apply`
 
-Policy writes are `policy_admin`. Evaluation reads are observational evidence.
+Policy writes are `policy_admin`. Evaluation reads are server-derived authority inputs.
 Generated OpenAPI is the client contract source.
 
 The evaluation request schema contains only `target.repository`,

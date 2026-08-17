@@ -115,9 +115,13 @@ class _EvidenceProvider(ChangeImpactRepositoryEvidenceProvider):
         return self.open_pull_requests[:limit]
 
 
-def _human(github_id: int = OWNER_GITHUB_ID) -> GitHubHumanIdentity:
+def _human(
+    github_id: int = OWNER_GITHUB_ID,
+    *,
+    login: str = "owner",
+) -> GitHubHumanIdentity:
     return GitHubHumanIdentity(
-        login="owner",
+        login=login,
         github_id=github_id,
         name="Owner",
         email="",
@@ -491,7 +495,9 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 owner_policy_digest=_owner_policy().policy_digest,
                 owner_requirement_record_id=_owner_requirement().record_id,
                 owner_requirement_revision=1,
-                owner_requirement_digest=_owner_requirement().requirement_digest,
+                owner_requirement_digest=(
+                    "8aadfe5b7b0291143ec9e0f653e1978c9cc081d12e36e86b49d87e4a7015e356"
+                ),
             )
 
             self.assertEqual(
@@ -774,15 +780,15 @@ class OwnerAcceptanceTests(unittest.TestCase):
             self.assertEqual(result.record.subject_sequence, 1)
             self.assertEqual(
                 result.record.acceptance_id,
-                "owner-acceptance-1cc2c18bea5c40c21cb1a9ba02ffe2a0",
+                "owner-acceptance-0dab839e317015df00d2c5caa0639130",
             )
             self.assertEqual(
                 result.record.event_id,
-                "owner-acceptance-event-b961f97ffb3c028a1cd19c0f8b951f8e",
+                "owner-acceptance-event-ba52f0656d92980fcf96fa9b2fe905fa",
             )
             self.assertEqual(
                 owner_acceptance_event_replay_digest(result.record),
-                "07145b7467300ec9d5bea196fed65f36315ca6dc867a21633396ecf657e1ca62",
+                "715064def80cb17f42b6b9c655afce293c0d2315148d09693f45abb11f140c2b",
             )
 
             replay = record_owner_acceptance_event(
@@ -799,11 +805,55 @@ class OwnerAcceptanceTests(unittest.TestCase):
             self.assertEqual(replay.status, "replayed")
             self.assertEqual(replay.record, result.record)
 
+            renamed_owner_replay = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(login="renamed-owner"),
+                action="accepted",
+                expected_binding_sha256=expected_binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="accept-1",
+                occurred_at="2026-08-07T12:02:00Z",
+            )
+            self.assertEqual(renamed_owner_replay.status, "replayed")
+            self.assertEqual(renamed_owner_replay.record, result.record)
+
             conflicting = OwnerAcceptanceEventRecord.model_validate(
                 result.record.model_dump(mode="json") | {"reason": "changed"}
             )
             with self.assertRaises(OwnerAcceptanceEventConflictError):
                 store.write_owner_acceptance_event_record(conflicting)
+
+    def test_before_write_can_reject_resolved_binding_before_append(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            target = ChangeImpactTargetReference(repository=REPOSITORY, pull_request_number=2022)
+            provider = _EvidenceProvider(_repository_evidence())
+            expected_binding_sha256 = _expected_binding_sha256(store=store, provider=provider)
+            observed_records: list[OwnerAcceptanceEventRecord] = []
+
+            def reject_before_write(record: OwnerAcceptanceEventRecord) -> None:
+                observed_records.append(record)
+                raise RuntimeError("resolved binding changed outside the held lock")
+
+            with self.assertRaisesRegex(RuntimeError, "outside the held lock"):
+                record_owner_acceptance_event(
+                    store=store,
+                    repository_evidence_provider=provider,
+                    target=target,
+                    identity=_human(),
+                    action="accepted",
+                    expected_binding_sha256=expected_binding_sha256,
+                    source_event_kind="browser_api",
+                    source_event_id="reject-before-write",
+                    occurred_at="2026-08-07T12:00:00Z",
+                    before_write=reject_before_write,
+                )
+
+            self.assertEqual(len(observed_records), 1)
+            self.assertEqual(observed_records[0].binding.repository_id, REPOSITORY_ID)
+            self.assertEqual(store.list_owner_acceptance_event_records(), ())
 
     def test_complete_human_transition_table_and_resolution_evidence(self) -> None:
         with TemporaryDirectory() as directory:

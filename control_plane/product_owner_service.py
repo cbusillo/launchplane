@@ -11,7 +11,7 @@ from control_plane.contracts.product_owner import (
     ProductOwnerPolicyRecord,
     ProductOwnerRequirementRecord,
     ProductOwnerRoutingRecord,
-    ProductOwnerShadowEvaluation,
+    ProductOwnerAuthorityEvaluation,
 )
 
 
@@ -134,9 +134,6 @@ class ProductOwnerReadModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    mode: Literal["shadow"] = "shadow"
-    authoritative: Literal[False] = False
-    enforcement_effect: Literal["none"] = "none"
     product: str
     system: str
     current_policy: ProductOwnerPolicyRecord | None = None
@@ -318,7 +315,7 @@ def get_product_owner_read_model(
     )
 
 
-def evaluate_product_owner_shadow_authority(
+def evaluate_product_owner_authority(
     *,
     context: ProductOwnerActionContext,
     actor: ProductOwnerActorIdentity,
@@ -330,7 +327,7 @@ def evaluate_product_owner_shadow_authority(
     claimed_requirement_revision: int | None = None,
     claimed_requirement_digest: str = "",
     evaluated_at: str = "",
-) -> ProductOwnerShadowEvaluation:
+) -> ProductOwnerAuthorityEvaluation:
     normalized_evaluated_at = _evaluation_timestamp(evaluated_at)
     try:
         current_requirement = _current_scoped_record(
@@ -712,8 +709,8 @@ def _evaluation(
     actor_is_preferred: bool = False,
     satisfying_owner_identity_ids: tuple[str, ...] = (),
     notify_owner_identity_ids: tuple[str, ...] = (),
-) -> ProductOwnerShadowEvaluation:
-    return ProductOwnerShadowEvaluation(
+) -> ProductOwnerAuthorityEvaluation:
+    return ProductOwnerAuthorityEvaluation(
         decision=decision,
         reason_code=reason_code,
         context=context,

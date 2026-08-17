@@ -182,7 +182,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "GET",
         "/v1/governance/projection",
-        "Read governance evidence without granting shadow authority.",
+        "Read governance evidence without granting mutation authority.",
         ("read_only_service", "operator_ui"),
         ("read",),
         "none",
@@ -236,8 +236,9 @@ INVARIANTS = {
         "landing_sha_source": "terminal_controller_result_only",
     },
     "governance": {
-        "shadow_evidence_authoritative": False,
-        "shadow_evidence_role": "advisory_only",
+        "owner_acceptance_authoritative": True,
+        "github_projection_role": "routing_and_status_only",
+        "engineering_review_advisory": True,
         "authorization_admission_and_landing_are_independent": True,
     },
     "protected_workflow_policy": {

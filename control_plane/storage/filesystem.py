@@ -2745,6 +2745,20 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    @contextmanager
+    def owner_acceptance_projection_lock(
+        self,
+        *,
+        repository_id: str,
+        pull_request_number: int,
+    ) -> Iterator[None]:
+        normalized_repository_id = repository_id.strip()
+        if not normalized_repository_id or pull_request_number < 1:
+            raise ValueError("Owner acceptance projection lock requires an exact pull request")
+        lock_id = f"{normalized_repository_id}-{pull_request_number}"
+        with self._exclusive_record_lock("owner_acceptance_projections", lock_id):
+            yield
+
     def write_owner_acceptance_event_record(
         self, record: OwnerAcceptanceEventRecord
     ) -> OwnerAcceptanceEventWriteStatus:

@@ -243,9 +243,17 @@ records:
 
 All three streams use deterministic record IDs, canonical SHA-256 payload
 digests, active/superseded history, exact-next revision sequencing, predecessor
-links, and compare-and-swap expected-tip writes. Shadow evaluation reports the
-current policy, requirement, and routing provenance and always returns
-`authoritative=false` with `enforcement_effect=none`.
+links, and compare-and-swap expected-tip writes. Authority evaluation reports the
+current policy, requirement, and routing provenance. Matching requirements govern
+the exact Owner acceptance binding; preferred routing never grants authority.
+
+The authority-cutover migration archives exact pre-cutover requirement rows in
+`launchplane_product_owner_requirement_authority_migrations`. Runtime readers
+and writers do not consume that table. Each migrated scope receives an empty
+revision-1 baseline, intentionally resetting the executable revision stream
+while preserving the prior chain in the archive. The next supported write can
+append revision 2, so Owner actions cannot govern a repository until an operator
+supplies an explicit authoritative requirement.
 
 The PostgreSQL tables are `launchplane_product_owner_policies`,
 `launchplane_product_owner_requirements`, and
@@ -254,7 +262,7 @@ tables without inserting or inferring any owner data.
 
 ## Owner Acceptance Event Records
 
-`OwnerAcceptanceEventRecord` is the append-only shadow ledger for exact-change
+`OwnerAcceptanceEventRecord` is the append-only authoritative ledger for exact-change
 Owner acceptance. Human-authored events are `accepted`, `changes_requested`, and
 `revoked`; `superseded` and `invalidated` are system-only. Human events require
 a browser-authenticated GitHub human who is a current Owner in the bound product
@@ -296,7 +304,7 @@ preserve the original #2022 binding, event, and replay digests byte-for-byte.
 ## Change Impact Policy Records
 
 `ChangeImpactPolicyRecord` stores repository-scoped component/path impact rules
-for shadow pull-request classification. Each active revision binds the exact
+for authoritative pull-request classification. Each active revision binds the exact
 numeric GitHub repository ID, numeric owner ID, owner/name, component rules,
 affected product/system scopes, engineering review tier, source, reason,
 effective timestamp, predecessor, and canonical policy digest.

@@ -36,6 +36,54 @@ def _every_code_request(*, result_pr_url: str = "") -> EveryCodeWorkRequestRecor
 
 
 class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
+    def test_ready_owner_handoff_is_exact_and_authoritative(self) -> None:
+        markdown = _render_preview_pr_feedback_markdown(
+            marker=DEFAULT_PREVIEW_FEEDBACK_MARKER,
+            status="ready",
+            anchor_pr_number=42,
+            preview_url="https://pr-42.preview.example.test",
+            immutable_image_reference="ghcr.io/example/web@sha256:" + "a" * 64,
+            refresh_image_reference="",
+            revision="b" * 40,
+            run_url="https://github.com/example/web/actions/runs/1",
+            failure_summary="",
+            repository="example/web",
+            owner_review_status="pending",
+            owner_review_url=(
+                "https://launchplane.example.test/ui/engineering/owner-acceptance"
+                "?repository=example%2Fweb&pull_request=42"
+            ),
+        )
+
+        self.assertIn("Owner review required before merge", markdown)
+        self.assertIn("https://pr-42.preview.example.test", markdown)
+        self.assertIn("repository=example%2Fweb&pull_request=42", markdown)
+        self.assertIn("Current state: **pending**", markdown)
+        self.assertIn("### What to test", markdown)
+        self.assertIn("Select **Accept**", markdown)
+        self.assertIn("Select **Request changes**", markdown)
+        self.assertIn("A GitHub approval, review, or comment does not record", markdown)
+        self.assertIn("bound to this exact revision and serving preview", markdown)
+
+    def test_ready_unavailable_owner_state_exposes_no_action(self) -> None:
+        markdown = _render_preview_pr_feedback_markdown(
+            marker=DEFAULT_PREVIEW_FEEDBACK_MARKER,
+            status="ready",
+            anchor_pr_number=42,
+            preview_url="https://pr-42.preview.example.test",
+            immutable_image_reference="",
+            refresh_image_reference="",
+            revision="b" * 40,
+            run_url="",
+            failure_summary="",
+            repository="example/web",
+            owner_review_status="unavailable",
+        )
+
+        self.assertIn("cannot expose an Owner action", markdown)
+        self.assertIn("Do not merge this change", markdown)
+        self.assertNotIn("Select **Accept**", markdown)
+
     def test_cleanup_failure_without_resource_evidence_does_not_claim_preview_exists(
         self,
     ) -> None:

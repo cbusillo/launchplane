@@ -468,6 +468,32 @@ class MergeReadinessScenarioTests(unittest.TestCase):
                 self.assertEqual(result.state, "blocked_owner_evidence")
                 self.assertIn(expected_reason, result.reason_codes)
 
+    def test_owner_authority_blocks_every_nonaccepted_current_state(self) -> None:
+        cases = (
+            ("pending", "acceptance_missing", "owner_acceptance_missing"),
+            ("changes_requested", "changes_requested", "owner_changes_requested"),
+            ("revoked", "acceptance_revoked", "owner_acceptance_revoked"),
+            ("stale", "acceptance_stale", "owner_acceptance_stale"),
+            ("unavailable", "change_impact_unavailable", "owner_evidence_unavailable"),
+        )
+        for owner_status, owner_reason, expected_reason in cases:
+            with self.subTest(owner_status=owner_status):
+                result = _evaluate(
+                    owner_decision=_owner_decision(
+                        _owner_product(
+                            status=owner_status,
+                            reason_code=owner_reason,
+                            admissible=False,
+                        )
+                    )
+                )
+                self.assertEqual(result.state, "blocked_owner_evidence")
+                self.assertIn(expected_reason, result.reason_codes)
+
+        accepted = _evaluate(owner_decision=_owner_decision(_owner_product()))
+        self.assertEqual(accepted.state, "ready")
+        self.assertIn("owner_acceptance_valid", accepted.reason_codes)
+
     def test_scenario_20_preview_isolation_history_remains_inadmissible(self) -> None:
         owner = _owner_product(
             status="stale",

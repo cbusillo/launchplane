@@ -69,6 +69,8 @@ from control_plane import service_status as control_plane_service_status
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane.change_impact_github import GitHubChangeImpactRepositoryEvidenceProvider
 from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
+from control_plane.contracts.change_impact import ChangeImpactTargetReference
+from control_plane.contracts.owner_acceptance import OwnerAcceptanceDecisionStatus
 from control_plane.engineering_review_service import (
     EngineeringReviewTargetResolver,
     resolve_engineering_review_pull_request_target,
@@ -77,6 +79,10 @@ from control_plane.every_code_worker import EVERY_CODE_GITHUB_TOKEN_ENV_KEY
 from control_plane.github_app_identity import (
     mint_repository_installation_token,
     resolve_advisory_github_app_identity,
+)
+from control_plane.owner_acceptance_projection import (
+    OwnerAcceptanceProjectionService,
+    owner_acceptance_workbench_reference_url,
 )
 from control_plane.http_routes import (
     AcceptedEvidenceResponse as AcceptedEvidenceResponse,
@@ -3713,6 +3719,19 @@ def create_launchplane_fastapi_app(
             github_api=github_api_request,
             token_context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
+    )
+    owner_acceptance_projection_service = OwnerAcceptanceProjectionService(
+        repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
+        github_app_token=lambda repository, repository_id: mint_repository_installation_token(
+            identity=resolve_advisory_github_app_identity(
+                control_plane_root=resolved_control_plane_root
+            ),
+            repository=repository,
+            repository_id=repository_id,
+            api_request=github_api_request,
+        ),
+        public_origin=(human_session_manager.public_origin if human_session_manager else None),
+        api_request=github_api_request,
     )
     resolved_engineering_review_target_resolver = (
         engineering_review_target_resolver
@@ -17357,6 +17376,33 @@ def create_launchplane_fastapi_app(
             if supports_every_code_work_requests(record_store)
             else None
         )
+        owner_review_status: OwnerAcceptanceDecisionStatus | None = None
+        owner_review_url = ""
+        if feedback_request.status == "ready":
+            owner_target = ChangeImpactTargetReference(
+                repository=feedback_request.repository,
+                pull_request_number=feedback_request.anchor_pr_number,
+            )
+            try:
+                projection_outcome = await run_in_threadpool(
+                    owner_acceptance_projection_service.reconcile_if_required,
+                    store=record_store,
+                    target=owner_target,
+                    source_event_id=normalized_key,
+                )
+                owner_review_status = projection_outcome.decision.status
+                if projection_outcome.result is not None and human_session_manager is not None:
+                    owner_review_url = owner_acceptance_workbench_reference_url(
+                        public_origin=human_session_manager.public_origin,
+                        repository=feedback_request.repository,
+                        pull_request_number=feedback_request.anchor_pr_number,
+                    )
+            except Exception:
+                owner_review_status = "unavailable"
+                owner_review_url = ""
+                _LOGGER.exception(
+                    "Owner acceptance GitHub projection refresh failed during preview feedback."
+                )
         try:
             feedback_record = build_preview_pr_feedback_record(
                 control_plane_root=resolved_control_plane_root,
@@ -17382,6 +17428,8 @@ def create_launchplane_fastapi_app(
                     if callable(getattr(record_store, "list_preview_records", None))
                     else None
                 ),
+                owner_review_status=owner_review_status,
+                owner_review_url=owner_review_url,
             )
         except click.ClickException as error:
             raise _launchplane_http_error(
@@ -21098,6 +21146,7 @@ def create_launchplane_fastapi_app(
             ),
             github_api=github_api_request,
             public_origin=(human_session_manager.public_origin if human_session_manager else None),
+            projection_service=owner_acceptance_projection_service,
         ),
     )
     register_governance_projection_routes(

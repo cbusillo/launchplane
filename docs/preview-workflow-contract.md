@@ -222,6 +222,20 @@ Manual `workflow_dispatch` may request `refresh` or `destroy` when a product rep
 needs an operator retry path. Manual refresh still follows the same build,
 publish, and Launchplane-refresh handoff as a PR refresh.
 
+## Owner Review Handoff
+
+When a ready preview belongs to a repository with an authoritative Owner
+requirement, the Launchplane-owned PR feedback comment is the canonical handoff.
+It includes the public preview URL, immutable image and current revision, the
+exact Launchplane Owner-workbench deep link, the PR changes link, a concise test
+plan, Accept and Request changes instructions, a staleness warning, and the next
+Launchplane step. GitHub reviews and comments do not record Owner acceptance.
+
+If Owner authority cannot be resolved or the workbench route is unavailable,
+the comment fails closed: it tells reviewers not to merge and exposes no Owner
+action instructions. Repositories classified as not requiring Owner acceptance
+receive the ordinary ready-preview comment without an interactive Owner handoff.
+
 ## Manager Preview Approval
 
 Manager approval is a Launchplane-owned interaction layered on the serving

@@ -41,7 +41,7 @@ def _configured_store(directory: str) -> object:
 
 
 class GovernanceProjectionHttpTests(unittest.IsolatedAsyncioTestCase):
-    async def test_reads_one_bounded_non_authoritative_projection(self) -> None:
+    async def test_reads_projection_with_authoritative_owner_facet(self) -> None:
         with TemporaryDirectory() as directory:
             store = _configured_store(directory)
             common = ReadRouteDependencies(
@@ -77,7 +77,8 @@ class GovernanceProjectionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(projection["mode"], "read_only_projection")
         self.assertFalse(projection["authoritative"])
         self.assertEqual(projection["authorizes"], [])
-        self.assertEqual(projection["owner_judgment"]["authorizes"], [])
+        self.assertTrue(projection["owner_judgment"]["authoritative"])
+        self.assertEqual(projection["owner_judgment"]["mode"], "owner_acceptance")
         self.assertEqual(projection["merge_readiness"]["mode"], "ephemeral")
         self.assertEqual(projection["merge_readiness"]["authorizes"], [])
         self.assertEqual(projection["merge_admission"]["status"], "not_recorded")

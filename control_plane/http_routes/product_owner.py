@@ -12,14 +12,14 @@ from control_plane.contracts.product_owner import (
     PRODUCT_OWNER_REQUIREMENT_WRITE_ACTION,
     PRODUCT_OWNER_ROUTING_READ_ACTION,
     PRODUCT_OWNER_ROUTING_WRITE_ACTION,
-    PRODUCT_OWNER_SHADOW_READ_ACTION,
     ProductOwnerActionContext,
     ProductOwnerActorIdentity,
     ProductOwnerPolicyRecord,
     ProductOwnerRequirementRecord,
     ProductOwnerRoutingRecord,
-    ProductOwnerShadowEvaluation,
+    ProductOwnerAuthorityEvaluation,
 )
+from control_plane.contracts.owner_acceptance import OWNER_ACCEPTANCE_READ_ACTION
 from control_plane.http_routes.support import (
     ApiRouteRegistrar,
     AuthorizationAllows,
@@ -40,7 +40,7 @@ from control_plane.product_owner_service import (
     apply_product_owner_policy,
     apply_product_owner_requirement,
     apply_product_owner_routing,
-    evaluate_product_owner_shadow_authority,
+    evaluate_product_owner_authority,
     get_product_owner_read_model,
     require_product_owner_policy_read_store,
     require_product_owner_policy_store,
@@ -55,7 +55,7 @@ from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity,
 PRODUCT_OWNER_POLICY_READ_ROUTE = "/v1/product-owner/policy"
 PRODUCT_OWNER_REQUIREMENT_READ_ROUTE = "/v1/product-owner/requirement"
 PRODUCT_OWNER_ROUTING_READ_ROUTE = "/v1/product-owner/routing"
-PRODUCT_OWNER_SHADOW_EVALUATION_ROUTE = "/v1/product-owner/shadow-evaluation"
+PRODUCT_OWNER_AUTHORITY_EVALUATION_ROUTE = "/v1/product-owner/evaluation"
 PRODUCT_OWNER_POLICY_APPLY_ROUTE = "/v1/product-owner/policies/apply"
 PRODUCT_OWNER_REQUIREMENT_APPLY_ROUTE = "/v1/product-owner/requirements/apply"
 PRODUCT_OWNER_ROUTING_APPLY_ROUTE = "/v1/product-owner/routing/apply"
@@ -79,12 +79,12 @@ class ProductOwnerReadResponse(BaseModel):
     read_model: ProductOwnerReadModel
 
 
-class ProductOwnerShadowEvaluationResponse(BaseModel):
+class ProductOwnerAuthorityEvaluationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    evaluation: ProductOwnerShadowEvaluation
+    evaluation: ProductOwnerAuthorityEvaluation
 
 
 class ProductOwnerPolicyApplyEnvelope(BaseModel):
@@ -236,7 +236,7 @@ def register_product_owner_read_routes(
             record_store,
         )
 
-    def read_shadow_evaluation(
+    def read_authority_evaluation(
         product: Annotated[str, Query(...)],
         system: Annotated[str, Query(...)],
         repository_id: Annotated[str, Query(...)],
@@ -248,7 +248,7 @@ def register_product_owner_read_routes(
         claimed_policy_digest: Annotated[str, Query()] = "",
         claimed_requirement_revision: Annotated[int | None, Query(ge=1)] = None,
         claimed_requirement_digest: Annotated[str, Query()] = "",
-    ) -> ProductOwnerShadowEvaluationResponse:
+    ) -> ProductOwnerAuthorityEvaluationResponse:
         trace_id = dependencies.next_trace_id()
         try:
             context = ProductOwnerActionContext(
@@ -267,7 +267,7 @@ def register_product_owner_read_routes(
             ) from error
         if not dependencies.authorization_allows(
             identity=identity,
-            action=PRODUCT_OWNER_SHADOW_READ_ACTION,
+            action=OWNER_ACCEPTANCE_READ_ACTION,
             product=context.product,
             context=context.system,
             target=AuthorizationTarget(scope="context"),
@@ -276,7 +276,7 @@ def register_product_owner_read_routes(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Caller cannot read product Owner shadow evaluation.",
+                message="Caller cannot read product Owner authority evaluation.",
             )
         try:
             actor = _actor_identity(identity)
@@ -285,7 +285,7 @@ def register_product_owner_read_routes(
                 status_code=403,
                 trace_id=trace_id,
                 code="product_owner_actor_identity_required",
-                message="Product Owner shadow evaluation requires a human GitHub identity.",
+                message="Product Owner authority evaluation requires a human GitHub identity.",
             ) from error
         try:
             policies = require_product_owner_policy_read_store(
@@ -311,9 +311,9 @@ def register_product_owner_read_routes(
                 status_code=503,
                 trace_id=trace_id,
                 code="database_storage_required",
-                message="Product Owner shadow storage is unavailable.",
+                message="Product Owner authority storage is unavailable.",
             ) from error
-        evaluation = evaluate_product_owner_shadow_authority(
+        evaluation = evaluate_product_owner_authority(
             context=context,
             actor=actor,
             policies=policies,
@@ -324,7 +324,7 @@ def register_product_owner_read_routes(
             claimed_requirement_revision=claimed_requirement_revision,
             claimed_requirement_digest=claimed_requirement_digest,
         )
-        return ProductOwnerShadowEvaluationResponse(trace_id=trace_id, evaluation=evaluation)
+        return ProductOwnerAuthorityEvaluationResponse(trace_id=trace_id, evaluation=evaluation)
 
     errors = {
         400: {"model": dependencies.error_response_model},
@@ -337,13 +337,13 @@ def register_product_owner_read_routes(
             PRODUCT_OWNER_POLICY_READ_ROUTE,
             read_policy,
             "read_product_owner_policy",
-            "Read the shadow product Owner policy bundle",
+            "Read the product Owner policy bundle",
         ),
         (
             PRODUCT_OWNER_REQUIREMENT_READ_ROUTE,
             read_requirement,
             "read_product_owner_requirement",
-            "Read the shadow product Owner requirement bundle",
+            "Read the product Owner requirement bundle",
         ),
         (
             PRODUCT_OWNER_ROUTING_READ_ROUTE,
@@ -362,12 +362,12 @@ def register_product_owner_read_routes(
             responses=errors,
         )
     app.add_api_route(
-        PRODUCT_OWNER_SHADOW_EVALUATION_ROUTE,
-        read_shadow_evaluation,
+        PRODUCT_OWNER_AUTHORITY_EVALUATION_ROUTE,
+        read_authority_evaluation,
         methods=["GET"],
-        response_model=ProductOwnerShadowEvaluationResponse,
-        operation_id="read_product_owner_shadow_evaluation",
-        summary="Evaluate product Owner authority without changing enforcement",
+        response_model=ProductOwnerAuthorityEvaluationResponse,
+        operation_id="read_product_owner_authority_evaluation",
+        summary="Evaluate current product Owner authority",
         responses=errors,
     )
 

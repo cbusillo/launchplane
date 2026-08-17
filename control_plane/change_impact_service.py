@@ -84,9 +84,6 @@ class ChangeImpactPolicyReadModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = Field(default=1, ge=1)
-    mode: Literal["shadow"] = "shadow"
-    authoritative: Literal[False] = False
-    enforcement_effect: Literal["none"] = "none"
     repository_id: str
     current_policy: ChangeImpactPolicyRecord | None = None
     policy_history_count: int = Field(default=0, ge=0)

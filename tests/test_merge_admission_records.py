@@ -110,26 +110,34 @@ def _landed_outcome(
     )
 
 
-def _guard_records() -> tuple[
+def _guard_records(
+    *,
+    policy_sha256: str = POLICY_SHA,
+    repository: str = REPOSITORY,
+    pull_request_number: int = 2083,
+    base_sha: str = BASE_SHA,
+    head_sha: str = HEAD_SHA,
+    tree_sha: str = TREE_SHA,
+) -> tuple[
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchLandingPlanRecord,
     MergeTrainControllerStateRecord,
     MergeTrainStructuralCandidateResult,
 ]:
     entry = MergeTrainBatchEntry(
-        pull_request_number=2083,
+        pull_request_number=pull_request_number,
         position=2,
-        head_sha=HEAD_SHA,
-        head_tree_sha=TREE_SHA,
+        head_sha=head_sha,
+        head_tree_sha=tree_sha,
         impact_status="known",
     )
     provenance = MergeTrainStructuralProvenance(
-        repository=REPOSITORY,
+        repository=repository,
         base_branch="main",
-        base_sha=BASE_SHA,
+        base_sha=base_sha,
         base_tree_sha=OTHER_SHA,
-        policy_key=f"{REPOSITORY}:main",
-        policy_sha256=POLICY_SHA,
+        policy_key=f"{repository}:main",
+        policy_sha256=policy_sha256,
         entries=(
             MergeTrainStructuralEntryBinding(
                 position=1,
@@ -143,7 +151,7 @@ def _guard_records() -> tuple[
             MergeTrainRollingStep(
                 position=1,
                 pull_request_number=entry.pull_request_number,
-                parent_sha=BASE_SHA,
+                parent_sha=base_sha,
                 parent_tree_sha=OTHER_SHA,
                 head_sha=entry.head_sha,
                 head_tree_sha=entry.head_tree_sha,
@@ -157,20 +165,20 @@ def _guard_records() -> tuple[
     )
     normalized_entry = entry.model_copy(update={"position": 1})
     batch_id = build_merge_train_batch_id(
-        repository=REPOSITORY,
+        repository=repository,
         base_branch="main",
-        base_sha=BASE_SHA,
-        entry_head_shas=(HEAD_SHA,),
+        base_sha=base_sha,
+        entry_head_shas=(head_sha,),
     )
     candidate = MergeTrainBatchCandidate(
         batch_id=batch_id,
-        repository=REPOSITORY,
+        repository=repository,
         base_branch="main",
-        base_sha=BASE_SHA,
-        policy_key=f"{REPOSITORY}:main",
-        policy_sha256=POLICY_SHA,
+        base_sha=base_sha,
+        policy_key=f"{repository}:main",
+        policy_sha256=policy_sha256,
         candidate_ref=build_merge_train_batch_candidate_ref(
-            repository=REPOSITORY,
+            repository=repository,
             base_branch="main",
             batch_id=batch_id,
         ),
@@ -202,13 +210,13 @@ def _guard_records() -> tuple[
     )
     controller_state = MergeTrainControllerStateRecord(
         controller_key=build_merge_train_controller_key(
-            repository=REPOSITORY,
+            repository=repository,
             base_branch="main",
         ),
-        repository=REPOSITORY,
+        repository=repository,
         base_branch="main",
-        policy_key=f"{REPOSITORY}:main",
-        policy_sha256=POLICY_SHA,
+        policy_key=f"{repository}:main",
+        policy_sha256=policy_sha256,
         status="running",
         updated_at="2026-08-11T03:00:00Z",
         lease_owner="controller-run-1",
@@ -217,7 +225,7 @@ def _guard_records() -> tuple[
         heartbeat_at="2026-08-11T03:00:00Z",
         active_action="land_batch",
         active_phase="merge_batch_entries",
-        active_pull_request_number=2083,
+        active_pull_request_number=pull_request_number,
         step_payload={
             "landing_plan_id": landing_plan.plan_id,
             "expected_effect_sha": landing_plan.candidate_sha,
@@ -226,7 +234,7 @@ def _guard_records() -> tuple[
     structural_result = MergeTrainStructuralCandidateResult(
         status="exact",
         reason_codes=("structural_single_entry_exact",),
-        effective_base_sha=BASE_SHA,
+        effective_base_sha=base_sha,
         effective_base_tree_sha=OTHER_SHA,
         candidate_sha256=candidate.candidate_sha256,
         landing_plan_sha256=landing_plan.landing_plan_sha256,
