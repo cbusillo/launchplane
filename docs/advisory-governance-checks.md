@@ -34,8 +34,11 @@ value `LAUNCHPLANE_ADVISORY_GITHUB_APP_PRIVATE_KEY`. Both belong to the
 Launchplane service context in DB-backed runtime records; they are not checked
 in, persisted in projection records, or accepted from callers. Installation
 tokens are minted for one exact repository with only Checks write permission
-and are revoked after the projection attempt. They are never logged or
-persisted.
+and are revoked after the projection attempt. Once GitHub returns a usable token
+string, Launchplane also revokes it before surfacing any later expiry,
+permission, repository-count, repository-id, or repository-name validation
+failure. A cleanup failure is attached to the original validation error rather
+than replacing it. Tokens are never logged or persisted.
 
 Registering and installing the live App is an operator authorization step. The
 code and dry-run contracts remain testable before that authorization exists;
@@ -73,7 +76,11 @@ changes are rejected and retried before the critical section, and the resolved
 event binding must still match the held lock before projection or append.
 Repository renames remain serialized by the stable id. Ready preview-feedback
 hydration and the explicit endpoint use this same locked current-ledger
-reconciliation service rather than projecting independently. A second
+reconciliation service rather than projecting independently. Preview feedback
+runs the synchronous lock, storage, and GitHub work in a worker thread instead
+of blocking the ASGI event loop. Bindingless stale and unavailable decisions
+still project against the exact resolved target as `action_required` or
+`failure`; only `not_required` intentionally omits the Owner action. A second
 evaluation confirms that the projected state stayed current before the lock is
 released, and every minted installation token is revoked after its attempt.
 PostgreSQL waiters use dedicated unpooled advisory-lock connections rather than

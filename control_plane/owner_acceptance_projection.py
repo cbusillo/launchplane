@@ -219,11 +219,7 @@ class OwnerAcceptanceProjectionService:
         with self.lock_current(store=store, target=target) as lock_target:
             decision, current_target = self.resolve_current(store=store, target=target)
             _require_projection_lock_target(lock_target, current_target)
-            if (
-                decision.status == "not_required"
-                or not decision.products
-                or decision.binding is None
-            ):
+            if decision.status == "not_required":
                 return OwnerAcceptanceProjectionOutcome(
                     decision=decision,
                     target=current_target,
@@ -471,8 +467,16 @@ def _summary(decision: OwnerAcceptanceDecision) -> str:
                 f"- `{product.product}`: **{product.status.replace('_', ' ')}** "
                 f"(`{product.reason_code}`; binding `{binding}`)"
             )
-    else:
+    elif decision.status == "not_required":
         lines.extend(("", "No product-specific Owner decision is currently required."))
+    else:
+        lines.extend(
+            (
+                "",
+                "No product-specific Owner decision is available from the current "
+                "authoritative evidence.",
+            )
+        )
     return "\n".join(lines)
 
 

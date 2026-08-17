@@ -14,6 +14,7 @@ from control_plane.http_app import _BOUNDED_REQUEST_BODY_CONTRACTS
 from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
     OWNER_ACCEPTANCE_READ_ACTION,
+    OwnerAcceptanceDecision,
 )
 from control_plane.contracts.change_impact import ChangeImpactTargetReference
 from control_plane.contracts.product_owner import ProductOwnerGrant, ProductOwnerIdentity
@@ -302,6 +303,96 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
             [call["method"] for call in github_api.calls if call.get("method") == "DELETE"],
             ["DELETE"],
         )
+
+    async def test_bindingless_negative_decisions_project_exact_target(self) -> None:
+        cases = (
+            (
+                OwnerAcceptanceDecision(
+                    status="stale",
+                    reason_code="change_impact_stale",
+                    evaluated_at="2026-08-17T01:30:00Z",
+                ),
+                "action_required",
+            ),
+            (
+                OwnerAcceptanceDecision(
+                    status="unavailable",
+                    reason_code="change_impact_unavailable",
+                    evaluated_at="2026-08-17T01:30:00Z",
+                ),
+                "failure",
+            ),
+        )
+        exact_target = _repository_evidence().target
+        for decision, expected_conclusion in cases:
+            with self.subTest(status=decision.status), TemporaryDirectory() as directory:
+                store = _store(Path(directory))
+                github_api = _GitHubCheckApi()
+                service = OwnerAcceptanceProjectionService(
+                    repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                    github_app_token=_installation_token,
+                    public_origin="https://ops.example.test",
+                    api_request=github_api,
+                )
+
+                with patch.object(
+                    OwnerAcceptanceProjectionService,
+                    "resolve_current",
+                    return_value=(decision, exact_target),
+                ):
+                    outcome = service.reconcile_if_required(
+                        store=store,
+                        target=ChangeImpactTargetReference(
+                            repository=REPOSITORY,
+                            pull_request_number=2022,
+                        ),
+                        source_event_id=f"bindingless-{decision.status}",
+                    )
+
+                self.assertIsNone(outcome.decision.binding)
+                self.assertEqual(outcome.target, exact_target)
+                self.assertIsNotNone(outcome.result)
+                assert github_api.check_run is not None
+                self.assertEqual(github_api.check_run["head_sha"], exact_target.head_sha)
+                self.assertEqual(github_api.check_run["conclusion"], expected_conclusion)
+                self.assertIn(
+                    "No product-specific Owner decision is available",
+                    github_api.check_run["output"]["summary"],
+                )
+
+    async def test_not_required_decision_intentionally_skips_projection(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            github_api = _GitHubCheckApi()
+            service = OwnerAcceptanceProjectionService(
+                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                github_app_token=_installation_token,
+                public_origin="https://ops.example.test",
+                api_request=github_api,
+            )
+            decision = OwnerAcceptanceDecision(
+                status="not_required",
+                reason_code="engineering_only",
+                evaluated_at="2026-08-17T01:30:00Z",
+            )
+            exact_target = _repository_evidence().target
+
+            with patch.object(
+                OwnerAcceptanceProjectionService,
+                "resolve_current",
+                return_value=(decision, exact_target),
+            ):
+                outcome = service.reconcile_if_required(
+                    store=store,
+                    target=ChangeImpactTargetReference(
+                        repository=REPOSITORY,
+                        pull_request_number=2022,
+                    ),
+                    source_event_id="not-required-no-projection",
+                )
+
+        self.assertIsNone(outcome.result)
+        self.assertEqual(github_api.calls, [])
 
     async def test_restoration_demotes_exact_target_before_reresolution(self) -> None:
         exact_target = _repository_evidence().target

@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
@@ -2264,6 +2265,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(request_schema["additionalProperties"], False)
 
     def test_preview_pr_feedback_hydrates_ready_url_from_preview_record(self) -> None:
+        request_thread_id = threading.get_ident()
+        projection_thread_ids: list[int] = []
+
+        def reconcile_owner_acceptance_in_worker(**_kwargs: object) -> MagicMock:
+            projection_thread_ids.append(threading.get_ident())
+            return MagicMock(
+                decision=MagicMock(status="pending"),
+                result=MagicMock(),
+            )
+
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
@@ -2284,10 +2295,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ) as create_comment,
             patch(
                 "control_plane.http_app.OwnerAcceptanceProjectionService.reconcile_if_required",
-                return_value=MagicMock(
-                    decision=MagicMock(status="pending"),
-                    result=MagicMock(),
-                ),
+                side_effect=reconcile_owner_acceptance_in_worker,
             ) as reconcile_owner_acceptance,
         ):
             root = Path(temporary_directory_name)
@@ -2435,6 +2443,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "https://pr-42.syo-preview.example.test",
         )
         self.assertEqual(payload["result"]["delivery_status"], "delivered", payload)
+        self.assertNotEqual(projection_thread_ids[0], request_thread_id)
         first_reconciliation_call = reconcile_owner_acceptance.call_args_list[0]
         target = first_reconciliation_call.kwargs["target"]
         self.assertEqual(target.repository, "cbusillo/sellyouroutboard")

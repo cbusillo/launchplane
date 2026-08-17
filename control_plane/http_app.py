@@ -17384,7 +17384,8 @@ def create_launchplane_fastapi_app(
                 pull_request_number=feedback_request.anchor_pr_number,
             )
             try:
-                projection_outcome = owner_acceptance_projection_service.reconcile_if_required(
+                projection_outcome = await run_in_threadpool(
+                    owner_acceptance_projection_service.reconcile_if_required,
                     store=record_store,
                     target=owner_target,
                     source_event_id=normalized_key,

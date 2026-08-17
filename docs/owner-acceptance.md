@@ -405,13 +405,18 @@ conservative projection or its token lifecycle fails, the event is not
 persisted. After append, Launchplane projects the resulting decision against the
 current exact target and ledger. Browser events, explicit reconciliation, and
 ready preview-feedback hydration all use the same shared projection service.
+Preview feedback executes the synchronous reconciliation in a worker thread so
+lock waits, storage reads, and GitHub requests do not block the ASGI event loop.
 Every path for one immutable repository id and pull request is serialized
-through the same store-backed projection lock. A repository-id change is
-rejected and retried before entering the critical section, and the freshly
+through the same store-backed projection lock. Bindingless stale and unavailable
+decisions project their non-green conclusion against the exact resolved target;
+only `not_required` intentionally omits the Owner action. A repository-id change
+is rejected and retried before entering the critical section, and the freshly
 resolved event binding must still match that lock before the conservative
 projection or append can occur. A rename remains on the same lock. Final
 projection is verified against a second current-state evaluation before the lock
-is released, and every minted installation token is revoked after its attempt.
+is released, and every minted installation token is revoked after its attempt,
+including post-mint validation failures inside the identity provider.
 PostgreSQL lock waiters use dedicated unpooled advisory-lock connections so they
 cannot exhaust the record-store pool needed by the lock holder. Acquisition is
 committed before provider work begins; cleanup explicitly unlocks the session,
