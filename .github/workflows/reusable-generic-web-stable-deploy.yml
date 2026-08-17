@@ -28,6 +28,13 @@ name: Reusable Generic Web Stable Deploy
         description: Source git ref attached to deployment evidence.
         required: true
         type: string
+      recovery_request_json:
+        description: >-
+          Optional bounded legacy deploy recovery request. When supplied, the
+          workflow runs only the recovery dry-run job and skips stable deploy.
+        required: false
+        default: ""
+        type: string
       timeout-ms:
         description: Launchplane request timeout in milliseconds.
         required: false
@@ -65,6 +72,7 @@ permissions:
 
 jobs:
   stable-deploy:
+    if: ${{ inputs.recovery_request_json == '' }}
     outputs:
       deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
       deploy_status: ${{ steps.lp.outputs.deploy_status }}
@@ -151,3 +159,46 @@ jobs:
           echo "deployment_record_id=$DEPLOYMENT_RECORD_ID"
           echo "deploy_status=$DEPLOY_STATUS"
           echo "post_deploy_status=$POST_DEPLOY_STATUS"
+
+  recovery-dry-run:
+    if: ${{ inputs.recovery_request_json != '' }}
+    outputs:
+      recovery_digest: ${{ steps.recovery.outputs.recovery_digest }}
+      proposed_action: ${{ steps.recovery.outputs.proposed_action }}
+      reservation_state: ${{ steps.recovery.outputs.reservation_state }}
+      provider_outcome: ${{ steps.recovery.outputs.provider_outcome }}
+      provider_status: ${{ steps.recovery.outputs.provider_status }}
+      retry_safe: ${{ steps.recovery.outputs.retry_safe }}
+      observed_at: ${{ steps.recovery.outputs.observed_at }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request Launchplane recovery dry run
+        id: recovery
+        uses: cbusillo/launchplane/.github/actions/generic-web-deploy-recovery-dry-run@b2055d2944626234664390d6fcd96975ded38511 # main
+        with:
+          request-json: ${{ inputs.recovery_request_json }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+
+      - name: Report bounded recovery evidence
+        env:
+          RECOVERY_DIGEST: ${{ steps.recovery.outputs.recovery_digest }}
+          PROPOSED_ACTION: ${{ steps.recovery.outputs.proposed_action }}
+          RESERVATION_STATE: ${{ steps.recovery.outputs.reservation_state }}
+          PROVIDER_OUTCOME: ${{ steps.recovery.outputs.provider_outcome }}
+          PROVIDER_STATUS: ${{ steps.recovery.outputs.provider_status }}
+          RETRY_SAFE: ${{ steps.recovery.outputs.retry_safe }}
+          OBSERVED_AT: ${{ steps.recovery.outputs.observed_at }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Generic-web deploy recovery dry run"
+            echo
+            echo "- Recovery digest: \`$RECOVERY_DIGEST\`"
+            echo "- Proposed action: \`$PROPOSED_ACTION\`"
+            echo "- Reservation state: \`$RESERVATION_STATE\`"
+            echo "- Provider outcome: \`$PROVIDER_OUTCOME\`"
+            echo "- Provider status: \`$PROVIDER_STATUS\`"
+            echo "- Retry safe: \`$RETRY_SAFE\`"
+            echo "- Observed at: \`$OBSERVED_AT\`"
+          } >> "$GITHUB_STEP_SUMMARY"

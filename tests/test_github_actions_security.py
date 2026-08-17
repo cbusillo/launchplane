@@ -162,6 +162,12 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     "cbusillo/launchplane/.github/actions/launchplane-request": ActionClassification(
         "First-party cross-repository", "OIDC-authenticated Launchplane API requests"
     ),
+    "cbusillo/launchplane/.github/actions/generic-web-deploy-recovery-dry-run": (
+        ActionClassification(
+            "First-party cross-repository",
+            "bounded legacy generic-web deploy reservation inspection",
+        )
+    ),
     "cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client": (
         ActionClassification("First-party cross-repository", "preview request client setup")
     ),

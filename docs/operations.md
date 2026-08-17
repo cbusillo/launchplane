@@ -401,10 +401,17 @@ Product repositories that need an OIDC-authenticated inspection should use the
 Launchplane-owned
 `.github/actions/generic-web-deploy-recovery-dry-run` action. Its single request
 object accepts only the exact legacy deploy coordinates, original GitHub Actions
-run ID and attempt, and operator reason. The action reconstructs the legacy
-idempotency key internally, calls only the dry-run route through the shared
-request action, suppresses the raw response body, and exposes only the seven
-bounded recovery fields documented above.
+run ID and attempt, operator reason, and optional connector-only
+`launchplane_url`. The action strips the connector URL before constructing the
+service payload, reconstructs the legacy idempotency key internally, calls only
+the dry-run route through the shared request action, suppresses the raw response
+body, and exposes only the seven bounded recovery fields documented above.
+Product repositories whose authz grant is bound to the stable-deploy reusable
+workflow may pass that request object through the optional
+`recovery_request_json` input on
+`.github/workflows/reusable-generic-web-stable-deploy.yml`. A non-empty recovery
+request skips the stable-deploy job and runs only the bounded dry-run action;
+the reusable workflow exposes no recovery apply input or route.
 
 Stage 2 apply is explicit and digest-gated. Operators call
 `POST /v1/admin/generic-web/deploy-recovery/apply` with the same request body as
