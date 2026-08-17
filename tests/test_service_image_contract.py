@@ -19,6 +19,17 @@ GITHUB_CLI_MODULE_CONTRACTS = {
         "GITHUB_CLI_X_TEXT_VERSION",
     ),
 }
+RUNTIME_SECURITY_UPGRADE_PACKAGES = {
+    "bsdutils",
+    "libblkid1",
+    "liblastlog2-2",
+    "libmount1",
+    "libsmartcols1",
+    "libuuid1",
+    "login",
+    "mount",
+    "util-linux",
+}
 GO_VERSION_PATTERN = re.compile(
     r"^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
@@ -100,6 +111,36 @@ class ServiceImageContractTests(unittest.TestCase):
 
         self.assertIn("openssh-client", dockerfile_text)
         self.assertIn("rm -rf /var/lib/apt/lists/*", dockerfile_text)
+
+    def test_service_image_refreshes_runtime_security_packages(self) -> None:
+        dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
+
+        dockerfile_text = dockerfile.read_text(encoding="utf-8")
+        runtime_stage = re.search(
+            r"(?ms)^FROM\s+\S*python:3\.13-slim\s*$"
+            r"(?P<body>.*?)(?=^FROM\s|\Z)",
+            dockerfile_text,
+        )
+
+        self.assertIsNotNone(runtime_stage)
+        assert runtime_stage is not None
+        runtime_stage_text = runtime_stage.group("body")
+        upgrade = re.search(
+            r"(?ms)apt-get install -y --no-install-recommends --only-upgrade\s+\\\n"
+            r"(?P<packages>.*?)\n\s*&& apt-get install -y --no-install-recommends",
+            runtime_stage_text,
+        )
+
+        self.assertIsNotNone(upgrade)
+        assert upgrade is not None
+        observed_packages = set(
+            re.findall(
+                r"(?m)^\s+(?P<package>[a-z0-9][a-z0-9+.-]*)\s+\\?\s*$",
+                upgrade.group("packages"),
+            )
+        )
+
+        self.assertTrue(RUNTIME_SECURITY_UPGRADE_PACKAGES.issubset(observed_packages))
 
 
 if __name__ == "__main__":
