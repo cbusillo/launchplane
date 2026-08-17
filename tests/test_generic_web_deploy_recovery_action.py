@@ -201,13 +201,23 @@ import('./{ACTION_ENTRYPOINT.as_posix()}');
         workflow = REUSABLE_WORKFLOW.read_text(encoding="utf-8")
 
         required_fragments = (
+            "actions: read",
             "recovery_request_json:",
             "github.event.inputs.original_run_id == ''",
             "github.event.inputs.original_run_id != ''",
+            "github.event.workflow_run.name != 'Launchplane Recovery Request'",
+            "github.event.workflow_run.name == 'Launchplane Recovery Request'",
+            "github.event.workflow_run.path == '.github/workflows/launchplane-recovery-request.yml'",
+            "name: Download staged recovery request",
+            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+            "launchplane-recovery-request-${{ github.event.workflow_run.id }}",
             "name: Resolve Launchplane recovery request",
             "ORIGINAL_RUN_ATTEMPT: ${{ github.event.inputs.original_run_attempt }}",
             "ORIGINAL_RUN_ID: ${{ github.event.inputs.original_run_id }}",
             "REASON: ${{ github.event.inputs.reason }}",
+            "RECOVERY_ARTIFACT_RUN_ID: ${{ github.event.workflow_run.id }}",
+            "Recovery request artifact must contain exactly one file.",
+            "Recovery request artifact exceeds the size limit.",
             "name: Request Launchplane recovery dry run",
             "uses: cbusillo/launchplane/.github/actions/"
             "generic-web-deploy-recovery-dry-run@b2055d2944626234664390d6fcd96975ded38511",

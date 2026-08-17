@@ -67,6 +67,7 @@ name: Reusable Generic Web Stable Deploy
         value: ${{ jobs.stable-deploy.outputs.error_message }}
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -74,7 +75,9 @@ jobs:
   stable-deploy:
     if: >-
       inputs.recovery_request_json == '' &&
-      (github.event_name != 'workflow_dispatch' || github.event.inputs.original_run_id == '')
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.original_run_id == '') &&
+      (github.event_name != 'workflow_run' ||
+       github.event.workflow_run.name != 'Launchplane Recovery Request')
     outputs:
       deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
       deploy_status: ${{ steps.lp.outputs.deploy_status }}
@@ -165,7 +168,14 @@ jobs:
   recovery-dry-run:
     if: >-
       inputs.recovery_request_json != '' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.original_run_id != '')
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.original_run_id != '') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.name == 'Launchplane Recovery Request' &&
+       github.event.workflow_run.path == '.github/workflows/launchplane-recovery-request.yml' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'workflow_dispatch' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     outputs:
       recovery_digest: ${{ steps.recovery.outputs.recovery_digest }}
       proposed_action: ${{ steps.recovery.outputs.proposed_action }}
@@ -176,6 +186,17 @@ jobs:
       observed_at: ${{ steps.recovery.outputs.observed_at }}
     runs-on: ubuntu-latest
     steps:
+      - name: Download staged recovery request
+        if: >-
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.name == 'Launchplane Recovery Request'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: launchplane-recovery-request-${{ github.event.workflow_run.id }}
+          path: .launchplane-recovery
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
       - name: Resolve Launchplane recovery request
         id: request
         env:
@@ -186,12 +207,28 @@ jobs:
           ORIGINAL_RUN_ID: ${{ github.event.inputs.original_run_id }}
           PRODUCT: ${{ inputs.product }}
           REASON: ${{ github.event.inputs.reason }}
+          RECOVERY_ARTIFACT_RUN_ID: ${{ github.event.workflow_run.id }}
           SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
         run: |
           set -euo pipefail
 
           if [ -n "$EXPLICIT_REQUEST" ]; then
             request="$EXPLICIT_REQUEST"
+          elif [ -n "$RECOVERY_ARTIFACT_RUN_ID" ]; then
+            request_file=.launchplane-recovery/launchplane-recovery-request.json
+            if [ ! -f "$request_file" ] || [ -L "$request_file" ]; then
+              echo "Recovery request artifact is missing or invalid." >&2
+              exit 1
+            fi
+            if [ "$(find .launchplane-recovery -type f | wc -l | tr -d ' ')" != "1" ]; then
+              echo "Recovery request artifact must contain exactly one file." >&2
+              exit 1
+            fi
+            if [ "$(wc -c < "$request_file" | tr -d ' ')" -gt 32768 ]; then
+              echo "Recovery request artifact exceeds the size limit." >&2
+              exit 1
+            fi
+            request="$(jq -c . "$request_file")"
           else
             if [ -z "$PRODUCT" ]; then
               PRODUCT="${GITHUB_REPOSITORY#*/}"
