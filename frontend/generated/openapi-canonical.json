@@ -6468,6 +6468,320 @@
         "title": "GenericWebDeployEnvelope",
         "type": "object"
       },
+      "GenericWebDeployRecoveryApplyRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_recovery_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expected Recovery Digest",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "original_deploy": {
+            "$ref": "#/components/schemas/GenericWebDeployEnvelope"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "product",
+          "instance",
+          "original_deploy",
+          "reason",
+          "expected_recovery_digest"
+        ],
+        "title": "GenericWebDeployRecoveryApplyRequest",
+        "type": "object"
+      },
+      "GenericWebDeployRecoveryApplyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "const": "apply",
+            "default": "apply",
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "provider_outcome": {
+            "enum": [
+              "present",
+              "absent",
+              "unknown",
+              "not_inspected"
+            ],
+            "title": "Provider Outcome",
+            "type": "string"
+          },
+          "provider_status": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Provider Status",
+            "type": "string"
+          },
+          "recovery_action": {
+            "enum": [
+              "replay_completed",
+              "wait_for_active_lease",
+              "adopt_observed",
+              "retry_original_operation",
+              "hold_unknown"
+            ],
+            "title": "Recovery Action",
+            "type": "string"
+          },
+          "recovery_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Recovery Digest",
+            "type": "string"
+          },
+          "reservation_attempt": {
+            "minimum": 1.0,
+            "title": "Reservation Attempt",
+            "type": "integer"
+          },
+          "reservation_state": {
+            "enum": [
+              "completed",
+              "reconcile_required"
+            ],
+            "title": "Reservation State",
+            "type": "string"
+          },
+          "retry_safe": {
+            "title": "Retry Safe",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "product",
+          "context",
+          "instance",
+          "reservation_state",
+          "reservation_attempt",
+          "recovery_action",
+          "recovery_digest",
+          "provider_outcome",
+          "retry_safe"
+        ],
+        "title": "GenericWebDeployRecoveryApplyResponse",
+        "type": "object"
+      },
+      "GenericWebDeployRecoveryDryRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "original_deploy": {
+            "$ref": "#/components/schemas/GenericWebDeployEnvelope"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "product",
+          "instance",
+          "original_deploy",
+          "reason"
+        ],
+        "title": "GenericWebDeployRecoveryDryRunRequest",
+        "type": "object"
+      },
+      "GenericWebDeployRecoveryDryRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "const": "dry-run",
+            "default": "dry-run",
+            "title": "Mode",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "proposed_action": {
+            "enum": [
+              "replay_completed",
+              "wait_for_active_lease",
+              "adopt_observed",
+              "retry_original_operation",
+              "hold_unknown"
+            ],
+            "title": "Proposed Action",
+            "type": "string"
+          },
+          "provider_effect_phase": {
+            "maxLength": 128,
+            "title": "Provider Effect Phase",
+            "type": "string"
+          },
+          "provider_outcome": {
+            "enum": [
+              "present",
+              "absent",
+              "unknown",
+              "not_inspected"
+            ],
+            "title": "Provider Outcome",
+            "type": "string"
+          },
+          "provider_status": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Provider Status",
+            "type": "string"
+          },
+          "provider_target_key_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Provider Target Key Sha256",
+            "type": "string"
+          },
+          "reconciliation_key_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Reconciliation Key Sha256",
+            "type": "string"
+          },
+          "recovery_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Recovery Digest",
+            "type": "string"
+          },
+          "reservation_attempt": {
+            "minimum": 1.0,
+            "title": "Reservation Attempt",
+            "type": "integer"
+          },
+          "reservation_created_at": {
+            "title": "Reservation Created At",
+            "type": "string"
+          },
+          "reservation_lease_expires_at": {
+            "default": "",
+            "title": "Reservation Lease Expires At",
+            "type": "string"
+          },
+          "reservation_state": {
+            "enum": [
+              "running",
+              "completed",
+              "reconcile_required"
+            ],
+            "title": "Reservation State",
+            "type": "string"
+          },
+          "reservation_updated_at": {
+            "title": "Reservation Updated At",
+            "type": "string"
+          },
+          "retry_safe": {
+            "title": "Retry Safe",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "reservation_state",
+          "reservation_attempt",
+          "reservation_created_at",
+          "reservation_updated_at",
+          "observed_at",
+          "reconciliation_key_sha256",
+          "provider_target_key_sha256",
+          "provider_effect_phase",
+          "provider_outcome",
+          "retry_safe",
+          "proposed_action",
+          "recovery_digest"
+        ],
+        "title": "GenericWebDeployRecoveryDryRunResponse",
+        "type": "object"
+      },
       "GenericWebDeployRequest": {
         "additionalProperties": false,
         "properties": {
@@ -33543,6 +33857,224 @@
           }
         },
         "summary": "Logout human auth session"
+      }
+    },
+    "/v1/admin/generic-web/deploy-recovery/apply": {
+      "post": {
+        "operationId": "apply_generic_web_deploy_recovery",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWebDeployRecoveryApplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericWebDeployRecoveryApplyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Apply a reviewed generic web deploy recovery"
+      }
+    },
+    "/v1/admin/generic-web/deploy-recovery/dry-run": {
+      "post": {
+        "operationId": "dry_run_generic_web_deploy_recovery",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWebDeployRecoveryDryRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericWebDeployRecoveryDryRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Inspect an existing generic web deploy reservation without writing"
       }
     },
     "/v1/agent/context": {

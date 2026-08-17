@@ -28,6 +28,13 @@ name: Reusable Generic Web Stable Deploy
         description: Source git ref attached to deployment evidence.
         required: true
         type: string
+      recovery_request_json:
+        description: >-
+          Optional bounded legacy deploy recovery request. When supplied, the
+          workflow runs only the recovery dry-run job and skips stable deploy.
+        required: false
+        default: ""
+        type: string
       timeout-ms:
         description: Launchplane request timeout in milliseconds.
         required: false
@@ -60,11 +67,17 @@ name: Reusable Generic Web Stable Deploy
         value: ${{ jobs.stable-deploy.outputs.error_message }}
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
 jobs:
   stable-deploy:
+    if: >-
+      inputs.recovery_request_json == '' &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.original_run_id == '') &&
+      (github.event_name != 'workflow_run' ||
+       github.event.workflow_run.name != 'Launchplane Recovery Request')
     outputs:
       deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
       deploy_status: ${{ steps.lp.outputs.deploy_status }}
@@ -151,3 +164,148 @@ jobs:
           echo "deployment_record_id=$DEPLOYMENT_RECORD_ID"
           echo "deploy_status=$DEPLOY_STATUS"
           echo "post_deploy_status=$POST_DEPLOY_STATUS"
+
+  recovery-dry-run:
+    if: >-
+      inputs.recovery_request_json != '' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.original_run_id != '') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.name == 'Launchplane Recovery Request' &&
+       github.event.workflow_run.path == '.github/workflows/launchplane-recovery-request.yml' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'workflow_dispatch' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    outputs:
+      recovery_digest: ${{ steps.recovery.outputs.recovery_digest }}
+      proposed_action: ${{ steps.recovery.outputs.proposed_action }}
+      reservation_state: ${{ steps.recovery.outputs.reservation_state }}
+      provider_outcome: ${{ steps.recovery.outputs.provider_outcome }}
+      provider_status: ${{ steps.recovery.outputs.provider_status }}
+      retry_safe: ${{ steps.recovery.outputs.retry_safe }}
+      observed_at: ${{ steps.recovery.outputs.observed_at }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download staged recovery request
+        if: >-
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.name == 'Launchplane Recovery Request'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: launchplane-recovery-request-${{ github.event.workflow_run.id }}
+          path: .launchplane-recovery
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Resolve Launchplane recovery request
+        id: request
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          EXPLICIT_REQUEST: ${{ inputs.recovery_request_json }}
+          INSTANCE: ${{ inputs.instance }}
+          ORIGINAL_RUN_ATTEMPT: ${{ github.event.inputs.original_run_attempt }}
+          ORIGINAL_RUN_ID: ${{ github.event.inputs.original_run_id }}
+          PRODUCT: ${{ inputs.product }}
+          REASON: ${{ github.event.inputs.reason }}
+          RECOVERY_ARTIFACT_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$EXPLICIT_REQUEST" ]; then
+            request="$EXPLICIT_REQUEST"
+          elif [ -n "$RECOVERY_ARTIFACT_RUN_ID" ]; then
+            request_file=.launchplane-recovery/launchplane-recovery-request.json
+            if [ ! -f "$request_file" ] || [ -L "$request_file" ]; then
+              echo "Recovery request artifact is missing or invalid." >&2
+              exit 1
+            fi
+            if [ "$(find .launchplane-recovery -type f | wc -l | tr -d ' ')" != "1" ]; then
+              echo "Recovery request artifact must contain exactly one file." >&2
+              exit 1
+            fi
+            if [ "$(wc -c < "$request_file" | tr -d ' ')" -gt 32768 ]; then
+              echo "Recovery request artifact exceeds the size limit." >&2
+              exit 1
+            fi
+            request="$(jq -c . "$request_file")"
+          else
+            if [ -z "$PRODUCT" ]; then
+              PRODUCT="${GITHUB_REPOSITORY#*/}"
+            fi
+            if [ -z "$INSTANCE" ]; then
+              INSTANCE="testing"
+            fi
+            for required in \
+              PRODUCT \
+              INSTANCE \
+              ARTIFACT_ID \
+              SOURCE_GIT_REF \
+              ORIGINAL_RUN_ID \
+              ORIGINAL_RUN_ATTEMPT \
+              REASON; do
+              if [ -z "${!required}" ]; then
+                echo "${required} is required for recovery dry-run." >&2
+                exit 1
+              fi
+            done
+
+            launchplane_url_json='${{ toJSON(inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL) }}'
+            request="$(jq -cn \
+              --argjson launchplane_url "$launchplane_url_json" \
+              --arg product "$PRODUCT" \
+              --arg instance "$INSTANCE" \
+              --arg artifact_id "$ARTIFACT_ID" \
+              --arg source_git_ref "$SOURCE_GIT_REF" \
+              --arg original_run_id "$ORIGINAL_RUN_ID" \
+              --arg original_run_attempt "$ORIGINAL_RUN_ATTEMPT" \
+              --arg reason "$REASON" \
+              '{
+                schema_version: 1,
+                launchplane_url: $launchplane_url,
+                product: $product,
+                instance: $instance,
+                artifact_id: $artifact_id,
+                source_git_ref: $source_git_ref,
+                original_run_id: $original_run_id,
+                original_run_attempt: $original_run_attempt,
+                reason: $reason
+              }')"
+          fi
+
+          {
+            echo "request<<EOF"
+            echo "$request"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Request Launchplane recovery dry run
+        id: recovery
+        uses: cbusillo/launchplane/.github/actions/generic-web-deploy-recovery-dry-run@b2055d2944626234664390d6fcd96975ded38511 # main
+        with:
+          request-json: ${{ steps.request.outputs.request }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+
+      - name: Report bounded recovery evidence
+        env:
+          RECOVERY_DIGEST: ${{ steps.recovery.outputs.recovery_digest }}
+          PROPOSED_ACTION: ${{ steps.recovery.outputs.proposed_action }}
+          RESERVATION_STATE: ${{ steps.recovery.outputs.reservation_state }}
+          PROVIDER_OUTCOME: ${{ steps.recovery.outputs.provider_outcome }}
+          PROVIDER_STATUS: ${{ steps.recovery.outputs.provider_status }}
+          RETRY_SAFE: ${{ steps.recovery.outputs.retry_safe }}
+          OBSERVED_AT: ${{ steps.recovery.outputs.observed_at }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Generic-web deploy recovery dry run"
+            echo
+            echo "- Recovery digest: \`$RECOVERY_DIGEST\`"
+            echo "- Proposed action: \`$PROPOSED_ACTION\`"
+            echo "- Reservation state: \`$RESERVATION_STATE\`"
+            echo "- Provider outcome: \`$PROVIDER_OUTCOME\`"
+            echo "- Provider status: \`$PROVIDER_STATUS\`"
+            echo "- Retry safe: \`$RETRY_SAFE\`"
+            echo "- Observed at: \`$OBSERVED_AT\`"
+          } >> "$GITHUB_STEP_SUMMARY"

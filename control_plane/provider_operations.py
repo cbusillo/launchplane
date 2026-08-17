@@ -16,6 +16,7 @@ than repeating the effect; provider-specific reconciliation stays behind the
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import hashlib
 from threading import Event, Lock, Thread
@@ -48,6 +49,20 @@ DurableProviderOperationStatus = Literal[
     "in_progress",
     "reconcile_required",
 ]
+
+
+def provider_operation_response_payload(
+    *,
+    trace_id: str,
+    records: Mapping[str, object],
+    result: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "status": "accepted",
+        "trace_id": trace_id,
+        "records": dict(records),
+        "result": result,
+    }
 
 
 class ProviderMutationRejectedError(Exception):
@@ -471,6 +486,55 @@ def run_durable_provider_operation(
     )
 
 
+def resume_acquired_provider_operation(
+    *,
+    store: DurableProviderOperationStore,
+    reservation: LaunchplaneIdempotencyRecord,
+    response_trace_id: str,
+    adapter: DurableProviderMutationAdapter,
+    lease_seconds: int = 300,
+    heartbeat_interval_seconds: float | None = None,
+) -> DurableProviderOperationResult:
+    if reservation.state != "running":
+        raise ValueError("Provider operation resume requires a running reservation.")
+    if not reservation.reconciliation_key:
+        raise ValueError("Provider operation resume requires a reconciliation key.")
+    if adapter.reconciliation_key().strip() != reservation.reconciliation_key:
+        raise ValueError("Provider operation resume reconciliation identity does not match.")
+    if adapter.target_key().strip() != reservation.provider_target_key:
+        raise ValueError("Provider operation resume target identity does not match.")
+    normalized_response_trace_id = response_trace_id.strip()
+    if not normalized_response_trace_id:
+        raise ValueError("Provider operation resume requires a response trace id.")
+    if lease_seconds < 1:
+        raise ValueError("Durable provider operation leases must be positive.")
+    resolved_heartbeat_interval = heartbeat_interval_seconds
+    if resolved_heartbeat_interval is None:
+        resolved_heartbeat_interval = max(0.1, min(30.0, lease_seconds / 3))
+    if resolved_heartbeat_interval <= 0:
+        raise ValueError("Durable provider operation heartbeat intervals must be positive.")
+    if resolved_heartbeat_interval >= lease_seconds:
+        raise ValueError("Durable provider operation heartbeats must run before lease expiry.")
+    provider_operation_key = build_provider_operation_key(
+        scope=reservation.scope,
+        route_path=reservation.route_path,
+        idempotency_key=reservation.idempotency_key,
+        request_fingerprint=reservation.request_fingerprint,
+        reconciliation_key=reservation.reconciliation_key,
+    )
+    return _apply_acquired(
+        store=store,
+        adapter=adapter,
+        reservation=reservation,
+        reconciliation_key=reservation.reconciliation_key,
+        provider_operation_key=provider_operation_key,
+        response_trace_id=normalized_response_trace_id,
+        lease_seconds=lease_seconds,
+        heartbeat_interval_seconds=resolved_heartbeat_interval,
+        release_pre_effect_failures=False,
+    )
+
+
 def _apply_acquired(
     *,
     store: DurableProviderOperationStore,
@@ -481,6 +545,7 @@ def _apply_acquired(
     response_trace_id: str,
     lease_seconds: int,
     heartbeat_interval_seconds: float,
+    release_pre_effect_failures: bool = True,
 ) -> DurableProviderOperationResult:
     heartbeat = _ReservationHeartbeat(
         store=store,
@@ -501,6 +566,12 @@ def _apply_acquired(
     except ProviderMutationRejectedError as rejection:
         current_reservation, _ = heartbeat.stop()
         if current_reservation.provider_effect_started_at:
+            return _mark_reconcile_required(
+                store=store,
+                reservation=current_reservation,
+                reconciliation_key=reconciliation_key,
+            )
+        if not release_pre_effect_failures:
             return _mark_reconcile_required(
                 store=store,
                 reservation=current_reservation,
@@ -541,6 +612,12 @@ def _apply_acquired(
 
     if not outcome.durable:
         if current_reservation.provider_effect_started_at:
+            return _mark_reconcile_required(
+                store=store,
+                reservation=current_reservation,
+                reconciliation_key=reconciliation_key,
+            )
+        if not release_pre_effect_failures:
             return _mark_reconcile_required(
                 store=store,
                 reservation=current_reservation,

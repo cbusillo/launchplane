@@ -366,6 +366,89 @@ former replaces the previous process-local apply lock. Both require an
   explaining that cleanup won. Provider read failures remain fail-closed. Do not
   reproduce this transition with direct SQL or provider-side deletion.
 
+### Generic-web deploy recovery dry-run/apply
+
+Legacy generic-web deploy recovery starts read-only. Operators call
+`POST /v1/admin/generic-web/deploy-recovery/dry-run` with the exact original
+`GenericWebDeployEnvelope` under `original_deploy`, the original
+`Idempotency-Key`, the product and instance, and a non-empty reason. The service
+authorizes `generic_web_deploy.execute` for the current product/context/instance
+before looking up any reservation. After lookup, it derives the original
+operation target from the stored reconciliation snapshot, or from an exact
+typed completed response, and authorizes the stored product/context/instance
+again before returning evidence.
+
+The lookup is existing-only and database-backed. It fingerprints the exact
+original payload using `/v1/drivers/generic-web/deploy`, searches across the
+original GitHub Actions scope, and fails closed for a missing, conflicting, or
+multi-scope match. It never probes through the normal deploy route: calling
+`/v1/drivers/generic-web/deploy` can reserve and start a new production deploy
+when the assumed legacy reservation does not exist.
+
+Dry-run uses the reservation's stored reconciliation and provider-target
+identities to inspect the original provider operation. Reconciliation identity,
+product, instance, provider-target, or completed-response drift returns a
+conflict before provider inspection; provider read uncertainty alone produces
+`hold_unknown`. It does not reserve,
+release, supersede, retry, adopt, or write deployment, inventory, idempotency,
+or provider state. The bounded response reports only reservation state and
+timestamps, hashed identifiers, provider outcome/status, retry safety, one of
+`replay_completed`, `wait_for_active_lease`, `adopt_observed`,
+`retry_original_operation`, or `hold_unknown`, and a canonical recovery digest.
+Raw scopes, idempotency keys, reconciliation keys, provider-target keys,
+original payloads, target URLs, and provider payloads are never returned.
+Product repositories that need an OIDC-authenticated inspection should use the
+Launchplane-owned
+`.github/actions/generic-web-deploy-recovery-dry-run` action. Its single request
+object accepts only the exact legacy deploy coordinates, original GitHub Actions
+run ID and attempt, operator reason, and optional connector-only
+`launchplane_url`. The action strips the connector URL before constructing the
+service payload, reconstructs the legacy idempotency key internally, calls only
+the dry-run route through the shared request action, suppresses the raw response
+body, and exposes only the seven bounded recovery fields documented above.
+Product repositories whose authz grant is bound to the stable-deploy reusable
+workflow may pass that request object through the optional
+`recovery_request_json` input on
+`.github/workflows/reusable-generic-web-stable-deploy.yml`. A non-empty recovery
+request skips the stable-deploy job and runs only the bounded dry-run action;
+the reusable workflow exposes no recovery apply input or route.
+For existing product connectors that must preserve an established reusable-job
+identity, the workflow also recognizes a caller `workflow_dispatch` event with
+non-empty `original_run_id`, `original_run_attempt`, and `reason` inputs. It
+constructs the same private recovery envelope from the caller event plus the
+existing product, instance, artifact, source, and Launchplane URL inputs, then
+skips stable deploy exactly as the explicit envelope path does.
+Product connectors whose authorization policy permits only `workflow_run` may
+instead stage `launchplane-recovery-request.json` in a successful one-day
+artifact from a `Launchplane Recovery Request` manual workflow on `main`. When
+the caller event matches that exact workflow name, path, branch, repository, and
+event type, the reusable workflow downloads only the artifact tied to the
+triggering run, enforces a single-file and size bound, and passes the compact
+request through the same bounded dry-run action. This mode also skips stable
+deploy and exposes no apply path.
+
+Stage 2 apply is explicit and digest-gated. Operators call
+`POST /v1/admin/generic-web/deploy-recovery/apply` with the same request body as
+the dry-run plus `expected_recovery_digest`. The service recomputes a fresh
+inspection and requires an exact digest match before it writes anything. The
+digest intentionally excludes `observed_at`, so routine database observation
+time changes do not stale a reviewed recovery; all reservation identity,
+provider classification, action, request, and bounded provider observation
+inputs remain part of the digest.
+
+Apply never creates a new reservation, releases a reservation, or supersedes a
+provider target. If the reviewed reservation is an expired `running` mutation,
+apply first CAS-transitions that exact reservation to `reconcile_required` via
+the durable mutation store, then uses the existing exact-match adoption or retry
+methods. `adopt_observed` stores deployment/inventory evidence from the reviewed
+inspection without re-observing the provider. `retry_original_operation` resumes
+the already-acquired reservation path and preserves `reconcile_required` for
+pre-effect rejection, lease loss, uncertain, or non-durable outcomes. Successful
+apply preserves the original deploy response evidence and adds only bounded
+recovery metadata, `recovery_digest` and `recovery_action`, so a lost-response
+apply retry can replay safely without exposing raw scope, key, target, or
+provider payload data.
+
 ## Target Launchplane Ingress
 
 The target communication model is:

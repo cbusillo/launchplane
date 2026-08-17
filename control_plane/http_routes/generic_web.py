@@ -11,6 +11,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from control_plane.contracts.generic_web_deploy_recovery import (
+    GenericWebDeployRecoveryApplyResponse,
+    GenericWebDeployRecoveryDryRunResponse,
+)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.product_profile_record import (
@@ -23,9 +27,17 @@ from control_plane.generic_web_deploy_http import (
     GenericWebDeployEnvelope,
     GenericWebDeployProductMismatchError,
     GenericWebDeployRouteDependencyError,
-    execute_generic_web_deploy_result,
     resolve_generic_web_deploy_lane,
-    should_store_generic_web_deploy_idempotency,
+)
+from control_plane.generic_web_deploy_provider_adapter import (
+    GenericWebDeployProviderMutationAdapter,
+)
+from control_plane.generic_web_deploy_recovery_http import (
+    GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE as _GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE,
+    GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE as _GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
+    GenericWebDeployRecoveryDependencies,
+    build_generic_web_deploy_recovery_apply_handler,
+    build_generic_web_deploy_recovery_dry_run_handler,
 )
 from control_plane.generic_web_preview_http import (
     GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE as _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
@@ -128,9 +140,7 @@ from control_plane.service_auth import (
 )
 from control_plane.storage.postgres import OutboxWithIdempotencyRequest, PostgresRecordStore
 from control_plane.workflows.generic_web_deploy import (
-    GenericWebDeployStore,
     normalize_generic_web_artifact_id,
-    record_observed_generic_web_deploy,
 )
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployProvider,
@@ -138,17 +148,12 @@ from control_plane.workflows.generic_web_deploy_provider import (
     build_generic_web_provider_reconciliation_key,
     build_generic_web_provider_target_key,
     default_generic_web_deploy_provider,
-    generic_web_provider_deployment_succeeded,
-    resolve_generic_web_provider_reconciliation_target,
 )
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewProfileStore,
     discover_generic_web_preview_desired_state,
     preview_pr_number_from_slug,
     resolve_generic_web_preview_slug,
-)
-from control_plane.workflows.odoo_generic_web_post_deploy import (
-    generic_web_post_deploy_executor_for_driver_id,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -160,174 +165,6 @@ __all__ = [
     "register_generic_web_rollback_write_routes",
     "register_generic_web_write_routes",
 ]
-
-
-class _GenericWebDeployProviderMutationAdapter:
-    def __init__(
-        self,
-        *,
-        control_plane_root: FilePath,
-        record_store: object,
-        deploy_request: GenericWebDeployEnvelope,
-        profile: LaunchplaneProductProfileRecord,
-        lane: ProductLaneProfile,
-        trace_id: str,
-    ) -> None:
-        self._control_plane_root = control_plane_root
-        self._record_store = record_store
-        self._deploy_request = deploy_request
-        self._profile = profile
-        self._lane = lane
-        self._trace_id = trace_id
-        self._deploy_provider: GenericWebDeployProvider = default_generic_web_deploy_provider()
-        self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None
-
-    def _resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
-        if self._resolved_deploy_target is None:
-            deploy = self._deploy_request.deploy
-            self._resolved_deploy_target = self._deploy_provider.resolve_deploy_target(
-                control_plane_root=self._control_plane_root,
-                request_artifact_id=deploy.artifact_id,
-                request_source_git_ref=deploy.source_git_ref,
-                request_timeout_seconds=deploy.timeout_seconds,
-                request_no_cache=deploy.no_cache,
-                record_store=self._record_store,
-                profile=self._profile,
-                lane=self._lane,
-                normalized_artifact_id=normalize_generic_web_artifact_id(
-                    profile=self._profile,
-                    artifact_id=deploy.artifact_id,
-                ),
-                request_deploy_reference=deploy.deploy_reference,
-                fallback_target_name=f"{self._profile.product}-{self._lane.instance}",
-            )
-        return self._resolved_deploy_target
-
-    def reconciliation_key(self) -> str:
-        return build_generic_web_provider_reconciliation_key(self._resolve_deploy_target())
-
-    def target_key(self) -> str:
-        return build_generic_web_provider_target_key(self._resolve_deploy_target())
-
-    def observe(
-        self,
-        provider_operation_key: str,
-        provider_effect_phase: str,
-        reconciliation_key: str,
-    ) -> ProviderObservation:
-        try:
-            deploy = self._deploy_request.deploy
-            resolved_target = resolve_generic_web_provider_reconciliation_target(
-                reconciliation_key=reconciliation_key,
-                request_artifact_id=deploy.artifact_id,
-                request_source_git_ref=deploy.source_git_ref,
-                request_timeout_seconds=deploy.timeout_seconds,
-                request_no_cache=deploy.no_cache,
-                normalized_artifact_id=normalize_generic_web_artifact_id(
-                    profile=self._profile,
-                    artifact_id=deploy.artifact_id,
-                ),
-                request_deploy_reference=deploy.deploy_reference,
-                lane=self._lane,
-            )
-            self._resolved_deploy_target = resolved_target
-            observation = self._deploy_provider.observe_artifact_deploy(
-                control_plane_root=self._control_plane_root,
-                resolved_deploy_target=resolved_target,
-                deployment_title=provider_operation_title(provider_operation_key),
-            )
-        except (FileNotFoundError, ValueError, click.ClickException):
-            return ProviderObservation(outcome="unknown")
-        if observation.outcome != "present":
-            if observation.outcome == "absent" and provider_effect_phase == "deploy_trigger":
-                return ProviderObservation(outcome="unknown")
-            return ProviderObservation(
-                outcome=observation.outcome,
-                retry_safe=(
-                    observation.outcome == "absent"
-                    and provider_effect_phase in {"", "target_update"}
-                ),
-            )
-        post_deploy_unobserved = (
-            generic_web_provider_deployment_succeeded(observation.deployment_status)
-            and generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None
-        )
-        deployment_record_id = self._deployment_record_id(provider_operation_key)
-        if provider_effect_phase.startswith("post_deploy_"):
-            read_deployment_record = getattr(self._record_store, "read_deployment_record", None)
-            if not callable(read_deployment_record):
-                return ProviderObservation(outcome="unknown")
-            try:
-                read_deployment_record(deployment_record_id)
-            except FileNotFoundError:
-                return ProviderObservation(outcome="unknown")
-            post_deploy_unobserved = False
-        try:
-            records, driver_result = record_observed_generic_web_deploy(
-                record_store=cast(GenericWebDeployStore, self._record_store),
-                profile=self._profile,
-                lane=self._lane,
-                resolved_deploy_target=resolved_target,
-                observation=observation,
-                deployment_record_id=deployment_record_id,
-                post_deploy_unobserved=post_deploy_unobserved,
-            )
-        except (FileNotFoundError, ValueError, click.ClickException):
-            return ProviderObservation(outcome="unknown")
-        terminal_failure = str(driver_result.get("deploy_status", "")).strip() == "fail"
-        return ProviderObservation(
-            outcome="present",
-            response_status_code=502 if terminal_failure else 202,
-            response_payload=_provider_operation_response_payload(
-                trace_id=self._trace_id,
-                records=records,
-                result=driver_result,
-            ),
-        )
-
-    def _deployment_record_id(self, provider_operation_key: str) -> str:
-        operation_digest = hashlib.sha256(provider_operation_key.encode("utf-8")).hexdigest()[:24]
-        return (
-            f"deployment-provider-operation-{operation_digest}-"
-            f"{self._lane.context}-{self._lane.instance}"
-        )
-
-    def apply(
-        self, provider_operation_key: str, lease: ProviderOperationLease
-    ) -> ProviderMutationOutcome:
-        try:
-            records, result = execute_generic_web_deploy_result(
-                control_plane_root=self._control_plane_root,
-                record_store=self._record_store,
-                request=self._deploy_request,
-                profile=self._profile,
-                lane=self._lane,
-                provider_operation_title=provider_operation_title(provider_operation_key),
-                deployment_record_id=self._deployment_record_id(provider_operation_key),
-                deploy_provider=self._deploy_provider,
-                resolved_deploy_target=self._resolve_deploy_target(),
-                provider_effect_checkpoint=lease.checkpoint_effect,
-            )
-        except (FileNotFoundError, ValueError) as error:
-            raise ProviderMutationRejectedError(error)
-        except click.ClickException as error:
-            raise ProviderMutationUnknownError(str(error)) from error
-        provider_effect_attempted = result.pop("provider_effect_attempted", False) is True
-        if str(result.get("deploy_status", "")).strip() == "fail" and provider_effect_attempted:
-            raise ProviderMutationUnknownError(
-                str(result.get("error_message", "")).strip()
-                or "Generic web provider outcome requires reconciliation."
-            )
-        return ProviderMutationOutcome(
-            response_status_code=202,
-            response_payload=_provider_operation_response_payload(
-                trace_id=self._trace_id,
-                records=records,
-                result=result,
-            ),
-            durable=should_store_generic_web_deploy_idempotency(result),
-            provider_effect_performed=provider_effect_attempted,
-        )
 
 
 class _GenericWebProdPromotionProviderMutationAdapter:
@@ -374,7 +211,10 @@ class _GenericWebProdPromotionProviderMutationAdapter:
         return self._resolved_deploy_target
 
     def reconciliation_key(self) -> str:
-        return build_generic_web_provider_reconciliation_key(self.resolve_deploy_target())
+        return build_generic_web_provider_reconciliation_key(
+            self.resolve_deploy_target(),
+            product=self._profile.product,
+        )
 
     def target_key(self) -> str:
         return build_generic_web_provider_target_key(self.resolve_deploy_target())
@@ -472,6 +312,8 @@ class GenericWebWriteRouteHandlers:
     apply_generic_web_preview_refresh: Callable[..., Any]
     apply_generic_web_preview_destroy: Callable[..., Any]
     apply_generic_web_deploy: Callable[..., Any]
+    dry_run_generic_web_deploy_recovery: Callable[..., Any]
+    apply_generic_web_deploy_recovery: Callable[..., Any]
     apply_generic_web_prod_promotion: Callable[..., Any]
     dispatch_generic_web_prod_promotion_workflow: Callable[..., Any]
     apply_generic_web_stable_verification: Callable[..., Any]
@@ -504,6 +346,29 @@ def build_generic_web_write_route_handlers(
     *,
     dependencies: GenericWebWriteRouteDependencies,
 ) -> GenericWebWriteRouteHandlers:
+    dry_run_generic_web_deploy_recovery = build_generic_web_deploy_recovery_dry_run_handler(
+        dependencies=GenericWebDeployRecoveryDependencies(
+            read_write_identity=dependencies.read_write_identity,
+            get_record_store=dependencies.get_record_store,
+            next_trace_id=dependencies.next_trace_id,
+            authorization_allows=dependencies.authorization_allows,
+            http_error=dependencies.http_error,
+            control_plane_root=dependencies.control_plane_root,
+            idempotency_request_fingerprint=dependencies.idempotency_request_fingerprint,
+        )
+    )
+    apply_generic_web_deploy_recovery = build_generic_web_deploy_recovery_apply_handler(
+        dependencies=GenericWebDeployRecoveryDependencies(
+            read_write_identity=dependencies.read_write_identity,
+            get_record_store=dependencies.get_record_store,
+            next_trace_id=dependencies.next_trace_id,
+            authorization_allows=dependencies.authorization_allows,
+            http_error=dependencies.http_error,
+            control_plane_root=dependencies.control_plane_root,
+            idempotency_request_fingerprint=dependencies.idempotency_request_fingerprint,
+        )
+    )
+
     def manager_preview_pr_number(
         *,
         profile: LaunchplaneProductProfileRecord,
@@ -1474,7 +1339,7 @@ def build_generic_web_write_route_handlers(
             route_path=_GENERIC_WEB_DEPLOY_ROUTE,
             payload=cast(dict[str, object], raw_payload),
         )
-        adapter = _GenericWebDeployProviderMutationAdapter(
+        adapter = GenericWebDeployProviderMutationAdapter(
             control_plane_root=dependencies.control_plane_root,
             record_store=record_store,
             deploy_request=deploy_request,
@@ -2098,6 +1963,8 @@ def build_generic_web_write_route_handlers(
         apply_generic_web_preview_refresh=apply_generic_web_preview_refresh,
         apply_generic_web_preview_destroy=apply_generic_web_preview_destroy,
         apply_generic_web_deploy=apply_generic_web_deploy,
+        dry_run_generic_web_deploy_recovery=dry_run_generic_web_deploy_recovery,
+        apply_generic_web_deploy_recovery=apply_generic_web_deploy_recovery,
         apply_generic_web_prod_promotion=apply_generic_web_prod_promotion,
         dispatch_generic_web_prod_promotion_workflow=dispatch_generic_web_prod_promotion_workflow,
         apply_generic_web_stable_verification=apply_generic_web_stable_verification,
@@ -2268,6 +2135,43 @@ def register_generic_web_write_routes(
         },
         operation_id="apply_generic_web_deploy",
         summary="Execute generic web deploy",
+        responses={
+            400: {"model": dependencies.error_response_model},
+            401: {"model": dependencies.error_response_model},
+            403: {"model": dependencies.error_response_model},
+            404: {"model": dependencies.error_response_model},
+            409: {"model": dependencies.error_response_model},
+            503: {"model": dependencies.error_response_model},
+        },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
+        handlers.dry_run_generic_web_deploy_recovery,
+        methods=["POST"],
+        response_model=GenericWebDeployRecoveryDryRunResponse,
+        response_model_exclude_none=True,
+        operation_id="dry_run_generic_web_deploy_recovery",
+        summary="Inspect an existing generic web deploy reservation without writing",
+        responses={
+            400: {"model": dependencies.error_response_model},
+            401: {"model": dependencies.error_response_model},
+            403: {"model": dependencies.error_response_model},
+            404: {"model": dependencies.error_response_model},
+            409: {"model": dependencies.error_response_model},
+            503: {"model": dependencies.error_response_model},
+        },
+    )
+
+    app.add_api_route(
+        _GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE,
+        handlers.apply_generic_web_deploy_recovery,
+        methods=["POST"],
+        status_code=202,
+        response_model=GenericWebDeployRecoveryApplyResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_generic_web_deploy_recovery",
+        summary="Apply a reviewed generic web deploy recovery",
         responses={
             400: {"model": dependencies.error_response_model},
             401: {"model": dependencies.error_response_model},
