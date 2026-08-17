@@ -44,13 +44,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends --only-upgrade \
+        bsdutils \
+        libblkid1 \
         libgssapi-krb5-2 \
         libk5crypto3 \
         libkrb5-3 \
         libkrb5support0 \
+        liblastlog2-2 \
+        libmount1 \
+        libsmartcols1 \
         libssl3t64 \
+        libuuid1 \
+        login \
+        mount \
         openssl \
         openssl-provider-legacy \
+        util-linux \
     && apt-get install -y --no-install-recommends ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
