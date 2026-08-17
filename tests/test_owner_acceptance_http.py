@@ -6,6 +6,7 @@ from threading import Event
 from typing import Any, Callable, cast
 import asyncio
 import unittest
+from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI, HTTPException
 
@@ -14,6 +15,7 @@ from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
     OWNER_ACCEPTANCE_READ_ACTION,
 )
+from control_plane.contracts.change_impact import ChangeImpactTargetReference
 from control_plane.contracts.product_owner import ProductOwnerGrant, ProductOwnerIdentity
 from control_plane.http_routes.owner_acceptance import (
     OWNER_ACCEPTANCE_EVALUATION_ROUTE,
@@ -25,6 +27,7 @@ from control_plane.http_routes.owner_acceptance import (
 )
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.owner_acceptance_projection import OwnerAcceptanceProjectionService
 from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneIdentity,
@@ -145,6 +148,7 @@ def _app(
     github_app_token: Callable[[str, str], GitHubAppInstallationToken] | None = None,
     github_api: Callable[..., object] | None = None,
     public_origin: str | None = None,
+    projection_service: OwnerAcceptanceProjectionService | None = None,
 ) -> FastAPI:
     resolved_identity = identity or _human()
     resolved_browser_identity = browser_identity or resolved_identity
@@ -170,6 +174,7 @@ def _app(
             github_app_token=github_app_token or _installation_token,
             public_origin=public_origin or "https://ops.example.test",
             github_api=resolved_github_api,
+            projection_service=projection_service,
         ),
     )
     return app
@@ -184,6 +189,163 @@ def _postgres_store(root: Path) -> PostgresRecordStore:
 
 
 class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_projection_and_negative_event_share_projection_lock(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            github_api = _BlockingAcceptedProjectionApi()
+            github_api.block_accepted_projection = False
+            provider = _EvidenceProvider(_repository_evidence())
+            projection_service = OwnerAcceptanceProjectionService(
+                repository_evidence_provider=provider,
+                github_app_token=_installation_token,
+                public_origin="https://ops.example.test",
+                api_request=github_api,
+            )
+            app = _app(
+                store=store,
+                repository_evidence_provider=provider,
+                github_api=github_api,
+                projection_service=projection_service,
+            )
+
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                binding_sha256 = evaluated.json()["decision"]["binding"]["binding_sha256"]
+                accepted = await client.post(
+                    OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                    json={
+                        "target": {
+                            "repository": REPOSITORY,
+                            "pull_request_number": 2022,
+                        },
+                        "action": "accepted",
+                        "expected_binding_sha256": binding_sha256,
+                    },
+                    headers={"Idempotency-Key": "preview-lock-accepted"},
+                )
+                self.assertEqual(accepted.status_code, 202, accepted.text)
+
+                assert github_api.check_run is not None
+                github_api.check_run["external_id"] = "0" * 64
+                github_api.block_accepted_projection = True
+                github_api.accepted_projection_entered.clear()
+                github_api.release_accepted_projection.clear()
+                preview_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        projection_service.reconcile_if_required,
+                        store=store,
+                        target=ChangeImpactTargetReference(
+                            repository=REPOSITORY,
+                            pull_request_number=2022,
+                        ),
+                        source_event_id="preview-ready-feedback",
+                    )
+                )
+                entered = await asyncio.to_thread(
+                    github_api.accepted_projection_entered.wait,
+                    10,
+                )
+                self.assertIs(entered, True)
+                changes_task = asyncio.create_task(
+                    client.post(
+                        OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                        json={
+                            "target": {
+                                "repository": REPOSITORY,
+                                "pull_request_number": 2022,
+                            },
+                            "action": "changes_requested",
+                            "expected_binding_sha256": binding_sha256,
+                            "reason": "Preview validation found a blocking correction.",
+                        },
+                        headers={"Idempotency-Key": "preview-lock-changes-requested"},
+                    )
+                )
+                await asyncio.sleep(0.1)
+                self.assertIs(changes_task.done(), False)
+                github_api.release_accepted_projection.set()
+                _, changes_requested = await asyncio.gather(preview_task, changes_task)
+
+        self.assertEqual(changes_requested.status_code, 202, changes_requested.text)
+        assert github_api.check_run is not None
+        self.assertEqual(github_api.check_run["conclusion"], "action_required")
+        self.assertEqual(
+            github_api.check_run["output"]["title"],
+            "Owner acceptance: changes requested",
+        )
+
+    async def test_preview_projection_revokes_its_installation_token(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            github_api = _GitHubCheckApi()
+            service = OwnerAcceptanceProjectionService(
+                repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+                github_app_token=_installation_token,
+                public_origin="https://ops.example.test",
+                api_request=github_api,
+            )
+
+            outcome = service.reconcile_if_required(
+                store=store,
+                target=ChangeImpactTargetReference(
+                    repository=REPOSITORY,
+                    pull_request_number=2022,
+                ),
+                source_event_id="preview-ready-token-revocation",
+            )
+
+        self.assertIsNotNone(outcome.result)
+        self.assertEqual(
+            [call["method"] for call in github_api.calls if call.get("method") == "DELETE"],
+            ["DELETE"],
+        )
+
+    async def test_restoration_demotes_exact_target_before_reresolution(self) -> None:
+        exact_target = _repository_evidence().target
+        service = OwnerAcceptanceProjectionService(
+            repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
+            github_app_token=_installation_token,
+            public_origin="https://ops.example.test",
+        )
+        operations: list[str] = []
+
+        def project_conservative(*_args: object, **_kwargs: object) -> MagicMock:
+            operations.append("demote")
+            return MagicMock()
+
+        def fail_resolution(*_args: object, **_kwargs: object) -> object:
+            operations.append("resolve")
+            raise RuntimeError("repository evidence is unavailable")
+
+        with (
+            patch.object(
+                OwnerAcceptanceProjectionService,
+                "project_conservative_locked",
+                side_effect=project_conservative,
+            ),
+            patch.object(
+                OwnerAcceptanceProjectionService,
+                "resolve_current",
+                side_effect=fail_resolution,
+            ),
+            self.assertRaisesRegex(RuntimeError, "repository evidence is unavailable"),
+        ):
+            service.restore_conservative_locked(
+                store=MagicMock(),
+                target=ChangeImpactTargetReference(
+                    repository=REPOSITORY,
+                    pull_request_number=2022,
+                ),
+                lock_target=exact_target,
+                exact_target=exact_target,
+                source_event_id="restore-exact-first",
+            )
+
+        self.assertEqual(operations, ["demote", "resolve"])
+
     async def test_projects_pending_owner_decision_as_action_required_check(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))

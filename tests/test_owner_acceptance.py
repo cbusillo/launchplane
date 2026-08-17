@@ -115,9 +115,13 @@ class _EvidenceProvider(ChangeImpactRepositoryEvidenceProvider):
         return self.open_pull_requests[:limit]
 
 
-def _human(github_id: int = OWNER_GITHUB_ID) -> GitHubHumanIdentity:
+def _human(
+    github_id: int = OWNER_GITHUB_ID,
+    *,
+    login: str = "owner",
+) -> GitHubHumanIdentity:
     return GitHubHumanIdentity(
-        login="owner",
+        login=login,
         github_id=github_id,
         name="Owner",
         email="",
@@ -784,7 +788,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
             )
             self.assertEqual(
                 owner_acceptance_event_replay_digest(result.record),
-                "e40b805ee28da0d7107f836dff824fa6fda4a258aad20d432cb6e76637a47c85",
+                "715064def80cb17f42b6b9c655afce293c0d2315148d09693f45abb11f140c2b",
             )
 
             replay = record_owner_acceptance_event(
@@ -800,6 +804,20 @@ class OwnerAcceptanceTests(unittest.TestCase):
             )
             self.assertEqual(replay.status, "replayed")
             self.assertEqual(replay.record, result.record)
+
+            renamed_owner_replay = record_owner_acceptance_event(
+                store=store,
+                repository_evidence_provider=provider,
+                target=target,
+                identity=_human(login="renamed-owner"),
+                action="accepted",
+                expected_binding_sha256=expected_binding_sha256,
+                source_event_kind="browser_api",
+                source_event_id="accept-1",
+                occurred_at="2026-08-07T12:02:00Z",
+            )
+            self.assertEqual(renamed_owner_replay.status, "replayed")
+            self.assertEqual(renamed_owner_replay.record, result.record)
 
             conflicting = OwnerAcceptanceEventRecord.model_validate(
                 result.record.model_dump(mode="json") | {"reason": "changed"}

@@ -213,9 +213,11 @@ The `Idempotency-Key` is scoped by the exact binding because the immutable event
 ID includes both values. Reusing one key for different product-binding digests
 creates distinct product events; replaying it for the same binding remains
 idempotent. Exact replay returns the already-persisted event and receives no new
-subject sequence. A different idempotency key cannot deliberately reaffirm the
-same human state on an identical binding; reaffirmation requires changed bound
-evidence and therefore a new binding.
+subject sequence. Replay identity uses the stable GitHub user ID; a mutable
+Owner login rename does not turn the same authorized event into a conflict. A
+different idempotency key cannot deliberately reaffirm the same human state on
+an identical binding; reaffirmation requires changed bound evidence and
+therefore a new binding.
 
 Human actions are:
 
@@ -401,17 +403,22 @@ Before appending a browser Owner event, Launchplane replaces the exact-head
 check with an `action_required` **updating decision** projection. If that
 conservative projection or its token lifecycle fails, the event is not
 persisted. After append, Launchplane projects the resulting decision against the
-current exact target and ledger. Human event writes for one immutable repository
-id and pull request are serialized through a store-backed projection lock. A
-repository-id change is rejected and retried before entering the critical
-section, and the freshly resolved event binding must still match that lock
-before the conservative projection or append can occur. A rename remains on
-the same lock. Final projection is verified against a second current-state
-evaluation before the lock is released.
+current exact target and ledger. Browser events, explicit reconciliation, and
+ready preview-feedback hydration all use the same shared projection service.
+Every path for one immutable repository id and pull request is serialized
+through the same store-backed projection lock. A repository-id change is
+rejected and retried before entering the critical section, and the freshly
+resolved event binding must still match that lock before the conservative
+projection or append can occur. A rename remains on the same lock. Final
+projection is verified against a second current-state evaluation before the lock
+is released, and every minted installation token is revoked after its attempt.
 PostgreSQL lock waiters use dedicated unpooled advisory-lock connections so they
-cannot exhaust the record-store pool needed by the lock holder. If final
-projection, token cleanup, or current-state confirmation fails, Launchplane
-restores the conservative non-green check before the route returns
+cannot exhaust the record-store pool needed by the lock holder. Acquisition is
+committed before provider work begins; cleanup explicitly unlocks the session,
+commits, and verifies that the lock was held. If final projection, token cleanup,
+or current-state confirmation fails, Launchplane first restores the conservative
+non-green check on the exact attempted target before any current-target
+re-resolution can fail, then returns
 `503 owner_acceptance_projection_reconciliation_required`; retrying with the
 same idempotency key replays the immutable event and retries projection. The
 explicit projection endpoint provides the same reconciliation path. Browsers

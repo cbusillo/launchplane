@@ -1,5 +1,4 @@
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
@@ -26,10 +25,7 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceViewerBindingEligibility,
     owner_acceptance_human_action_semantics,
 )
-from control_plane.github_app_identity import (
-    GitHubAppInstallationToken,
-    revoke_installation_token,
-)
+from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.http_routes.support import (
     ApiRouteRegistrar,
     ReadRouteDependencies,
@@ -45,7 +41,6 @@ from control_plane.owner_acceptance import (
     evaluate_owner_acceptance_viewer_eligibility,
     record_owner_acceptance_event,
     require_owner_acceptance_event_store,
-    require_owner_acceptance_projection_lock_store,
 )
 from control_plane.owner_acceptance_queue import (
     OwnerAcceptanceQueueEntry,
@@ -58,9 +53,8 @@ from control_plane.owner_acceptance_current_items import (
     build_owner_acceptance_current_items,
 )
 from control_plane.owner_acceptance_projection import (
-    owner_acceptance_projection_sha256,
-    project_owner_acceptance_decision,
-    project_owner_acceptance_update_in_progress,
+    OwnerAcceptanceProjectionReconciliationError,
+    OwnerAcceptanceProjectionService,
 )
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.workflows.launchplane import github_api_request
@@ -94,6 +88,7 @@ class OwnerAcceptanceRouteDependencies:
     github_app_token: Callable[[str, str], GitHubAppInstallationToken] | None = None
     github_api: Callable[..., object] = github_api_request
     public_origin: str | None = None
+    projection_service: OwnerAcceptanceProjectionService | None = None
 
 
 class OwnerAcceptanceEventEnvelope(BaseModel):
@@ -254,56 +249,6 @@ def _event_semantics(record: OwnerAcceptanceEventRecord) -> OwnerAcceptanceEvent
     )
 
 
-def _validate_projection_target(
-    decision: OwnerAcceptanceDecision,
-    target: ChangeImpactTarget,
-) -> None:
-    bindings = tuple(
-        product.binding for product in decision.products if product.binding is not None
-    )
-    if decision.binding is not None:
-        bindings = (decision.binding, *bindings)
-    for binding in bindings:
-        if (
-            binding.repository.casefold() != target.repository.casefold()
-            or binding.repository_id != target.repository_id
-            or binding.repository_owner_id != target.repository_owner_id
-            or binding.pull_request_number != target.pull_request_number
-            or binding.head_sha != target.head_sha
-            or binding.tree_sha != target.tree_sha
-        ):
-            raise ValueError("Owner acceptance projection target changed during evaluation.")
-
-
-def _resolve_owner_acceptance_projection_state(
-    *,
-    store: object,
-    target: ChangeImpactTargetReference,
-    repository_evidence_provider: ChangeImpactRepositoryEvidenceProvider,
-) -> tuple[OwnerAcceptanceDecision, ChangeImpactTarget]:
-    initial_evidence = repository_evidence_provider.resolve(target)
-    decision = evaluate_owner_acceptance(
-        store=store,
-        target=target,
-        repository_evidence_provider=repository_evidence_provider,
-    )
-    evidence = repository_evidence_provider.resolve(target)
-    if initial_evidence.target != evidence.target:
-        raise ValueError("Owner acceptance projection target changed during evaluation.")
-    _validate_projection_target(decision, evidence.target)
-    return decision, evidence.target
-
-
-def _projection_targets_share_lock(
-    first: ChangeImpactTarget,
-    second: ChangeImpactTarget,
-) -> bool:
-    return (
-        first.repository_id == second.repository_id
-        and first.pull_request_number == second.pull_request_number
-    )
-
-
 def register_owner_acceptance_routes(
     app: ApiRouteRegistrar,
     *,
@@ -311,6 +256,12 @@ def register_owner_acceptance_routes(
 ) -> None:
     common = dependencies.common
     projection_identity = dependencies.read_write_identity or common.read_identity
+    projection_service = dependencies.projection_service or OwnerAcceptanceProjectionService(
+        repository_evidence_provider=dependencies.repository_evidence_provider,
+        github_app_token=dependencies.github_app_token,
+        public_origin=dependencies.public_origin,
+        api_request=dependencies.github_api,
+    )
 
     def viewer_capabilities(
         *,
@@ -337,140 +288,6 @@ def register_owner_acceptance_routes(
         return OwnerAcceptanceViewerCapabilities(
             event_write_authorized=event_write_authorized,
             bindings=bindings,
-        )
-
-    def project_decision(
-        *,
-        decision: OwnerAcceptanceDecision,
-        target: ChangeImpactTarget,
-    ) -> AdvisoryCheckProjectionResult:
-        if dependencies.github_app_token is None:
-            raise ValueError("Owner acceptance projection identity is unavailable.")
-        if dependencies.public_origin is None:
-            raise ValueError("Owner acceptance projection public origin is unavailable.")
-        installation_token = dependencies.github_app_token(
-            target.repository,
-            target.repository_id,
-        )
-        try:
-            return project_owner_acceptance_decision(
-                decision=decision,
-                target=target,
-                public_origin=dependencies.public_origin,
-                installation_token=installation_token,
-                api_request=dependencies.github_api,
-            )
-        finally:
-            revoke_installation_token(
-                installation_token=installation_token,
-                api_request=dependencies.github_api,
-            )
-
-    @contextmanager
-    def projection_lock(
-        *,
-        target: ChangeImpactTargetReference,
-        record_store: object,
-    ) -> Iterator[ChangeImpactTarget]:
-        projection_lock_store = require_owner_acceptance_projection_lock_store(record_store)
-        for attempt in range(3):
-            _, candidate_target = _resolve_owner_acceptance_projection_state(
-                store=record_store,
-                target=target,
-                repository_evidence_provider=dependencies.repository_evidence_provider,
-            )
-            with projection_lock_store.owner_acceptance_projection_lock(
-                repository_id=candidate_target.repository_id,
-                pull_request_number=candidate_target.pull_request_number,
-            ):
-                _, confirmed_target = _resolve_owner_acceptance_projection_state(
-                    store=record_store,
-                    target=target,
-                    repository_evidence_provider=dependencies.repository_evidence_provider,
-                )
-                if _projection_targets_share_lock(candidate_target, confirmed_target):
-                    yield confirmed_target
-                    return
-            logger.warning(
-                "Owner acceptance projection target identity changed while locking; retrying.",
-                extra={"projection_lock_attempt": attempt + 1},
-            )
-        raise ValueError("Owner acceptance projection target identity changed repeatedly.")
-
-    def reconcile_current_decision(
-        *,
-        target: ChangeImpactTargetReference,
-        record_store: object,
-        lock_target: ChangeImpactTarget,
-    ) -> tuple[OwnerAcceptanceDecision, AdvisoryCheckProjectionResult]:
-        for attempt in range(3):
-            decision, resolved_target = _resolve_owner_acceptance_projection_state(
-                store=record_store,
-                target=target,
-                repository_evidence_provider=dependencies.repository_evidence_provider,
-            )
-            if not _projection_targets_share_lock(lock_target, resolved_target):
-                raise ValueError("Owner acceptance projection target identity changed.")
-            result = project_decision(decision=decision, target=resolved_target)
-            confirmed_decision, confirmed_target = _resolve_owner_acceptance_projection_state(
-                store=record_store,
-                target=target,
-                repository_evidence_provider=dependencies.repository_evidence_provider,
-            )
-            if confirmed_target == resolved_target and owner_acceptance_projection_sha256(
-                confirmed_decision
-            ) == owner_acceptance_projection_sha256(decision):
-                return confirmed_decision, result
-            logger.warning(
-                "Owner acceptance changed during GitHub projection; retrying current state.",
-                extra={"projection_attempt": attempt + 1},
-            )
-        raise ValueError("Owner acceptance changed repeatedly during GitHub projection.")
-
-    def project_update_in_progress(
-        *,
-        target: ChangeImpactTarget,
-        source_event_id: str,
-    ) -> AdvisoryCheckProjectionResult:
-        if dependencies.github_app_token is None:
-            raise ValueError("Owner acceptance projection identity is unavailable.")
-        if dependencies.public_origin is None:
-            raise ValueError("Owner acceptance projection public origin is unavailable.")
-        installation_token = dependencies.github_app_token(
-            target.repository,
-            target.repository_id,
-        )
-        try:
-            return project_owner_acceptance_update_in_progress(
-                target=target,
-                source_event_id=source_event_id,
-                public_origin=dependencies.public_origin,
-                installation_token=installation_token,
-                api_request=dependencies.github_api,
-            )
-        finally:
-            revoke_installation_token(
-                installation_token=installation_token,
-                api_request=dependencies.github_api,
-            )
-
-    def restore_conservative_projection(
-        *,
-        target: ChangeImpactTargetReference,
-        record_store: object,
-        lock_target: ChangeImpactTarget,
-        source_event_id: str,
-    ) -> None:
-        _, current_target = _resolve_owner_acceptance_projection_state(
-            store=record_store,
-            target=target,
-            repository_evidence_provider=dependencies.repository_evidence_provider,
-        )
-        if not _projection_targets_share_lock(lock_target, current_target):
-            raise ValueError("Owner acceptance projection target identity changed.")
-        project_update_in_progress(
-            target=current_target,
-            source_event_id=source_event_id,
         )
 
     def evaluate(
@@ -568,10 +385,9 @@ def register_owner_acceptance_routes(
                 message="Caller cannot write Owner acceptance events.",
             )
         try:
-            _resolve_owner_acceptance_projection_state(
+            projection_service.resolve_current(
                 store=record_store,
                 target=envelope.target,
-                repository_evidence_provider=dependencies.repository_evidence_provider,
             )
         except (OwnerAcceptanceEvaluationUnavailableError, TypeError, ValueError) as error:
             raise common.http_error(
@@ -582,9 +398,9 @@ def register_owner_acceptance_routes(
             ) from error
 
         try:
-            with projection_lock(
+            with projection_service.lock_current(
+                store=record_store,
                 target=envelope.target,
-                record_store=record_store,
             ) as locked_projection_target:
 
                 def project_conservative_check(record: OwnerAcceptanceEventRecord) -> None:
@@ -597,16 +413,10 @@ def register_owner_acceptance_routes(
                         head_sha=binding.head_sha,
                         tree_sha=binding.tree_sha,
                     )
-                    if not _projection_targets_share_lock(
-                        locked_projection_target,
-                        record_target,
-                    ):
-                        raise OwnerAcceptanceProjectionUnavailableError(
-                            "Owner acceptance target identity changed before persistence."
-                        )
                     try:
-                        project_update_in_progress(
-                            target=record_target,
+                        projection_service.project_conservative_locked(
+                            lock_target=locked_projection_target,
+                            exact_target=record_target,
                             source_event_id=idempotency_key,
                         )
                     except Exception as error:
@@ -626,23 +436,14 @@ def register_owner_acceptance_routes(
                     before_write=project_conservative_check,
                 )
                 try:
-                    final_decision, _ = reconcile_current_decision(
+                    projection_outcome = projection_service.reconcile_locked(
+                        store=record_store,
                         target=envelope.target,
-                        record_store=record_store,
                         lock_target=locked_projection_target,
+                        source_event_id=idempotency_key,
                     )
-                except Exception as error:
-                    try:
-                        restore_conservative_projection(
-                            target=envelope.target,
-                            record_store=record_store,
-                            lock_target=locked_projection_target,
-                            source_event_id=idempotency_key,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Owner acceptance conservative projection restoration failed."
-                        )
+                    final_decision = projection_outcome.decision
+                except OwnerAcceptanceProjectionReconciliationError as error:
                     raise OwnerAcceptanceProjectionReconciliationRequiredError(
                         str(error)
                     ) from error
@@ -907,40 +708,29 @@ def register_owner_acceptance_routes(
                 message="Caller cannot project Owner acceptance decisions.",
             )
         try:
-            with projection_lock(
+            projection_outcome = projection_service.reconcile(
+                store=record_store,
                 target=request.target,
-                record_store=record_store,
-            ) as locked_projection_target:
-                try:
-                    decision, result = reconcile_current_decision(
-                        target=request.target,
-                        record_store=record_store,
-                        lock_target=locked_projection_target,
-                    )
-                except Exception:
-                    try:
-                        restore_conservative_projection(
-                            target=request.target,
-                            record_store=record_store,
-                            lock_target=locked_projection_target,
-                            source_event_id="manual-projection-reconciliation",
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Owner acceptance conservative projection restoration failed."
-                        )
-                    raise
-        except (OwnerAcceptanceEvaluationUnavailableError, TypeError, ValueError) as error:
+                source_event_id="manual-projection-reconciliation",
+            )
+        except (
+            OwnerAcceptanceEvaluationUnavailableError,
+            OwnerAcceptanceProjectionReconciliationError,
+            TypeError,
+            ValueError,
+        ) as error:
             raise common.http_error(
                 status_code=503,
                 trace_id=trace_id,
                 code="owner_acceptance_projection_unavailable",
                 message=str(error),
             ) from error
+        if projection_outcome.result is None:
+            raise RuntimeError("Owner acceptance projection did not produce a GitHub result.")
         return OwnerAcceptanceProjectionResponse(
             trace_id=trace_id,
-            decision=decision,
-            result=result,
+            decision=projection_outcome.decision,
+            result=projection_outcome.result,
         )
 
     errors = {

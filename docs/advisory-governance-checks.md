@@ -71,15 +71,20 @@ decision from a fresh current-ledger evaluation while holding a store-backed
 immutable-repository-id projection lock for the pull request. Repository-id
 changes are rejected and retried before the critical section, and the resolved
 event binding must still match the held lock before projection or append.
-Repository renames remain serialized by the stable id. A second evaluation
-confirms that the projected state stayed current before the lock is released.
+Repository renames remain serialized by the stable id. Ready preview-feedback
+hydration and the explicit endpoint use this same locked current-ledger
+reconciliation service rather than projecting independently. A second
+evaluation confirms that the projected state stayed current before the lock is
+released, and every minted installation token is revoked after its attempt.
 PostgreSQL waiters use dedicated unpooled advisory-lock connections rather than
-consuming the record-store pool. Final delivery, token cleanup, or confirmation
-failure restores the conservative check and returns a reconciliation-required
-error.
-Idempotent replay and the explicit projection endpoint can safely retry the
-final projection. This sequence remains non-authoritative for admission, and
-browser sessions do not gain projection authority.
+consuming the record-store pool. Successful acquisition is committed before
+provider work; cleanup explicitly unlocks, commits, and verifies the session
+lock. Final delivery, token cleanup, or confirmation failure demotes the exact
+attempted target before any potentially failing re-resolution, then returns a
+reconciliation-required error. Idempotent replay uses stable GitHub user ID
+rather than mutable Owner login and can safely retry the final projection. This
+sequence remains non-authoritative for admission, and browser sessions do not
+gain projection authority.
 
 ## No Feedback Loop
 

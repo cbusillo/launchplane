@@ -8525,10 +8525,21 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 )
                 if acquired:
+                    connection.commit()
                     try:
                         yield
                     finally:
-                        connection.close()
+                        unlocked = bool(
+                            connection.scalar(
+                                text("select pg_advisory_unlock(hashtextextended(:lock_name, 0))"),
+                                {"lock_name": lock_name},
+                            )
+                        )
+                        connection.commit()
+                        if not unlocked:
+                            raise RuntimeError(
+                                "PostgreSQL Owner acceptance projection lock cleanup failed"
+                            )
                     return
             time.sleep(0.05)
 

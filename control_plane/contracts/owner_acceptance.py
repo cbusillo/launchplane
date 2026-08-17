@@ -980,6 +980,7 @@ def owner_acceptance_event_replay_digest(record: OwnerAcceptanceEventRecord) -> 
     authorization = payload.get("authorization")
     if isinstance(authorization, dict):
         authorization.pop("authorized_at", None)
+        authorization.pop("owner_login", None)
     return _canonical_sha256(payload)
 
 

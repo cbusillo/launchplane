@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
@@ -1641,6 +1641,67 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 store._owner_acceptance_projection_lock_engine.pool,
                 NullPool,
             )
+        finally:
+            store.close()
+
+    def test_owner_acceptance_projection_lock_commits_and_verifies_unlock(self) -> None:
+        store = PostgresRecordStore(
+            database_url="postgresql+psycopg://test:test@127.0.0.1:1/launchplane"
+        )
+        original_lock_engine = store._owner_acceptance_projection_lock_engine
+        assert original_lock_engine is not None
+        original_lock_engine.dispose()
+        lock_engine = MagicMock()
+        connection = MagicMock()
+        connection.scalar.side_effect = (True, True)
+        connection_context = MagicMock()
+        connection_context.__enter__.return_value = connection
+        connection_context.__exit__.return_value = False
+        lock_engine.connect.return_value = connection_context
+        store._owner_acceptance_projection_lock_engine = lock_engine
+        try:
+            with store.owner_acceptance_projection_lock(
+                repository_id="101",
+                pull_request_number=42,
+            ):
+                connection.commit.assert_called_once_with()
+
+            self.assertEqual(connection.commit.call_count, 2)
+            self.assertEqual(connection.scalar.call_count, 2)
+            self.assertIn(
+                "pg_try_advisory_lock",
+                str(connection.scalar.call_args_list[0].args[0]),
+            )
+            self.assertIn(
+                "pg_advisory_unlock",
+                str(connection.scalar.call_args_list[1].args[0]),
+            )
+        finally:
+            store.close()
+
+    def test_owner_acceptance_projection_lock_rejects_failed_unlock(self) -> None:
+        store = PostgresRecordStore(
+            database_url="postgresql+psycopg://test:test@127.0.0.1:1/launchplane"
+        )
+        original_lock_engine = store._owner_acceptance_projection_lock_engine
+        assert original_lock_engine is not None
+        original_lock_engine.dispose()
+        lock_engine = MagicMock()
+        connection = MagicMock()
+        connection.scalar.side_effect = (True, False)
+        connection_context = MagicMock()
+        connection_context.__enter__.return_value = connection
+        connection_context.__exit__.return_value = False
+        lock_engine.connect.return_value = connection_context
+        store._owner_acceptance_projection_lock_engine = lock_engine
+        try:
+            with self.assertRaisesRegex(RuntimeError, "lock cleanup failed"):
+                with store.owner_acceptance_projection_lock(
+                    repository_id="101",
+                    pull_request_number=42,
+                ):
+                    pass
+            self.assertEqual(connection.commit.call_count, 2)
         finally:
             store.close()
 
