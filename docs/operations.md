@@ -412,6 +412,12 @@ workflow may pass that request object through the optional
 `.github/workflows/reusable-generic-web-stable-deploy.yml`. A non-empty recovery
 request skips the stable-deploy job and runs only the bounded dry-run action;
 the reusable workflow exposes no recovery apply input or route.
+For existing product connectors that must preserve an established reusable-job
+identity, the workflow also recognizes a caller `workflow_dispatch` event with
+non-empty `original_run_id`, `original_run_attempt`, and `reason` inputs. It
+constructs the same private recovery envelope from the caller event plus the
+existing product, instance, artifact, source, and Launchplane URL inputs, then
+skips stable deploy exactly as the explicit envelope path does.
 
 Stage 2 apply is explicit and digest-gated. Operators call
 `POST /v1/admin/generic-web/deploy-recovery/apply` with the same request body as
