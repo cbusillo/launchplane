@@ -4,8 +4,11 @@ description: Inspect one exact legacy generic-web deploy reservation through Lau
 
 inputs:
   launchplane-url:
-    description: Base URL for the Launchplane service.
-    required: true
+    description: >-
+      Optional base URL for the Launchplane service. When omitted, request-json
+      must include launchplane_url.
+    required: false
+    default: ""
   request-json:
     description: Exact legacy deploy coordinates and operator reason as JSON.
     required: true
