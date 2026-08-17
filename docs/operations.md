@@ -418,6 +418,14 @@ non-empty `original_run_id`, `original_run_attempt`, and `reason` inputs. It
 constructs the same private recovery envelope from the caller event plus the
 existing product, instance, artifact, source, and Launchplane URL inputs, then
 skips stable deploy exactly as the explicit envelope path does.
+Product connectors whose authorization policy permits only `workflow_run` may
+instead stage `launchplane-recovery-request.json` in a successful one-day
+artifact from a `Launchplane Recovery Request` manual workflow on `main`. When
+the caller event matches that exact workflow name, path, branch, repository, and
+event type, the reusable workflow downloads only the artifact tied to the
+triggering run, enforces a single-file and size bound, and passes the compact
+request through the same bounded dry-run action. This mode also skips stable
+deploy and exposes no apply path.
 
 Stage 2 apply is explicit and digest-gated. Operators call
 `POST /v1/admin/generic-web/deploy-recovery/apply` with the same request body as
