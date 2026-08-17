@@ -5703,6 +5703,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             ],
                         }
                     ],
+                    "local_admins": [
+                        {
+                            "subjects": ["recovery-admin"],
+                            "token_labels": ["recovery-admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        }
+                    ],
                 }
             )
             app = create_launchplane_fastapi_test_app(
@@ -6072,7 +6081,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "contexts": ["launchplane"],
                             "actions": ["product_profile.read"],
                         },
-                    ]
+                    ],
+                    "local_admins": [
+                        {
+                            "subjects": ["recovery-admin"],
+                            "token_labels": ["recovery-admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        }
+                    ],
                 }
             )
             app = create_launchplane_fastapi_test_app(
@@ -6181,7 +6199,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(active_status, 200)
         self.assertEqual(active_payload["policy"]["revision"], 2)
         self.assertEqual(active_payload["policy"]["managed_rule_count"], 1)
-        self.assertEqual(active_payload["policy"]["unmanaged_rule_count"], 1)
+        self.assertEqual(active_payload["policy"]["unmanaged_rule_count"], 2)
         self.assertEqual(
             active_payload["policy"]["github_actions_privileged_unpinned_reusable_rule_count"],
             1,

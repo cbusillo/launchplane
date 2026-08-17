@@ -12,6 +12,7 @@ from control_plane.authz_grant_service import (
     AuthzManagedPolicyReconcileEnvelope,
     AuthzPolicyConflictError,
     AuthzPolicyRequestError,
+    AuthzPolicySafetyError,
     execute_managed_authz_policy_reconcile,
     plan_managed_authz_policy_reconcile,
     summarize_active_authz_policy_record,
@@ -25,7 +26,9 @@ from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
     LaunchplaneAuthzPolicy,
+    LocalAdminPolicyRule,
     LocalOperatorPolicyRule,
+    TerminalAgentPolicyRule,
 )
 
 
@@ -111,6 +114,34 @@ def _authz_rollout_fixture(filename: str) -> LaunchplaneAuthzPolicy:
     fixture_path = Path(__file__).parent / "fixtures" / "authz" / filename
     return LaunchplaneAuthzPolicy.model_validate(
         json.loads(fixture_path.read_text(encoding="utf-8"))
+    )
+
+
+def _workflow_admin_identity() -> GitHubActionsIdentity:
+    return replace(
+        _identity(),
+        job_workflow_ref=(
+            "cbusillo/launchplane/.github/workflows/reusable-manage-authorization.yml@" + "a" * 40
+        ),
+    )
+
+
+def _workflow_admin_rule(
+    identity: GitHubActionsIdentity,
+    *,
+    managed_rule_id: str = "authz.admin",
+) -> GitHubActionsPolicyRule:
+    return GitHubActionsPolicyRule(
+        managed_set_id="operator.launchplane",
+        managed_rule_id=managed_rule_id,
+        repository=identity.repository,
+        repository_id=identity.repository_id,
+        repository_owner_id=identity.repository_owner_id,
+        workflow_refs=(identity.workflow_ref,),
+        job_workflow_refs=(identity.job_workflow_ref,),
+        products=("launchplane",),
+        contexts=("launchplane",),
+        actions=("authz_policy_grant.write",),
     )
 
 
@@ -506,11 +537,116 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             }
         )
 
-        with self.assertRaisesRegex(AuthzPolicyConflictError, "retain at least one principal"):
+        with self.assertRaises(AuthzPolicySafetyError) as raised:
             plan_managed_authz_policy_reconcile(
                 record_store=_AuthzPolicyStore((_active_record_for_policy(current_policy),)),
                 request=request,
             )
+        self.assertEqual(raised.exception.code, "authz_policy_admin_unreachable")
+        self.assertIn("retain at least one reachable principal", str(raised.exception))
+
+    def test_managed_reconcile_counts_terminal_agent_policy_administrator(self) -> None:
+        terminal_admin = TerminalAgentPolicyRule(
+            managed_set_id="operator.terminal-admin",
+            managed_rule_id="terminal.admin",
+            subjects=("terminal-agent",),
+            token_labels=("terminal-admin",),
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=("authz_policy_grant.write",),
+        )
+        current_record = _active_record_for_policy(
+            LaunchplaneAuthzPolicy(schema_version=2, terminal_agents=(terminal_admin,))
+        )
+        request = AuthzManagedPolicyReconcileEnvelope(
+            schema_version=2,
+            product="launchplane",
+            managed_set_id="operator.terminal-admin",
+            desired_policy=LaunchplaneAuthzPolicy(schema_version=2),
+        )
+
+        with self.assertRaises(AuthzPolicySafetyError) as raised:
+            plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=request,
+            )
+
+        self.assertEqual(raised.exception.code, "authz_policy_admin_unreachable")
+
+    def test_managed_apply_requires_independent_policy_administrator(self) -> None:
+        identity = _workflow_admin_identity()
+        applying_admin = _workflow_admin_rule(identity)
+        retired_rule = applying_admin.model_copy(
+            update={
+                "managed_rule_id": "service.read",
+                "actions": ("product_environment.read",),
+            }
+        )
+
+        def apply_request(
+            current_record: LaunchplaneAuthzPolicyRecord,
+        ) -> AuthzManagedPolicyReconcileEnvelope:
+            dry_run = AuthzManagedPolicyReconcileEnvelope(
+                schema_version=2,
+                product="launchplane",
+                managed_set_id="operator.launchplane",
+                reason="Retire the obsolete managed read rule.",
+                desired_policy=LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    github_actions=(applying_admin,),
+                ),
+            )
+            _, _, _, diff = plan_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=dry_run,
+            )
+            return AuthzManagedPolicyReconcileEnvelope.model_validate(
+                {
+                    **dry_run.model_dump(mode="json"),
+                    "mode": "apply",
+                    "reviewed_plan_sha256": diff.plan_sha256,
+                }
+            )
+
+        current_policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(applying_admin, retired_rule),
+        )
+        current_record = _active_record_for_policy(current_policy)
+        with self.assertRaises(AuthzPolicySafetyError) as raised:
+            execute_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=apply_request(current_record),
+                identity=identity,
+                trace_id="trace-independent-admin-required",
+                now_timestamp=lambda: "2026-08-17T00:00:00Z",
+                authorized_policy_sha256=current_record.policy_sha256,
+            )
+        self.assertEqual(
+            raised.exception.code,
+            "authz_policy_independent_admin_unreachable",
+        )
+
+        independent_admin = LocalAdminPolicyRule(
+            subjects=("recovery-admin",),
+            token_labels=("recovery-admin",),
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=("authz_policy_grant.write",),
+        )
+        recoverable_record = _active_record_for_policy(
+            current_policy.model_copy(update={"local_admins": (independent_admin,)})
+        )
+        result = execute_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((recoverable_record,)),
+            request=apply_request(recoverable_record),
+            identity=identity,
+            trace_id="trace-independent-admin-retained",
+            now_timestamp=lambda: "2026-08-17T00:00:00Z",
+            authorized_policy_sha256=recoverable_record.policy_sha256,
+        )
+
+        self.assertTrue(result.changed)
 
     def test_managed_reconcile_rejects_unreviewed_apply_plan(self) -> None:
         current_record = _active_record()
@@ -560,6 +696,70 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                     },
                 }
             )
+
+    def test_managed_reconcile_requires_scoped_github_human_principals(self) -> None:
+        base_rule = {
+            "managed_set_id": "operator.humans",
+            "managed_rule_id": "human.read",
+            "products": ["launchplane"],
+            "contexts": ["launchplane"],
+            "actions": ["product_profile.read"],
+        }
+        invalid_rules = (
+            ({**base_rule, "roles": ["read_only"]}, "at least one principal selector"),
+            ({**base_rule, "github_ids": [1001]}, "at least one explicit role"),
+            (
+                {**base_rule, "logins": ["*"], "roles": ["read_only"]},
+                "require exact login, organization, and team selectors",
+            ),
+            (
+                {**base_rule, "logins": ["owner"], "roles": ["admin"]},
+                "require immutable github_ids",
+            ),
+            (
+                {
+                    **base_rule,
+                    "logins": ["owner"],
+                    "roles": ["read_only"],
+                    "actions": ["authz_policy_grant.write"],
+                },
+                "require immutable github_ids",
+            ),
+        )
+
+        for invalid_rule, message in invalid_rules:
+            with self.subTest(message=message), self.assertRaisesRegex(ValidationError, message):
+                AuthzManagedPolicyReconcileEnvelope.model_validate(
+                    {
+                        "schema_version": 2,
+                        "product": "launchplane",
+                        "managed_set_id": "operator.humans",
+                        "desired_policy": {
+                            "schema_version": 2,
+                            "github_humans": [invalid_rule],
+                        },
+                    }
+                )
+
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.humans",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_humans": [
+                        {
+                            **base_rule,
+                            "github_ids": [1001],
+                            "roles": ["admin"],
+                        }
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(request.desired_policy.github_humans[0].github_ids, (1001,))
 
     def test_owner_acceptance_managed_set_enforces_minimum_human_boundary(self) -> None:
         valid_rule = {
@@ -1068,10 +1268,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 github_actions=(compatibility_rule, stale_managed_rule),
             )
         )
-        with self.assertRaisesRegex(
-            AuthzPolicyConflictError,
-            "retain policy administration authority for the applying identity",
-        ):
+        with self.assertRaises(AuthzPolicySafetyError):
             execute_managed_authz_policy_reconcile(
                 record_store=_AuthzPolicyStore((stale_record,)),
                 request=reconcile_request(stale_managed_rule),
@@ -1099,6 +1296,57 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
 
         result_diff = cast(dict[str, object], result.driver_result["diff"])
         self.assertEqual(result_diff["retired_unmanaged_compatibility_rule_count"], 1)
+
+    def test_managed_route_requires_every_change_to_retain_applying_admin(self) -> None:
+        identity = replace(
+            _identity(),
+            job_workflow_ref=(
+                "cbusillo/launchplane/.github/workflows/reusable-manage-authorization.yml@"
+                + "a" * 40
+            ),
+        )
+        current_rule = GitHubActionsPolicyRule(
+            managed_set_id="operator.launchplane",
+            managed_rule_id="authz.admin",
+            repository=identity.repository,
+            repository_id=identity.repository_id,
+            repository_owner_id=identity.repository_owner_id,
+            workflow_refs=(identity.workflow_ref,),
+            job_workflow_refs=(identity.job_workflow_ref,),
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=("authz_policy_grant.write",),
+        )
+        replacement_rule = current_rule.model_copy(update={"repository_id": "9999"})
+        current_record = _active_record_for_policy(
+            LaunchplaneAuthzPolicy(schema_version=2, github_actions=(current_rule,))
+        )
+        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                "schema_version": 2,
+                "product": "launchplane",
+                "managed_set_id": "operator.launchplane",
+                "desired_policy": {
+                    "schema_version": 2,
+                    "github_actions": [replacement_rule.model_dump(mode="json")],
+                },
+            }
+        )
+
+        with self.assertRaises(AuthzPolicySafetyError) as raised:
+            execute_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=request,
+                identity=identity,
+                trace_id="trace-managed-lockout",
+                now_timestamp=lambda: "2026-08-17T00:00:00Z",
+                authorized_policy_sha256=current_record.policy_sha256,
+            )
+        self.assertEqual(raised.exception.code, "authz_policy_applying_admin_removed")
+        self.assertIn(
+            "retain policy administration authority for the applying identity",
+            str(raised.exception),
+        )
 
     def test_managed_reconcile_rejects_ambiguous_compatibility_retirement(self) -> None:
         managed_rule = GitHubActionsPolicyRule(
@@ -1439,6 +1687,95 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         self.assertEqual(
             diff.operational_readiness_blockers[0].reason_codes,
             ("job_workflow_refs_not_singleton",),
+        )
+
+    def test_managed_reconcile_rejects_apply_with_operational_readiness_blockers(
+        self,
+    ) -> None:
+        identity = _workflow_admin_identity()
+        admin_rule = _workflow_admin_rule(identity)
+        current_record = _active_record_for_policy(
+            LaunchplaneAuthzPolicy(schema_version=2, github_actions=(admin_rule,))
+        )
+        dry_run = AuthzManagedPolicyReconcileEnvelope(
+            schema_version=2,
+            product="launchplane",
+            managed_set_id="test.operational-readiness-rollout",
+            reason="Verify readiness blockers fail closed.",
+            desired_policy=_authz_rollout_fixture("operational-readiness-overlap.json"),
+        )
+        _, _, _, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=dry_run,
+        )
+        apply_request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                **dry_run.model_dump(mode="json"),
+                "mode": "apply",
+                "reason": "Verify readiness blockers fail closed.",
+                "reviewed_plan_sha256": diff.plan_sha256,
+            }
+        )
+
+        with self.assertRaises(AuthzPolicySafetyError) as raised:
+            execute_managed_authz_policy_reconcile(
+                record_store=_AuthzPolicyStore((current_record,)),
+                request=apply_request,
+                identity=identity,
+                trace_id="trace-readiness-blocked",
+                now_timestamp=lambda: "2026-08-17T00:00:00Z",
+                authorized_policy_sha256=current_record.policy_sha256,
+            )
+        self.assertEqual(raised.exception.code, "authz_operational_readiness_blocked")
+        self.assertIn(
+            "cannot apply while operational-readiness blockers remain",
+            str(raised.exception),
+        )
+
+    def test_managed_reconcile_allows_noop_apply_with_existing_readiness_blockers(
+        self,
+    ) -> None:
+        identity = _workflow_admin_identity()
+        admin_rule = _workflow_admin_rule(identity)
+        blocked_policy = _authz_rollout_fixture("operational-readiness-overlap.json")
+        current_policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(admin_rule, *blocked_policy.github_actions),
+        )
+        current_record = _active_record_for_policy(current_policy)
+        dry_run = AuthzManagedPolicyReconcileEnvelope(
+            schema_version=2,
+            product="launchplane",
+            managed_set_id="test.operational-readiness-rollout",
+            reason="Verify no-op applies remain idempotent.",
+            desired_policy=blocked_policy,
+        )
+        _, _, _, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=dry_run,
+        )
+        apply_request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                **dry_run.model_dump(mode="json"),
+                "mode": "apply",
+                "reviewed_plan_sha256": diff.plan_sha256,
+            }
+        )
+
+        result = execute_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=apply_request,
+            identity=identity,
+            trace_id="trace-readiness-noop",
+            now_timestamp=lambda: "2026-08-17T00:00:00Z",
+            authorized_policy_sha256=current_record.policy_sha256,
+        )
+
+        self.assertFalse(result.changed)
+        result_diff = cast(dict[str, object], result.driver_result["diff"])
+        self.assertEqual(
+            result_diff["operational_readiness_blocked_rule_count"],
+            1,
         )
 
     def test_managed_reconcile_accepts_split_exact_worker_rollout_as_readiness_final(

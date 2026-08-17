@@ -53,6 +53,10 @@ Treat this file as the launch checklist for each Every Code session in
 - Update docs in the same change when behavior or ownership changes.
 - Fix root causes, not symptoms; avoid workaround-only flows unless the
   operator explicitly asks for a time-boxed mitigation.
+- Follow `docs/authorization-authority.md`. While issue `#2058` is unresolved,
+  do not propose, add, or apply new routine GitHub-secret/workflow-managed
+  authorization grants. Treat `authorization_denied` as an authority or
+  capability gap and block the affected work on the DB-native redesign.
 - Dispatch and watch protected GitHub operator workflows only through the
   installed `github_workflow_babysit.py` helper. Do not use raw
   `gh workflow run`, `gh run watch`, or a generic run waiter for those jobs;

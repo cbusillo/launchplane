@@ -169,6 +169,9 @@ _WORKFLOW_REF_GLOB_CHARACTERS = frozenset("*?[")
 _IMMUTABLE_WORKFLOW_ACTION_SAFETIES = frozenset(
     {"prod", "destructive", "secret_backed", "policy_admin"}
 )
+_IMMUTABLE_GITHUB_HUMAN_ACTION_SAFETIES = frozenset(
+    {"prod", "destructive", "secret_backed", "policy_admin"}
+)
 _MANAGED_AUTHZ_RECONCILE_SOURCE = "service:authz-managed-rule-set-reconcile"
 _AUTHZ_POLICY_ADMIN_ACTION = "authz_policy_grant.write"
 _OWNER_ACCEPTANCE_MANAGED_SET_ID = "operator.owner-acceptance"
@@ -329,6 +332,36 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
                         "Managed GitHub Actions authz rules require immutable repository_id "
                         f"and repository_owner_id selectors ({rule.managed_rule_id})."
                     )
+                if isinstance(rule, GitHubHumanPolicyRule):
+                    if not rule.roles:
+                        raise ValueError(
+                            "Managed GitHub human authz rules require at least one explicit role "
+                            f"({rule.managed_rule_id})."
+                        )
+                    if not any((rule.github_ids, rule.logins, rule.organizations, rule.teams)):
+                        raise ValueError(
+                            "Managed GitHub human authz rules require at least one principal "
+                            f"selector ({rule.managed_rule_id})."
+                        )
+                    if any(
+                        _contains_selector_glob(selector)
+                        for selector in (*rule.logins, *rule.organizations, *rule.teams)
+                    ):
+                        raise ValueError(
+                            "Managed GitHub human authz rules require exact login, organization, "
+                            f"and team selectors ({rule.managed_rule_id})."
+                        )
+                    if (
+                        "admin" in rule.roles
+                        or any(
+                            action_safety(action) in _IMMUTABLE_GITHUB_HUMAN_ACTION_SAFETIES
+                            for action in rule.actions
+                        )
+                    ) and not rule.github_ids:
+                        raise ValueError(
+                            "Managed GitHub human admin and sensitive-action rules require "
+                            f"immutable github_ids ({rule.managed_rule_id})."
+                        )
         return self
 
 
@@ -527,6 +560,12 @@ def authz_policy_operator_payload(identity: LaunchplaneIdentity) -> dict[str, ob
 
 class AuthzPolicyConflictError(ValueError):
     pass
+
+
+class AuthzPolicySafetyError(AuthzPolicyConflictError):
+    def __init__(self, *, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class AuthzPolicyRequestError(ValueError):
@@ -918,25 +957,102 @@ def _authz_policy_without_managed_identities(
     )
 
 
-def _authz_policy_retains_administration(policy: LaunchplaneAuthzPolicy) -> bool:
-    def grants_policy_administration(rule: object) -> bool:
-        actions = getattr(rule, "actions", ())
-        products = getattr(rule, "products", ())
-        contexts = getattr(rule, "contexts", ())
-        return (
-            (not actions or _AUTHZ_POLICY_ADMIN_ACTION in actions)
-            and (not products or "launchplane" in products)
-            and (not contexts or "launchplane" in contexts)
+def _authz_rule_grants_policy_administration(rule: AuthzPolicyRule) -> bool:
+    if rule.actions and _AUTHZ_POLICY_ADMIN_ACTION not in rule.actions:
+        return False
+    if isinstance(rule, GitHubHumanPolicyRule):
+        product_allowed = not rule.products or "launchplane" in rule.products
+        context_allowed = not rule.contexts or "launchplane" in rule.contexts
+    else:
+        product_allowed = not rule.products or any(
+            fnmatchcase("launchplane", value) for value in rule.products
         )
+        context_allowed = not rule.contexts or any(
+            fnmatchcase("launchplane", value) for value in rule.contexts
+        )
+    if not product_allowed or not context_allowed:
+        return False
+    if isinstance(rule, GitHubActionsPolicyRule):
+        return bool(rule.repository and rule.workflow_refs)
+    if isinstance(rule, GitHubHumanPolicyRule):
+        return bool(rule.github_ids and "admin" in rule.roles)
+    return bool(rule.subjects and rule.token_labels)
 
-    return (
-        any(grants_policy_administration(rule) for rule in policy.github_actions)
-        or any(
-            grants_policy_administration(rule) and (not rule.roles or "admin" in rule.roles)
-            for rule in policy.github_humans
+
+def _authz_policy_administrator_rules(
+    policy: LaunchplaneAuthzPolicy,
+) -> tuple[AuthzPolicyRule, ...]:
+    return tuple(
+        rule
+        for _, rules in _authz_policy_rule_collections(policy)
+        for rule in rules
+        if _authz_rule_grants_policy_administration(rule)
+    )
+
+
+def _authz_policy_retains_administration(policy: LaunchplaneAuthzPolicy) -> bool:
+    return bool(_authz_policy_administrator_rules(policy))
+
+
+def _authz_rule_allows_identity(
+    *,
+    rule: AuthzPolicyRule,
+    identity: LaunchplaneIdentity,
+    schema_version: Literal[1, 2],
+) -> bool:
+    if isinstance(rule, GitHubActionsPolicyRule) and isinstance(identity, GitHubActionsIdentity):
+        return rule.allows(
+            identity=identity,
+            action=_AUTHZ_POLICY_ADMIN_ACTION,
+            product="launchplane",
+            context="launchplane",
+            schema_version=schema_version,
         )
-        or any(grants_policy_administration(rule) for rule in policy.local_operators)
-        or any(grants_policy_administration(rule) for rule in policy.local_admins)
+    if isinstance(rule, GitHubHumanPolicyRule) and isinstance(identity, GitHubHumanIdentity):
+        return rule.allows(
+            identity=identity,
+            action=_AUTHZ_POLICY_ADMIN_ACTION,
+            product="launchplane",
+            context="launchplane",
+            schema_version=schema_version,
+        )
+    if isinstance(rule, TerminalAgentPolicyRule) and isinstance(identity, TerminalAgentIdentity):
+        return rule.allows(
+            identity=identity,
+            action=_AUTHZ_POLICY_ADMIN_ACTION,
+            product="launchplane",
+            context="launchplane",
+            schema_version=schema_version,
+        )
+    if isinstance(rule, LocalOperatorPolicyRule) and isinstance(identity, LocalOperatorIdentity):
+        return rule.allows(
+            identity=identity,
+            action=_AUTHZ_POLICY_ADMIN_ACTION,
+            product="launchplane",
+            context="launchplane",
+            schema_version=schema_version,
+        )
+    if isinstance(rule, LocalAdminPolicyRule) and isinstance(identity, LocalAdminIdentity):
+        return rule.allows(
+            identity=identity,
+            action=_AUTHZ_POLICY_ADMIN_ACTION,
+            product="launchplane",
+            context="launchplane",
+            schema_version=schema_version,
+        )
+    return False
+
+
+def _authz_policy_retains_independent_administration(
+    *, policy: LaunchplaneAuthzPolicy, applying_identity: LaunchplaneIdentity
+) -> bool:
+    return any(
+        not _authz_rule_allows_identity(
+            rule=rule,
+            identity=applying_identity,
+            schema_version=policy.schema_version,
+        )
+        for rule in _authz_policy_administrator_rules(policy)
     )
 
 
@@ -1226,9 +1342,12 @@ def plan_managed_authz_policy_reconcile(
     if _authz_policy_retains_administration(
         base_policy
     ) and not _authz_policy_retains_administration(updated_policy):
-        raise AuthzPolicyConflictError(
-            "Managed authz policy reconciliation must retain at least one principal that can "
-            "administer Launchplane authz policy."
+        raise AuthzPolicySafetyError(
+            code="authz_policy_admin_unreachable",
+            message=(
+                "Managed authz policy reconciliation must retain at least one reachable principal "
+                "that can administer Launchplane authz policy."
+            ),
         )
     desired_policy_sha256 = authz_policy_sha256(updated_policy)
     changed = current_record.policy_sha256 != desired_policy_sha256
@@ -1410,15 +1529,45 @@ def execute_managed_authz_policy_reconcile(
         current_record=current_record,
         expected_policy_sha256=authorized_policy_sha256,
     )
-    if managed_diff.retired_unmanaged_compatibility_rule_count and not updated_policy.allows(
+    if managed_diff.changed and not updated_policy.allows(
         identity=identity,
         action=_AUTHZ_POLICY_ADMIN_ACTION,
         product=request.product,
         context="launchplane",
     ):
-        raise AuthzPolicyConflictError(
-            "Managed authz compatibility retirement must retain policy administration "
-            "authority for the applying identity."
+        raise AuthzPolicySafetyError(
+            code="authz_policy_applying_admin_removed",
+            message=(
+                "Managed authz policy reconciliation must retain policy administration "
+                "authority for the applying identity."
+            ),
+        )
+    if (
+        request.mode == "apply"
+        and managed_diff.changed
+        and managed_diff.operational_readiness_blocked_rule_count
+    ):
+        raise AuthzPolicySafetyError(
+            code="authz_operational_readiness_blocked",
+            message=(
+                "Managed authz policy reconciliation cannot apply while operational-readiness "
+                "blockers remain. Review the dry-run evidence and submit an exact candidate."
+            ),
+        )
+    if (
+        request.mode == "apply"
+        and managed_diff.changed
+        and not _authz_policy_retains_independent_administration(
+            policy=updated_policy,
+            applying_identity=identity,
+        )
+    ):
+        raise AuthzPolicySafetyError(
+            code="authz_policy_independent_admin_unreachable",
+            message=(
+                "Managed authz policy reconciliation must retain a reachable policy "
+                "administrator independent from the applying identity."
+            ),
         )
     diff = managed_diff.model_dump(mode="json")
     audit = authz_managed_policy_reconcile_audit_payload(

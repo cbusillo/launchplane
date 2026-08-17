@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    GitHubHumanIdentity,
+    GitHubHumanPolicyRule,
+    LaunchplaneAuthzPolicy,
+)
 from control_plane.service_human_auth import (
     GitHubOAuthConfig,
     HumanSessionManager,
@@ -37,7 +41,7 @@ def _identity() -> GitHubHumanIdentity:
 
 
 class HumanSessionManagerTests(unittest.TestCase):
-    def test_bootstrap_admin_role_survives_db_policy_revalidation(self) -> None:
+    def test_bootstrap_admin_role_applies_before_db_human_policy_exists(self) -> None:
         manager = HumanSessionManager(
             config=GitHubOAuthConfig(
                 client_id="client-id",
@@ -55,6 +59,55 @@ class HumanSessionManagerTests(unittest.TestCase):
                 authz_policy=LaunchplaneAuthzPolicy(),
             ),
             "admin",
+        )
+
+    def test_bootstrap_admin_role_stops_after_db_human_policy_exists(self) -> None:
+        manager = HumanSessionManager(
+            config=GitHubOAuthConfig(
+                client_id="client-id",
+                client_secret="client-secret",
+                public_url="https://launchplane.example",
+                session_secret="session-secret",
+                bootstrap_admin_emails=frozenset({"alice@example.com"}),
+            ),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        policy = LaunchplaneAuthzPolicy(
+            github_humans=(
+                GitHubHumanPolicyRule(
+                    github_ids=(999,),
+                    roles=("admin",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("authz_policy_grant.write",),
+                ),
+            )
+        )
+
+        self.assertIsNone(manager.authorized_role(identity=_identity(), authz_policy=policy))
+
+    def test_legacy_human_policy_does_not_disable_bootstrap_admin(self) -> None:
+        manager = HumanSessionManager(
+            config=GitHubOAuthConfig(
+                client_id="client-id",
+                client_secret="client-secret",
+                public_url="https://launchplane.example",
+                session_secret="session-secret",
+                bootstrap_admin_emails=frozenset({"alice@example.com"}),
+            ),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        policy = LaunchplaneAuthzPolicy(
+            github_humans=(
+                GitHubHumanPolicyRule(
+                    logins=("*",),
+                    actions=("authz_policy_grant.write",),
+                ),
+            )
+        )
+
+        self.assertEqual(
+            manager.authorized_role(identity=_identity(), authz_policy=policy), "admin"
         )
 
     def test_session_cookie_is_signed_and_round_trips(self) -> None:

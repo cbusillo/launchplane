@@ -252,19 +252,20 @@ class GitHubOAuthClient:
             if isinstance(org, dict) and str(org.get("login", "")).strip()
         )
         teams = frozenset(_team_names(team_payload))
-        bootstrap_admin_email = next(
-            iter(sorted(self._config.bootstrap_admin_emails.intersection(email_candidates))),
-            "",
+        role = authz_policy.human_role_for(
+            github_id=github_id,
+            login=login,
+            organizations=organizations,
+            teams=teams,
         )
-        if bootstrap_admin_email:
-            role: Literal["read_only", "admin"] | None = "admin"
-        else:
-            role = authz_policy.human_role_for(
-                github_id=github_id,
-                login=login,
-                organizations=organizations,
-                teams=teams,
+        bootstrap_admin_email = ""
+        if role is None and not authz_policy.github_humans:
+            bootstrap_admin_email = next(
+                iter(sorted(self._config.bootstrap_admin_emails.intersection(email_candidates))),
+                "",
             )
+            if bootstrap_admin_email:
+                role = "admin"
         if role is None:
             raise PermissionError("GitHub user is not authorized for Launchplane.")
         return GitHubHumanIdentity(
@@ -330,6 +331,18 @@ def _team_names(team_payload: object) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _has_db_backed_human_policy_administrator(policy: LaunchplaneAuthzPolicy) -> bool:
+    return any(
+        bool(rule.github_ids)
+        and not any((rule.logins, rule.organizations, rule.teams))
+        and "admin" in rule.roles
+        and rule.products == ("launchplane",)
+        and rule.contexts == ("launchplane",)
+        and "authz_policy_grant.write" in rule.actions
+        for rule in policy.github_humans
+    )
+
+
 class HumanSessionManager:
     def __init__(
         self,
@@ -352,15 +365,18 @@ class HumanSessionManager:
         identity: GitHubHumanIdentity,
         authz_policy: LaunchplaneAuthzPolicy,
     ) -> Literal["read_only", "admin"] | None:
-        email = identity.email.strip().lower()
-        if email and email in self._config.bootstrap_admin_emails:
-            return "admin"
-        return authz_policy.human_role_for(
+        role = authz_policy.human_role_for(
             github_id=identity.github_id,
             login=identity.login,
             organizations=identity.organizations,
             teams=identity.teams,
         )
+        if role is not None or _has_db_backed_human_policy_administrator(authz_policy):
+            return role
+        email = identity.email.strip().lower()
+        if email and email in self._config.bootstrap_admin_emails:
+            return "admin"
+        return None
 
     def issue(self, identity: GitHubHumanIdentity) -> LaunchplaneHumanSession:
         now = self._now()

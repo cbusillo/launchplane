@@ -303,5 +303,8 @@ Product retirement does not add checked-in product or provider authority. The
 workflow accepts operator-supplied product, instance, target digest, reason,
 issue, reviewed plan, and idempotency values; the service resolves all real
 context, provider target, runtime, and secret authority from DB-backed records.
-The authorization managed-set secret routes policy material through the
-existing protected authz reconciliation workflow and is not a product catalog.
+Authorization managed-set secrets are transitional desired input routed through
+the protected reconciliation workflow. They are not live policy authority and
+must not become a product catalog or the routine durable permissions editor.
+While the `#2058` authorization audit is open, do not add new routine managed
+sets or grants through those secrets; follow `authorization-authority.md`.
