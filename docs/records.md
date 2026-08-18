@@ -493,9 +493,11 @@ an ORM column/table or remains only in the evidence payload.
   actions, and selector-shape reason codes, but never repository IDs, workflow
   refs, products, contexts, or instances. A rule containing old and new worker
   SHAs in one `job_workflow_refs` selector may remain valid transitional
-  authorization, but it reports `job_workflow_refs_not_singleton`. Readiness-safe
-  expansion uses two separately identified exact rules, one immutable worker SHA
-  per rule, followed by reviewed contraction of the old rule.
+  authorization, but it reports `job_workflow_refs_not_singleton` and blocks any
+  changed apply for that managed set. An unchanged apply remains a no-op.
+  Readiness-safe expansion uses two separately identified exact rules, one
+  immutable worker SHA per rule, followed by reviewed contraction of the old
+  rule.
   Generic-web preview retirement plan evidence additionally records bounded
   authority sources, target managed rule IDs/count, and a SHA-256 digest of the
   resolved repository identity. It never records or returns raw numeric

@@ -1815,9 +1815,9 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text.count(
                 "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
             ),
-            3,
+            2,
         )
-        self.assertGreaterEqual(workflow_text.count("github.ref_type == 'branch'"), 3)
+        self.assertGreaterEqual(workflow_text.count("github.ref_type == 'branch'"), 2)
         self.assertIn(
             "BREAK_GLASS_IMAGE_REFERENCE: ${{ inputs.break_glass_image_reference }}",
             emergency_job,
@@ -1915,7 +1915,7 @@ class ProductOnboardingTests(unittest.TestCase):
     def test_deploy_launchplane_break_glass_limits_credentials_and_permissions(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
         deploy_job = workflow_text.split("  deploy:\n", 1)[1].split(
-            "  operator-authz-managed-validate:\n", 1
+            "  emergency-dokploy-rollback:\n", 1
         )[0]
         emergency_job = workflow_text.split("  emergency-dokploy-rollback:\n", 1)[1]
         validation_step = emergency_job.split("- name: Validate manual break-glass request", 1)[
@@ -1969,10 +1969,14 @@ class ProductOnboardingTests(unittest.TestCase):
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
 
         self.assertFalse(Path("scripts/deploy/ensure-authz-grants.sh").exists())
-        self.assertIn("operator-authz-managed-validate:", workflow_text)
-        self.assertIn("operator-authz-managed:", workflow_text)
         for retired_token in (
+            "operator-authz-managed-validate:",
+            "operator-authz-managed:",
             "operator-authz-grants:",
+            "authz_managed_mode",
+            "authz_managed_reviewed_plan_sha256",
+            "authz_managed_reason",
+            "authz_managed_related_issue",
             "authz_grants_mode",
             "authz_grants_expected_sha256",
             "authz_policy_expected_sha256",

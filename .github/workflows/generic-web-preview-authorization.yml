@@ -75,6 +75,8 @@ jobs:
       plan_sha256: ${{ steps.plan.outputs.plan_sha256 }}
       product: ${{ steps.inputs.outputs.product }}
     env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      WORKFLOW_REF: ${{ github.ref }}
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       MODE: ${{ inputs.mode }}
       OPERATION: ${{ inputs.operation }}
@@ -111,6 +113,11 @@ jobs:
               return value
 
           mode = required("MODE")
+          expected_ref = f"refs/heads/{os.environ['DEFAULT_BRANCH']}"
+          if os.environ["WORKFLOW_REF"] != expected_ref:
+              raise SystemExit(
+                  "Generic-web preview authorization must run from the default branch."
+              )
           if mode not in {"dry_run", "apply"}:
               raise SystemExit("mode must be dry_run or apply.")
           operation = required("OPERATION")
@@ -240,6 +247,11 @@ jobs:
             exit 1
           fi
           jq '.result.configuration' authz-plan.json > authz-reconcile-request.json
+          managed_set_id="$(jq -r '.managed_set_id // empty' authz-reconcile-request.json)"
+          if [ "$managed_set_id" != "operator.generic-web-preview" ]; then
+            echo "Preview authz plan returned an unexpected managed set." >&2
+            exit 1
+          fi
           echo "plan_sha256=$plan_sha256" >> "$GITHUB_OUTPUT"
           {
             echo "## Generic-web preview authorization plan"
@@ -267,8 +279,42 @@ jobs:
   apply:
     if: ${{ inputs.mode == 'apply' }}
     needs: plan
+    concurrency:
+      group: launchplane-authz-policy
+      cancel-in-progress: false
     uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml@d21d609514404d3420fceb7fe53857ae407d3ff8 # main
     with:
       product: ${{ needs.plan.outputs.product }}
       plan_sha256: ${{ needs.plan.outputs.plan_sha256 }}
-    secrets: inherit
+
+  verify-apply:
+    if: ${{ inputs.mode == 'apply' }}
+    needs:
+      - plan
+      - apply
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download authorization apply evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.0
+        with:
+          name: generic-web-preview-authz-apply
+          path: .
+
+      - name: Verify applied authorization
+        shell: bash
+        env:
+          REVIEWED_PLAN_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          jq -e \
+            --arg reviewed "$REVIEWED_PLAN_SHA256" \
+            '.result.diff.managed_set_id == "operator.generic-web-preview" and
+             .result.diff.plan_sha256 == $reviewed and
+             (.result.changed | type == "boolean") and
+             (.result.diff.operational_readiness_blocked_rule_count | type == "number") and
+             ((.result.changed | not) or
+              .result.diff.operational_readiness_blocked_rule_count == 0)' \
+            authz-apply.json >/dev/null || {
+            echo "Applied preview authorization did not match the reviewed contract." >&2
+            exit 1
+          }

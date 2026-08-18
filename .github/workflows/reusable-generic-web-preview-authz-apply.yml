@@ -47,6 +47,11 @@ jobs:
             echo "Reviewed authz configuration does not match its plan artifact." >&2
             exit 1
           fi
+          managed_set_id="$(jq -r '.managed_set_id // empty' authz-reconcile-request.json)"
+          if [ "$managed_set_id" != "operator.generic-web-preview" ]; then
+            echo "Reviewed preview authorization uses an unexpected managed set." >&2
+            exit 1
+          fi
           jq \
             --arg reviewed "$artifact_plan_sha256" \
             '.mode="apply" | .reviewed_plan_sha256=$reviewed' \
@@ -65,6 +70,23 @@ jobs:
           expected-status: "202"
           fail-result-paths: ""
           response-output-file: authz-apply.json
+
+      - name: Verify applied authorization
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e \
+            --arg reviewed "$PLAN_SHA256" \
+            '.result.diff.managed_set_id == "operator.generic-web-preview" and
+             .result.diff.plan_sha256 == $reviewed and
+             (.result.changed | type == "boolean") and
+             (.result.diff.operational_readiness_blocked_rule_count | type == "number") and
+             ((.result.changed | not) or
+              .result.diff.operational_readiness_blocked_rule_count == 0)' \
+            authz-apply.json >/dev/null || {
+            echo "Applied preview authorization did not match the reviewed contract." >&2
+            exit 1
+          }
 
       - name: Summarize applied authorization
         if: always()

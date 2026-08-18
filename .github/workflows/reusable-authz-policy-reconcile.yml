@@ -9,9 +9,8 @@ name: Reusable Authz Policy Reconcile
         required: true
         type: string
       expected_managed_set_id:
-        description: Optional exact managed-set identity required from the protected configuration.
-        required: false
-        default: ""
+        description: Exact managed-set identity required from the protected configuration.
+        required: true
         type: string
       reviewed_plan_sha256:
         description: Plan SHA-256 returned by the reviewed dry run; required for apply.
@@ -129,7 +128,9 @@ jobs:
           if re.fullmatch(r"[a-z0-9][a-z0-9._:/-]{0,127}", managed_set_id) is None:
               raise SystemExit("Managed authz configuration requires a stable managed_set_id.")
           expected_managed_set_id = os.environ.get("EXPECTED_MANAGED_SET_ID", "").strip()
-          if expected_managed_set_id and managed_set_id != expected_managed_set_id:
+          if not expected_managed_set_id:
+              raise SystemExit("Managed authz reconciliation requires expected_managed_set_id.")
+          if managed_set_id != expected_managed_set_id:
               raise SystemExit(
                   "Managed authz configuration managed_set_id does not match the selected managed set."
               )
@@ -281,7 +282,9 @@ jobs:
              (.result.diff.plan_sha256 | test("^[0-9a-f]{64}$")) and
              (.result.diff.previous_policy_sha256 | test("^[0-9a-f]{64}$")) and
              (.result.diff.desired_policy_sha256 | test("^[0-9a-f]{64}$")) and
-             (.result.diff.desired_set_sha256 | test("^[0-9a-f]{64}$"))' \
+             (.result.diff.desired_set_sha256 | test("^[0-9a-f]{64}$")) and
+             (.result.diff.operational_readiness_blocked_rule_count | type == "number") and
+             (.result.diff.operational_readiness_blockers | type == "array")' \
             "$RESPONSE_FILE" >/dev/null || {
             echo "Launchplane managed authz response did not match the reviewed contract." >&2
             exit 1
@@ -291,13 +294,20 @@ jobs:
             echo "Launchplane applied a different managed authz plan than the reviewed digest." >&2
             exit 1
           fi
+          changed="$(jq -r '.result.changed' "$RESPONSE_FILE")"
+          readiness_blockers="$(
+            jq -r '.result.diff.operational_readiness_blocked_rule_count' "$RESPONSE_FILE"
+          )"
+          if [ "$MODE" = "apply" ] && [ "$changed" = "true" ] && [ "$readiness_blockers" != "0" ]; then
+            echo "Launchplane refused to verify an authz apply with operational-readiness blockers." >&2
+            exit 1
+          fi
           jq '{
             mode: .result.mode,
             changed: .result.changed,
             authz_policy: .result.authz_policy,
             diff: .result.diff
           }' "$RESPONSE_FILE" > "$EVIDENCE_DIRECTORY/summary.json"
-          changed="$(jq -r '.result.changed' "$RESPONSE_FILE")"
           schema_migrated="$(jq -r '.result.diff.schema_migrated' "$RESPONSE_FILE")"
           authorization_changed="$(jq -r '.result.diff.authorization_changed' "$RESPONSE_FILE")"
           previous_policy_sha256="$(jq -r '.result.diff.previous_policy_sha256' "$RESPONSE_FILE")"
@@ -308,6 +318,10 @@ jobs:
           updated="$(jq -r '.result.diff.updated_rule_count' "$RESPONSE_FILE")"
           removed="$(jq -r '.result.diff.removed_rule_count' "$RESPONSE_FILE")"
           unchanged="$(jq -r '.result.diff.unchanged_rule_count' "$RESPONSE_FILE")"
+          readiness_reasons="$(
+            jq -c '[.result.diff.operational_readiness_blockers[]?.reason_codes[]?] | unique' \
+              "$RESPONSE_FILE"
+          )"
           {
             echo "## Managed authorization reconciliation"
             echo
@@ -317,6 +331,8 @@ jobs:
             echo "- Authorization changed: $authorization_changed"
             echo "- Schema migrated: $schema_migrated"
             echo "- Rules: added=$added adopted=$adopted updated=$updated removed=$removed unchanged=$unchanged"
+            echo "- Operational-readiness blockers: $readiness_blockers"
+            echo "- Operational-readiness reason codes: $readiness_reasons"
             printf '%s\n' "- Previous policy SHA-256: $previous_policy_sha256"
             printf '%s\n' "- Desired policy SHA-256: $desired_policy_sha256"
             printf '%s\n' "- Desired set SHA-256: $desired_set_sha256"
