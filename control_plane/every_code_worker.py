@@ -22,6 +22,7 @@ from control_plane.child_process_errors import (
     normalize_child_process_failure,
     redact_untrusted_text,
 )
+from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 from control_plane.contracts.every_code_pr_feedback_record import (
     EveryCodePrFeedbackRecord,
     EveryCodePrFeedbackStatus,
@@ -3758,7 +3759,9 @@ def _every_code_relevant_pr_checks(
     return [
         item
         for item in check_rollup
-        if isinstance(item, dict) and _github_check_conclusion(item) != "SKIPPED"
+        if isinstance(item, dict)
+        and _github_check_conclusion(item) != "SKIPPED"
+        and not is_launchplane_projected_check(_github_check_name(item))
     ]
 
 

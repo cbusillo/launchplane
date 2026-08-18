@@ -74,15 +74,30 @@
             "title": "Check Run Id",
             "type": "integer"
           },
-          "conclusion": {
+          "check_status": {
             "enum": [
-              "neutral",
-              "success",
-              "failure",
-              "action_required"
+              "in_progress",
+              "completed"
             ],
-            "title": "Conclusion",
+            "title": "Check Status",
             "type": "string"
+          },
+          "conclusion": {
+            "anyOf": [
+              {
+                "enum": [
+                  "neutral",
+                  "success",
+                  "failure",
+                  "action_required"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conclusion"
           },
           "external_id": {
             "pattern": "^[0-9a-f]{64}$",
@@ -104,8 +119,8 @@
             "type": "string"
           },
           "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
+            "const": 2,
+            "default": 2,
             "title": "Schema Version",
             "type": "integer"
           },
@@ -127,6 +142,7 @@
           "app_id",
           "installation_id",
           "check_run_id",
+          "check_status",
           "conclusion"
         ],
         "title": "AdvisoryCheckProjectionResult",

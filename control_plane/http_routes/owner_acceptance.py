@@ -23,6 +23,7 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptanceResolutionEvidence,
     OwnerAcceptanceTransitionError,
     OwnerAcceptanceViewerBindingEligibility,
+    owner_acceptance_event_replay_digest,
     owner_acceptance_human_action_semantics,
 )
 from control_plane.github_app_identity import GitHubAppInstallationToken
@@ -76,6 +77,18 @@ class OwnerAcceptanceProjectionUnavailableError(RuntimeError):
 
 
 class OwnerAcceptanceProjectionReconciliationRequiredError(RuntimeError):
+    pass
+
+
+class OwnerAcceptanceEventNotPersistedError(RuntimeError):
+    pass
+
+
+class OwnerAcceptanceEventNotPersistedProjectionError(RuntimeError):
+    pass
+
+
+class OwnerAcceptanceEventPersistenceUnknownError(RuntimeError):
     pass
 
 
@@ -249,6 +262,31 @@ def _event_semantics(record: OwnerAcceptanceEventRecord) -> OwnerAcceptanceEvent
     )
 
 
+def _owner_acceptance_event_persistence_outcome(
+    *,
+    store: object,
+    record: OwnerAcceptanceEventRecord,
+) -> Literal["persisted", "absent", "unknown"]:
+    try:
+        persisted = require_owner_acceptance_event_store(store).read_owner_acceptance_event_record(
+            record.event_id
+        )
+    except FileNotFoundError:
+        return "absent"
+    except Exception:
+        logger.warning(
+            "Could not determine Owner acceptance event persistence outcome.",
+            exc_info=True,
+        )
+        return "unknown"
+    if owner_acceptance_event_replay_digest(persisted) == owner_acceptance_event_replay_digest(
+        record
+    ):
+        return "persisted"
+    logger.error("Owner acceptance event id resolved to a different persisted payload.")
+    return "unknown"
+
+
 def register_owner_acceptance_routes(
     app: ApiRouteRegistrar,
     *,
@@ -402,8 +440,11 @@ def register_owner_acceptance_routes(
                 store=record_store,
                 target=envelope.target,
             ) as locked_projection_target:
+                prewrite_projection_target: ChangeImpactTarget | None = None
+                prewrite_event_record: OwnerAcceptanceEventRecord | None = None
 
                 def project_conservative_check(record: OwnerAcceptanceEventRecord) -> None:
+                    nonlocal prewrite_event_record, prewrite_projection_target
                     binding = record.binding
                     record_target = ChangeImpactTarget(
                         repository_id=binding.repository_id,
@@ -419,22 +460,101 @@ def register_owner_acceptance_routes(
                             exact_target=record_target,
                             source_event_id=idempotency_key,
                         )
-                    except Exception as error:
-                        raise OwnerAcceptanceProjectionUnavailableError(str(error)) from error
+                    except Exception as projection_error:
+                        raise OwnerAcceptanceProjectionUnavailableError(
+                            str(projection_error)
+                        ) from projection_error
+                    prewrite_event_record = record
+                    prewrite_projection_target = record_target
 
-                result: OwnerAcceptanceWriteResult = record_owner_acceptance_event(
-                    store=record_store,
-                    repository_evidence_provider=dependencies.repository_evidence_provider,
-                    target=envelope.target,
-                    identity=identity,
-                    action=envelope.action,
-                    expected_binding_sha256=envelope.expected_binding_sha256,
-                    source_event_kind="browser_api",
-                    source_event_id=idempotency_key,
-                    reason=envelope.reason,
-                    resolution=envelope.resolution,
-                    before_write=project_conservative_check,
-                )
+                try:
+                    result: OwnerAcceptanceWriteResult = record_owner_acceptance_event(
+                        store=record_store,
+                        repository_evidence_provider=dependencies.repository_evidence_provider,
+                        target=envelope.target,
+                        identity=identity,
+                        action=envelope.action,
+                        expected_binding_sha256=envelope.expected_binding_sha256,
+                        source_event_kind="browser_api",
+                        source_event_id=idempotency_key,
+                        reason=envelope.reason,
+                        resolution=envelope.resolution,
+                        before_write=project_conservative_check,
+                    )
+                except Exception as event_error:
+                    if prewrite_projection_target is not None and prewrite_event_record is not None:
+                        persistence_outcome = _owner_acceptance_event_persistence_outcome(
+                            store=record_store,
+                            record=prewrite_event_record,
+                        )
+                        if persistence_outcome == "absent" and isinstance(
+                            event_error,
+                            (
+                                OwnerAcceptanceSelfReviewDeniedError,
+                                OwnerAcceptanceAuthorizationError,
+                                OwnerAcceptanceEventConflictError,
+                                OwnerAcceptanceTransitionError,
+                                OwnerAcceptanceBindingConflictError,
+                            ),
+                        ):
+                            try:
+                                projection_service.reconcile_locked(
+                                    store=record_store,
+                                    target=envelope.target,
+                                    lock_target=locked_projection_target,
+                                    source_event_id=idempotency_key,
+                                )
+                            except OwnerAcceptanceProjectionReconciliationError as recovery_error:
+                                raise OwnerAcceptanceEventNotPersistedProjectionError(
+                                    str(recovery_error)
+                                ) from event_error
+                            raise
+                        try:
+                            if persistence_outcome == "persisted":
+                                projection_service.restore_reconciliation_required_locked(
+                                    store=record_store,
+                                    target=envelope.target,
+                                    lock_target=locked_projection_target,
+                                    exact_target=prewrite_projection_target,
+                                    source_event_id=idempotency_key,
+                                )
+                            else:
+                                projection_service.restore_event_write_failure_locked(
+                                    store=record_store,
+                                    target=envelope.target,
+                                    lock_target=locked_projection_target,
+                                    exact_target=prewrite_projection_target,
+                                    source_event_id=idempotency_key,
+                                    persistence_outcome=persistence_outcome,
+                                )
+                        except Exception as restoration_error:
+                            combined_error = ExceptionGroup(
+                                "Owner acceptance event handling and GitHub recovery both failed.",
+                                [event_error, restoration_error],
+                            )
+                            if persistence_outcome == "persisted":
+                                raise OwnerAcceptanceProjectionReconciliationRequiredError(
+                                    str(restoration_error)
+                                ) from combined_error
+                            if persistence_outcome == "absent":
+                                raise OwnerAcceptanceEventNotPersistedProjectionError(
+                                    str(restoration_error)
+                                ) from combined_error
+                            raise OwnerAcceptanceEventPersistenceUnknownError(
+                                str(restoration_error)
+                            ) from combined_error
+                        if persistence_outcome == "persisted":
+                            raise OwnerAcceptanceProjectionReconciliationRequiredError(
+                                str(event_error)
+                            ) from event_error
+                        if persistence_outcome == "absent":
+                            raise OwnerAcceptanceEventNotPersistedError(
+                                str(event_error)
+                            ) from event_error
+                        raise OwnerAcceptanceEventPersistenceUnknownError(
+                            str(event_error)
+                        ) from event_error
+                    raise
                 try:
                     projection_outcome = projection_service.reconcile_locked(
                         store=record_store,
@@ -470,6 +590,50 @@ def register_owner_acceptance_routes(
                     "Owner acceptance event was persisted, but the final GitHub status "
                     "projection requires reconciliation. Retry with the same Idempotency-Key "
                     "or use the Owner acceptance projection endpoint."
+                ),
+            ) from error
+        except OwnerAcceptanceEventNotPersistedError as error:
+            logger.error(
+                "Owner acceptance event write failed without persistence.",
+                exc_info=True,
+            )
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="owner_acceptance_event_write_failed",
+                message=(
+                    "Owner acceptance event was not persisted. GitHub shows the failed "
+                    "update; retry with the same Idempotency-Key."
+                ),
+            ) from error
+        except OwnerAcceptanceEventNotPersistedProjectionError as error:
+            logger.error(
+                "Owner acceptance event was not persisted and GitHub recovery failed.",
+                exc_info=True,
+            )
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="owner_acceptance_event_write_failed_projection_unknown",
+                message=(
+                    "Owner acceptance event was not persisted, but Launchplane could not "
+                    "confirm the restored GitHub projection. Reconcile Owner acceptance "
+                    "before retrying with the same Idempotency-Key."
+                ),
+            ) from error
+        except OwnerAcceptanceEventPersistenceUnknownError as error:
+            logger.error(
+                "Owner acceptance event persistence outcome is unknown.",
+                exc_info=True,
+            )
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="owner_acceptance_event_write_outcome_unknown",
+                message=(
+                    "Launchplane could not determine whether the Owner acceptance event was "
+                    "persisted. Reconcile the Owner acceptance state before retrying with the "
+                    "same Idempotency-Key."
                 ),
             ) from error
         except OwnerAcceptanceSelfReviewDeniedError as error:

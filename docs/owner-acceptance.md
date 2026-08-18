@@ -400,9 +400,9 @@ product decision and exact binding, rechecks the current target before the
 provider write, and uses the decision digest as the check-run `external_id`.
 
 Before appending a browser Owner event, Launchplane replaces the exact-head
-check with an `action_required` **updating decision** projection. If that
-conservative projection or its token lifecycle fails, the event is not
-persisted. After append, Launchplane projects the resulting decision against the
+check with an `in_progress` **updating decision** projection. If that non-green
+projection or its token lifecycle fails, the event is not persisted. After
+append, Launchplane projects the resulting decision against the
 current exact target and ledger. Browser events, explicit reconciliation, and
 ready preview-feedback hydration all use the same shared projection service.
 Preview feedback executes the synchronous reconciliation in a worker thread so
@@ -420,20 +420,35 @@ including post-mint validation failures inside the identity provider.
 PostgreSQL lock waiters use dedicated unpooled advisory-lock connections so they
 cannot exhaust the record-store pool needed by the lock holder. Acquisition is
 committed before provider work begins; cleanup explicitly unlocks the session,
-commits, and verifies that the lock was held. If final projection, token cleanup,
-or current-state confirmation fails, Launchplane first restores the conservative
-non-green check on the exact attempted target before any current-target
-re-resolution can fail, then returns
-`503 owner_acceptance_projection_reconciliation_required`; retrying with the
-same idempotency key replays the immutable event and retries projection. The
-explicit projection endpoint provides the same reconciliation path. Browsers
-never receive projection credentials or projection authority.
+commits, and verifies that the lock was held. If the event is confirmed persisted
+but final projection, token cleanup, or current-state confirmation fails,
+Launchplane first writes a completed `action_required` **reconciliation
+required** check on the exact attempted target, then returns
+`503 owner_acceptance_projection_reconciliation_required`. If the event write
+fails, Launchplane reads the deterministic event id before describing the
+outcome: confirmed absence returns `owner_acceptance_event_write_failed` and a
+completed `failure` **update failed** check; an unreadable or mismatched record
+returns `owner_acceptance_event_write_outcome_unknown` and a completed `failure`
+**write outcome unknown** check. If the failed write's GitHub recovery cannot be
+confirmed, Launchplane returns
+`owner_acceptance_event_write_failed_projection_unknown` without claiming that
+GitHub shows the failure. Concurrent domain conflicts confirmed absent restore
+the current authoritative decision before retaining their original 4xx response.
+Retrying with the same idempotency key safely replays any persisted immutable
+event. The explicit projection endpoint provides the same reconciliation path.
+Browsers never receive projection credentials or projection authority.
 
-The completed check conclusion is `success` for accepted or not-required state,
-`action_required` for pending, stale, revoked, or changes-requested state, and
-`failure` when authoritative evidence is unavailable. The output lists the
-aggregate state plus each affected product and binding. The check is excluded
-from Launchplane technical-check inputs and cannot replace the Launchplane decision.
+The GitHub check remains `in_progress` with no conclusion for ordinary pending
+Owner review. It is completed with `success` for accepted or not-required state,
+`action_required` for stale, revoked, changes-requested, or reconciliation-required
+state, and `failure` when authoritative evidence is unavailable. Because GitHub
+does not reliably reopen completed check runs, a completed-to-pending transition
+creates a fresh same-name, same-head check run. GitHub may mark incomplete checks
+stale after fourteen days; the next Launchplane projection creates a fresh
+pending run. The output lists the aggregate state plus each affected product and
+binding. The check is excluded from Launchplane technical-check inputs and cannot
+replace the Launchplane decision. The projection response is schema version 2 and
+reports both the exact GitHub check-run status and its nullable conclusion.
 
 ## Combined Governance Read Model
 
