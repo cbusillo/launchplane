@@ -14185,6 +14185,13 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message=str(error),
             ) from error
+        except control_plane_authz_grant_service.AuthzPolicySafetyError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
         except control_plane_authz_grant_service.AuthzPolicyConflictError as error:
             if authz_request.mode == "apply" and normalized_idempotency_key:
                 replay_response = replay_stored_apply_idempotency(

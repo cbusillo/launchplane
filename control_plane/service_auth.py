@@ -461,15 +461,13 @@ class GitHubHumanPolicyRule(ManagedAuthzPolicyRule):
         target: AuthorizationTarget | None = None,
         schema_version: AuthzPolicySchemaVersion = 1,
     ) -> bool:
-        if self.github_ids and identity.github_id not in self.github_ids:
-            return False
-        if self.logins and not self._matches_any(identity.login, self.logins):
-            return False
-        if self.organizations and not self._intersects(identity.organizations, self.organizations):
-            return False
-        if self.teams and not self._intersects(identity.teams, self.teams):
-            return False
-        if self.roles and identity.role not in self.roles:
+        if not self.matches_principal(
+            github_id=identity.github_id,
+            login=identity.login,
+            organizations=identity.organizations,
+            teams=identity.teams,
+            role=identity.role,
+        ):
             return False
         if self.products and product not in self.products:
             return False

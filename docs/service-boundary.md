@@ -729,11 +729,10 @@ stable managed rule after canary evidence.
 The standalone policy-admin worker owns its exact immutable grants in the
 separate `operator.authz-policy-reconcile` managed set. Rotate that authority by
 expanding through the currently authorized worker, advancing the wrapper pin,
-verifying the new identity, and then contracting the old rule. When the set is
-first established, the deploy workflow may carry a temporary authz-only
-selector that forwards the dedicated protected secret to the previous worker.
-That bridge does not deploy Launchplane, cannot accept deploy or rollback
-inputs, and is removed after the standalone wrapper succeeds.
+verifying the new identity, and then contracting the old rule. The deploy
+workflow no longer carries any authorization inputs, secret, or reconciliation
+job. Do not reintroduce a deploy-time policy bridge; missing policy-admin
+authority is a DB-native recovery design blocker.
 
 Production diagnostic and repair workers do not accept a service URL or OIDC
 audience from their callers. Thin dispatch workflows may forward only the typed

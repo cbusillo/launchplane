@@ -2,9 +2,19 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import unittest
+from unittest.mock import patch
 
-from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    GitHubHumanIdentity,
+    GitHubHumanPolicyRule,
+    LaunchplaneAuthzPolicy,
+)
 from control_plane.service_human_auth import (
+    GITHUB_EMAILS_URL,
+    GITHUB_ORGS_URL,
+    GITHUB_TEAMS_URL,
+    GITHUB_USER_URL,
+    GitHubOAuthClient,
     GitHubOAuthConfig,
     HumanSessionManager,
     InMemoryHumanSessionStore,
@@ -12,6 +22,26 @@ from control_plane.service_human_auth import (
     build_browser_mutation_request_headers,
     validate_browser_mutation_request_headers,
 )
+
+
+class _FakeGitHubResponse:
+    def __init__(self, payload: object) -> None:
+        self._payload = payload
+
+    def json(self) -> object:
+        return self._payload
+
+
+class _FakeOAuthSession:
+    def __init__(self, payloads: dict[str, object]) -> None:
+        self._payloads = payloads
+        self.token_fetched = False
+
+    def fetch_token(self, *_args: object, **_kwargs: object) -> None:
+        self.token_fetched = True
+
+    def get(self, url: str) -> _FakeGitHubResponse:
+        return _FakeGitHubResponse(self._payloads[url])
 
 
 def _config(*, session_secret: str = "session-secret") -> GitHubOAuthConfig:
@@ -36,8 +66,34 @@ def _identity() -> GitHubHumanIdentity:
     )
 
 
+def _oauth_config() -> GitHubOAuthConfig:
+    return GitHubOAuthConfig(
+        client_id="client-id",
+        client_secret="client-secret",
+        public_url="https://launchplane.example",
+        session_secret="session-secret",
+        bootstrap_admin_emails=frozenset({"alice@example.com"}),
+    )
+
+
+def _oauth_session() -> _FakeOAuthSession:
+    return _FakeOAuthSession(
+        {
+            GITHUB_USER_URL: {
+                "login": "alice",
+                "id": 123,
+                "name": "Alice Example",
+                "email": "alice@example.com",
+            },
+            GITHUB_ORGS_URL: [],
+            GITHUB_TEAMS_URL: [],
+            GITHUB_EMAILS_URL: [],
+        }
+    )
+
+
 class HumanSessionManagerTests(unittest.TestCase):
-    def test_bootstrap_admin_role_survives_db_policy_revalidation(self) -> None:
+    def test_bootstrap_admin_role_applies_before_db_human_policy_exists(self) -> None:
         manager = HumanSessionManager(
             config=GitHubOAuthConfig(
                 client_id="client-id",
@@ -56,6 +112,99 @@ class HumanSessionManagerTests(unittest.TestCase):
             ),
             "admin",
         )
+
+    def test_bootstrap_admin_role_stops_after_db_human_policy_exists(self) -> None:
+        manager = HumanSessionManager(
+            config=GitHubOAuthConfig(
+                client_id="client-id",
+                client_secret="client-secret",
+                public_url="https://launchplane.example",
+                session_secret="session-secret",
+                bootstrap_admin_emails=frozenset({"alice@example.com"}),
+            ),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        policy = LaunchplaneAuthzPolicy(
+            github_humans=(
+                GitHubHumanPolicyRule(
+                    github_ids=(999,),
+                    roles=("admin",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("authz_policy_grant.write",),
+                ),
+            )
+        )
+
+        self.assertIsNone(manager.authorized_role(identity=_identity(), authz_policy=policy))
+
+    def test_legacy_human_policy_does_not_disable_bootstrap_admin(self) -> None:
+        manager = HumanSessionManager(
+            config=GitHubOAuthConfig(
+                client_id="client-id",
+                client_secret="client-secret",
+                public_url="https://launchplane.example",
+                session_secret="session-secret",
+                bootstrap_admin_emails=frozenset({"alice@example.com"}),
+            ),
+            session_store=InMemoryHumanSessionStore(),
+        )
+        policy = LaunchplaneAuthzPolicy(
+            github_humans=(
+                GitHubHumanPolicyRule(
+                    logins=("*",),
+                    actions=("authz_policy_grant.write",),
+                ),
+            )
+        )
+
+        self.assertEqual(
+            manager.authorized_role(identity=_identity(), authz_policy=policy), "admin"
+        )
+
+    def test_oauth_legacy_human_policy_preserves_bootstrap_admin(self) -> None:
+        oauth_session = _oauth_session()
+        policy = LaunchplaneAuthzPolicy(
+            github_humans=(
+                GitHubHumanPolicyRule(
+                    logins=("*",),
+                    actions=("authz_policy_grant.write",),
+                ),
+            )
+        )
+
+        with patch.object(GitHubOAuthClient, "_new_session", return_value=oauth_session):
+            identity = GitHubOAuthClient(_oauth_config()).fetch_identity(
+                code="github-code",
+                code_verifier="verifier",
+                authz_policy=policy,
+            )
+
+        self.assertEqual(identity.role, "admin")
+
+    def test_oauth_db_policy_admin_retires_bootstrap_admin(self) -> None:
+        oauth_session = _oauth_session()
+        policy = LaunchplaneAuthzPolicy(
+            github_humans=(
+                GitHubHumanPolicyRule(
+                    github_ids=(999,),
+                    roles=("admin",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("authz_policy_grant.write",),
+                ),
+            )
+        )
+
+        with (
+            patch.object(GitHubOAuthClient, "_new_session", return_value=oauth_session),
+            self.assertRaises(PermissionError),
+        ):
+            GitHubOAuthClient(_oauth_config()).fetch_identity(
+                code="github-code",
+                code_verifier="verifier",
+                authz_policy=policy,
+            )
 
     def test_session_cookie_is_signed_and_round_trips(self) -> None:
         store = InMemoryHumanSessionStore()
@@ -104,6 +253,7 @@ class HumanSessionManagerTests(unittest.TestCase):
 
         self.assertIsNone(manager.read_cookie(f"launchplane_session={session.session_id}"))
         self.assertIsNone(manager.read_cookie("launchplane_session=bad value.signature"))
+        self.assertIsNone(manager.read_cookie(f"launchplane_session={session.session_id}.é"))
         self.assertIsNone(manager.read_cookie("other=value"))
 
     def test_delete_cookie_session_requires_valid_signature(self) -> None:
@@ -179,6 +329,7 @@ class HumanSessionManagerTests(unittest.TestCase):
         first_token = manager.csrf_token(first_session)
 
         self.assertIsNone(manager.consume_csrf_token(second_session, first_token))
+        self.assertIsNone(manager.consume_csrf_token(first_session, "v1.0.é"))
         rotated_session = manager.consume_csrf_token(first_session, first_token)
         assert rotated_session is not None
         self.assertIsNone(manager.consume_csrf_token(rotated_session, first_token))

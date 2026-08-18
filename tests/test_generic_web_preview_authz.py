@@ -96,6 +96,28 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
 
         self.assertIn("include_ingress_operator", workflow_text)
         self.assertIn("launchplane_sha", workflow_text)
+        self.assertIn(
+            "Generic-web preview authorization must run from the default branch",
+            workflow_text,
+        )
+        self.assertNotIn("secrets: inherit", workflow_text)
+        self.assertIn(
+            'managed_set_id" != "operator.generic-web-preview"',
+            workflow_text,
+        )
+        self.assertIn("verify-apply:", workflow_text)
+        self.assertIn("Download authorization apply evidence", workflow_text)
+        self.assertIn("group: launchplane-authz-policy", workflow_text)
+        self.assertIn("Applied preview authorization did not match", workflow_text)
+        apply_workflow_text = Path(
+            ".github/workflows/reusable-generic-web-preview-authz-apply.yml"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("group: launchplane-authz-policy", apply_workflow_text)
+        self.assertIn(
+            'managed_set_id" != "operator.generic-web-preview"',
+            apply_workflow_text,
+        )
+        self.assertIn("Verify applied authorization", apply_workflow_text)
 
     def test_onboarding_generates_exact_six_rule_contract(self) -> None:
         rules = generic_web_preview_rules(_request())

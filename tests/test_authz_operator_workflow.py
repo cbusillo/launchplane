@@ -144,6 +144,16 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 "${{ secrets.LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_BACKUP_RESTORE_MANAGED_SET_JSON }}",
             ),
         }
+        raw_managed_set_options = managed_set_input["options"]
+        assert isinstance(raw_managed_set_options, list)
+        managed_set_options: list[str] = []
+        for option in raw_managed_set_options:
+            assert isinstance(option, str)
+            managed_set_options.append(option)
+        self.assertEqual(
+            set(managed_set_options),
+            {job_name.removeprefix("reconcile-") for job_name in expected_jobs},
+        )
         self.assertEqual(set(self.dispatch_workflow.jobs), set(expected_jobs))
         for job_name, (condition, expected_secret) in expected_jobs.items():
             with self.subTest(job=job_name):
@@ -162,39 +172,52 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
                 dispatch_inputs = dispatch_job["with"]
                 assert isinstance(dispatch_inputs, dict)
                 expected_managed_set_ids = {
+                    "reconcile-primary": "operator.primary",
                     "reconcile-authz-policy-reconcile": "operator.authz-policy-reconcile",
                     "reconcile-generic-web-onboarding": "operator.generic-web-onboarding",
                     "reconcile-manager-preview-approval": "operator.manager-preview-approval",
                     "reconcile-owner-acceptance": "operator.owner-acceptance",
                     "reconcile-product-owner-policy-admin": "operator.product-owner-policy-admin",
+                    "reconcile-product-health-monitoring": "operator.product-health-monitoring",
                     "reconcile-product-retirement": "operator.product-retirement",
-                    "reconcile-detached-application-retirement": (
-                        "operator.detached-application-retirement"
-                    ),
-                    "reconcile-preview-feedback-remediation": (
-                        "operator.preview-feedback-remediation"
-                    ),
-                    "reconcile-generic-web-route-binding": (
-                        "operator.generic-web-route-binding"
-                    ),
+                    "reconcile-detached-application-retirement": "operator.detached-application-retirement",
+                    "reconcile-preview-feedback-remediation": "operator.preview-feedback-remediation",
+                    "reconcile-generic-web-route-binding": "operator.generic-web-route-binding",
                     "reconcile-generic-web-testing-ingress-route": (
                         "operator.generic-web-testing-ingress-route"
                     ),
+                    "reconcile-odoo-route-binding": "operator.odoo-route-binding",
+                    "reconcile-odoo-external-route-binding": "operator.odoo-external-route-binding",
+                    "reconcile-odoo-testing-ingress-route": "operator.odoo-testing-ingress-route",
+                    "reconcile-odoo-testing-route-binding-refresh": (
+                        "operator.odoo-testing-route-binding-refresh"
+                    ),
+                    "reconcile-odoo-testing-target-replacement": (
+                        "operator.odoo-testing-target-replacement"
+                    ),
+                    "reconcile-odoo-opw-preview-feedback": "operator.odoo-opw-preview-feedback",
+                    "reconcile-odoo-opw-production-enrollment": (
+                        "operator.odoo-opw-production-enrollment"
+                    ),
+                    "reconcile-odoo-production-enrollment": "operator.odoo-production-enrollment",
+                    "reconcile-odoo-production-operation-read": (
+                        "operator.odoo-production-operation-read"
+                    ),
+                    "reconcile-odoo-production-backup-restore": (
+                        "operator.odoo-production-backup-restore"
+                    ),
                 }
-                if job_name in expected_managed_set_ids:
-                    self.assertEqual(
-                        dispatch_inputs["expected_managed_set_id"],
-                        expected_managed_set_ids[job_name],
-                    )
-                else:
-                    self.assertNotIn("expected_managed_set_id", dispatch_inputs)
+                self.assertEqual(
+                    dispatch_inputs["expected_managed_set_id"],
+                    expected_managed_set_ids[job_name],
+                )
                 dispatch_secrets = dispatch_job["secrets"]
                 assert isinstance(dispatch_secrets, dict)
                 self.assertEqual(dispatch_secrets["managed_set_json"], expected_secret)
 
-    def test_deploy_workflow_bootstraps_managed_authz_without_deploying(self) -> None:
+    def test_deploy_workflow_does_not_administer_authorization(self) -> None:
         deploy_job = self.deploy_workflow.job("deploy")
-        self.assertIn("inputs.authz_managed_mode == 'none'", str(deploy_job["if"]))
+        self.assertNotIn("authz_managed", str(deploy_job["if"]))
         self.assertNotIn("operator-authz-grants", self.deploy_workflow.jobs)
         dispatch = self.deploy_workflow.data["on"]
         assert isinstance(dispatch, dict)
@@ -203,42 +226,18 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         dispatch_inputs = workflow_dispatch["inputs"]
         assert isinstance(dispatch_inputs, dict)
         self.assertFalse(any(name.startswith("authz_grants_") for name in dispatch_inputs))
+        self.assertFalse(any(name.startswith("authz_managed_") for name in dispatch_inputs))
         self.assertNotIn("authz_managed_set", dispatch_inputs)
         self.assertNotIn(
             "operator-authz-policy-reconcile-bootstrap",
             self.deploy_workflow.jobs,
         )
-        managed_job = self.deploy_workflow.job("operator-authz-managed")
-        self.assertEqual(
-            self.deploy_workflow.job_uses("operator-authz-managed"),
-            "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml@"
-            "4dbef2945b0a297a6edaa949a42d8c7d4cbc01cd",
+        self.assertNotIn("operator-authz-managed", self.deploy_workflow.jobs)
+        self.assertNotIn("operator-authz-managed-validate", self.deploy_workflow.jobs)
+        self.assertNotIn(
+            "LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON",
+            Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8"),
         )
-        self.assertEqual(managed_job["needs"], "operator-authz-managed-validate")
-        self.assertEqual(
-            self.deploy_workflow.job_permissions("operator-authz-managed"),
-            {"contents": "read", "id-token": "write"},
-        )
-        managed_secrets = managed_job["secrets"]
-        assert isinstance(managed_secrets, dict)
-        self.assertEqual(
-            managed_secrets["managed_set_json"],
-            "${{ secrets.LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON }}",
-        )
-        managed_inputs = managed_job["with"]
-        assert isinstance(managed_inputs, dict)
-        self.assertEqual(managed_inputs["mode"], "${{ inputs.authz_managed_mode }}")
-        self.assertEqual(
-            managed_inputs["reviewed_plan_sha256"],
-            "${{ inputs.authz_managed_reviewed_plan_sha256 }}",
-        )
-        validation_step = self.deploy_workflow.step_named(
-            "operator-authz-managed-validate", "Validate managed authz isolation"
-        )
-        self.assertIsNotNone(validation_step)
-        assert validation_step is not None
-        self.assertIn("cannot include a deploy image input", validation_step.run)
-        self.assertIn("cannot include break-glass rollback inputs", validation_step.run)
 
     def test_reusable_workflow_is_protected_and_service_backed(self) -> None:
         workflow_call = self.workflow.data["on"]
@@ -251,8 +250,8 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
         assert isinstance(workflow_call_inputs, dict)
         expected_managed_set_id = workflow_call_inputs["expected_managed_set_id"]
         assert isinstance(expected_managed_set_id, dict)
-        self.assertEqual(expected_managed_set_id["default"], "")
-        self.assertEqual(expected_managed_set_id["required"], False)
+        self.assertNotIn("default", expected_managed_set_id)
+        self.assertEqual(expected_managed_set_id["required"], True)
         self.assertEqual(expected_managed_set_id["type"], "string")
         workflow_call_secrets = workflow_call_contract["secrets"]
         assert isinstance(workflow_call_secrets, dict)
@@ -316,6 +315,16 @@ class AuthzOperatorWorkflowTests(unittest.TestCase):
             "${{ steps.request.outputs.evidence_directory }}",
         )
         self.assertEqual(upload_step.with_values["retention-days"], 30)
+        verify_step = self.workflow.step_named(
+            "reconcile", "Verify and summarize managed authz result"
+        )
+        self.assertIsNotNone(verify_step)
+        assert verify_step is not None
+        self.assertIn("operational_readiness_blocked_rule_count", verify_step.run)
+        self.assertIn(
+            "refused to verify an authz apply with operational-readiness blockers",
+            verify_step.run,
+        )
         cleanup_step = self.workflow.step_named(
             "reconcile", "Remove managed authz request material"
         )

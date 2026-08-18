@@ -184,6 +184,13 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
                         'contexts = ["launchplane"]',
                         'actions = ["authz_policy_grant.write"]',
                         "",
+                        "[[local_admins]]",
+                        'subjects = ["recovery-admin"]',
+                        'token_labels = ["recovery-admin"]',
+                        'products = ["launchplane"]',
+                        'contexts = ["launchplane"]',
+                        'actions = ["authz_policy_grant.write"]',
+                        "",
                     )
                 ),
                 encoding="utf-8",

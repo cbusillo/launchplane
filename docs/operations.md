@@ -552,7 +552,9 @@ requires DB-backed policy storage, enforces `authz_policy_grant.write`,
 preserves signed-in GitHub human-session callers, and keeps dry-runs stateless.
 Apply atomically commits the active-policy compare-and-swap and completed
 `Idempotency-Key` replay evidence. Managed reconciliation is the sole policy
-write contract for every principal type.
+write implementation currently available for every principal type. That is an
+implementation fact, not approval for GitHub to remain durable desired-policy
+authority. Follow `authorization-authority.md` and the active `#2058` freeze.
 
 `POST /v1/authz-diagnostics/github-actions/evaluate` is a read-only diagnostic
 route for GitHub Actions callers. It evaluates only the calling OIDC identity
@@ -562,10 +564,12 @@ active policy record/revision plus opaque identity and rule fingerprints and
 failed selector categories; it never returns workflow refs, repositories,
 policy values, or other principal rules. Ordinary route denials remain generic.
 
-Operators mutate shared or production authz through the deployed service, not
-through direct DB commands or a local CLI from an arbitrary checkout. Store the
-complete desired rules for one `managed_set_id` in a protected repository
-secret. `LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` owns the primary operator set;
+Operators never mutate shared or production authz through direct DB commands or
+a local CLI from an arbitrary checkout. The protected secret/workflow model
+below is transitional compatibility for already-existing managed sets, not the
+routine path for new grants. Do not create a managed set or modify production
+authorization merely to resolve another task's `authorization_denied` result.
+`LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` currently carries the primary operator set;
 `LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON` owns the exact immutable
 policy-admin worker rules for the standalone authz wrapper and must declare the
 `operator.authz-policy-reconcile` managed-set identity;
@@ -658,19 +662,22 @@ deliberately excluded from that secret.
 The policy-admin worker set is self-rotating. Before repinning the standalone
 wrapper, add a distinct exact rule for the next reusable-worker SHA through the
 currently authorized worker, apply the reviewed expansion, then advance the
-wrapper. A first-time recovery may temporarily expose
-`authz_managed_set = authz-policy-reconcile` in the deploy workflow's existing
-authz-only path so the previous immutable worker can add the standalone rule.
-That selector is a bootstrap bridge only: verify the new wrapper, then remove
-the selector in the next change. It must never replace or partially reconstruct
-`LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON`.
+wrapper. The former temporary deploy selector for first-time policy-admin
+recovery no longer exists. Do not reintroduce it or represent image rollback as
+DB-policy recovery. A missing authorized administrator is a `#2058` architecture
+blocker until a bounded, independently protected DB-policy recovery contract is
+designed and reviewed.
 
-The reusable authz worker accepts an optional exact expected managed-set
-identity from a reviewed wrapper. When provided, the worker rejects protected
+The reusable authz worker requires an exact expected managed-set identity from
+every reviewed wrapper. The worker rejects protected
 configuration whose `managed_set_id` does not match before rendering or sending
-the reconciliation request. Land this compatibility input before advancing a
-pinned wrapper that depends on it; do not pass a new input to an older immutable
-worker revision.
+the reconciliation request. Every standalone selector binds one exact
+`operator.*` identity. The deploy workflow is not an authorization wrapper and
+does not carry a managed-set secret.
+
+Land reusable-workflow input compatibility before advancing any immutable
+wrapper pin that depends on it. Never pass a newly introduced input to an older
+pinned worker revision that does not declare that input.
 
 ### Reusable workflow SHA rollout for readiness-gated actions
 
@@ -681,7 +688,8 @@ worker without creating an authorization gap by using two separate exact rules:
 1. Add a new rule with a distinct `managed_rule_id` and the new immutable worker
    SHA while retaining the old exact rule unchanged. Each rule must keep a
    singleton `job_workflow_refs` selector and the same exact lane/action scope.
-2. Run `Manage Launchplane Authorization` in `dry_run` mode and require
+2. Only for an explicitly approved maintenance of this already-authorized
+   transitional set, run `Manage Launchplane Authorization` in `dry_run` mode and require
    `operational_readiness_blocked_rule_count=0` in the recorded diff before
    approving the protected `launchplane-authz-admin` job. Apply the reviewed
    expansion, then deploy the wrapper that calls the new worker SHA.
@@ -691,12 +699,22 @@ worker without creating an authorization gap by using two separate exact rules:
    the readiness preflight.
 
 Do not place old and new worker SHAs together in one readiness-sensitive rule.
-That overlap can be valid transitional authorization, but it is intentionally
-not final operational-readiness shape and will report
+An existing overlap can remain valid transitional authorization, but it is
+intentionally not final operational-readiness shape and will report
 `job_workflow_refs_not_singleton`. The managed-authz dry-run records bounded
 rule IDs, affected readiness actions, and reason codes without exposing selector
-values. Every expansion and contraction still requires the protected human
-approval; diagnostics do not bypass or weaken that control.
+values. Any changed apply is rejected until the desired set uses separate exact
+rules; an unchanged replay remains a no-op. Every expansion and contraction
+still requires the protected human approval; diagnostics do not bypass or
+weaken that control.
+
+Managed-authz dry-runs also return `policy_safety_blockers` for candidates that
+would remove the last reachable policy administrator, remove the applying
+administrator, or leave no administrator independent from the applying
+identity. These blockers are review evidence rather than dry-run transport
+errors. Apply remains fail-closed with the corresponding bounded error code and
+does not persist the candidate while any applicable policy-safety blocker
+remains.
 
 `Tracked Target Logs` and `Odoo Website Bootstrap Override` follow this same
 two-change rollout. Their dispatch files are thin operator entrypoints pinned to
@@ -734,15 +752,14 @@ read with all mutation flags disabled so drift fails closed instead of changing
 the route. Context-scoped callers retain the existing provider-mutation
 contract; do not grant that broader scope merely to inspect one testing lane.
 
-Use the `Manage Launchplane Authorization` workflow on the default branch.
-Select the intended `managed_set`, then dispatch `mode=dry_run` with the final
-single-line reason and related issue that will also be used for apply. The
-environment gate protects the OIDC-minting job,
+For explicitly approved maintenance of an already-authorized transitional set,
+use `Manage Launchplane Authorization` on the default branch. Select the
+intended `managed_set`, then dispatch `mode=dry_run` with the final single-line
+reason and related issue that will also be used for apply. The environment gate
+protects the OIDC-minting job,
 the worker is pinned to a reviewed immutable revision, and all authz runs share
-one non-canceling concurrency group. During the one-time bootstrap before the
-dedicated wrapper is present in active policy, dispatch `Deploy Launchplane`
-with `authz_managed_mode=dry_run`; that job calls the same protected immutable
-worker without building or deploying an image.
+one non-canceling concurrency group. `Deploy Launchplane` has no authorization
+inputs or jobs and must not be used for policy bootstrap or recovery.
 
 Babysit protected operator workflows with the installed GitHub workflow helper
 instead of dispatching and then polling by workflow name:

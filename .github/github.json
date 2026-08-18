@@ -9,6 +9,7 @@
     "index": "docs/README.md",
     "architecture": "docs/architecture.md",
     "configBoundary": "docs/config-boundary.md",
+    "authorizationAuthority": "docs/authorization-authority.md",
     "serviceBoundary": "docs/service-boundary.md",
     "dokployServiceDeployments": "docs/dokploy-service-deployments.md",
     "driverDescriptors": "docs/driver-descriptors.md",

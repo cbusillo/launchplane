@@ -381,6 +381,63 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             )
         )
 
+    def test_human_rule_without_principal_or_role_preserves_legacy_runtime_semantics(
+        self,
+    ) -> None:
+        identity = _human_identity(role="admin")
+
+        for rule in (
+            GitHubHumanPolicyRule(
+                roles=("admin",),
+                products=("launchplane",),
+                contexts=("launchplane",),
+                actions=("authz_policy_grant.write",),
+            ),
+            GitHubHumanPolicyRule(
+                github_ids=(identity.github_id,),
+                products=("launchplane",),
+                contexts=("launchplane",),
+                actions=("authz_policy_grant.write",),
+            ),
+        ):
+            with self.subTest(rule=rule.model_dump(mode="json")):
+                self.assertTrue(
+                    rule.allows(
+                        identity=identity,
+                        action="authz_policy_grant.write",
+                        product="launchplane",
+                        context="launchplane",
+                    )
+                )
+                self.assertTrue(
+                    rule.matches_principal(
+                        github_id=identity.github_id,
+                        login=identity.login,
+                        organizations=identity.organizations,
+                        teams=identity.teams,
+                        role=identity.role,
+                    )
+                )
+
+    def test_human_principal_selectors_preserve_legacy_glob_runtime_semantics(self) -> None:
+        identity = _human_identity(role="read_only")
+
+        for rule in (
+            GitHubHumanPolicyRule(logins=("*",), roles=("read_only",)),
+            GitHubHumanPolicyRule(organizations=("*",), roles=("read_only",)),
+            GitHubHumanPolicyRule(teams=("*",), roles=("read_only",)),
+        ):
+            with self.subTest(rule=rule.model_dump(mode="json")):
+                self.assertTrue(
+                    rule.matches_principal(
+                        github_id=identity.github_id,
+                        login=identity.login,
+                        organizations=identity.organizations,
+                        teams=identity.teams,
+                        role=identity.role,
+                    )
+                )
+
     def test_agent_authz_audit_records_safe_denial_metadata(self) -> None:
         audit = agent_authz_audit(
             identity=_actions_identity(),
