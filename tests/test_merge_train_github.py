@@ -795,7 +795,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         },
                         {
                             "name": "launchplane/owner-acceptance",
-                            **_check_run("completed", "failure"),
+                            **_check_run("in_progress", None),
                         },
                     ]
                 },

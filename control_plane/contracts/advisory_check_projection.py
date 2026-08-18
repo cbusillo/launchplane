@@ -19,6 +19,7 @@ LAUNCHPLANE_PROJECTED_CHECK_NAMES = frozenset(
 )
 
 AdvisoryCheckProjectionStatus = Literal["projected", "updated", "replayed"]
+AdvisoryCheckRunStatus = Literal["in_progress", "completed"]
 AdvisoryCheckConclusion = Literal["neutral", "success", "failure", "action_required"]
 
 
@@ -34,7 +35,8 @@ class AdvisoryCheckProjection(BaseModel):
     details_url: str
     title: str = Field(min_length=1, max_length=255)
     summary: str = Field(min_length=1, max_length=65535)
-    conclusion: AdvisoryCheckConclusion = "neutral"
+    check_status: AdvisoryCheckRunStatus = "completed"
+    conclusion: AdvisoryCheckConclusion | None = "neutral"
 
     @model_validator(mode="after")
     def _validate_projection(self) -> "AdvisoryCheckProjection":
@@ -68,13 +70,17 @@ class AdvisoryCheckProjection(BaseModel):
             ) from error
         if self.title.strip() != self.title or self.summary.strip() != self.summary:
             raise ValueError("Advisory check projection text must be canonical.")
+        if self.check_status == "completed" and self.conclusion is None:
+            raise ValueError("Completed advisory checks require a conclusion.")
+        if self.check_status == "in_progress" and self.conclusion is not None:
+            raise ValueError("In-progress advisory checks cannot have a conclusion.")
         return self
 
 
 class AdvisoryCheckProjectionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: Literal[2] = 2
     status: AdvisoryCheckProjectionStatus
     name: str
     head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
@@ -82,7 +88,8 @@ class AdvisoryCheckProjectionResult(BaseModel):
     app_id: int = Field(ge=1)
     installation_id: int = Field(ge=1)
     check_run_id: int = Field(ge=1)
-    conclusion: AdvisoryCheckConclusion
+    check_status: AdvisoryCheckRunStatus
+    conclusion: AdvisoryCheckConclusion | None
 
 
 def is_launchplane_projected_check(name: str) -> bool:

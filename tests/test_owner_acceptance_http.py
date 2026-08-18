@@ -15,6 +15,7 @@ from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
     OWNER_ACCEPTANCE_READ_ACTION,
     OwnerAcceptanceDecision,
+    OwnerAcceptanceTransitionError,
 )
 from control_plane.contracts.change_impact import ChangeImpactTargetReference
 from control_plane.contracts.product_owner import ProductOwnerGrant, ProductOwnerIdentity
@@ -93,6 +94,7 @@ class _GitHubCheckApi:
             self.check_run = {
                 "id": 91,
                 **body,
+                "conclusion": body.get("conclusion"),
                 "app": {"id": 42},
             }
         else:
@@ -394,7 +396,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(outcome.result)
         self.assertEqual(github_api.calls, [])
 
-    async def test_restoration_demotes_exact_target_before_reresolution(self) -> None:
+    async def test_restoration_marks_exact_target_before_reresolution(self) -> None:
         exact_target = _repository_evidence().target
         service = OwnerAcceptanceProjectionService(
             repository_evidence_provider=_EvidenceProvider(_repository_evidence()),
@@ -403,8 +405,8 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         operations: list[str] = []
 
-        def project_conservative(*_args: object, **_kwargs: object) -> MagicMock:
-            operations.append("demote")
+        def project_reconciliation_required(*_args: object, **_kwargs: object) -> MagicMock:
+            operations.append("mark-required")
             return MagicMock()
 
         def fail_resolution(*_args: object, **_kwargs: object) -> object:
@@ -414,8 +416,8 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(
                 OwnerAcceptanceProjectionService,
-                "project_conservative_locked",
-                side_effect=project_conservative,
+                "project_reconciliation_required_locked",
+                side_effect=project_reconciliation_required,
             ),
             patch.object(
                 OwnerAcceptanceProjectionService,
@@ -424,7 +426,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
             ),
             self.assertRaisesRegex(RuntimeError, "repository evidence is unavailable"),
         ):
-            service.restore_conservative_locked(
+            service.restore_reconciliation_required_locked(
                 store=MagicMock(),
                 target=ChangeImpactTargetReference(
                     repository=REPOSITORY,
@@ -435,9 +437,9 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 source_event_id="restore-exact-first",
             )
 
-        self.assertEqual(operations, ["demote", "resolve"])
+        self.assertEqual(operations, ["mark-required", "resolve"])
 
-    async def test_projects_pending_owner_decision_as_action_required_check(self) -> None:
+    async def test_projects_pending_owner_decision_as_in_progress_check(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
             calls: list[dict[str, Any]] = []
@@ -453,7 +455,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                         "name": body["name"],
                         "head_sha": body["head_sha"],
                         "status": body["status"],
-                        "conclusion": body["conclusion"],
+                        "conclusion": body.get("conclusion"),
                         "external_id": body["external_id"],
                         "details_url": body["details_url"],
                         "output": body["output"],
@@ -490,12 +492,14 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["decision"]["status"], "pending")
         self.assertEqual(payload["result"]["name"], "launchplane/owner-acceptance")
-        self.assertEqual(payload["result"]["conclusion"], "action_required")
+        self.assertEqual(payload["result"]["check_status"], "in_progress")
+        self.assertIsNone(payload["result"]["conclusion"])
         self.assertEqual(
             calls[-2]["body"]["details_url"],
             "https://ops.example.test/ui/engineering/owner-acceptance?repository=example%2Fweb&pull_request=2022",
         )
-        self.assertEqual(calls[-2]["body"]["conclusion"], "action_required")
+        self.assertEqual(calls[-2]["body"]["status"], "in_progress")
+        self.assertNotIn("conclusion", calls[-2]["body"])
         self.assertEqual(calls[-1]["method"], "DELETE")
 
     async def test_successful_event_projects_conservative_then_final_decision(self) -> None:
@@ -529,8 +533,12 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(event_count, 1)
         self.assertEqual(
-            [body["conclusion"] for body in github_api.successful_write_bodies],
-            ["action_required", "success"],
+            [body.get("conclusion") for body in github_api.successful_write_bodies],
+            [None, "success"],
+        )
+        self.assertEqual(
+            [body["status"] for body in github_api.successful_write_bodies],
+            ["in_progress", "completed"],
         )
         self.assertEqual(
             [body["output"]["title"] for body in github_api.successful_write_bodies],
@@ -576,6 +584,243 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(event_count, 0)
 
+    async def test_event_write_failure_confirms_absence_and_projects_failure(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            github_api = _GitHubCheckApi()
+            app = _app(store=store, github_api=github_api)
+
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                with patch.object(
+                    store,
+                    "write_owner_acceptance_event_record",
+                    side_effect=RuntimeError("storage write failed"),
+                ):
+                    response = await client.post(
+                        OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                        json={
+                            "target": {
+                                "repository": REPOSITORY,
+                                "pull_request_number": 2022,
+                            },
+                            "action": "accepted",
+                            "expected_binding_sha256": evaluated.json()["decision"]["binding"][
+                                "binding_sha256"
+                            ],
+                        },
+                        headers={"Idempotency-Key": "accept-with-storage-failure"},
+                    )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "owner_acceptance_event_write_failed",
+        )
+        self.assertIn("was not persisted", response.json()["detail"]["message"])
+        assert github_api.check_run is not None
+        self.assertEqual(github_api.check_run["status"], "completed")
+        self.assertEqual(github_api.check_run["conclusion"], "failure")
+        self.assertEqual(
+            github_api.check_run["output"]["title"],
+            "Owner acceptance: update failed",
+        )
+        self.assertEqual(
+            [body.get("conclusion") for body in github_api.successful_write_bodies],
+            [None, "failure"],
+        )
+
+    async def test_event_write_failure_reports_unrestored_github_projection(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            github_api = _GitHubCheckApi(fail_read_numbers=(2,))
+            app = _app(store=store, github_api=github_api)
+
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                with patch.object(
+                    store,
+                    "write_owner_acceptance_event_record",
+                    side_effect=RuntimeError("storage write failed"),
+                ):
+                    response = await client.post(
+                        OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                        json={
+                            "target": {
+                                "repository": REPOSITORY,
+                                "pull_request_number": 2022,
+                            },
+                            "action": "accepted",
+                            "expected_binding_sha256": evaluated.json()["decision"]["binding"][
+                                "binding_sha256"
+                            ],
+                        },
+                        headers={"Idempotency-Key": "accept-with-unrestored-failure"},
+                    )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "owner_acceptance_event_write_failed_projection_unknown",
+        )
+        self.assertIn("could not confirm", response.json()["detail"]["message"])
+        self.assertNotIn("GitHub shows", response.json()["detail"]["message"])
+        assert github_api.check_run is not None
+        self.assertEqual(github_api.check_run["status"], "in_progress")
+        self.assertIsNone(github_api.check_run["conclusion"])
+
+    async def test_concurrent_transition_error_preserves_domain_response(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            github_api = _GitHubCheckApi()
+            app = _app(store=store, github_api=github_api)
+
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                with patch.object(
+                    store,
+                    "write_owner_acceptance_event_record",
+                    side_effect=OwnerAcceptanceTransitionError("concurrent transition"),
+                ):
+                    response = await client.post(
+                        OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                        json={
+                            "target": {
+                                "repository": REPOSITORY,
+                                "pull_request_number": 2022,
+                            },
+                            "action": "accepted",
+                            "expected_binding_sha256": evaluated.json()["decision"]["binding"][
+                                "binding_sha256"
+                            ],
+                        },
+                        headers={"Idempotency-Key": "accept-with-transition-race"},
+                    )
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "owner_acceptance_transition_invalid",
+        )
+        assert github_api.check_run is not None
+        self.assertEqual(github_api.check_run["status"], "in_progress")
+        self.assertIsNone(github_api.check_run["conclusion"])
+        self.assertEqual(
+            github_api.check_run["output"]["title"],
+            "Owner acceptance: pending",
+        )
+
+    async def test_event_write_failure_detects_confirmed_persistence(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            github_api = _GitHubCheckApi()
+            app = _app(store=store, github_api=github_api)
+            persist_event = store.write_owner_acceptance_event_record
+
+            def persist_then_fail(record):  # type: ignore[no-untyped-def]
+                persist_event(record)
+                raise RuntimeError("storage acknowledgement failed")
+
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                with patch.object(
+                    store,
+                    "write_owner_acceptance_event_record",
+                    side_effect=persist_then_fail,
+                ):
+                    response = await client.post(
+                        OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                        json={
+                            "target": {
+                                "repository": REPOSITORY,
+                                "pull_request_number": 2022,
+                            },
+                            "action": "accepted",
+                            "expected_binding_sha256": evaluated.json()["decision"]["binding"][
+                                "binding_sha256"
+                            ],
+                        },
+                        headers={"Idempotency-Key": "accept-with-unknown-ack"},
+                    )
+                event_count = len(store.list_owner_acceptance_event_records())
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "owner_acceptance_projection_reconciliation_required",
+        )
+        self.assertIn("was persisted", response.json()["detail"]["message"])
+        self.assertEqual(event_count, 1)
+        assert github_api.check_run is not None
+        self.assertEqual(github_api.check_run["conclusion"], "action_required")
+        self.assertEqual(
+            github_api.check_run["output"]["title"],
+            "Owner acceptance: reconciliation required",
+        )
+
+    async def test_event_write_failure_projects_unknown_persistence_outcome(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            github_api = _GitHubCheckApi()
+            app = _app(store=store, github_api=github_api)
+
+            async with lifespan_client(app) as client:
+                evaluated = await client.get(
+                    OWNER_ACCEPTANCE_EVALUATION_ROUTE,
+                    params={"repository": REPOSITORY, "pull_request_number": 2022},
+                )
+                with (
+                    patch.object(
+                        store,
+                        "write_owner_acceptance_event_record",
+                        side_effect=RuntimeError("storage write failed"),
+                    ),
+                    patch.object(
+                        store,
+                        "read_owner_acceptance_event_record",
+                        side_effect=RuntimeError("storage read failed"),
+                    ),
+                ):
+                    response = await client.post(
+                        OWNER_ACCEPTANCE_EVENTS_ROUTE,
+                        json={
+                            "target": {
+                                "repository": REPOSITORY,
+                                "pull_request_number": 2022,
+                            },
+                            "action": "accepted",
+                            "expected_binding_sha256": evaluated.json()["decision"]["binding"][
+                                "binding_sha256"
+                            ],
+                        },
+                        headers={"Idempotency-Key": "accept-with-unknown-write"},
+                    )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "owner_acceptance_event_write_outcome_unknown",
+        )
+        self.assertIn("could not determine", response.json()["detail"]["message"])
+        assert github_api.check_run is not None
+        self.assertEqual(github_api.check_run["conclusion"], "failure")
+        self.assertEqual(
+            github_api.check_run["output"]["title"],
+            "Owner acceptance: write outcome unknown",
+        )
+
     async def test_final_projection_failure_requires_idempotent_reconciliation(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
@@ -601,7 +846,7 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 event_count_after_failure = len(store.list_owner_acceptance_event_records())
                 assert github_api.check_run is not None
-                conclusion_after_failure = github_api.check_run["conclusion"]
+                conclusion_after_failure = github_api.check_run.get("conclusion")
                 reconciled = await client.post(
                     OWNER_ACCEPTANCE_EVENTS_ROUTE,
                     json=request,
@@ -622,8 +867,12 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         assert github_api.check_run is not None
         self.assertEqual(github_api.check_run["conclusion"], "success")
         self.assertEqual(
-            [body["conclusion"] for body in github_api.successful_write_bodies],
-            ["action_required", "success"],
+            [body.get("conclusion") for body in github_api.successful_write_bodies],
+            [None, "action_required", None, "success"],
+        )
+        self.assertEqual(
+            [body["status"] for body in github_api.successful_write_bodies],
+            ["in_progress", "completed", "in_progress", "completed"],
         )
 
     async def test_final_token_revoke_failure_restores_conservative_projection(self) -> None:
@@ -663,11 +912,15 @@ class OwnerAcceptanceHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(github_api.check_run["conclusion"], "action_required")
         self.assertEqual(
             github_api.check_run["output"]["title"],
-            "Owner acceptance: updating decision",
+            "Owner acceptance: reconciliation required",
         )
         self.assertEqual(
-            [body["conclusion"] for body in github_api.successful_write_bodies],
-            ["action_required", "success", "action_required"],
+            [body.get("conclusion") for body in github_api.successful_write_bodies],
+            [None, "success", "action_required"],
+        )
+        self.assertEqual(
+            [body["status"] for body in github_api.successful_write_bodies],
+            ["in_progress", "completed", "completed"],
         )
 
     async def test_concurrent_negative_event_cannot_restore_stale_success(self) -> None:

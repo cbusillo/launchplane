@@ -1329,6 +1329,11 @@ class EveryCodeWorkerTests(unittest.TestCase):
                     "statusCheckRollup": [
                         {"name": "static_checks", "status": "COMPLETED", "conclusion": "SUCCESS"},
                         {"name": "preview", "status": "COMPLETED", "conclusion": "SKIPPED"},
+                        {
+                            "name": "launchplane/owner-acceptance",
+                            "status": "IN_PROGRESS",
+                            "conclusion": "",
+                        },
                     ],
                 }
             )
@@ -1346,6 +1351,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(len(gate_records), 1)
         self.assertEqual(gate_records[0].status, "labeled")
         self.assertEqual(gate_records[0].head_sha, "abcdef1234567890")
+        self.assertNotIn("owner-acceptance", gate_records[0].check_summary)
         self.assertIn(
             (
                 "gh",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 from urllib.parse import quote, urlencode
 
 import click
@@ -16,6 +17,7 @@ from control_plane.workflows.launchplane import github_api_request
 
 
 GitHubApiRequest = Callable[..., object]
+logger = logging.getLogger(__name__)
 
 
 class AdvisoryCheckProjectionError(ValueError):
@@ -63,38 +65,55 @@ def write_advisory_check_projection(
         raise AdvisoryCheckProjectionError(
             "GitHub advisory check runs response must include check_runs."
         )
-    current = next(
-        (
-            json_object(
-                item,
-                "GitHub advisory check run",
-                error_type=AdvisoryCheckProjectionError,
-            )
-            for item in raw_check_runs
-            if isinstance(item, dict)
-            and str(item.get("name") or "") == projection.name
-            and str(item.get("head_sha") or "").lower() == projection.head_sha
-            and _app_id(item.get("app")) == installation_token.app_id
-        ),
+    matching_runs = tuple(
+        json_object(
+            item,
+            "GitHub advisory check run",
+            error_type=AdvisoryCheckProjectionError,
+        )
+        for item in raw_check_runs
+        if isinstance(item, dict)
+        and item.get("name") == projection.name
+        and isinstance(item.get("head_sha"), str)
+        and item["head_sha"].lower() == projection.head_sha
+        and _app_id(item.get("app")) == installation_token.app_id
+    )
+    exact_match = next(
+        (check_run for check_run in matching_runs if _matches_projection(check_run, projection)),
         None,
     )
-    if current is not None and _matches_projection(current, projection):
+    if exact_match is not None:
         return _result(
             status="replayed",
             projection=projection,
             installation_token=installation_token,
-            check_run=current,
+            check_run=exact_match,
         )
-    body = {
+    current = matching_runs[0] if matching_runs else None
+    body: dict[str, object] = {
         "name": projection.name,
-        "status": "completed",
-        "conclusion": projection.conclusion,
+        "status": projection.check_status,
         "external_id": projection.external_id,
         "details_url": projection.details_url,
         "output": {"title": projection.title, "summary": projection.summary},
     }
+    if projection.conclusion is not None:
+        body["conclusion"] = projection.conclusion
     status: AdvisoryCheckProjectionStatus
-    if current is None:
+    recreate_incomplete = (
+        current is not None
+        and current.get("status") == "completed"
+        and projection.check_status == "in_progress"
+    )
+    if current is None or recreate_incomplete:
+        if recreate_incomplete:
+            logger.info(
+                "Creating a fresh in-progress advisory check after GitHub completed the prior run.",
+                extra={
+                    "advisory_check_name": projection.name,
+                    "advisory_check_head_sha": projection.head_sha,
+                },
+            )
         response = _github_api_request(
             api_request,
             path=f"/repos/{repository_path}/check-runs",
@@ -137,13 +156,13 @@ def write_advisory_check_projection(
 def _matches_projection(check_run: dict[str, object], projection: AdvisoryCheckProjection) -> bool:
     output = check_run.get("output")
     return (
-        str(check_run.get("status") or "") == "completed"
-        and str(check_run.get("conclusion") or "") == projection.conclusion
-        and str(check_run.get("external_id") or "") == projection.external_id
-        and str(check_run.get("details_url") or "") == projection.details_url
+        check_run.get("status") == projection.check_status
+        and _conclusion_matches(check_run, projection)
+        and check_run.get("external_id") == projection.external_id
+        and check_run.get("details_url") == projection.details_url
         and isinstance(output, dict)
-        and str(output.get("title") or "") == projection.title
-        and str(output.get("summary") or "") == projection.summary
+        and output.get("title") == projection.title
+        and output.get("summary") == projection.summary
     )
 
 
@@ -154,6 +173,7 @@ def _result(
     installation_token: GitHubAppInstallationToken,
     check_run: dict[str, object],
 ) -> AdvisoryCheckProjectionResult:
+    output = check_run.get("output")
     if (
         required_string_text(
             check_run.get("name"),
@@ -174,9 +194,12 @@ def _result(
         )
         != projection.external_id
         or _app_id(check_run.get("app")) != installation_token.app_id
-        or str(check_run.get("status") or "") != "completed"
-        or str(check_run.get("conclusion") or "") != projection.conclusion
-        or str(check_run.get("details_url") or "") != projection.details_url
+        or check_run.get("status") != projection.check_status
+        or not _conclusion_matches(check_run, projection)
+        or check_run.get("details_url") != projection.details_url
+        or not isinstance(output, dict)
+        or output.get("title") != projection.title
+        or output.get("summary") != projection.summary
     ):
         raise AdvisoryCheckProjectionError(
             "GitHub advisory check run response did not match exact projection identity."
@@ -193,8 +216,15 @@ def _result(
             "GitHub advisory check run response requires id.",
             error_type=AdvisoryCheckProjectionError,
         ),
+        check_status=projection.check_status,
         conclusion=projection.conclusion,
     )
+
+
+def _conclusion_matches(check_run: dict[str, object], projection: AdvisoryCheckProjection) -> bool:
+    if projection.conclusion is None:
+        return check_run.get("conclusion") is None
+    return check_run.get("conclusion") == projection.conclusion
 
 
 def _app_id(value: object) -> int:

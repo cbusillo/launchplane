@@ -1083,7 +1083,7 @@ class _TenantControllerTransport:
                             "name": "launchplane/owner-acceptance",
                             "head_sha": _candidate().head_sha,
                             "app": {"id": 42},
-                            "status": "queued",
+                            "status": "in_progress",
                             "conclusion": None,
                         },
                     ]
