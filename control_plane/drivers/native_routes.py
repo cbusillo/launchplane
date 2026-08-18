@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Any, Protocol
 
 from control_plane.contracts.driver_descriptor import DriverActionScope
 from control_plane.drivers.generic_web_dispatch import (
@@ -157,16 +157,24 @@ class _AuthorizationAllows(Protocol):
     ) -> bool: ...
 
 
+def _iterable_values(value: Any) -> Iterable[Any]:
+    return value if isinstance(value, Iterable) else ()
+
+
+def _text_value(value: Any) -> str:
+    return str(value)
+
+
 def _fastapi_route_paths_by_method(app: object, method: str) -> frozenset[str]:
     normalized_method = method.upper()
     route_paths: set[str] = set()
-    for route in cast(Iterable[object], getattr(app, "routes", ())):
+    for route in _iterable_values(getattr(app, "routes", ())):
         route_path = getattr(route, "path", None)
         route_methods = getattr(route, "methods", None)
         if not isinstance(route_path, str) or route_methods is None:
             continue
         methods = {
-            str(route_method).upper() for route_method in cast(Iterable[object], route_methods)
+            _text_value(route_method).upper() for route_method in _iterable_values(route_methods)
         }
         if normalized_method in methods:
             route_paths.add(route_path)
@@ -238,11 +246,11 @@ def _descriptor_driver_route_authz_action(route_path: str) -> str:
     return _descriptor_driver_route_metadata(route_path).authz_action
 
 
-def _is_native_fastapi_driver_route_path(route_path: str) -> bool:
+def is_native_fastapi_driver_route_path(route_path: str) -> bool:
     return route_path in _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS
 
 
-def _bind_native_fastapi_driver_handler(
+def bind_native_fastapi_driver_handler(
     *,
     route_path: str,
     endpoint: Callable[..., object],
@@ -252,7 +260,7 @@ def _bind_native_fastapi_driver_handler(
         raise ValueError(f"Unknown native FastAPI driver route: {route_path}")
     route_metadata = _descriptor_driver_route_metadata(route_path)
     if declared_methods is not None:
-        normalized_methods = frozenset(str(method).upper() for method in declared_methods)
+        normalized_methods = frozenset(_text_value(method).upper() for method in declared_methods)
         if normalized_methods != frozenset({route_metadata.method}):
             actual_methods = ", ".join(sorted(normalized_methods)) or "<none>"
             raise ValueError(
@@ -276,11 +284,11 @@ def _native_driver_route_metadata_for_handler(endpoint: object) -> _DriverRouteM
     return route_metadata
 
 
-def _native_driver_route_authz_action(endpoint: object) -> str:
+def native_driver_route_authz_action(endpoint: object) -> str:
     return _native_driver_route_metadata_for_handler(endpoint).authz_action
 
 
-def _native_driver_route_authorization_allows(
+def native_driver_route_authorization_allows(
     *,
     endpoint: object,
     authorization_allows: _AuthorizationAllows,
@@ -303,7 +311,7 @@ def _native_driver_route_authorization_allows(
     )
 
 
-def _native_driver_route_alternate_authz_action(endpoint: object) -> str:
+def native_driver_route_alternate_authz_action(endpoint: object) -> str:
     alternate_authz_actions = _native_driver_route_metadata_for_handler(
         endpoint
     ).alternate_authz_actions
@@ -313,6 +321,13 @@ def _native_driver_route_alternate_authz_action(endpoint: object) -> str:
             "authorization action."
         )
     return alternate_authz_actions[0]
+
+
+_is_native_fastapi_driver_route_path = is_native_fastapi_driver_route_path
+_bind_native_fastapi_driver_handler = bind_native_fastapi_driver_handler
+_native_driver_route_authz_action = native_driver_route_authz_action
+_native_driver_route_authorization_allows = native_driver_route_authorization_allows
+_native_driver_route_alternate_authz_action = native_driver_route_alternate_authz_action
 
 
 def _validate_native_descriptor_driver_routes() -> None:
@@ -362,7 +377,7 @@ def _validate_native_fastapi_driver_routes(app: object) -> None:
     route_registrations: dict[str, list[object]] = {
         route_path: [] for route_path in _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS
     }
-    for route in cast(Iterable[object], getattr(app, "routes", ())):
+    for route in _iterable_values(getattr(app, "routes", ())):
         route_path = getattr(route, "path", None)
         if isinstance(route_path, str) and route_path in route_registrations:
             route_registrations[route_path].append(route)
@@ -395,7 +410,8 @@ def _validate_native_fastapi_driver_routes(app: object) -> None:
             frozenset()
             if route_methods is None
             else frozenset(
-                str(route_method).upper() for route_method in cast(Iterable[object], route_methods)
+                _text_value(route_method).upper()
+                for route_method in _iterable_values(route_methods)
             )
         )
         if normalized_methods != frozenset({route_metadata.method}):

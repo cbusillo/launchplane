@@ -131,7 +131,7 @@ def build_every_code_work_request_id(
             "Every Code work request id requires repository, issue_number, and trigger_label"
         )
     digest = hashlib.sha256(
-        f"{normalized_repository}#{issue_number}:{normalized_label}".encode("utf-8")
+        f"{normalized_repository}#{issue_number}:{normalized_label}".encode()
     ).hexdigest()[:16]
     return f"every-code-{normalized_repository.replace('/', '-')}-{issue_number}-{digest}"
 
@@ -152,7 +152,7 @@ def build_every_code_work_request_lifecycle_id(
             },
             sort_keys=True,
             separators=(",", ":"),
-        ).encode("utf-8")
+        ).encode()
     ).hexdigest()[:16]
     return f"every-code-lifecycle-{digest}"
 
@@ -173,7 +173,7 @@ def claim_every_code_work_request(
     if record.state != "queued":
         return None
     new_attempt = record.attempt + 1
-    resolved_lease_expires_at = lease_expires_at.strip() or _add_seconds_to_timestamp(
+    resolved_lease_expires_at = lease_expires_at.strip() or add_seconds_to_timestamp(
         claimed_at, lease_seconds
     )
     return record.model_copy(
@@ -403,10 +403,13 @@ def close_every_code_work_request_for_issue(
     return record.model_copy(update=updates)
 
 
-def _add_seconds_to_timestamp(timestamp: str, seconds: int) -> str:
+def add_seconds_to_timestamp(timestamp: str, seconds: int) -> str:
     try:
         dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return timestamp
     result = dt.astimezone(UTC) + timedelta(seconds=seconds)
     return result.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+_add_seconds_to_timestamp = add_seconds_to_timestamp

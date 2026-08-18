@@ -5,9 +5,9 @@ from control_plane.service_auth import (
 )
 
 
-class _StubVerifier:
-    def __init__(self, identity: GitHubActionsIdentity):
-        self.identity = identity
+class StubVerifier:
+    def __init__(self, verified_identity: GitHubActionsIdentity):
+        self.identity = verified_identity
 
     def verify(self, token: str) -> GitHubActionsIdentity:
         if token != "valid-token":
@@ -15,7 +15,7 @@ class _StubVerifier:
         return self.identity
 
 
-def _identity(
+def identity(
     *,
     repository: str = "every/verireel",
     workflow_ref: str = "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
@@ -46,6 +46,10 @@ def _identity(
             "run_attempt": "1",
         },
     )
+
+
+_StubVerifier = StubVerifier
+_identity = identity
 
 
 def _local_operator_policy(

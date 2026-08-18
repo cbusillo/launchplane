@@ -3,14 +3,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import re
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "f0a2c4e6b8d1"
+EXPECTED_ALEMBIC_HEAD_REVISION = "a2c4e6f8b0d3"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -26,6 +26,10 @@ class SchemaInspectorProtocol(Protocol):
 
     def get_pk_constraint(self, table_name: str) -> Mapping[str, object]:
         raise NotImplementedError
+
+
+def _schema_metadata_text(value: Any) -> str:
+    return str(value)
 
 
 @dataclass(frozen=True)
@@ -283,6 +287,11 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         ("jsonb",),
     ),
     CriticalColumnType(
+        "launchplane_authz_denials",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
         "launchplane_tenant_repository_classifications",
         "payload",
         ("jsonb",),
@@ -466,6 +475,16 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         ("status",),
         unique=True,
         predicate_expression="status='active'",
+    ),
+    CriticalIndex(
+        "launchplane_authz_denials",
+        "launchplane_authz_denials_recorded_idx",
+        ("recorded_at",),
+    ),
+    CriticalIndex(
+        "launchplane_authz_denials",
+        "launchplane_authz_denials_expires_idx",
+        ("expires_at",),
     ),
     CriticalIndex(
         "launchplane_idempotency_records",
@@ -1011,7 +1030,7 @@ def critical_column_type_errors(
         if table_names is not None and expected_type.table_name not in table_names:
             continue
         columns = {
-            str(column.get("name", "")): column
+            _schema_metadata_text(column.get("name", "")): column
             for column in inspector.get_columns(expected_type.table_name)
         }
         column = columns.get(expected_type.column_name)
@@ -1041,9 +1060,9 @@ def critical_primary_key_errors(
             continue
         constraint = inspector.get_pk_constraint(expected_key.table_name)
         observed_columns = tuple(
-            str(column_name)
+            _schema_metadata_text(column_name)
             for column_name in _object_sequence(constraint.get("constrained_columns"))
-            if str(column_name)
+            if _schema_metadata_text(column_name)
         )
         if observed_columns != expected_key.column_names:
             observed_summary = ", ".join(observed_columns) or "<none>"
@@ -1068,7 +1087,7 @@ def critical_index_errors(
         if expected_index.table_name not in table_names:
             continue
         indexes_by_name = {
-            str(index.get("name", "")): index
+            _schema_metadata_text(index.get("name", "")): index
             for index in inspector.get_indexes(expected_index.table_name)
         }
         observed_index = indexes_by_name.get(expected_index.index_name)
@@ -1244,7 +1263,7 @@ def postgres_index_definitions(engine: Engine) -> dict[tuple[str, str], str]:
 def _normalized_type_name(type_value: object) -> str:
     tokens = {
         type(type_value).__name__.lower(),
-        str(type_value).lower(),
+        _schema_metadata_text(type_value).lower(),
     }
     return " ".join(sorted(tokens))
 
@@ -1276,7 +1295,7 @@ def _object_sequence(value: object) -> tuple[object, ...]:
 def _normalize_index_column(value: object) -> str:
     if value is None:
         return ""
-    normalized = str(value).strip().strip('"').lower()
+    normalized = _schema_metadata_text(value).strip().strip('"').lower()
     if not normalized:
         return ""
     normalized = normalized.split()[0].strip('"')

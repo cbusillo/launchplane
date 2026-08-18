@@ -78,6 +78,24 @@ through Launchplane's API and UI:
 - export and restore policy without making GitHub the durable desired-state
   store.
 
+The first DB-native read-only slice keeps those capabilities separate:
+
+- `authz_policy_effective_access.read` is restricted to an authenticated
+  GitHub administrator or local administrator and evaluates exactly one supplied
+  principal, action, product, context, explicit context-or-instance target scope,
+  and optional exact instance against the single active DB policy record;
+- `authz_denial_explanation.read` is independently grantable to a human support
+  reader and returns one redacted denial record by trace ID;
+- effective-access responses expose only the supplied scope, decision, bounded
+  reason code, and active policy record identity; they never expose matching
+  rules, selector values, managed-set topology, tokens, or other principals;
+- denial records contain no principal identifier or token label, expire after
+  30 days, and return the same not-found response when absent or expired.
+
+Landing these read contracts does not authorize their production grants and
+does not relax the active freeze. Production policy changes still require the
+separate reviewed administration and recovery gates owned by `#2058`/`#2061`.
+
 After parity and recovery gates pass, protected desired-set secrets and routine
 authorization workflows must be retired. GitHub may remain an identity provider
 and transport for already-authorized workloads, plus a narrowly bounded

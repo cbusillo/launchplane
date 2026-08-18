@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from fnmatch import fnmatchcase
 import re
 import secrets
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, Protocol, cast
+from threading import local
+from typing import Annotated, Any, Literal, Protocol, TypeAlias, cast
+from weakref import WeakKeyDictionary
 
 import jwt
 from pydantic import (
@@ -74,25 +77,25 @@ class LocalAdminIdentity:
     token_label: str
 
 
-LaunchplaneIdentity = (
+LaunchplaneIdentity: TypeAlias = (
     GitHubActionsIdentity
     | GitHubHumanIdentity
     | TerminalAgentIdentity
     | LocalOperatorIdentity
     | LocalAdminIdentity
 )
-AuthorizationScope = Literal["global", "context", "instance", "preview"]
-AuthzPolicySchemaVersion = Literal[1, 2]
-AgentConsumerSubjectType = Literal[
+AuthorizationScope: TypeAlias = Literal["global", "context", "instance", "preview"]
+AuthzPolicySchemaVersion: TypeAlias = Literal[1, 2]
+AgentConsumerSubjectType: TypeAlias = Literal[
     "github_actions", "github_human", "terminal_agent", "local_operator", "local_admin"
 ]
-AgentConsumerAccessProfile = Literal[
+AgentConsumerAccessProfile: TypeAlias = Literal[
     "automation_worker",
     "human_admin",
     "limited_remote_user",
     "owner_local_agent",
 ]
-AgentConsumerActionSafety = Literal[
+AgentConsumerActionSafety: TypeAlias = Literal[
     "read",
     "safe_write",
     "mutation",
@@ -101,7 +104,98 @@ AgentConsumerActionSafety = Literal[
     "secret_backed",
     "policy_admin",
 ]
-AgentAuthzDecision = Literal["allowed", "denied"]
+AgentAuthzDecision: TypeAlias = Literal["allowed", "denied"]
+AuthzDecisionReason: TypeAlias = Literal[
+    "allowed",
+    "authz_policy_schema_incompatible",
+    "instance_scope_required",
+    "principal_role_restricted",
+    "principal_binding_invalid",
+    "no_matching_grant",
+]
+
+
+class AuthzEvaluation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    decision: AgentAuthzDecision
+    reason_code: AuthzDecisionReason
+    principal_type: AgentConsumerSubjectType
+    action: str
+    product: str
+    context: str
+    target_scope: AuthorizationScope
+    instance_specified: bool
+
+
+_AUTHZ_EVALUATION_BY_TASK: WeakKeyDictionary[asyncio.Task[Any], AuthzEvaluation] = (
+    WeakKeyDictionary()
+)
+_AUTHZ_EVALUATION_BY_THREAD = local()
+
+
+def _current_asyncio_task() -> asyncio.Task[Any] | None:
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return None
+
+
+def current_authz_evaluation() -> AuthzEvaluation | None:
+    task = _current_asyncio_task()
+    if task is not None:
+        return _AUTHZ_EVALUATION_BY_TASK.get(task)
+    evaluation = getattr(_AUTHZ_EVALUATION_BY_THREAD, "evaluation", None)
+    return evaluation if isinstance(evaluation, AuthzEvaluation) else None
+
+
+def clear_authz_evaluation() -> None:
+    task = _current_asyncio_task()
+    if task is not None:
+        _AUTHZ_EVALUATION_BY_TASK.pop(task, None)
+    _AUTHZ_EVALUATION_BY_THREAD.evaluation = None
+
+
+def _authz_principal_type(identity: LaunchplaneIdentity) -> AgentConsumerSubjectType:
+    if isinstance(identity, GitHubHumanIdentity):
+        return "github_human"
+    if isinstance(identity, TerminalAgentIdentity):
+        return "terminal_agent"
+    if isinstance(identity, LocalOperatorIdentity):
+        return "local_operator"
+    if isinstance(identity, LocalAdminIdentity):
+        return "local_admin"
+    return "github_actions"
+
+
+def _record_authz_evaluation(
+    *,
+    identity: LaunchplaneIdentity,
+    action: str,
+    product: str,
+    context: str,
+    target: AuthorizationTarget,
+    allowed: bool,
+    reason_code: AuthzDecisionReason,
+    record_context: bool,
+) -> AuthzEvaluation:
+    evaluation = AuthzEvaluation(
+        decision="allowed" if allowed else "denied",
+        reason_code=reason_code,
+        principal_type=_authz_principal_type(identity),
+        action=action,
+        product=product,
+        context=context,
+        target_scope=target.scope,
+        instance_specified=bool(target.instances),
+    )
+    if record_context:
+        task = _current_asyncio_task()
+        if task is not None:
+            _AUTHZ_EVALUATION_BY_TASK[task] = evaluation
+        else:
+            _AUTHZ_EVALUATION_BY_THREAD.evaluation = evaluation
+    return evaluation
 
 
 def _validated_instance_selectors(instances: tuple[str, ...]) -> tuple[str, ...]:
@@ -185,6 +279,78 @@ def _instances_allowed(
     if allowed_instances == ("*",):
         return True
     return set(target.instances).issubset(allowed_instances)
+
+
+def authz_selector_matches(value: str, selectors: tuple[str, ...]) -> bool:
+    normalized_value = value.strip()
+    return any(fnmatchcase(normalized_value, selector) for selector in selectors)
+
+
+class ScopedAuthzPolicyRule(ManagedAuthzPolicyRule):
+    products: tuple[str, ...] = ()
+    contexts: tuple[str, ...] = ()
+    instances: AuthzInstanceSelectors = ()
+    actions: tuple[str, ...] = ()
+
+    def _scope_selector_matches(self, value: str, selectors: tuple[str, ...]) -> bool:
+        return value in selectors
+
+    def allows_scope(
+        self,
+        *,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None,
+        schema_version: AuthzPolicySchemaVersion,
+    ) -> bool:
+        return (
+            (not self.products or self._scope_selector_matches(product, self.products))
+            and (not self.contexts or self._scope_selector_matches(context, self.contexts))
+            and _instances_allowed(
+                allowed_instances=self.instances,
+                target=target,
+                schema_version=schema_version,
+            )
+            and (not self.actions or action in self.actions)
+        )
+
+
+class PatternScopedAuthzPolicyRule(ScopedAuthzPolicyRule):
+    def _scope_selector_matches(self, value: str, selectors: tuple[str, ...]) -> bool:
+        return authz_selector_matches(value, selectors)
+
+
+class TokenBoundAuthzPolicyRule(ScopedAuthzPolicyRule):
+    subjects: tuple[str, ...] = ()
+    token_labels: tuple[str, ...] = ()
+
+    def allows_token_bound_identity(
+        self,
+        *,
+        subject: str,
+        token_label: str,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None,
+        schema_version: AuthzPolicySchemaVersion,
+    ) -> bool:
+        return (
+            (not self.subjects or authz_selector_matches(subject, self.subjects))
+            and (not self.token_labels or authz_selector_matches(token_label, self.token_labels))
+            and self.allows_scope(
+                action=action,
+                product=product,
+                context=context,
+                target=target,
+                schema_version=schema_version,
+            )
+        )
+
+
+class PatternTokenBoundAuthzPolicyRule(TokenBoundAuthzPolicyRule, PatternScopedAuthzPolicyRule):
+    pass
 
 
 class TokenVerifier(Protocol):
@@ -334,7 +500,7 @@ class GitHubOidcVerifier:
         )
 
 
-class GitHubActionsPolicyRule(ManagedAuthzPolicyRule):
+class GitHubActionsPolicyRule(PatternScopedAuthzPolicyRule):
     model_config = ConfigDict(extra="forbid")
 
     repository: str
@@ -345,10 +511,6 @@ class GitHubActionsPolicyRule(ManagedAuthzPolicyRule):
     event_names: tuple[str, ...] = ()
     refs: tuple[str, ...] = ()
     environments: tuple[str, ...] = ()
-    products: tuple[str, ...] = ()
-    contexts: tuple[str, ...] = ()
-    instances: AuthzInstanceSelectors = ()
-    actions: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_repository_identity(self) -> "GitHubActionsPolicyRule":
@@ -370,8 +532,7 @@ class GitHubActionsPolicyRule(ManagedAuthzPolicyRule):
 
     @staticmethod
     def _matches_claim(value: str, allowed_values: tuple[str, ...]) -> bool:
-        normalized_value = value.strip()
-        return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
+        return authz_selector_matches(value, allowed_values)
 
     def allows(
         self,
@@ -403,22 +564,16 @@ class GitHubActionsPolicyRule(ManagedAuthzPolicyRule):
             return False
         if self.environments and identity.environment not in self.environments:
             return False
-        if self.products and not self._matches_claim(product, self.products):
-            return False
-        if self.contexts and not self._matches_claim(context, self.contexts):
-            return False
-        if not _instances_allowed(
-            allowed_instances=self.instances,
+        return self.allows_scope(
+            action=action,
+            product=product,
+            context=context,
             target=target,
             schema_version=schema_version,
-        ):
-            return False
-        if self.actions and action not in self.actions:
-            return False
-        return True
+        )
 
 
-class GitHubHumanPolicyRule(ManagedAuthzPolicyRule):
+class GitHubHumanPolicyRule(ScopedAuthzPolicyRule):
     model_config = ConfigDict(extra="forbid")
 
     github_ids: tuple[int, ...] = ()
@@ -426,10 +581,6 @@ class GitHubHumanPolicyRule(ManagedAuthzPolicyRule):
     organizations: tuple[str, ...] = ()
     teams: tuple[str, ...] = ()
     roles: tuple[Literal["read_only", "admin"], ...] = ()
-    products: tuple[str, ...] = ()
-    contexts: tuple[str, ...] = ()
-    instances: AuthzInstanceSelectors = ()
-    actions: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_github_ids(self) -> "GitHubHumanPolicyRule":
@@ -440,8 +591,7 @@ class GitHubHumanPolicyRule(ManagedAuthzPolicyRule):
 
     @staticmethod
     def _matches_any(value: str, allowed_values: tuple[str, ...]) -> bool:
-        normalized_value = value.strip()
-        return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
+        return authz_selector_matches(value, allowed_values)
 
     @staticmethod
     def _intersects(values: frozenset[str], allowed_values: tuple[str, ...]) -> bool:
@@ -469,19 +619,13 @@ class GitHubHumanPolicyRule(ManagedAuthzPolicyRule):
             role=identity.role,
         ):
             return False
-        if self.products and product not in self.products:
-            return False
-        if self.contexts and context not in self.contexts:
-            return False
-        if not _instances_allowed(
-            allowed_instances=self.instances,
+        return self.allows_scope(
+            action=action,
+            product=product,
+            context=context,
             target=target,
             schema_version=schema_version,
-        ):
-            return False
-        if self.actions and action not in self.actions:
-            return False
-        return True
+        )
 
     def matches_principal(
         self,
@@ -505,20 +649,8 @@ class GitHubHumanPolicyRule(ManagedAuthzPolicyRule):
         return True
 
 
-class TerminalAgentPolicyRule(ManagedAuthzPolicyRule):
+class TerminalAgentPolicyRule(TokenBoundAuthzPolicyRule):
     model_config = ConfigDict(extra="forbid")
-
-    subjects: tuple[str, ...] = ()
-    token_labels: tuple[str, ...] = ()
-    products: tuple[str, ...] = ()
-    contexts: tuple[str, ...] = ()
-    instances: AuthzInstanceSelectors = ()
-    actions: tuple[str, ...] = ()
-
-    @staticmethod
-    def _matches_any(value: str, allowed_values: tuple[str, ...]) -> bool:
-        normalized_value = value.strip()
-        return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
 
     def allows(
         self,
@@ -530,39 +662,19 @@ class TerminalAgentPolicyRule(ManagedAuthzPolicyRule):
         target: AuthorizationTarget | None = None,
         schema_version: AuthzPolicySchemaVersion = 1,
     ) -> bool:
-        if self.subjects and not self._matches_any(identity.subject, self.subjects):
-            return False
-        if self.token_labels and not self._matches_any(identity.token_label, self.token_labels):
-            return False
-        if self.products and product not in self.products:
-            return False
-        if self.contexts and context not in self.contexts:
-            return False
-        if not _instances_allowed(
-            allowed_instances=self.instances,
+        return self.allows_token_bound_identity(
+            subject=identity.subject,
+            token_label=identity.token_label,
+            action=action,
+            product=product,
+            context=context,
             target=target,
             schema_version=schema_version,
-        ):
-            return False
-        if self.actions and action not in self.actions:
-            return False
-        return True
+        )
 
 
-class LocalOperatorPolicyRule(ManagedAuthzPolicyRule):
+class LocalOperatorPolicyRule(PatternTokenBoundAuthzPolicyRule):
     model_config = ConfigDict(extra="forbid")
-
-    subjects: tuple[str, ...] = ()
-    token_labels: tuple[str, ...] = ()
-    products: tuple[str, ...] = ()
-    contexts: tuple[str, ...] = ()
-    instances: AuthzInstanceSelectors = ()
-    actions: tuple[str, ...] = ()
-
-    @staticmethod
-    def _matches_any(value: str, allowed_values: tuple[str, ...]) -> bool:
-        normalized_value = value.strip()
-        return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
 
     def allows(
         self,
@@ -574,39 +686,19 @@ class LocalOperatorPolicyRule(ManagedAuthzPolicyRule):
         target: AuthorizationTarget | None = None,
         schema_version: AuthzPolicySchemaVersion = 1,
     ) -> bool:
-        if self.subjects and not self._matches_any(identity.subject, self.subjects):
-            return False
-        if self.token_labels and not self._matches_any(identity.token_label, self.token_labels):
-            return False
-        if self.products and not self._matches_any(product, self.products):
-            return False
-        if self.contexts and not self._matches_any(context, self.contexts):
-            return False
-        if not _instances_allowed(
-            allowed_instances=self.instances,
+        return self.allows_token_bound_identity(
+            subject=identity.subject,
+            token_label=identity.token_label,
+            action=action,
+            product=product,
+            context=context,
             target=target,
             schema_version=schema_version,
-        ):
-            return False
-        if self.actions and action not in self.actions:
-            return False
-        return True
+        )
 
 
-class LocalAdminPolicyRule(ManagedAuthzPolicyRule):
+class LocalAdminPolicyRule(PatternTokenBoundAuthzPolicyRule):
     model_config = ConfigDict(extra="forbid")
-
-    subjects: tuple[str, ...] = ()
-    token_labels: tuple[str, ...] = ()
-    products: tuple[str, ...] = ()
-    contexts: tuple[str, ...] = ()
-    instances: AuthzInstanceSelectors = ()
-    actions: tuple[str, ...] = ()
-
-    @staticmethod
-    def _matches_any(value: str, allowed_values: tuple[str, ...]) -> bool:
-        normalized_value = value.strip()
-        return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
 
     def allows(
         self,
@@ -618,23 +710,15 @@ class LocalAdminPolicyRule(ManagedAuthzPolicyRule):
         target: AuthorizationTarget | None = None,
         schema_version: AuthzPolicySchemaVersion = 1,
     ) -> bool:
-        if self.subjects and not self._matches_any(identity.subject, self.subjects):
-            return False
-        if self.token_labels and not self._matches_any(identity.token_label, self.token_labels):
-            return False
-        if self.products and not self._matches_any(product, self.products):
-            return False
-        if self.contexts and not self._matches_any(context, self.contexts):
-            return False
-        if not _instances_allowed(
-            allowed_instances=self.instances,
+        return self.allows_token_bound_identity(
+            subject=identity.subject,
+            token_label=identity.token_label,
+            action=action,
+            product=product,
+            context=context,
             target=target,
             schema_version=schema_version,
-        ):
-            return False
-        if self.actions and action not in self.actions:
-            return False
-        return True
+        )
 
 
 class AgentConsumerSubject(BaseModel):
@@ -751,7 +835,6 @@ def agent_consumer_subject(
             action=action,
             action_safety=safety,
             read_only_context=True,
-            approval_capable=False,
         )
     if isinstance(identity, LocalOperatorIdentity):
         return AgentConsumerSubject(
@@ -898,7 +981,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
                     rule.pop("managed_rule_id", None)
         return payload
 
-    def allows(
+    def evaluate(
         self,
         *,
         identity: LaunchplaneIdentity,
@@ -906,20 +989,48 @@ class LaunchplaneAuthzPolicy(BaseModel):
         product: str,
         context: str,
         target: AuthorizationTarget | None = None,
-    ) -> bool:
+        record_context: bool = True,
+    ) -> AuthzEvaluation:
         resolved_target = target or AuthorizationTarget(scope="context")
         if self.schema_version != 2 and action in exact_instance_workflow_authz_actions():
-            return False
+            return _record_authz_evaluation(
+                identity=identity,
+                action=action,
+                product=product,
+                context=context,
+                target=resolved_target,
+                allowed=False,
+                reason_code="authz_policy_schema_incompatible",
+                record_context=record_context,
+            )
         if (
             self.schema_version == 2
             and action in exclusively_instance_scoped_authz_actions()
             and resolved_target.scope != "instance"
         ):
-            return False
+            return _record_authz_evaluation(
+                identity=identity,
+                action=action,
+                product=product,
+                context=context,
+                target=resolved_target,
+                allowed=False,
+                reason_code="instance_scope_required",
+                record_context=record_context,
+            )
         if isinstance(identity, GitHubHumanIdentity):
             if identity.role == "read_only" and not limited_remote_user_action_allowed(action):
-                return False
-            return any(
+                return _record_authz_evaluation(
+                    identity=identity,
+                    action=action,
+                    product=product,
+                    context=context,
+                    target=resolved_target,
+                    allowed=False,
+                    reason_code="principal_role_restricted",
+                    record_context=record_context,
+                )
+            allowed = any(
                 rule.allows(
                     identity=identity,
                     action=action,
@@ -930,8 +1041,8 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 )
                 for rule in self.github_humans
             )
-        if isinstance(identity, TerminalAgentIdentity):
-            return any(
+        elif isinstance(identity, TerminalAgentIdentity):
+            allowed = any(
                 rule.allows(
                     identity=identity,
                     action=action,
@@ -942,8 +1053,19 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 )
                 for rule in self.terminal_agents
             )
-        if isinstance(identity, LocalOperatorIdentity):
-            return local_operator_identity_valid(identity=identity, action=action) and any(
+        elif isinstance(identity, LocalOperatorIdentity):
+            if not local_operator_identity_valid(identity=identity, action=action):
+                return _record_authz_evaluation(
+                    identity=identity,
+                    action=action,
+                    product=product,
+                    context=context,
+                    target=resolved_target,
+                    allowed=False,
+                    reason_code="principal_binding_invalid",
+                    record_context=record_context,
+                )
+            allowed = any(
                 rule.allows(
                     identity=identity,
                     action=action,
@@ -954,8 +1076,19 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 )
                 for rule in self.local_operators
             )
-        if isinstance(identity, LocalAdminIdentity):
-            return local_admin_identity_valid(identity=identity, action=action) and any(
+        elif isinstance(identity, LocalAdminIdentity):
+            if not local_admin_identity_valid(identity=identity, action=action):
+                return _record_authz_evaluation(
+                    identity=identity,
+                    action=action,
+                    product=product,
+                    context=context,
+                    target=resolved_target,
+                    allowed=False,
+                    reason_code="principal_binding_invalid",
+                    record_context=record_context,
+                )
+            allowed = any(
                 rule.allows(
                     identity=identity,
                     action=action,
@@ -966,16 +1099,47 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 )
                 for rule in self.local_admins
             )
-        return any(
-            rule.allows(
+        else:
+            allowed = any(
+                rule.allows(
+                    identity=identity,
+                    action=action,
+                    product=product,
+                    context=context,
+                    target=resolved_target,
+                    schema_version=self.schema_version,
+                )
+                for rule in self.github_actions
+            )
+        return _record_authz_evaluation(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+            target=resolved_target,
+            allowed=allowed,
+            reason_code="allowed" if allowed else "no_matching_grant",
+            record_context=record_context,
+        )
+
+    def allows(
+        self,
+        *,
+        identity: LaunchplaneIdentity,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None = None,
+    ) -> bool:
+        return (
+            self.evaluate(
                 identity=identity,
                 action=action,
                 product=product,
                 context=context,
-                target=resolved_target,
-                schema_version=self.schema_version,
-            )
-            for rule in self.github_actions
+                target=target,
+            ).decision
+            == "allowed"
         )
 
     def allows_product_instance_preflight(

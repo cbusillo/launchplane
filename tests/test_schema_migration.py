@@ -33,7 +33,7 @@ from control_plane.storage.schema_invariants import (
     EXPECTED_ALEMBIC_HEAD_REVISION,
 )
 from control_plane.storage.schema_migration import (
-    _alembic_config,
+    alembic_config,
     migrate_schema,
     schema_migration_action,
 )
@@ -44,7 +44,7 @@ class SchemaMigrationTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = f"sqlite+pysqlite:///{database_path}"
-            config = _alembic_config(database_url)
+            config = alembic_config(database_url)
             command.upgrade(config, "c6f8a0b2d4e6")
             engine = create_engine(database_url)
             observation_id = "public-ingress-example-site-prod-20260727t120000z"
@@ -241,7 +241,7 @@ class SchemaMigrationTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = f"sqlite+pysqlite:///{database_path}"
-            config = _alembic_config(database_url)
+            config = alembic_config(database_url)
             command.upgrade(config, "c6f8a0b2d4e6")
             engine = create_engine(database_url)
 
@@ -313,7 +313,7 @@ class SchemaMigrationTests(unittest.TestCase):
             )
             try:
                 with engine.begin() as connection:
-                    for incident_id, payload in rows:
+                    for row_incident_id, row_payload in rows:
                         connection.execute(
                             text(
                                 "insert into launchplane_public_ingress_incidents "
@@ -323,14 +323,14 @@ class SchemaMigrationTests(unittest.TestCase):
                                 ":payload)"
                             ),
                             {
-                                "incident_id": incident_id,
+                                "incident_id": row_incident_id,
                                 "product": "example-site",
                                 "context": "example-site",
                                 "instance": "prod",
-                                "status": payload["status"],
-                                "opened_at": payload["opened_at"],
-                                "latest_observed_at": payload["latest_observed_at"],
-                                "payload": json.dumps(payload),
+                                "status": row_payload["status"],
+                                "opened_at": row_payload["opened_at"],
+                                "latest_observed_at": row_payload["latest_observed_at"],
+                                "payload": json.dumps(row_payload),
                             },
                         )
                 command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
@@ -399,7 +399,7 @@ class SchemaMigrationTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = f"sqlite+pysqlite:///{database_path}"
-            config = _alembic_config(database_url)
+            config = alembic_config(database_url)
             command.upgrade(config, "b3d5f7a9c1e4")
             engine = create_engine(database_url)
             profile_payload = {
@@ -570,7 +570,7 @@ class SchemaMigrationTests(unittest.TestCase):
         database_url = "postgresql+psycopg://launchplane:p%40ssword@postgres/launchplane"
 
         self.assertEqual(
-            _alembic_config(database_url).get_main_option("sqlalchemy.url"),
+            alembic_config(database_url).get_main_option("sqlalchemy.url"),
             database_url,
         )
 
@@ -578,7 +578,7 @@ class SchemaMigrationTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = f"sqlite+pysqlite:///{database_path}"
-            config = _alembic_config(database_url)
+            config = alembic_config(database_url)
             command.upgrade(config, "a1c3e5f7b9d2")
             engine = create_engine(database_url)
             try:
@@ -643,7 +643,7 @@ class SchemaMigrationTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = f"sqlite+pysqlite:///{database_path}"
-            command.upgrade(_alembic_config(database_url), EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(alembic_config(database_url), EXPECTED_ALEMBIC_HEAD_REVISION)
             policy = LaunchplaneAuthzPolicy()
             first_record = LaunchplaneAuthzPolicyRecord(
                 record_id="authz-sqlite-first",
@@ -703,7 +703,7 @@ class SchemaMigrationTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = f"sqlite+pysqlite:///{database_path}"
-            config = _alembic_config(database_url)
+            config = alembic_config(database_url)
 
             command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
             engine = create_engine(database_url)
@@ -813,7 +813,7 @@ class SchemaMigrationTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = f"sqlite+pysqlite:///{database_path}"
-            config = _alembic_config(database_url)
+            config = alembic_config(database_url)
 
             command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
             engine = create_engine(database_url)
@@ -861,7 +861,9 @@ class SchemaMigrationTests(unittest.TestCase):
                 }
                 owner_indexes: dict[str, dict[str, Mapping[str, object]]] = {
                     table_name: {
-                        str(index["name"]): index for index in inspector.get_indexes(table_name)
+                        index_name: index
+                        for index in inspector.get_indexes(table_name)
+                        if isinstance(index_name := index.get("name"), str)
                     }
                     for table_name in owner_table_names
                 }
@@ -1008,7 +1010,7 @@ class SchemaMigrationTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = f"sqlite+pysqlite:///{database_path}"
-            config = _alembic_config(database_url)
+            config = alembic_config(database_url)
             command.upgrade(config, "e9b1d3f5a7c0")
             legacy_payloads = []
             previous_record_id: str | None = None
@@ -1193,7 +1195,7 @@ class SchemaMigrationTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = f"sqlite+pysqlite:///{database_path}"
-            config = _alembic_config(database_url)
+            config = alembic_config(database_url)
 
             command.upgrade(config, "f3a5c7e9b1d4")
             engine = create_engine(database_url)
@@ -1261,7 +1263,7 @@ class SchemaMigrationTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = f"sqlite+pysqlite:///{database_path}"
-            config = _alembic_config(database_url)
+            config = alembic_config(database_url)
             command.upgrade(config, "a4c6e8f0b2d5")
             engine = create_engine(database_url)
             legacy_rows = [
@@ -1402,7 +1404,7 @@ class SchemaMigrationTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = f"sqlite+pysqlite:///{database_path}"
-            config = _alembic_config(database_url)
+            config = alembic_config(database_url)
             command.upgrade(config, "b5d7f9a1c3e6")
             engine = create_engine(database_url)
             legacy_payload = {
@@ -1489,7 +1491,29 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "f0a2c4e6b8d1")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "a2c4e6f8b0d3")
+        self.assertEqual(
+            column_types[("launchplane_authz_denials", "payload")],
+            ("jsonb",),
+        )
+        self.assertEqual(
+            indexes[
+                (
+                    "launchplane_authz_denials",
+                    "launchplane_authz_denials_recorded_idx",
+                )
+            ].column_names,
+            ("recorded_at",),
+        )
+        self.assertEqual(
+            indexes[
+                (
+                    "launchplane_authz_denials",
+                    "launchplane_authz_denials_expires_idx",
+                )
+            ].column_names,
+            ("expires_at",),
+        )
         self.assertEqual(
             column_types[("launchplane_merge_admissions", "payload")],
             ("jsonb",),
