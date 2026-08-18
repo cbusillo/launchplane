@@ -6,21 +6,13 @@ from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
 import hmac
+from importlib import import_module
 import os
 import secrets
 from threading import RLock
 import warnings
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlsplit
-
-from cryptography.hazmat.primitives import hashes, hmac as cryptography_hmac
-
-if TYPE_CHECKING:
-    from authlib.integrations.requests_client import (  # type: ignore[import-untyped]
-        OAuth2Session as OAuth2SessionType,
-    )
-else:
-    OAuth2SessionType = Any
 
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
 
@@ -85,6 +77,18 @@ class HumanSessionStore(Protocol):
         *,
         expected_generation: int,
     ) -> bool: ...
+
+
+class OAuthResponse(Protocol):
+    def json(self) -> Any: ...
+
+
+class OAuth2SessionType(Protocol):
+    def create_authorization_url(self, url: str, **kwargs: object) -> tuple[str, str]: ...
+
+    def fetch_token(self, url: str, **kwargs: object) -> object: ...
+
+    def get(self, url: str) -> OAuthResponse: ...
 
 
 class InMemoryHumanSessionStore:
@@ -194,13 +198,16 @@ class GitHubOAuthClient:
     ) -> OAuth2SessionType:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            from authlib.integrations.requests_client import OAuth2Session
+            requests_client = import_module("authlib.integrations.requests_client")
 
-        return OAuth2Session(
-            client_id=client_id,
-            client_secret=client_secret,
-            scope=scope,
-            redirect_uri=redirect_uri,
+        return cast(
+            OAuth2SessionType,
+            requests_client.OAuth2Session(
+                client_id=client_id,
+                client_secret=client_secret,
+                scope=scope,
+                redirect_uri=redirect_uri,
+            ),
         )
 
     def authorization_url(self, *, state: str, code_challenge: str) -> str:
@@ -259,7 +266,7 @@ class GitHubOAuthClient:
             teams=teams,
         )
         bootstrap_admin_email = ""
-        if role is None and not authz_policy.github_humans:
+        if role is None and not _has_db_backed_human_policy_administrator(authz_policy):
             bootstrap_admin_email = next(
                 iter(sorted(self._config.bootstrap_admin_emails.intersection(email_candidates))),
                 "",
@@ -401,9 +408,9 @@ class HumanSessionManager:
     def authorization_claims_are_current(self, session: LaunchplaneHumanSession) -> bool:
         now = self._now()
         return (
-            session.created_at <= now
-            and session.created_at + timedelta(seconds=SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS)
-            > now
+            session.created_at
+            <= now
+            < session.created_at + timedelta(seconds=SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS)
         )
 
     def revoke(self, session: LaunchplaneHumanSession) -> None:
@@ -451,6 +458,8 @@ class HumanSessionManager:
         token: str,
     ) -> LaunchplaneHumanSession | None:
         normalized_token = token.strip()
+        if not normalized_token.isascii():
+            return None
         generation = _csrf_token_generation(normalized_token)
         if generation is None or generation != session.csrf_generation:
             return None
@@ -491,30 +500,37 @@ class HumanSessionManager:
 
     def _sign_cookie_value(self, session_id: str) -> str:
         normalized_session_id = session_id.strip()
-        signer = cryptography_hmac.HMAC(
-            self._config.session_secret.encode("utf-8"),
-            hashes.SHA256(),
-        )
-        signer.update(normalized_session_id.encode("utf-8"))
-        signature = signer.finalize().hex()
+        signature = hmac.new(
+            self._config.session_secret.encode(),
+            normalized_session_id.encode(),
+            hashlib.sha256,
+        ).hexdigest()
         return f"{normalized_session_id}.{signature}"
 
     def _csrf_signature(self, *, session_id: str, generation: int) -> str:
-        signer = cryptography_hmac.HMAC(
-            self._config.session_secret.encode("utf-8"),
-            hashes.SHA256(),
+        signature_payload = b"\0".join(
+            (
+                b"launchplane-browser-csrf-v1",
+                session_id.encode(),
+                str(generation).encode(),
+            )
         )
-        signer.update(b"launchplane-browser-csrf-v1\0")
-        signer.update(session_id.encode("utf-8"))
-        signer.update(b"\0")
-        signer.update(str(generation).encode("ascii"))
-        return base64.urlsafe_b64encode(signer.finalize()).decode("ascii").rstrip("=")
+        signature = hmac.new(
+            self._config.session_secret.encode(),
+            signature_payload,
+            hashlib.sha256,
+        ).digest()
+        return base64.urlsafe_b64encode(signature).decode().rstrip("=")
 
     def _verify_cookie_value(self, cookie_session_id: str) -> str:
         session_id, separator, signature = cookie_session_id.strip().partition(".")
         if not separator or not signature:
             return ""
-        if not session_id or any(character.isspace() for character in session_id):
+        if (
+            not session_id
+            or not signature.isascii()
+            or any(character.isspace() for character in session_id)
+        ):
             return ""
         expected_cookie_value = self._sign_cookie_value(session_id)
         _expected_session_id, _separator, expected_signature = expected_cookie_value.partition(".")
@@ -545,7 +561,9 @@ def browser_origin_from_url(value: str) -> str:
     if ":" in host:
         host = f"[{host}]"
     default_port = 443 if scheme == "https" else 80
-    port_suffix = f":{port}" if port is not None and port != default_port else ""
+    port_suffix = ""
+    if port is not None and port != default_port:
+        port_suffix = f":{int(port)}"
     return f"{scheme}://{host}{port_suffix}"
 
 

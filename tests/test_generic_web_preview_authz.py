@@ -112,8 +112,7 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
         apply_workflow_text = Path(
             ".github/workflows/reusable-generic-web-preview-authz-apply.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("group: launchplane-authz-policy", apply_workflow_text)
-        self.assertIn("cancel-in-progress: false", apply_workflow_text)
+        self.assertNotIn("group: launchplane-authz-policy", apply_workflow_text)
         self.assertIn(
             'managed_set_id" != "operator.generic-web-preview"',
             apply_workflow_text,

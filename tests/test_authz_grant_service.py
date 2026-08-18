@@ -110,6 +110,34 @@ def _active_record_for_policy(policy: LaunchplaneAuthzPolicy) -> LaunchplaneAuth
     )
 
 
+def _managed_service_deploy_request() -> AuthzManagedPolicyReconcileEnvelope:
+    return AuthzManagedPolicyReconcileEnvelope.model_validate(
+        {
+            "schema_version": 2,
+            "product": "launchplane",
+            "mode": "dry_run",
+            "managed_set_id": "operator.launchplane",
+            "schema_migration": "migrate_v1_to_v2",
+            "unmanaged_adoption": "adopt_matching",
+            "desired_policy": {
+                "schema_version": 2,
+                "github_actions": [
+                    {
+                        "managed_set_id": "operator.launchplane",
+                        "managed_rule_id": "service.deploy",
+                        "repository": "cbusillo/launchplane",
+                        "repository_id": "1001",
+                        "repository_owner_id": "2001",
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["launchplane_service_deploy.execute"],
+                    }
+                ],
+            },
+        }
+    )
+
+
 def _authz_rollout_fixture(filename: str) -> LaunchplaneAuthzPolicy:
     fixture_path = Path(__file__).parent / "fixtures" / "authz" / filename
     return LaunchplaneAuthzPolicy.model_validate(
@@ -345,31 +373,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
 
     def test_managed_route_rejects_policy_change_after_authorization(self) -> None:
         active_record = _active_record()
-        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
-            {
-                "schema_version": 2,
-                "product": "launchplane",
-                "mode": "dry_run",
-                "managed_set_id": "operator.launchplane",
-                "schema_migration": "migrate_v1_to_v2",
-                "unmanaged_adoption": "adopt_matching",
-                "desired_policy": {
-                    "schema_version": 2,
-                    "github_actions": [
-                        {
-                            "managed_set_id": "operator.launchplane",
-                            "managed_rule_id": "service.deploy",
-                            "repository": "cbusillo/launchplane",
-                            "repository_id": "1001",
-                            "repository_owner_id": "2001",
-                            "products": ["launchplane"],
-                            "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
-                        }
-                    ],
-                },
-            }
-        )
+        request = _managed_service_deploy_request()
 
         with self.assertRaisesRegex(AuthzPolicyConflictError, "after the caller was authorized"):
             execute_managed_authz_policy_reconcile(
@@ -383,31 +387,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
 
     def test_managed_reconcile_adopts_v1_rule_and_migrates_schema(self) -> None:
         current_record = _active_record()
-        request = AuthzManagedPolicyReconcileEnvelope.model_validate(
-            {
-                "schema_version": 2,
-                "product": "launchplane",
-                "mode": "dry_run",
-                "managed_set_id": "operator.launchplane",
-                "schema_migration": "migrate_v1_to_v2",
-                "unmanaged_adoption": "adopt_matching",
-                "desired_policy": {
-                    "schema_version": 2,
-                    "github_actions": [
-                        {
-                            "managed_set_id": "operator.launchplane",
-                            "managed_rule_id": "service.deploy",
-                            "repository": "cbusillo/launchplane",
-                            "repository_id": "1001",
-                            "repository_owner_id": "2001",
-                            "products": ["launchplane"],
-                            "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
-                        }
-                    ],
-                },
-            }
-        )
+        request = _managed_service_deploy_request()
 
         current_policy, observed_record, updated_policy, diff = plan_managed_authz_policy_reconcile(
             record_store=_AuthzPolicyStore((current_record,)),
@@ -533,17 +513,42 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 "product": "launchplane",
                 "mode": "dry_run",
                 "managed_set_id": "operator.owner",
+                "reason": "Verify the last policy administrator cannot be removed.",
                 "desired_policy": {"schema_version": 2},
             }
         )
 
+        _, _, _, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((_active_record_for_policy(current_policy),)),
+            request=request,
+        )
+
+        self.assertEqual(diff.policy_safety_blocker_count, 1)
+        self.assertEqual(
+            diff.policy_safety_blockers[0].code,
+            "authz_policy_admin_unreachable",
+        )
+        self.assertIn(
+            "retain at least one reachable principal",
+            diff.policy_safety_blockers[0].message,
+        )
+        apply_request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                **request.model_dump(mode="json"),
+                "mode": "apply",
+                "reviewed_plan_sha256": diff.plan_sha256,
+            }
+        )
         with self.assertRaises(AuthzPolicySafetyError) as raised:
-            plan_managed_authz_policy_reconcile(
+            execute_managed_authz_policy_reconcile(
                 record_store=_AuthzPolicyStore((_active_record_for_policy(current_policy),)),
-                request=request,
+                request=apply_request,
+                identity=_workflow_admin_identity(),
+                trace_id="trace-last-admin-apply",
+                now_timestamp=lambda: "2026-08-17T00:00:00Z",
+                authorized_policy_sha256=authz_policy_sha256(current_policy),
             )
         self.assertEqual(raised.exception.code, "authz_policy_admin_unreachable")
-        self.assertIn("retain at least one reachable principal", str(raised.exception))
 
     def test_managed_reconcile_counts_terminal_agent_policy_administrator(self) -> None:
         terminal_admin = TerminalAgentPolicyRule(
@@ -565,13 +570,16 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             desired_policy=LaunchplaneAuthzPolicy(schema_version=2),
         )
 
-        with self.assertRaises(AuthzPolicySafetyError) as raised:
-            plan_managed_authz_policy_reconcile(
-                record_store=_AuthzPolicyStore((current_record,)),
-                request=request,
-            )
+        _, _, _, diff = plan_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=request,
+        )
 
-        self.assertEqual(raised.exception.code, "authz_policy_admin_unreachable")
+        self.assertEqual(diff.policy_safety_blocker_count, 1)
+        self.assertEqual(
+            diff.policy_safety_blockers[0].code,
+            "authz_policy_admin_unreachable",
+        )
 
     def test_managed_apply_requires_independent_policy_administrator(self) -> None:
         identity = _workflow_admin_identity()
@@ -584,7 +592,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         )
 
         def apply_request(
-            current_record: LaunchplaneAuthzPolicyRecord,
+            policy_record: LaunchplaneAuthzPolicyRecord,
         ) -> AuthzManagedPolicyReconcileEnvelope:
             dry_run = AuthzManagedPolicyReconcileEnvelope(
                 schema_version=2,
@@ -597,7 +605,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 ),
             )
             _, _, _, diff = plan_managed_authz_policy_reconcile(
-                record_store=_AuthzPolicyStore((current_record,)),
+                record_store=_AuthzPolicyStore((policy_record,)),
                 request=dry_run,
             )
             return AuthzManagedPolicyReconcileEnvelope.model_validate(
@@ -613,6 +621,29 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             github_actions=(applying_admin, retired_rule),
         )
         current_record = _active_record_for_policy(current_policy)
+        dry_run_result = execute_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=AuthzManagedPolicyReconcileEnvelope(
+                schema_version=2,
+                product="launchplane",
+                managed_set_id="operator.launchplane",
+                reason="Retire the obsolete managed read rule.",
+                desired_policy=LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    github_actions=(applying_admin,),
+                ),
+            ),
+            identity=identity,
+            trace_id="trace-independent-admin-dry-run",
+            now_timestamp=lambda: "2026-08-17T00:00:00Z",
+            authorized_policy_sha256=current_record.policy_sha256,
+        )
+        dry_run_diff = cast(dict[str, object], dry_run_result.driver_result["diff"])
+        self.assertEqual(dry_run_diff["policy_safety_blocker_count"], 1)
+        self.assertEqual(
+            cast(list[dict[str, object]], dry_run_diff["policy_safety_blockers"])[0]["code"],
+            "authz_policy_independent_admin_unreachable",
+        )
         with self.assertRaises(AuthzPolicySafetyError) as raised:
             execute_managed_authz_policy_reconcile(
                 record_store=_AuthzPolicyStore((current_record,)),
@@ -1254,6 +1285,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                     "product": "launchplane",
                     "managed_set_id": "operator.launchplane",
                     "unmanaged_adoption": "adopt_matching",
+                    "reason": "Verify stale managed administration fails closed.",
                     "desired_policy": {
                         "schema_version": 2,
                         "github_actions": [managed_rule.model_dump(mode="json")],
@@ -1268,15 +1300,37 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 github_actions=(compatibility_rule, stale_managed_rule),
             )
         )
-        with self.assertRaises(AuthzPolicySafetyError):
+        stale_result = execute_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((stale_record,)),
+            request=reconcile_request(stale_managed_rule),
+            identity=identity,
+            trace_id="trace-retirement-lockout-dry-run",
+            now_timestamp=lambda: "2026-07-20T00:00:00Z",
+            authorized_policy_sha256=stale_record.policy_sha256,
+        )
+        stale_diff = cast(dict[str, object], stale_result.driver_result["diff"])
+        stale_blockers = cast(list[dict[str, object]], stale_diff["policy_safety_blockers"])
+        self.assertIn(
+            "authz_policy_applying_admin_removed",
+            {blocker["code"] for blocker in stale_blockers},
+        )
+        stale_apply_request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                **reconcile_request(stale_managed_rule).model_dump(mode="json"),
+                "mode": "apply",
+                "reviewed_plan_sha256": stale_diff["plan_sha256"],
+            }
+        )
+        with self.assertRaises(AuthzPolicySafetyError) as raised:
             execute_managed_authz_policy_reconcile(
                 record_store=_AuthzPolicyStore((stale_record,)),
-                request=reconcile_request(stale_managed_rule),
+                request=stale_apply_request,
                 identity=identity,
                 trace_id="trace-retirement-lockout",
                 now_timestamp=lambda: "2026-07-20T00:00:00Z",
                 authorized_policy_sha256=stale_record.policy_sha256,
             )
+        self.assertEqual(raised.exception.code, "authz_policy_applying_admin_removed")
 
         active_managed_rule = managed_admin_rule(repository_id=identity.repository_id)
         active_record = _active_record_for_policy(
@@ -1326,6 +1380,7 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
                 "schema_version": 2,
                 "product": "launchplane",
                 "managed_set_id": "operator.launchplane",
+                "reason": "Verify applying administration cannot be removed.",
                 "desired_policy": {
                     "schema_version": 2,
                     "github_actions": [replacement_rule.model_dump(mode="json")],
@@ -1333,10 +1388,32 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             }
         )
 
+        dry_run_result = execute_managed_authz_policy_reconcile(
+            record_store=_AuthzPolicyStore((current_record,)),
+            request=request,
+            identity=identity,
+            trace_id="trace-managed-lockout-dry-run",
+            now_timestamp=lambda: "2026-08-17T00:00:00Z",
+            authorized_policy_sha256=current_record.policy_sha256,
+        )
+        dry_run_diff = cast(dict[str, object], dry_run_result.driver_result["diff"])
+        dry_run_blockers = cast(list[dict[str, object]], dry_run_diff["policy_safety_blockers"])
+        self.assertIn(
+            "authz_policy_applying_admin_removed",
+            {blocker["code"] for blocker in dry_run_blockers},
+        )
+        apply_request = AuthzManagedPolicyReconcileEnvelope.model_validate(
+            {
+                **request.model_dump(mode="json"),
+                "mode": "apply",
+                "reviewed_plan_sha256": dry_run_diff["plan_sha256"],
+            }
+        )
+
         with self.assertRaises(AuthzPolicySafetyError) as raised:
             execute_managed_authz_policy_reconcile(
                 record_store=_AuthzPolicyStore((current_record,)),
-                request=request,
+                request=apply_request,
                 identity=identity,
                 trace_id="trace-managed-lockout",
                 now_timestamp=lambda: "2026-08-17T00:00:00Z",

@@ -675,6 +675,10 @@ the reconciliation request. Every standalone selector binds one exact
 `operator.*` identity. The deploy workflow is not an authorization wrapper and
 does not carry a managed-set secret.
 
+Land reusable-workflow input compatibility before advancing any immutable
+wrapper pin that depends on it. Never pass a newly introduced input to an older
+pinned worker revision that does not declare that input.
+
 ### Reusable workflow SHA rollout for readiness-gated actions
 
 Operational-readiness actions require one exact managed rule for the current
@@ -703,6 +707,14 @@ values. Any changed apply is rejected until the desired set uses separate exact
 rules; an unchanged replay remains a no-op. Every expansion and contraction
 still requires the protected human approval; diagnostics do not bypass or
 weaken that control.
+
+Managed-authz dry-runs also return `policy_safety_blockers` for candidates that
+would remove the last reachable policy administrator, remove the applying
+administrator, or leave no administrator independent from the applying
+identity. These blockers are review evidence rather than dry-run transport
+errors. Apply remains fail-closed with the corresponding bounded error code and
+does not persist the candidate while any applicable policy-safety blocker
+remains.
 
 `Tracked Target Logs` and `Odoo Website Bootstrap Override` follow this same
 two-change rollout. Their dispatch files are thin operator entrypoints pinned to

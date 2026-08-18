@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from fnmatch import fnmatchcase
 import hashlib
 import json
 import re
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -36,7 +37,6 @@ from control_plane.service_auth import (
     GitHubHumanPolicyRule,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
-    LaunchplaneIdentity,
     LocalAdminIdentity,
     LocalAdminPolicyRule,
     LocalOperatorIdentity,
@@ -71,20 +71,46 @@ def _require_expected_authz_policy(
         )
 
 
-AuthzPolicyRule = (
+AuthzPolicyRule: TypeAlias = (
     GitHubActionsPolicyRule
     | GitHubHumanPolicyRule
     | TerminalAgentPolicyRule
     | LocalOperatorPolicyRule
     | LocalAdminPolicyRule
 )
-AuthzPrincipalType = Literal[
+AuthzApplyingIdentity: TypeAlias = (
+    GitHubActionsIdentity
+    | GitHubHumanIdentity
+    | TerminalAgentIdentity
+    | LocalOperatorIdentity
+    | LocalAdminIdentity
+)
+AuthzPrincipalType: TypeAlias = Literal[
     "github_actions",
     "github_humans",
     "terminal_agents",
     "local_operators",
     "local_admins",
 ]
+_AUTHZ_PRINCIPAL_TYPES: tuple[AuthzPrincipalType, ...] = (
+    "github_actions",
+    "github_humans",
+    "terminal_agents",
+    "local_operators",
+    "local_admins",
+)
+
+
+@dataclass(frozen=True)
+class AuthzRuleLocation:
+    principal_type: AuthzPrincipalType
+    index: int
+
+
+@dataclass(frozen=True)
+class AuthzManagedRuleEntry:
+    principal_type: AuthzPrincipalType
+    rule: AuthzPolicyRule
 
 
 def _authz_policy_rule_collections(
@@ -118,6 +144,26 @@ _AUTHZ_RULE_SELECTOR_FIELDS = (
 )
 
 
+@overload
+def _normalize_authz_rule(rule: GitHubActionsPolicyRule) -> GitHubActionsPolicyRule: ...
+
+
+@overload
+def _normalize_authz_rule(rule: GitHubHumanPolicyRule) -> GitHubHumanPolicyRule: ...
+
+
+@overload
+def _normalize_authz_rule(rule: TerminalAgentPolicyRule) -> TerminalAgentPolicyRule: ...
+
+
+@overload
+def _normalize_authz_rule(rule: LocalOperatorPolicyRule) -> LocalOperatorPolicyRule: ...
+
+
+@overload
+def _normalize_authz_rule(rule: LocalAdminPolicyRule) -> LocalAdminPolicyRule: ...
+
+
 def _normalize_authz_rule(rule: AuthzPolicyRule) -> AuthzPolicyRule:
     updates: dict[str, object] = {}
     for field_name in _AUTHZ_RULE_SELECTOR_FIELDS:
@@ -133,33 +179,13 @@ def _normalize_desired_authz_policy(policy: LaunchplaneAuthzPolicy) -> Launchpla
         principal_type: tuple(
             sorted(
                 (_normalize_authz_rule(rule) for rule in rules),
-                key=lambda rule: str(rule.managed_rule_id),
+                key=lambda rule: rule.managed_rule_id or "",
             )
         )
         for principal_type, rules in _authz_policy_rule_collections(policy)
     }
-    return LaunchplaneAuthzPolicy(
-        schema_version=policy.schema_version,
-        github_actions=cast(
-            tuple[GitHubActionsPolicyRule, ...],
-            normalized_collections["github_actions"],
-        ),
-        github_humans=cast(
-            tuple[GitHubHumanPolicyRule, ...],
-            normalized_collections["github_humans"],
-        ),
-        terminal_agents=cast(
-            tuple[TerminalAgentPolicyRule, ...],
-            normalized_collections["terminal_agents"],
-        ),
-        local_operators=cast(
-            tuple[LocalOperatorPolicyRule, ...],
-            normalized_collections["local_operators"],
-        ),
-        local_admins=cast(
-            tuple[LocalAdminPolicyRule, ...],
-            normalized_collections["local_admins"],
-        ),
+    return LaunchplaneAuthzPolicy.model_validate(
+        {"schema_version": policy.schema_version, **normalized_collections}
     )
 
 
@@ -192,8 +218,8 @@ _PRODUCT_OWNER_POLICY_ADMIN_ACTIONS = frozenset(
         PRODUCT_OWNER_REQUIREMENT_WRITE_ACTION,
     }
 )
-AuthzSchemaMigrationMode = Literal["reject", "migrate_v1_to_v2"]
-AuthzUnmanagedAdoptionMode = Literal["reject", "adopt_matching"]
+AuthzSchemaMigrationMode: TypeAlias = Literal["reject", "migrate_v1_to_v2"]
+AuthzUnmanagedAdoptionMode: TypeAlias = Literal["reject", "adopt_matching"]
 
 
 def _validate_owner_acceptance_managed_set(policy: LaunchplaneAuthzPolicy) -> None:
@@ -315,7 +341,8 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
             _validate_product_owner_policy_admin_managed_set(self.desired_policy)
         for principal_type, rules in _authz_policy_rule_collections(self.desired_policy):
             for rule in rules:
-                if rule.managed_set_id != self.managed_set_id or not rule.managed_rule_id:
+                managed_rule_id = rule.managed_rule_id
+                if rule.managed_set_id != self.managed_set_id or managed_rule_id is None:
                     raise ValueError(
                         "Every desired managed authz rule must declare the request managed_set_id "
                         f"and a managed_rule_id ({principal_type})."
@@ -323,25 +350,25 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
                 if not rule.actions:
                     raise ValueError(
                         "Every desired managed authz rule must declare at least one action "
-                        f"({principal_type}:{rule.managed_rule_id})."
+                        f"({principal_type}:{managed_rule_id})."
                     )
                 if isinstance(rule, GitHubActionsPolicyRule) and (
                     not rule.repository_id or not rule.repository_owner_id
                 ):
                     raise ValueError(
                         "Managed GitHub Actions authz rules require immutable repository_id "
-                        f"and repository_owner_id selectors ({rule.managed_rule_id})."
+                        f"and repository_owner_id selectors ({managed_rule_id})."
                     )
                 if isinstance(rule, GitHubHumanPolicyRule):
                     if not rule.roles:
                         raise ValueError(
                             "Managed GitHub human authz rules require at least one explicit role "
-                            f"({rule.managed_rule_id})."
+                            f"({managed_rule_id})."
                         )
                     if not any((rule.github_ids, rule.logins, rule.organizations, rule.teams)):
                         raise ValueError(
                             "Managed GitHub human authz rules require at least one principal "
-                            f"selector ({rule.managed_rule_id})."
+                            f"selector ({managed_rule_id})."
                         )
                     if any(
                         _contains_selector_glob(selector)
@@ -349,7 +376,7 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
                     ):
                         raise ValueError(
                             "Managed GitHub human authz rules require exact login, organization, "
-                            f"and team selectors ({rule.managed_rule_id})."
+                            f"and team selectors ({managed_rule_id})."
                         )
                     if (
                         "admin" in rule.roles
@@ -360,7 +387,7 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
                     ) and not rule.github_ids:
                         raise ValueError(
                             "Managed GitHub human admin and sensitive-action rules require "
-                            f"immutable github_ids ({rule.managed_rule_id})."
+                            f"immutable github_ids ({managed_rule_id})."
                         )
         return self
 
@@ -376,7 +403,7 @@ class AuthzManagedPolicyRouteResult(BaseModel):
     driver_result: dict[str, object]
 
 
-AuthzManagedRuleChangeKind = Literal["added", "adopted", "updated", "removed"]
+AuthzManagedRuleChangeKind: TypeAlias = Literal["added", "adopted", "updated", "removed"]
 
 
 class AuthzManagedRuleChange(BaseModel):
@@ -402,7 +429,7 @@ class AuthzManagedCompatibilityRetirement(BaseModel):
     )
 
 
-AuthzOperationalReadinessBlockerCode = Literal[
+AuthzOperationalReadinessBlockerCode: TypeAlias = Literal[
     "repository_not_exact",
     "workflow_refs_not_singleton",
     "workflow_ref_not_exact",
@@ -427,6 +454,20 @@ class AuthzManagedOperationalReadinessBlocker(BaseModel):
     reason_codes: tuple[AuthzOperationalReadinessBlockerCode, ...]
 
 
+AuthzManagedPolicySafetyBlockerCode: TypeAlias = Literal[
+    "authz_policy_admin_unreachable",
+    "authz_policy_applying_admin_removed",
+    "authz_policy_independent_admin_unreachable",
+]
+
+
+class AuthzManagedPolicySafetyBlocker(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: AuthzManagedPolicySafetyBlockerCode
+    message: str
+
+
 class AuthzManagedPolicyDiff(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -449,9 +490,31 @@ class AuthzManagedPolicyDiff(BaseModel):
     unmanaged_compatibility_candidate_count: int = 0
     retired_unmanaged_compatibility_rule_count: int = 0
     retired_unmanaged_compatibility_rules: tuple[AuthzManagedCompatibilityRetirement, ...] = ()
+    policy_safety_blocker_count: int = 0
+    policy_safety_blockers: tuple[AuthzManagedPolicySafetyBlocker, ...] = ()
     operational_readiness_blocked_rule_count: int = 0
     operational_readiness_blockers: tuple[AuthzManagedOperationalReadinessBlocker, ...] = ()
     changes: tuple[AuthzManagedRuleChange, ...] = ()
+
+
+def _managed_policy_safety_blocker(
+    code: AuthzManagedPolicySafetyBlockerCode,
+) -> AuthzManagedPolicySafetyBlocker:
+    messages = {
+        "authz_policy_admin_unreachable": (
+            "Managed authz policy reconciliation must retain at least one reachable principal "
+            "that can administer Launchplane authz policy."
+        ),
+        "authz_policy_applying_admin_removed": (
+            "Managed authz policy reconciliation must retain policy administration "
+            "authority for the applying identity."
+        ),
+        "authz_policy_independent_admin_unreachable": (
+            "Managed authz policy reconciliation must retain a reachable policy "
+            "administrator independent from the applying identity."
+        ),
+    }
+    return AuthzManagedPolicySafetyBlocker(code=code, message=messages[code])
 
 
 def summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[str, object]:
@@ -516,7 +579,7 @@ def summarize_active_authz_policy_record(
     return summary
 
 
-def authz_policy_operator_payload(identity: LaunchplaneIdentity) -> dict[str, object]:
+def authz_policy_operator_payload(identity: AuthzApplyingIdentity) -> dict[str, object]:
     if isinstance(identity, GitHubHumanIdentity):
         return {
             "type": "github_human",
@@ -578,7 +641,35 @@ def _authz_rule_sha256(rule: AuthzPolicyRule) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical_json.encode()).hexdigest()
+
+
+@overload
+def _authz_rule_without_managed_identity(
+    rule: GitHubActionsPolicyRule,
+) -> GitHubActionsPolicyRule: ...
+
+
+@overload
+def _authz_rule_without_managed_identity(
+    rule: GitHubHumanPolicyRule,
+) -> GitHubHumanPolicyRule: ...
+
+
+@overload
+def _authz_rule_without_managed_identity(
+    rule: TerminalAgentPolicyRule,
+) -> TerminalAgentPolicyRule: ...
+
+
+@overload
+def _authz_rule_without_managed_identity(
+    rule: LocalOperatorPolicyRule,
+) -> LocalOperatorPolicyRule: ...
+
+
+@overload
+def _authz_rule_without_managed_identity(rule: LocalAdminPolicyRule) -> LocalAdminPolicyRule: ...
 
 
 def _authz_rule_without_managed_identity(rule: AuthzPolicyRule) -> AuthzPolicyRule:
@@ -659,9 +750,13 @@ def _managed_operational_readiness_blockers(
         reason_codes = operational_readiness_rule_selector_blockers(rule)
         if not reason_codes:
             continue
+        if rule.managed_rule_id is None:
+            raise AuthzPolicyRequestError(
+                "Operational-readiness managed authz rules require managed_rule_id."
+            )
         blockers.append(
             AuthzManagedOperationalReadinessBlocker(
-                managed_rule_id=str(rule.managed_rule_id),
+                managed_rule_id=rule.managed_rule_id,
                 actions=matching_actions,
                 reason_codes=reason_codes,
             )
@@ -753,17 +848,22 @@ def _validate_github_managed_workflow_transition(
         assert isinstance(desired_rule, GitHubActionsPolicyRule)
         if not _github_rule_requires_immutable_workflow(desired_rule):
             continue
+        managed_rule_id = desired_rule.managed_rule_id
+        if managed_rule_id is None:
+            raise AuthzPolicyRequestError(
+                "High-privilege managed GitHub Actions rules require managed_rule_id."
+            )
         if not desired_rule.workflow_refs or any(
             _contains_selector_glob(workflow_ref) for workflow_ref in desired_rule.workflow_refs
         ):
             raise AuthzPolicyRequestError(
                 "High-privilege managed GitHub Actions rules require exact caller workflow_refs "
-                f"({desired_rule.managed_rule_id})."
+                f"({managed_rule_id})."
             )
         if not desired_rule.job_workflow_refs:
             raise AuthzPolicyRequestError(
                 "High-privilege managed GitHub Actions rules require an exact reviewed reusable "
-                f"workflow identity ({desired_rule.managed_rule_id})."
+                f"workflow identity ({managed_rule_id})."
             )
         if not any(
             is_immutable_job_workflow_ref(job_workflow_ref)
@@ -772,7 +872,7 @@ def _validate_github_managed_workflow_transition(
             raise AuthzPolicyRequestError(
                 "High-privilege managed GitHub Actions rules require at least one reusable "
                 "workflow identity pinned to a full commit SHA "
-                f"({desired_rule.managed_rule_id})."
+                f"({managed_rule_id})."
             )
         for job_workflow_ref in desired_rule.job_workflow_refs:
             if is_immutable_job_workflow_ref(job_workflow_ref):
@@ -788,7 +888,7 @@ def _validate_github_managed_workflow_transition(
                 raise AuthzPolicyRequestError(
                     "High-privilege managed GitHub Actions rules can preserve a mutable reusable "
                     "workflow ref only when the active policy already authorizes that exact ref; "
-                    f"new refs must use a full commit SHA ({desired_rule.managed_rule_id})."
+                    f"new refs must use a full commit SHA ({managed_rule_id})."
                 )
 
 
@@ -876,8 +976,8 @@ def _managed_github_compatibility_retirement_matches(
         or current_rule.repository_owner_id
     ):
         return False
-    normalized_current_rule = cast(GitHubActionsPolicyRule, _normalize_authz_rule(current_rule))
-    normalized_desired_rule = cast(GitHubActionsPolicyRule, _normalize_authz_rule(desired_rule))
+    normalized_current_rule = _normalize_authz_rule(current_rule)
+    normalized_desired_rule = _normalize_authz_rule(desired_rule)
     return (
         normalized_current_rule.repository == normalized_desired_rule.repository
         and bool(normalized_current_rule.actions)
@@ -919,25 +1019,35 @@ def _managed_github_compatibility_retirement_matches(
 
 def _managed_rules_by_id(
     *, policy: LaunchplaneAuthzPolicy, managed_set_id: str
-) -> dict[str, tuple[AuthzPrincipalType, AuthzPolicyRule]]:
-    return {
-        str(rule.managed_rule_id): (principal_type, rule)
-        for principal_type, rules in _authz_policy_rule_collections(policy)
-        for rule in rules
-        if rule.managed_set_id == managed_set_id and rule.managed_rule_id is not None
-    }
+) -> dict[str, AuthzManagedRuleEntry]:
+    managed_rules: dict[str, AuthzManagedRuleEntry] = {}
+    for principal_type, rules in _authz_policy_rule_collections(policy):
+        for rule in rules:
+            if rule.managed_set_id != managed_set_id or rule.managed_rule_id is None:
+                continue
+            managed_rules[rule.managed_rule_id] = AuthzManagedRuleEntry(
+                principal_type=principal_type,
+                rule=rule,
+            )
+    return managed_rules
 
 
 def _desired_managed_set_payload(policy: LaunchplaneAuthzPolicy) -> list[dict[str, object]]:
-    return [
-        {
-            "principal_type": principal_type,
-            "managed_rule_id": str(rule.managed_rule_id),
-            "rule": rule.model_dump(mode="json", exclude_none=True),
-        }
-        for principal_type, rules in _authz_policy_rule_collections(policy)
-        for rule in rules
-    ]
+    payload: list[dict[str, object]] = []
+    for principal_type, rules in _authz_policy_rule_collections(policy):
+        for rule in rules:
+            if rule.managed_rule_id is None:
+                raise AuthzPolicyRequestError(
+                    "Desired managed authz rules require managed_rule_id."
+                )
+            payload.append(
+                {
+                    "principal_type": principal_type,
+                    "managed_rule_id": rule.managed_rule_id,
+                    "rule": rule.model_dump(mode="json", exclude_none=True),
+                }
+            )
+    return payload
 
 
 def _authz_policy_without_managed_identities(
@@ -947,13 +1057,8 @@ def _authz_policy_without_managed_identities(
         principal_type: tuple(_authz_rule_without_managed_identity(rule) for rule in rules)
         for principal_type, rules in _authz_policy_rule_collections(policy)
     }
-    return LaunchplaneAuthzPolicy(
-        schema_version=policy.schema_version,
-        github_actions=cast(tuple[GitHubActionsPolicyRule, ...], collections["github_actions"]),
-        github_humans=cast(tuple[GitHubHumanPolicyRule, ...], collections["github_humans"]),
-        terminal_agents=cast(tuple[TerminalAgentPolicyRule, ...], collections["terminal_agents"]),
-        local_operators=cast(tuple[LocalOperatorPolicyRule, ...], collections["local_operators"]),
-        local_admins=cast(tuple[LocalAdminPolicyRule, ...], collections["local_admins"]),
+    return LaunchplaneAuthzPolicy.model_validate(
+        {"schema_version": policy.schema_version, **collections}
     )
 
 
@@ -997,54 +1102,42 @@ def _authz_policy_retains_administration(policy: LaunchplaneAuthzPolicy) -> bool
 def _authz_rule_allows_identity(
     *,
     rule: AuthzPolicyRule,
-    identity: LaunchplaneIdentity,
+    identity: AuthzApplyingIdentity,
     schema_version: Literal[1, 2],
 ) -> bool:
-    if isinstance(rule, GitHubActionsPolicyRule) and isinstance(identity, GitHubActionsIdentity):
-        return rule.allows(
+    identity_matches_rule = any(
+        (
+            (
+                isinstance(rule, GitHubActionsPolicyRule)
+                and isinstance(identity, GitHubActionsIdentity)
+            ),
+            (isinstance(rule, GitHubHumanPolicyRule) and isinstance(identity, GitHubHumanIdentity)),
+            (
+                isinstance(rule, TerminalAgentPolicyRule)
+                and isinstance(identity, TerminalAgentIdentity)
+            ),
+            (
+                isinstance(rule, LocalOperatorPolicyRule)
+                and isinstance(identity, LocalOperatorIdentity)
+            ),
+            (isinstance(rule, LocalAdminPolicyRule) and isinstance(identity, LocalAdminIdentity)),
+        )
+    )
+    if not identity_matches_rule:
+        return False
+    return bool(
+        cast(Any, rule).allows(
             identity=identity,
             action=_AUTHZ_POLICY_ADMIN_ACTION,
             product="launchplane",
             context="launchplane",
             schema_version=schema_version,
         )
-    if isinstance(rule, GitHubHumanPolicyRule) and isinstance(identity, GitHubHumanIdentity):
-        return rule.allows(
-            identity=identity,
-            action=_AUTHZ_POLICY_ADMIN_ACTION,
-            product="launchplane",
-            context="launchplane",
-            schema_version=schema_version,
-        )
-    if isinstance(rule, TerminalAgentPolicyRule) and isinstance(identity, TerminalAgentIdentity):
-        return rule.allows(
-            identity=identity,
-            action=_AUTHZ_POLICY_ADMIN_ACTION,
-            product="launchplane",
-            context="launchplane",
-            schema_version=schema_version,
-        )
-    if isinstance(rule, LocalOperatorPolicyRule) and isinstance(identity, LocalOperatorIdentity):
-        return rule.allows(
-            identity=identity,
-            action=_AUTHZ_POLICY_ADMIN_ACTION,
-            product="launchplane",
-            context="launchplane",
-            schema_version=schema_version,
-        )
-    if isinstance(rule, LocalAdminPolicyRule) and isinstance(identity, LocalAdminIdentity):
-        return rule.allows(
-            identity=identity,
-            action=_AUTHZ_POLICY_ADMIN_ACTION,
-            product="launchplane",
-            context="launchplane",
-            schema_version=schema_version,
-        )
-    return False
+    )
 
 
 def _authz_policy_retains_independent_administration(
-    *, policy: LaunchplaneAuthzPolicy, applying_identity: LaunchplaneIdentity
+    *, policy: LaunchplaneAuthzPolicy, applying_identity: AuthzApplyingIdentity
 ) -> bool:
     return any(
         not _authz_rule_allows_identity(
@@ -1077,16 +1170,16 @@ def _reconcile_managed_policy(
         policy=desired_policy,
         managed_set_id=managed_set_id,
     )
-    current_collections = dict(_authz_policy_rule_collections(current_policy))
-    adoption_locations: dict[tuple[AuthzPrincipalType, int], str] = {}
+    adoption_locations: dict[AuthzRuleLocation, str] = {}
     adopted_rule_ids: set[str] = set()
-    for managed_rule_id, (desired_principal_type, desired_rule) in sorted(
-        desired_managed_rules.items()
-    ):
+    for managed_rule_id in sorted(desired_managed_rules):
+        desired_entry = desired_managed_rules[managed_rule_id]
+        desired_principal_type = desired_entry.principal_type
+        desired_rule = desired_entry.rule
         if managed_rule_id in current_managed_rules:
             continue
-        candidates = tuple(
-            (principal_type, index)
+        candidates: tuple[AuthzRuleLocation, ...] = tuple(
+            AuthzRuleLocation(principal_type=principal_type, index=index)
             for principal_type, rules in _authz_policy_rule_collections(current_policy)
             for index, current_rule in enumerate(rules)
             if current_rule.managed_set_id is None
@@ -1123,41 +1216,38 @@ def _reconcile_managed_policy(
                 "with unmanaged_adoption='adopt_matching'."
             )
         candidate = candidates[0]
-        if candidate[0] != desired_principal_type or candidate in adoption_locations:
+        if candidate.principal_type != desired_principal_type or candidate in adoption_locations:
             raise AuthzPolicyConflictError(
                 "Managed authz policy adoption is ambiguous across desired managed identities."
             )
         adoption_locations[candidate] = managed_rule_id
         adopted_rule_ids.add(managed_rule_id)
 
-    retirement_matches_by_location: dict[tuple[AuthzPrincipalType, int], tuple[str, ...]] = {}
-    retirement_locations_by_managed_rule_id: dict[
-        str, tuple[tuple[AuthzPrincipalType, int], ...]
-    ] = {}
+    retirement_matches_by_location: dict[AuthzRuleLocation, tuple[str, ...]] = {}
+    retirement_locations_by_managed_rule_id: dict[str, tuple[AuthzRuleLocation, ...]] = {}
     for principal_type, rules in _authz_policy_rule_collections(current_policy):
         for index, current_rule in enumerate(rules):
             if principal_type != "github_actions" or current_rule.managed_set_id is not None:
                 continue
             matching_managed_rule_ids = tuple(
                 managed_rule_id
-                for managed_rule_id, (desired_principal_type, desired_rule) in sorted(
-                    desired_managed_rules.items()
-                )
-                if desired_principal_type == "github_actions"
+                for managed_rule_id, desired_entry in sorted(desired_managed_rules.items())
+                if desired_entry.principal_type == "github_actions"
                 and _managed_github_compatibility_retirement_matches(
                     current_rule=current_rule,
-                    desired_rule=desired_rule,
+                    desired_rule=desired_entry.rule,
                 )
             )
             if matching_managed_rule_ids:
-                retirement_matches_by_location[(principal_type, index)] = matching_managed_rule_ids
+                location = AuthzRuleLocation(principal_type=principal_type, index=index)
+                retirement_matches_by_location[location] = matching_managed_rule_ids
                 for managed_rule_id in matching_managed_rule_ids:
                     retirement_locations_by_managed_rule_id[managed_rule_id] = (
                         *retirement_locations_by_managed_rule_id.get(managed_rule_id, ()),
-                        (principal_type, index),
+                        location,
                     )
 
-    retirement_candidates = {
+    retirement_candidates: dict[AuthzRuleLocation, str] = {
         location: managed_rule_ids[0]
         for location, managed_rule_ids in retirement_matches_by_location.items()
         if len(managed_rule_ids) == 1
@@ -1165,7 +1255,7 @@ def _reconcile_managed_policy(
         and current_managed_rules.get(managed_rule_ids[0])
         == desired_managed_rules[managed_rule_ids[0]]
     }
-    retirement_locations: dict[tuple[AuthzPrincipalType, int], str] = {}
+    retirement_locations: dict[AuthzRuleLocation, str] = {}
     if unmanaged_adoption == "adopt_matching":
         ambiguous_locations = tuple(
             location
@@ -1190,29 +1280,37 @@ def _reconcile_managed_policy(
             retirement_locations[location] = managed_rule_id
 
     updated_collections: dict[AuthzPrincipalType, list[AuthzPolicyRule]] = {
-        principal_type: [] for principal_type in current_collections
+        principal_type: [] for principal_type in _AUTHZ_PRINCIPAL_TYPES
     }
     placed_desired_rule_ids: set[str] = set()
     compatibility_retirements: list[AuthzManagedCompatibilityRetirement] = []
     for principal_type, current_rules in _authz_policy_rule_collections(current_policy):
         for index, current_rule in enumerate(current_rules):
             if current_rule.managed_set_id == managed_set_id:
-                managed_rule_id = str(current_rule.managed_rule_id)
-                desired_entry = desired_managed_rules.get(managed_rule_id)
-                if desired_entry is not None and desired_entry[0] == principal_type:
-                    updated_collections[principal_type].append(desired_entry[1])
+                if current_rule.managed_rule_id is None:
+                    raise AuthzPolicyConflictError(
+                        "Managed authz policy contains a managed rule without managed_rule_id."
+                    )
+                managed_rule_id = current_rule.managed_rule_id
+                matching_desired_entry = desired_managed_rules.get(managed_rule_id)
+                if (
+                    matching_desired_entry is not None
+                    and matching_desired_entry.principal_type == principal_type
+                ):
+                    updated_collections[principal_type].append(matching_desired_entry.rule)
                     placed_desired_rule_ids.add(managed_rule_id)
                 continue
-            adopted_rule_id = adoption_locations.get((principal_type, index))
+            location = AuthzRuleLocation(principal_type=principal_type, index=index)
+            adopted_rule_id = adoption_locations.get(location)
             if adopted_rule_id is not None:
                 updated_collections[principal_type].append(
-                    desired_managed_rules[adopted_rule_id][1]
+                    desired_managed_rules[adopted_rule_id].rule
                 )
                 placed_desired_rule_ids.add(adopted_rule_id)
                 continue
-            retired_managed_rule_id = retirement_locations.get((principal_type, index))
+            retired_managed_rule_id = retirement_locations.get(location)
             if retired_managed_rule_id is not None:
-                desired_rule = desired_managed_rules[retired_managed_rule_id][1]
+                desired_rule = desired_managed_rules[retired_managed_rule_id].rule
                 compatibility_retirements.append(
                     AuthzManagedCompatibilityRetirement(
                         managed_rule_id=retired_managed_rule_id,
@@ -1223,71 +1321,54 @@ def _reconcile_managed_policy(
                 continue
             updated_collections[principal_type].append(current_rule)
 
-    for managed_rule_id, (principal_type, desired_rule) in sorted(desired_managed_rules.items()):
+    for managed_rule_id in sorted(desired_managed_rules):
         if managed_rule_id in placed_desired_rule_ids:
             continue
-        updated_collections[principal_type].append(desired_rule)
+        unplaced_desired_entry = desired_managed_rules[managed_rule_id]
+        updated_collections[unplaced_desired_entry.principal_type].append(
+            unplaced_desired_entry.rule
+        )
 
-    updated_policy = LaunchplaneAuthzPolicy(
-        schema_version=2,
-        github_actions=cast(
-            tuple[GitHubActionsPolicyRule, ...],
-            tuple(updated_collections["github_actions"]),
-        ),
-        github_humans=cast(
-            tuple[GitHubHumanPolicyRule, ...],
-            tuple(updated_collections["github_humans"]),
-        ),
-        terminal_agents=cast(
-            tuple[TerminalAgentPolicyRule, ...],
-            tuple(updated_collections["terminal_agents"]),
-        ),
-        local_operators=cast(
-            tuple[LocalOperatorPolicyRule, ...],
-            tuple(updated_collections["local_operators"]),
-        ),
-        local_admins=cast(
-            tuple[LocalAdminPolicyRule, ...],
-            tuple(updated_collections["local_admins"]),
-        ),
+    updated_policy = LaunchplaneAuthzPolicy.model_validate(
+        {"schema_version": 2, **updated_collections}
     )
     changes: list[AuthzManagedRuleChange] = []
     unchanged_rule_count = 0
     for managed_rule_id in sorted(current_managed_rules.keys() | desired_managed_rules.keys()):
         current_entry = current_managed_rules.get(managed_rule_id)
-        desired_entry = desired_managed_rules.get(managed_rule_id)
+        desired_change_entry = desired_managed_rules.get(managed_rule_id)
         if current_entry is None:
-            assert desired_entry is not None
+            assert desired_change_entry is not None
             changes.append(
                 AuthzManagedRuleChange(
                     managed_rule_id=managed_rule_id,
                     change="adopted" if managed_rule_id in adopted_rule_ids else "added",
-                    desired_principal_type=desired_entry[0],
-                    desired_rule_sha256=_authz_rule_sha256(desired_entry[1]),
+                    desired_principal_type=desired_change_entry.principal_type,
+                    desired_rule_sha256=_authz_rule_sha256(desired_change_entry.rule),
                 )
             )
             continue
-        if desired_entry is None:
+        if desired_change_entry is None:
             changes.append(
                 AuthzManagedRuleChange(
                     managed_rule_id=managed_rule_id,
                     change="removed",
-                    previous_principal_type=current_entry[0],
-                    previous_rule_sha256=_authz_rule_sha256(current_entry[1]),
+                    previous_principal_type=current_entry.principal_type,
+                    previous_rule_sha256=_authz_rule_sha256(current_entry.rule),
                 )
             )
             continue
-        if current_entry == desired_entry:
+        if current_entry == desired_change_entry:
             unchanged_rule_count += 1
             continue
         changes.append(
             AuthzManagedRuleChange(
                 managed_rule_id=managed_rule_id,
                 change="updated",
-                previous_principal_type=current_entry[0],
-                desired_principal_type=desired_entry[0],
-                previous_rule_sha256=_authz_rule_sha256(current_entry[1]),
-                desired_rule_sha256=_authz_rule_sha256(desired_entry[1]),
+                previous_principal_type=current_entry.principal_type,
+                desired_principal_type=desired_change_entry.principal_type,
+                previous_rule_sha256=_authz_rule_sha256(current_entry.rule),
+                desired_rule_sha256=_authz_rule_sha256(desired_change_entry.rule),
             )
         )
     return (
@@ -1339,16 +1420,11 @@ def plan_managed_authz_policy_reconcile(
         managed_set_id=request.managed_set_id,
         unmanaged_adoption=request.unmanaged_adoption,
     )
+    policy_safety_blockers: tuple[AuthzManagedPolicySafetyBlocker, ...] = ()
     if _authz_policy_retains_administration(
         base_policy
     ) and not _authz_policy_retains_administration(updated_policy):
-        raise AuthzPolicySafetyError(
-            code="authz_policy_admin_unreachable",
-            message=(
-                "Managed authz policy reconciliation must retain at least one reachable principal "
-                "that can administer Launchplane authz policy."
-            ),
-        )
+        policy_safety_blockers = (_managed_policy_safety_blocker("authz_policy_admin_unreachable"),)
     desired_policy_sha256 = authz_policy_sha256(updated_policy)
     changed = current_record.policy_sha256 != desired_policy_sha256
     desired_set_payload = _desired_managed_set_payload(request.desired_policy)
@@ -1357,7 +1433,7 @@ def plan_managed_authz_policy_reconcile(
             desired_set_payload,
             sort_keys=True,
             separators=(",", ":"),
-        ).encode("utf-8")
+        ).encode()
     ).hexdigest()
     candidate_revision = current_record.revision + int(changed)
     plan_payload = {
@@ -1376,7 +1452,7 @@ def plan_managed_authz_policy_reconcile(
         "related_issue": request.related_issue,
     }
     plan_sha256 = hashlib.sha256(
-        json.dumps(plan_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(plan_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     if request.mode == "apply" and request.reviewed_plan_sha256 != plan_sha256:
         raise AuthzPolicyConflictError(
@@ -1410,6 +1486,8 @@ def plan_managed_authz_policy_reconcile(
         unmanaged_compatibility_candidate_count=unmanaged_compatibility_candidate_count,
         retired_unmanaged_compatibility_rule_count=len(compatibility_retirements),
         retired_unmanaged_compatibility_rules=compatibility_retirements,
+        policy_safety_blocker_count=len(policy_safety_blockers),
+        policy_safety_blockers=policy_safety_blockers,
         operational_readiness_blocked_rule_count=len(operational_readiness_blockers),
         operational_readiness_blockers=operational_readiness_blockers,
         changes=changes,
@@ -1467,7 +1545,7 @@ def _dry_run_authz_policy_record(
 def authz_managed_policy_reconcile_audit_payload(
     *,
     request: AuthzManagedPolicyReconcileEnvelope,
-    identity: LaunchplaneIdentity,
+    identity: AuthzApplyingIdentity,
     previous_record: LaunchplaneAuthzPolicyRecord,
     new_record: LaunchplaneAuthzPolicyRecord | None,
     diff: AuthzManagedPolicyDiff,
@@ -1507,7 +1585,7 @@ def execute_managed_authz_policy_reconcile(
     *,
     record_store: AuthzPolicyRecordStore,
     request: AuthzManagedPolicyReconcileEnvelope,
-    identity: LaunchplaneIdentity,
+    identity: AuthzApplyingIdentity,
     trace_id: str,
     now_timestamp: TimestampProvider,
     authorized_policy_sha256: str = "",
@@ -1529,19 +1607,40 @@ def execute_managed_authz_policy_reconcile(
         current_record=current_record,
         expected_policy_sha256=authorized_policy_sha256,
     )
+    policy_safety_blockers = list(managed_diff.policy_safety_blockers)
     if managed_diff.changed and not updated_policy.allows(
         identity=identity,
         action=_AUTHZ_POLICY_ADMIN_ACTION,
         product=request.product,
         context="launchplane",
     ):
-        raise AuthzPolicySafetyError(
-            code="authz_policy_applying_admin_removed",
-            message=(
-                "Managed authz policy reconciliation must retain policy administration "
-                "authority for the applying identity."
-            ),
+        policy_safety_blockers.append(
+            _managed_policy_safety_blocker("authz_policy_applying_admin_removed")
         )
+    if managed_diff.changed and not _authz_policy_retains_independent_administration(
+        policy=updated_policy,
+        applying_identity=identity,
+    ):
+        policy_safety_blockers.append(
+            _managed_policy_safety_blocker("authz_policy_independent_admin_unreachable")
+        )
+    managed_diff = managed_diff.model_copy(
+        update={
+            "policy_safety_blocker_count": len(policy_safety_blockers),
+            "policy_safety_blockers": tuple(policy_safety_blockers),
+        }
+    )
+    if request.mode == "apply" and managed_diff.changed:
+        blockers_by_code = {
+            blocker.code: blocker for blocker in managed_diff.policy_safety_blockers
+        }
+        for code in (
+            "authz_policy_admin_unreachable",
+            "authz_policy_applying_admin_removed",
+        ):
+            blocker = blockers_by_code.get(code)
+            if blocker is not None:
+                raise AuthzPolicySafetyError(code=blocker.code, message=blocker.message)
     if (
         request.mode == "apply"
         and managed_diff.changed
@@ -1554,21 +1653,20 @@ def execute_managed_authz_policy_reconcile(
                 "blockers remain. Review the dry-run evidence and submit an exact candidate."
             ),
         )
-    if (
-        request.mode == "apply"
-        and managed_diff.changed
-        and not _authz_policy_retains_independent_administration(
-            policy=updated_policy,
-            applying_identity=identity,
-        )
-    ):
-        raise AuthzPolicySafetyError(
-            code="authz_policy_independent_admin_unreachable",
-            message=(
-                "Managed authz policy reconciliation must retain a reachable policy "
-                "administrator independent from the applying identity."
+    if request.mode == "apply" and managed_diff.changed:
+        independent_admin_blocker = next(
+            (
+                blocker
+                for blocker in managed_diff.policy_safety_blockers
+                if blocker.code == "authz_policy_independent_admin_unreachable"
             ),
+            None,
         )
+        if independent_admin_blocker is not None:
+            raise AuthzPolicySafetyError(
+                code=independent_admin_blocker.code,
+                message=independent_admin_blocker.message,
+            )
     diff = managed_diff.model_dump(mode="json")
     audit = authz_managed_policy_reconcile_audit_payload(
         request=request,

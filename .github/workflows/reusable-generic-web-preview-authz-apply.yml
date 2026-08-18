@@ -17,10 +17,6 @@ permissions:
   contents: read
   id-token: write
 
-concurrency:
-  group: launchplane-authz-policy
-  cancel-in-progress: false
-
 jobs:
   apply:
     runs-on: ubuntu-latest

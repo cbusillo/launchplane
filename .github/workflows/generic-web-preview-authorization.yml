@@ -76,7 +76,7 @@ jobs:
       product: ${{ steps.inputs.outputs.product }}
     env:
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-      GITHUB_REF_NAME: ${{ github.ref }}
+      WORKFLOW_REF: ${{ github.ref }}
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       MODE: ${{ inputs.mode }}
       OPERATION: ${{ inputs.operation }}
@@ -114,7 +114,7 @@ jobs:
 
           mode = required("MODE")
           expected_ref = f"refs/heads/{os.environ['DEFAULT_BRANCH']}"
-          if os.environ["GITHUB_REF_NAME"] != expected_ref:
+          if os.environ["WORKFLOW_REF"] != expected_ref:
               raise SystemExit(
                   "Generic-web preview authorization must run from the default branch."
               )
