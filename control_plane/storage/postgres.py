@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -39,6 +39,7 @@ from sqlalchemy.pool import NullPool
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
+from control_plane.contracts.authz_denial_record import AuthzDenialRecord
 from control_plane.contracts.authz_policy_record import (
     AuthzPolicyCompareWriteResult,
     LaunchplaneAuthzPolicyRecord,
@@ -639,8 +640,8 @@ class _TenantTechnicalHumanWaiverAuthoritySnapshot:
         )
         return records if limit is None else records[: max(limit, 0)]
 
+    @staticmethod
     def list_tenant_technical_human_waiver_event_records(
-        self,
         **_: object,
     ) -> tuple[TenantTechnicalHumanWaiverEventRecord, ...]:
         return ()
@@ -688,8 +689,8 @@ class _TrustedMaintenanceAuthoritySnapshot:
         )
         return records if limit is None else records[: max(limit, 0)]
 
+    @staticmethod
     def list_trusted_maintenance_evidence_records(
-        self,
         **_: object,
     ) -> tuple[TrustedMaintenanceEvidenceRecord, ...]:
         return ()
@@ -701,6 +702,14 @@ def _utc_now_timestamp() -> str:
 
 class _PayloadRow(Protocol):
     payload: PayloadDict
+
+
+def _string_value(value: Any) -> str:
+    return str(value)
+
+
+def _payload_from_row(row: object) -> PayloadDict:
+    return cast(_PayloadRow, row).payload
 
 
 class Base(DeclarativeBase):
@@ -1934,6 +1943,19 @@ class LaunchplaneAuthzPolicyRow(Base):
     source: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneAuthzDenialRow(Base):
+    __tablename__ = "launchplane_authz_denials"
+    __table_args__ = (
+        Index("launchplane_authz_denials_recorded_idx", desc("recorded_at")),
+        Index("launchplane_authz_denials_expires_idx", "expires_at"),
+    )
+
+    trace_id: Mapped[str] = mapped_column(String, primary_key=True)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -3508,7 +3530,9 @@ class PostgresRecordStore(HumanSessionStore):
             existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
             for column_name in sorted(table.columns.keys()):
                 if column_name not in existing_columns:
-                    missing_columns.append(f"{table_name}.{column_name}")
+                    missing_columns.append(
+                        f"{_string_value(table_name)}.{_string_value(column_name)}"
+                    )
         if missing_columns:
             missing = ", ".join(missing_columns)
             raise RuntimeError(
@@ -3534,15 +3558,15 @@ class PostgresRecordStore(HumanSessionStore):
         self._engine.dispose()
 
     def __del__(self) -> None:
-        try:
+        with suppress(Exception):
             self.close()
-        except Exception:
-            return None
 
-    def _payload_dict(self, model: BaseModel) -> PayloadDict:
+    @staticmethod
+    def _payload_dict(model: BaseModel) -> PayloadDict:
         return model.model_dump(mode="json", exclude_none=True)
 
-    def _read_payload(self, *, model_type: type[RecordModel], payload: PayloadDict) -> RecordModel:
+    @staticmethod
+    def _read_payload(*, model_type: type[RecordModel], payload: PayloadDict) -> RecordModel:
         return model_type.model_validate(payload)
 
     def _write_row(self, row: Base) -> None:
@@ -3556,7 +3580,8 @@ class PostgresRecordStore(HumanSessionStore):
     def _after_authz_policy_write_step(self, step_name: str) -> None:
         return None
 
-    def _after_tenant_technical_human_waiver_write_step(self, step_name: str) -> None:
+    @staticmethod
+    def _after_tenant_technical_human_waiver_write_step(_step_name: str) -> None:
         return None
 
     def _merge_authority_row(self, session: Any, row: Base, *, step_name: str) -> None:
@@ -3932,7 +3957,7 @@ class PostgresRecordStore(HumanSessionStore):
             raise FileNotFoundError(f"{label} was already deleted.")
         current_record = self._read_payload(
             model_type=model_type,
-            payload=cast(_PayloadRow, row).payload,
+            payload=_payload_from_row(row),
         )
         if self._payload_dict(current_record) != self._payload_dict(expected_record):
             raise ValueError(f"{label} changed during bundle write.")
@@ -4040,7 +4065,7 @@ class PostgresRecordStore(HumanSessionStore):
             return tuple(
                 self._read_payload(
                     model_type=model_type,
-                    payload=cast(_PayloadRow, row).payload,
+                    payload=_payload_from_row(row),
                 )
                 for row in rows
             )
@@ -4317,7 +4342,8 @@ class PostgresRecordStore(HumanSessionStore):
                 parsed = parsed.replace(tzinfo=timezone.utc)
         return format_launchplane_mutation_timestamp(parsed)
 
-    def _mutation_lease_expiry(self, *, observed_at: str, lease_seconds: int) -> str:
+    @staticmethod
+    def _mutation_lease_expiry(*, observed_at: str, lease_seconds: int) -> str:
         if lease_seconds < 1 or lease_seconds > 86_400:
             raise ValueError("Mutation reservation lease_seconds must be between 1 and 86400.")
         return format_launchplane_mutation_timestamp(
@@ -4328,8 +4354,8 @@ class PostgresRecordStore(HumanSessionStore):
             + timedelta(seconds=lease_seconds)
         )
 
+    @staticmethod
     def _updated_idempotency_record(
-        self,
         record: LaunchplaneIdempotencyRecord,
         **updates: object,
     ) -> LaunchplaneIdempotencyRecord:
@@ -4337,8 +4363,8 @@ class PostgresRecordStore(HumanSessionStore):
         payload.update(updates)
         return LaunchplaneIdempotencyRecord.model_validate(payload)
 
+    @staticmethod
     def _updated_outbox_delivery_record(
-        self,
         record: OutboxDeliveryRecord,
         **updates: object,
     ) -> OutboxDeliveryRecord:
@@ -4346,8 +4372,8 @@ class PostgresRecordStore(HumanSessionStore):
         payload.update(updates)
         return OutboxDeliveryRecord.model_validate(payload)
 
+    @staticmethod
     def _mutation_transition_identity(
-        self,
         record: LaunchplaneIdempotencyRecord,
     ) -> tuple[object, ...]:
         return (
@@ -4622,7 +4648,7 @@ class PostgresRecordStore(HumanSessionStore):
             if current_record.lease_expires_at <= observed_at:
                 return OutboxDeliveryCompletionResult(status="lease_expired", record=current_record)
             next_updates = dict(updates)
-            if not str(next_updates.get("updated_at") or "").strip():
+            if not _string_value(next_updates.get("updated_at") or "").strip():
                 next_updates["updated_at"] = observed_at
             if require_terminal:
                 next_updates["lease_owner"] = ""
@@ -4949,7 +4975,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
         if normalized_provider_target_key and not normalized_reconciliation_key:
             raise ValueError("Provider target keys require a reconciliation key.")
-        insert_error: IntegrityError | None = None
+        insert_error: IntegrityError
         try:
             with self._session_factory() as session:
                 self._begin_serialized_write(session)
@@ -5007,7 +5033,6 @@ class PostgresRecordStore(HumanSessionStore):
                         provider_target_key=provider_target_key,
                         retry_missing_collision=False,
                     )
-                assert insert_error is not None
                 raise insert_error
             current_record = self._read_payload(
                 model_type=LaunchplaneIdempotencyRecord,
@@ -5860,8 +5885,8 @@ class PostgresRecordStore(HumanSessionStore):
         row.attempt = record.attempt
         row.payload = self._payload_dict(record)
 
+    @staticmethod
     def _lock_odoo_stable_lane(
-        self,
         session: Any,
         *,
         product: str,
@@ -5881,8 +5906,8 @@ class PostgresRecordStore(HumanSessionStore):
         elif dialect_name == "sqlite":
             session.execute(text("BEGIN IMMEDIATE"))
 
+    @staticmethod
     def _active_odoo_stable_lane_operation_owner(
-        self,
         session: Any,
         *,
         product: str,
@@ -8654,7 +8679,7 @@ class PostgresRecordStore(HumanSessionStore):
                 if not database or database == ":memory:":
                     yield
                     return
-                lock_digest = hashlib.sha256(lock_key.encode("utf-8")).hexdigest()
+                lock_digest = hashlib.sha256(lock_key.encode()).hexdigest()
                 database_path = Path(database).expanduser().resolve()
                 lock_path = database_path.parent / (
                     f".{database_path.name}.owner-acceptance-{lock_digest}.lock"
@@ -8770,8 +8795,8 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 return "replayed"
 
+    @staticmethod
     def _next_owner_acceptance_subject_sequence(
-        self,
         *,
         session: Any,
         record: OwnerAcceptanceEventRecord,
@@ -10759,7 +10784,7 @@ class PostgresRecordStore(HumanSessionStore):
             return
         session.execute(
             text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
-            {"lock_name": (f"launchplane:tenant-repository-classification:{repository_id}")},
+            {"lock_name": f"launchplane:tenant-repository-classification:{repository_id}"},
         )
 
     def compare_and_write_tenant_repository_classification_record(
@@ -11429,7 +11454,7 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 raise FileNotFoundError(request_id)
             record = self._read_payload(model_type=EveryCodeWorkRequestRecord, payload=row.payload)
-            if record.fencing_token > 0 and update.fencing_token != record.fencing_token:
+            if 0 < record.fencing_token != update.fencing_token:
                 raise ValueError(
                     f"Every Code status update fencing token {update.fencing_token} "
                     f"does not match record fencing token {record.fencing_token}"
@@ -11953,7 +11978,7 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         submission: EngineeringReviewRunSubmission,
     ) -> EngineeringReviewRunRecord:
-        credential_hash = hashlib.sha256(submission.credential.encode("utf-8")).hexdigest()
+        credential_hash = hashlib.sha256(submission.credential.encode()).hexdigest()
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             statement = select(LaunchplaneEngineeringReviewRunRow).where(
@@ -13908,6 +13933,43 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             return tuple(self._read_authz_policy_row(row) for row in session.scalars(statement))
 
+    def write_authz_denial_record(self, record: AuthzDenialRecord) -> None:
+        with self._session_factory() as session:
+            session.execute(
+                delete(LaunchplaneAuthzDenialRow).where(
+                    LaunchplaneAuthzDenialRow.expires_at <= record.recorded_at
+                )
+            )
+            existing = session.get(LaunchplaneAuthzDenialRow, record.trace_id)
+            if existing is not None:
+                stored_record = AuthzDenialRecord.model_validate(existing.payload)
+                if stored_record != record:
+                    session.rollback()
+                    raise ValueError("Authz denial trace id already stores different evidence.")
+                session.commit()
+                return
+            session.add(
+                LaunchplaneAuthzDenialRow(
+                    trace_id=record.trace_id,
+                    recorded_at=record.recorded_at,
+                    expires_at=record.expires_at,
+                    payload=record.model_dump(mode="json"),
+                )
+            )
+            session.commit()
+
+    def read_authz_denial_record(
+        self,
+        *,
+        trace_id: str,
+        observed_at: str,
+    ) -> AuthzDenialRecord | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneAuthzDenialRow, trace_id.strip())
+            if row is None or row.expires_at <= observed_at:
+                return None
+            return AuthzDenialRecord.model_validate(row.payload)
+
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None:
         self._write_row(self._product_profile_row(record))
 
@@ -14250,9 +14312,8 @@ class PostgresRecordStore(HumanSessionStore):
                 return False
         return True
 
-    def _read_product_profile_payload(
-        self, payload: PayloadDict
-    ) -> LaunchplaneProductProfileRecord:
+    @staticmethod
+    def _read_product_profile_payload(payload: PayloadDict) -> LaunchplaneProductProfileRecord:
         return LaunchplaneProductProfileRecord.model_validate(
             migrate_product_profile_lifecycle_payload(
                 migrate_product_profile_monitoring_intent_payload(
@@ -15263,27 +15324,26 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 authority_changed = route_binding_sha256 != expected_route_binding_sha256
             if authority_changed:
-                session.merge(
-                    LaunchplanePublicIngressObservationRow(
-                        record_id=observation.record_id,
-                        product=observation.product,
-                        context=observation.context,
-                        instance=observation.instance,
-                        status=observation.status,
-                        observed_at=observation.observed_at,
-                        incident_id="",
-                        check_token=check_token,
-                        check_kind=observation.check_kind,
-                        payload=self._payload_dict(
-                            observation.model_copy(
-                                update={
-                                    "incident_id": "",
-                                    "incident_event_id": "",
-                                }
-                            )
-                        ),
-                    )
+                observation_row = LaunchplanePublicIngressObservationRow(
+                    record_id=observation.record_id,
+                    product=observation.product,
+                    context=observation.context,
+                    instance=observation.instance,
+                    status=observation.status,
+                    observed_at=observation.observed_at,
+                    check_token=check_token,
+                    check_kind=observation.check_kind,
+                    payload=self._payload_dict(
+                        observation.model_copy(
+                            update={
+                                "incident_id": "",
+                                "incident_event_id": "",
+                            }
+                        )
+                    ),
                 )
+                observation_row.incident_id = ""
+                session.merge(observation_row)
                 session.commit()
                 return PublicIngressTransitionWriteResult(status="authority_changed")
             self._lock_public_ingress_incident_write(
@@ -15335,20 +15395,19 @@ class PostgresRecordStore(HumanSessionStore):
                 unlinked_observation = observation.model_copy(
                     update={"incident_id": "", "incident_event_id": ""}
                 )
-                session.merge(
-                    LaunchplanePublicIngressObservationRow(
-                        record_id=observation.record_id,
-                        product=observation.product,
-                        context=observation.context,
-                        instance=observation.instance,
-                        status=observation.status,
-                        observed_at=observation.observed_at,
-                        incident_id="",
-                        check_token=check_token,
-                        check_kind=observation.check_kind,
-                        payload=self._payload_dict(unlinked_observation),
-                    )
+                observation_row = LaunchplanePublicIngressObservationRow(
+                    record_id=observation.record_id,
+                    product=observation.product,
+                    context=observation.context,
+                    instance=observation.instance,
+                    status=observation.status,
+                    observed_at=observation.observed_at,
+                    check_token=check_token,
+                    check_kind=observation.check_kind,
+                    payload=self._payload_dict(unlinked_observation),
                 )
+                observation_row.incident_id = ""
+                session.merge(observation_row)
                 session.commit()
                 return PublicIngressTransitionWriteResult(status="incident_changed")
             self._lock_outbox_dedupe_keys(
@@ -15655,7 +15714,7 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             current_record = self._read_payload(
                 model_type=DokployTargetRecord,
-                payload=cast(_PayloadRow, row).payload,
+                payload=_payload_from_row(row),
             )
             if current_record != expected_record:
                 raise ValueError("Dokploy target record changed during domain authority repair.")
@@ -15676,7 +15735,7 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             current_target_id_record = self._read_payload(
                 model_type=DokployTargetIdRecord,
-                payload=cast(_PayloadRow, target_id_row).payload,
+                payload=_payload_from_row(target_id_row),
             )
             if current_target_id_record != expected_target_id_record:
                 raise ValueError("Dokploy target-id record changed during domain authority repair.")
@@ -15698,7 +15757,7 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             current_provider_target_record = self._read_payload(
                 model_type=ProviderTargetRecord,
-                payload=cast(_PayloadRow, provider_row).payload,
+                payload=_payload_from_row(provider_row),
             )
             if current_provider_target_record != expected_provider_target_record:
                 raise ValueError("Provider-target record changed during domain authority repair.")
@@ -16569,7 +16628,7 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             try:
-                ChangeImpactPolicyRecord.model_validate(record.model_dump(mode="python"))
+                ChangeImpactPolicyRecord.model_validate(record.model_dump())
             except ValueError as error:
                 raise ChangeImpactPolicyConflictError(
                     "Incoming change impact policy payload does not match its derived identifiers."
@@ -16795,10 +16854,12 @@ class PostgresRecordStore(HumanSessionStore):
         conflict_error: type[ValueError],
         label: str,
     ) -> Literal["written", "replayed"]:
+        model_class: Any = model_type
+        row_class: Any = row_type
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             try:
-                model_type.model_validate(record.model_dump(mode="python"))
+                model_class.model_validate(record.model_dump())
             except ValueError as error:
                 raise conflict_error(
                     f"Incoming {label} payload does not match its derived identifiers."
@@ -16814,22 +16875,20 @@ class PostgresRecordStore(HumanSessionStore):
                     text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
                     {
                         "lock_name": (
-                            f"product-owner:{row_type.__tablename__}:"
+                            f"product-owner:{row_class.__tablename__}:"
                             f"{record.product}:{record.system}"
                         )
                     },
                 )
             statement = (
-                select(row_type)
-                .where(row_type.product == record.product, row_type.system == record.system)
-                .order_by(getattr(row_type, revision_field).desc())
+                select(row_class)
+                .where(row_class.product == record.product, row_class.system == record.system)
+                .order_by(getattr(row_class, revision_field).desc())
             )
             if self.database_dialect_name == "postgresql":
                 statement = statement.with_for_update()
             rows = tuple(session.scalars(statement).all())
-            records = tuple(
-                self._read_payload(model_type=model_type, payload=row.payload) for row in rows
-            )
+            records = tuple(model_class.model_validate(row.payload) for row in rows)
             same_id = tuple(
                 existing for existing in records if existing.record_id == record.record_id
             )

@@ -756,7 +756,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
 
     def test_descriptor_driver_route_rejects_duplicate_path(self) -> None:
         descriptor = _fake_native_descriptor(
-            _fake_native_action(action_id="ping"),
+            _fake_native_action(),
             _fake_native_action(action_id="pong", authz_action="fake_native.pong"),
         )
 
@@ -966,7 +966,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     for node in ast.walk(syntax_tree)
                     if isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "_native_driver_route_authorization_allows"
+                    and node.func.attr
+                    in {
+                        "_native_driver_route_authorization_allows",
+                        "native_driver_route_authorization_allows",
+                    }
                 ]
                 self.assertEqual(len(authorization_calls), 1)
                 keyword_names = {keyword.arg for keyword in authorization_calls[0].keywords}

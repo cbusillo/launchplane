@@ -48,7 +48,7 @@ def schema_migration_action(
 
 
 def _alembic_predecessor_revisions(target_revision: str) -> frozenset[str]:
-    script_directory = ScriptDirectory.from_config(_alembic_config("sqlite://"))
+    script_directory = ScriptDirectory.from_config(alembic_config("sqlite://"))
     return frozenset(
         revision.revision
         for revision in script_directory.iterate_revisions(target_revision, "base")
@@ -73,17 +73,17 @@ def migrate_schema(
             try:
                 stamp_revision = schema_stamp_revision_for_engine(engine)
                 if stamp_revision:
-                    command.stamp(_alembic_config(database_url), stamp_revision)
+                    command.stamp(alembic_config(database_url), stamp_revision)
                 current_revision = _current_revision(engine)
                 if not current_revision:
-                    command.upgrade(_alembic_config(database_url), target_revision)
+                    command.upgrade(alembic_config(database_url), target_revision)
                 else:
                     action = schema_migration_action(
                         current_revision=current_revision,
                         target_revision=target_revision,
                     )
                     if action == "upgrade":
-                        command.upgrade(_alembic_config(database_url), target_revision)
+                        command.upgrade(alembic_config(database_url), target_revision)
                 final_revision = _current_revision(engine)
                 if not final_revision:
                     raise RuntimeError("Launchplane schema migration did not record a revision.")
@@ -118,7 +118,7 @@ def _current_revision(engine: Engine) -> str:
     return revisions[0] if revisions else ""
 
 
-def _alembic_config(database_url: str) -> Config:
+def alembic_config(database_url: str) -> Config:
     repository_root = Path(__file__).resolve().parents[2]
     config = Config(str(repository_root / "alembic.ini"))
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))

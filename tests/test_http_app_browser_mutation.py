@@ -20,8 +20,8 @@ from tests.http_app_test_support import (
     _RejectingVerifier,
     _work_graph_read_policy,
 )
-from tests.support.auth import _identity, _StubVerifier
-from tests.support.work_graph import _work_graph_snapshot_payload
+from tests.support.auth import StubVerifier, identity
+from tests.support.work_graph import work_graph_snapshot_payload
 
 
 class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
@@ -34,6 +34,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         expected_routes = {
             "/auth/logout",
             "/v1/agent/write-intents/evaluate",
+            "/v1/authz-diagnostics/effective-access/evaluate",
             "/v1/authz-policies/managed-rule-sets/reconcile",
             "/v1/drivers/generic-web/prod-promotion",
             "/v1/drivers/generic-web/prod-promotion-workflow",
@@ -87,9 +88,8 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actual_bearer_only_routes, expected_bearer_only_routes)
         self.assertEqual(unprotected_cookie_routes, set())
 
-    def _human_app(
-        self,
-    ) -> tuple[FastAPI, HumanSessionManager, LaunchplaneHumanSession]:
+    @staticmethod
+    def _human_app() -> tuple[FastAPI, HumanSessionManager, LaunchplaneHumanSession]:
         session_manager = HumanSessionManager(
             config=_github_oauth_config(),
             session_store=InMemoryHumanSessionStore(),
@@ -128,7 +128,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
                 response = await _post_work_graph_rank(
                     app,
-                    payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
+                    payload={"snapshot": work_graph_snapshot_payload(), "limit": 1},
                     authorization="",
                     headers=headers,
                 )
@@ -153,7 +153,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
                 response = await _post_work_graph_rank(
                     app,
-                    payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
+                    payload={"snapshot": work_graph_snapshot_payload(), "limit": 1},
                     authorization="",
                     headers=headers,
                 )
@@ -169,20 +169,20 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
         stale_response = await _post_work_graph_rank(
             app,
-            payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
+            payload={"snapshot": work_graph_snapshot_payload(), "limit": 1},
             authorization="",
             headers=stale_headers,
         )
         valid_headers = _browser_mutation_headers(session_manager, human_session)
         accepted_response = await _post_work_graph_rank(
             app,
-            payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
+            payload={"snapshot": work_graph_snapshot_payload(), "limit": 1},
             authorization="",
             headers=valid_headers,
         )
         replay_response = await _post_work_graph_rank(
             app,
-            payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
+            payload={"snapshot": work_graph_snapshot_payload(), "limit": 1},
             authorization="",
             headers=valid_headers,
         )
@@ -194,14 +194,14 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_github_actions_bearer_mutation_does_not_require_browser_headers(self) -> None:
         app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
+            verifier=StubVerifier(identity()),
             authz_policy=_work_graph_read_policy(),
             record_store_factory=lambda: _MissingProductReadStore(),
         )
 
         response = await _post_work_graph_rank(
             app,
-            payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
+            payload={"snapshot": work_graph_snapshot_payload(), "limit": 1},
         )
 
         self.assertEqual(response.status_code, 202)

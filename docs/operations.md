@@ -564,6 +564,25 @@ active policy record/revision plus opaque identity and rule fingerprints and
 failed selector categories; it never returns workflow refs, repositories,
 policy values, or other principal rules. Ordinary route denials remain generic.
 
+`POST /v1/authz-diagnostics/effective-access/evaluate` is the DB-native
+administrator read path for one explicit principal/action/product/context and
+explicit context-or-instance target scope, with one exact instance required for
+instance scope. The caller must be a GitHub administrator or local
+administrator with `authz_policy_effective_access.read`. The route reloads the
+single active DB policy record, delegates the decision to the ordinary policy
+evaluator, and returns only the supplied scope, allowed/denied decision, one
+bounded reason code, and active record/revision/digest. It does not return rule
+matches, selector values, managed IDs, principal values, or permission lists.
+
+Standard `authorization_denied` HTTP failures with a captured policy evaluation
+write a redacted `launchplane_authz_denials` audit record on a best-effort basis.
+`GET /v1/authz-diagnostics/denials/{trace_id}` requires the separately grantable
+`authz_denial_explanation.read` action and returns only that trace's bounded
+request scope, principal type, reason code, route path, and policy provenance.
+The record never stores a principal identifier or token label, expires after 30
+days, and missing and expired traces share `authz_denial_not_found`. Persistence
+failure never weakens or replaces the original denial.
+
 Operators never mutate shared or production authz through direct DB commands or
 a local CLI from an arbitrary checkout. The protected secret/workflow model
 below is transitional compatibility for already-existing managed sets, not the

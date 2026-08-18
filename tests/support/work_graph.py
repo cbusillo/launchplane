@@ -28,7 +28,7 @@ def write_fake_gh_sequence(directory: Path, *, responses: list[dict[str, object]
     return script
 
 
-def _work_graph_snapshot_payload() -> dict[str, object]:
+def work_graph_snapshot_payload() -> dict[str, object]:
     return {
         "generated_at": "2026-05-06T01:45:00Z",
         "repos": [
@@ -65,3 +65,6 @@ def _work_graph_snapshot_payload() -> dict[str, object]:
             },
         ],
     }
+
+
+_work_graph_snapshot_payload = work_graph_snapshot_payload

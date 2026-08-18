@@ -7,25 +7,26 @@ import os
 import re
 import secrets
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import cache
 from urllib.parse import unquote
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, MutableMapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
-from typing import Annotated, Any, Literal, NoReturn, Protocol, cast
+from typing import Annotated, Any, Literal, NoReturn, Protocol, Self, cast
 from uuid import uuid4
 import click
+import fastapi.exceptions as fastapi_exceptions
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.datastructures import DefaultPlaceholder
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
-from starlette.concurrency import run_in_threadpool
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from requests.exceptions import RequestException
+from sqlalchemy.exc import SQLAlchemyError
 from control_plane import authz_grant_service as control_plane_authz_grant_service
 from control_plane import authz_diagnostics as control_plane_authz_diagnostics
 from control_plane import ingress_route_scope as control_plane_ingress_route_scope
@@ -70,6 +71,16 @@ from control_plane import live_target_runtime as control_plane_live_target_runti
 from control_plane.change_impact_github import GitHubChangeImpactRepositoryEvidenceProvider
 from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
 from control_plane.contracts.change_impact import ChangeImpactTargetReference
+from control_plane.contracts.authz_access_read import (
+    AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
+    EFFECTIVE_ACCESS_READ_ACTION,
+    AuthzDenialExplanationResponse,
+    EffectiveAccessDecision,
+    EffectiveAccessEvaluateRequest,
+    EffectiveAccessEvaluateResponse,
+    EffectiveAccessRequestSummary,
+)
+from control_plane.contracts.authz_denial_record import build_authz_denial_record
 from control_plane.contracts.owner_acceptance import OwnerAcceptanceDecisionStatus
 from control_plane.engineering_review_service import (
     EngineeringReviewTargetResolver,
@@ -86,8 +97,6 @@ from control_plane.owner_acceptance_projection import (
 )
 from control_plane.http_routes import (
     AcceptedEvidenceResponse as AcceptedEvidenceResponse,
-    BackupGateEvidenceRequest as BackupGateEvidenceRequest,
-    DeploymentEvidenceRequest as DeploymentEvidenceRequest,
     DriverReadRouteDependencies,
     EVIDENCE_INGRESS_ROUTES as _EVIDENCE_INGRESS_ROUTES,
     EvidenceWriteRouteDependencies,
@@ -108,7 +117,6 @@ from control_plane.http_routes import (
     OwnerAcceptanceRouteDependencies,
     GovernanceProjectionRouteDependencies,
     ProductReadRouteDependencies,
-    PromotionEvidenceRequest as PromotionEvidenceRequest,
     ReadRouteDependencies,
     WorkGraphReadRouteDependencies,
     accepted_evidence_response,
@@ -164,7 +172,7 @@ from control_plane.http_routes import (
     register_work_graph_issue_inbox_read_routes,
     register_work_graph_snapshot_read_routes,
     replay_idempotent_response,
-    request_fingerprint,
+    request_fingerprint as build_request_fingerprint,
     require_product_profile_read_store,
 )
 from control_plane.contracts.authz_policy_record import (
@@ -204,7 +212,7 @@ from control_plane.contracts.every_code_notifications import (
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
-    _add_seconds_to_timestamp as _add_lease_seconds,
+    add_seconds_to_timestamp as add_lease_seconds,
     requeue_every_code_work_request,
 )
 from control_plane.contracts.idempotency_record import (
@@ -669,6 +677,7 @@ from control_plane.runtime_key_safety import (
 from control_plane.service_auth import (
     AgentAuthzDecision,
     AuthorizationTarget,
+    AuthzEvaluation,
     BearerIdentityConfig,
     GitHubActionsIdentity,
     GitHubHumanIdentity,
@@ -680,6 +689,8 @@ from control_plane.service_auth import (
     TokenVerifier,
     agent_authz_audit,
     bearer_identity_from_token,
+    clear_authz_evaluation,
+    current_authz_evaluation,
 )
 from control_plane.service_human_auth import (
     BROWSER_CSRF_HEADER_NAME,
@@ -775,6 +786,14 @@ EveryCodeGitHubWebhookHandler = Callable[
 ManagerPreviewApprovalGitHubWebhookHandler = Callable[
     [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
 ]
+
+
+Message = MutableMapping[str, Any]
+Scope = MutableMapping[str, Any]
+Receive = Callable[[], Awaitable[Message]]
+Send = Callable[[Message], Awaitable[None]]
+ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
+STARLETTE_HTTP_EXCEPTION: Any = getattr(fastapi_exceptions, "StarletteHTTPException")
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -993,6 +1012,8 @@ _PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
 _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
 _AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE = "/v1/authz-diagnostics/github-actions/evaluate"
+_AUTHZ_EFFECTIVE_ACCESS_EVALUATE_ROUTE = "/v1/authz-diagnostics/effective-access/evaluate"
+_AUTHZ_DENIAL_EXPLANATION_ROUTE = "/v1/authz-diagnostics/denials/{trace_id}"
 _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE = "/v1/authz-policies/managed-rule-sets/reconcile"
 _GENERIC_WEB_PREVIEW_AUTHZ_PLAN_ROUTE = (
     "/v1/authz-policies/managed-rule-sets/generic-web-preview/plan"
@@ -1062,6 +1083,39 @@ class LaunchplaneErrorResponse(BaseModel):
         default=None,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+
+
+@dataclass(frozen=True)
+class AuthzPolicyProvenance:
+    source: str
+    record_id: str
+    revision: int
+    policy_sha256: str
+
+    @classmethod
+    def from_record(cls, record: LaunchplaneAuthzPolicyRecord) -> Self:
+        return cls(
+            source="db",
+            record_id=record.record_id,
+            revision=record.revision,
+            policy_sha256=record.policy_sha256,
+        )
+
+
+class LaunchplaneHTTPException(HTTPException):
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        detail: dict[str, object],
+        headers: dict[str, str] | None = None,
+        authz_evaluation: AuthzEvaluation | None = None,
+        authz_policy_provenance: AuthzPolicyProvenance | None = None,
+    ) -> None:
+        super().__init__(status_code=status_code, detail=detail, headers=headers)
+        self.structured_detail = detail
+        self.authz_evaluation = authz_evaluation
+        self.authz_policy_provenance = authz_policy_provenance
 
 
 class OdooStableBootstrapOperationActiveResponse(BaseModel):
@@ -1149,7 +1203,7 @@ def bounded_request_body_contract(path: str) -> tuple[str, int, bool, bool] | No
         and path_parts[3] == "environments"
         and path_parts[5:] == ["config", "apply"]
     ):
-        return ("Product config", _PRODUCT_CONFIG_MAX_BODY_BYTES, True, True)
+        return "Product config", _PRODUCT_CONFIG_MAX_BODY_BYTES, True, True
     return None
 
 
@@ -1230,7 +1284,7 @@ class BoundedRequestBodyMiddleware:
                 send=send,
                 status_code=400,
                 code="invalid_request",
-                message=(f"{request_label} Content-Length must be an unsigned decimal integer."),
+                message=f"{request_label} Content-Length must be an unsigned decimal integer.",
             )
             return
         normalized_content_length = content_length.lstrip("0") or "0"
@@ -1308,9 +1362,9 @@ class BoundedRequestBodyMiddleware:
         async def replay_receive() -> Message:
             nonlocal next_message_index
             if next_message_index < len(buffered_messages):
-                message = buffered_messages[next_message_index]
+                buffered_message = buffered_messages[next_message_index]
                 next_message_index += 1
-                return message
+                return buffered_message
             return await receive()
 
         await self.app(scope, replay_receive, send)
@@ -1629,7 +1683,7 @@ class _OdooPreviewProviderMutationAdapter:
 
     def target_key(self) -> str:
         reconciliation_key = self.reconciliation_key()
-        return f"dokploy-provider-target:{hashlib.sha256(reconciliation_key.encode('utf-8')).hexdigest()}"
+        return f"dokploy-provider-target:{hashlib.sha256(reconciliation_key.encode()).hexdigest()}"
 
     def _destroy_invalidation_records(self) -> dict[str, object]:
         provenance = self._issued_plan.plan_provenance
@@ -1646,7 +1700,9 @@ class _OdooPreviewProviderMutationAdapter:
         )
         return {
             "manager_preview_approval_required": bool(result.get("required")),
-            "manager_preview_invalidation_event_status": str(result.get("event_status") or ""),
+            "manager_preview_invalidation_event_status": string_value(
+                result.get("event_status") or ""
+            ),
         }
 
     def _finalize_successful_result(
@@ -1666,7 +1722,9 @@ class _OdooPreviewProviderMutationAdapter:
                 else None
             ),
         )
-        lifecycle_status = str(lifecycle_records.get("lifecycle_evidence_status") or "").strip()
+        lifecycle_status = string_value(
+            lifecycle_records.get("lifecycle_evidence_status") or ""
+        ).strip()
         if lifecycle_status == "stale":
             blocked_result = OdooPreviewDokployApplyResult.model_validate(driver_result).model_copy(
                 update={
@@ -1705,11 +1763,11 @@ class _OdooPreviewProviderMutationAdapter:
         driver_result.pop("provider_effect_attempted", None)
         response_status_code = 202
         records: dict[str, object] = {}
-        if str(driver_result.get("status", "")).strip() == "pass":
+        if string_value(driver_result.get("status", "")).strip() == "pass":
             driver_result, records, response_status_code = self._finalize_successful_result(
                 driver_result
             )
-        terminal_failure = str(driver_result.get("status", "")).strip() == "fail"
+        terminal_failure = string_value(driver_result.get("status", "")).strip() == "fail"
         return ProviderObservation(
             outcome="present",
             response_status_code=502 if terminal_failure else response_status_code,
@@ -1745,10 +1803,10 @@ class _OdooPreviewProviderMutationAdapter:
         ) as error:
             raise ProviderMutationRejectedError(error)
         provider_effect_attempted = driver_result.pop("provider_effect_attempted", False) is True
-        driver_status = str(driver_result.get("status", "")).strip()
+        driver_status = string_value(driver_result.get("status", "")).strip()
         if driver_status == "fail" and provider_effect_attempted:
             raise ProviderMutationUnknownError(
-                str(driver_result.get("error_message", "")).strip()
+                string_value(driver_result.get("error_message", "")).strip()
                 or "Odoo preview provider outcome requires reconciliation."
             )
         response_status_code = 202
@@ -1760,7 +1818,7 @@ class _OdooPreviewProviderMutationAdapter:
                 driver_result
             )
             lease.assert_current()
-            driver_status = str(driver_result.get("status", "")).strip()
+            driver_status = string_value(driver_result.get("status", "")).strip()
         return ProviderMutationOutcome(
             response_status_code=response_status_code,
             response_payload=_provider_operation_response_payload(
@@ -1849,7 +1907,7 @@ class ProductExpectedConfigApplyEnvelope(BaseModel):
 def _runtime_config_requirement_key(
     requirement: ProductRuntimeConfigRequirement,
 ) -> tuple[str, str, str]:
-    return (requirement.context, requirement.instance, requirement.key)
+    return requirement.context, requirement.instance, requirement.key
 
 
 def _secret_config_requirement_key(
@@ -3087,7 +3145,7 @@ def idempotency_request_fingerprint(*, route_path: str, payload: dict[str, objec
         _PRODUCT_ENVIRONMENT_CONFIG_APPLY_ROUTE,
     }:
         return product_config_request_fingerprint(payload)
-    return request_fingerprint(
+    return build_request_fingerprint(
         canonical_request_payload_for_idempotency(route_path=route_path, payload=payload)
     )
 
@@ -3117,7 +3175,7 @@ def product_config_continuity_payload(payload: dict[str, object]) -> dict[str, o
 
 def product_config_request_fingerprint(payload: dict[str, object]) -> str:
     if not payload.get("secrets"):
-        return request_fingerprint(payload)
+        return build_request_fingerprint(payload)
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return control_plane_secrets.keyed_secret_payload_fingerprint(
         canonical,
@@ -3286,7 +3344,7 @@ def product_promotion_dry_run_record(
     if idempotency_store is None:
         return None
     continuity_payload = product_promotion_continuity_payload(status=status, bump=bump)
-    continuity_fingerprint = request_fingerprint(continuity_payload)
+    continuity_fingerprint = build_request_fingerprint(continuity_payload)
     stored_record = idempotency_store.read_idempotency_record(
         scope=idempotency_scope(identity),
         route_path=_PRODUCT_PROMOTION_DRY_RUN_MARKER_ROUTE,
@@ -3320,7 +3378,7 @@ def store_product_promotion_dry_run_record(
     ):
         return
     continuity_payload = product_promotion_continuity_payload(status=status, bump=bump)
-    continuity_fingerprint = request_fingerprint(continuity_payload)
+    continuity_fingerprint = build_request_fingerprint(continuity_payload)
     dry_run_key = product_promotion_dry_run_key(status=status, bump=bump)
     marker_trace_id = f"{trace_id}-product-promotion-dry-run"
     try:
@@ -3442,17 +3500,14 @@ class _LaunchplaneFastAPI(FastAPI):
         endpoint: Callable[..., Any],
         **kwargs: Any,
     ) -> None:
-        if native_routes._is_native_fastapi_driver_route_path(path):
-            route_metadata = native_routes._bind_native_fastapi_driver_handler(
+        if native_routes.is_native_fastapi_driver_route_path(path):
+            route_metadata = native_routes.bind_native_fastapi_driver_handler(
                 route_path=path,
                 endpoint=endpoint,
                 declared_methods=kwargs.get("methods"),
             )
             kwargs["methods"] = [route_metadata.method]
-        responses = cast(
-            dict[int | str, dict[str, Any]] | None,
-            kwargs.get("responses"),
-        )
+        responses = kwargs.get("responses")
         if path.startswith("/v1/") and path != "/v1/health":
             responses = {
                 409: {"model": LaunchplaneErrorResponse},
@@ -3590,6 +3645,14 @@ class LaunchplaneAuthzPolicyRuntime:
             policy=self._policy,
         )
 
+    def provenance(self) -> AuthzPolicyProvenance:
+        return AuthzPolicyProvenance(
+            source=self._source,
+            record_id=self._record_id,
+            revision=self._revision,
+            policy_sha256=self._policy_sha256,
+        )
+
     def update(
         self,
         policy: LaunchplaneAuthzPolicy,
@@ -3619,6 +3682,15 @@ class ResolvedLaunchplaneAuthzPolicy(BaseModel):
     revision: int = Field(default=0, ge=0)
 
 
+def optional_callable_attribute(instance: object, name: str) -> Callable[..., Any] | None:
+    attribute = getattr(instance, name, None)
+    return attribute if callable(attribute) else None
+
+
+def string_value(value: Any) -> str:
+    return str(value)
+
+
 def resolve_launchplane_authz_policy(
     *,
     record_store: object,
@@ -3626,8 +3698,8 @@ def resolve_launchplane_authz_policy(
     policy_source: str,
     now_timestamp: str,
 ) -> ResolvedLaunchplaneAuthzPolicy:
-    list_records = getattr(record_store, "list_authz_policy_records", None)
-    if callable(list_records):
+    list_records = optional_callable_attribute(record_store, "list_authz_policy_records")
+    if list_records is not None:
         records = list_records(status="active", limit=1)
         if records:
             record = records[0]
@@ -3640,8 +3712,8 @@ def resolve_launchplane_authz_policy(
             )
 
     policy_sha256 = authz_policy_sha256(bootstrap_policy)
-    seed_record = getattr(record_store, "seed_authz_policy_if_absent", None)
-    if callable(seed_record):
+    seed_record = optional_callable_attribute(record_store, "seed_authz_policy_if_absent")
+    if seed_record is not None:
         record = LaunchplaneAuthzPolicyRecord(
             record_id=build_authz_policy_record_id(
                 revision=1,
@@ -3720,6 +3792,7 @@ def create_launchplane_fastapi_app(
             token_context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
     )
+    injected_github_api_request = github_api_request
     owner_acceptance_projection_service = OwnerAcceptanceProjectionService(
         repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
         github_app_token=lambda repository, repository_id: mint_repository_installation_token(
@@ -3728,10 +3801,10 @@ def create_launchplane_fastapi_app(
             ),
             repository=repository,
             repository_id=repository_id,
-            api_request=github_api_request,
+            api_request=injected_github_api_request,
         ),
         public_origin=(human_session_manager.public_origin if human_session_manager else None),
-        api_request=github_api_request,
+        api_request=injected_github_api_request,
     )
     resolved_engineering_review_target_resolver = (
         engineering_review_target_resolver
@@ -3809,11 +3882,12 @@ def create_launchplane_fastapi_app(
         request: Request,
         call_next: Callable[[Request], Any],
     ) -> Response:
+        request_authz_policy_provenance = resolved_authz_policy_runtime.provenance()
         if request.url.path.startswith("/v1/") and request.url.path != "/v1/health":
             trace_id = next_trace_id()
             try:
                 refresh_result = await run_in_threadpool(read_active_authz_policy_records)
-            except Exception:
+            except (OSError, RuntimeError, SQLAlchemyError, TypeError, ValueError):
                 logging.exception("Failed to refresh the active Launchplane authz policy.")
                 return JSONResponse(
                     status_code=503,
@@ -3826,6 +3900,9 @@ def create_launchplane_fastapi_app(
                     ).model_dump(mode="json"),
                 )
             if refresh_result is None:
+                request.state.launchplane_authz_policy_provenance = (
+                    resolved_authz_policy_runtime.provenance()
+                )
                 return cast(Response, await call_next(request))
             active_records = refresh_result
             if not active_records:
@@ -3851,6 +3928,7 @@ def create_launchplane_fastapi_app(
                     ).model_dump(mode="json"),
                 )
             active_record = active_records[0]
+            request_authz_policy_provenance = AuthzPolicyProvenance.from_record(active_record)
             if (
                 resolved_authz_policy_runtime.policy_sha256 != active_record.policy_sha256
                 or resolved_authz_policy_runtime.source != "db"
@@ -3864,7 +3942,19 @@ def create_launchplane_fastapi_app(
                     record_id=active_record.record_id,
                     revision=active_record.revision,
                 )
+        request.state.launchplane_authz_policy_provenance = request_authz_policy_provenance
         return cast(Response, await call_next(request))
+
+    @app.middleware("http")
+    async def isolate_authz_evaluation_context(
+        request: Request,
+        call_next: Callable[[Request], Any],
+    ) -> Response:
+        clear_authz_evaluation()
+        try:
+            return cast(Response, await call_next(request))
+        finally:
+            clear_authz_evaluation()
 
     resolved_oauth_login_state_store = (
         oauth_login_state_store if oauth_login_state_store is not None else OAuthLoginStateStore()
@@ -3897,12 +3987,16 @@ def create_launchplane_fastapi_app(
                 identity=session.identity,
                 authz_policy=resolved_authz_policy_runtime.policy,
             )
-            if current_role is None:
+            if current_role == "admin":
+                resolved_role: Literal["read_only", "admin"] = "admin"
+            elif current_role == "read_only":
+                resolved_role = "read_only"
+            else:
                 return None
-            if current_role != session.identity.role:
+            if resolved_role != session.identity.role:
                 session = replace(
                     session,
-                    identity=replace(session.identity, role=current_role),
+                    identity=replace(session.identity, role=resolved_role),
                 )
         renewed_session = human_session_manager.renew_if_needed(session)
         if renewed_session is None:
@@ -4048,7 +4142,7 @@ def create_launchplane_fastapi_app(
                     ),
                 ).model_dump(mode="json"),
             )
-        except Exception:  # noqa: BLE001
+        except (OSError, RequestException, RuntimeError, ValueError):
             _LOGGER.exception("GitHub OAuth callback failed", extra={"trace_id": trace_id})
             return reject_invalid_github_oauth_callback(
                 trace_id,
@@ -4211,7 +4305,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=next_trace_id(),
                 code="authorization_denied",
-                message=("Work graph rank requires GitHub Actions OIDC or a GitHub human session."),
+                message="Work graph rank requires GitHub Actions OIDC or a GitHub human session.",
             )
         try:
             return verifier.verify(bearer_token)
@@ -4295,7 +4389,7 @@ def create_launchplane_fastapi_app(
         assert bearer_identity_config is not None
         try:
             return EngineeringReviewWorkerIdentity(
-                worker_runtime_id=(bearer_identity_config.engineering_review_worker_runtime_id),
+                worker_runtime_id=bearer_identity_config.engineering_review_worker_runtime_id,
                 worker_host=bearer_identity_config.engineering_review_worker_host,
             )
         except ValueError as error:
@@ -4345,7 +4439,7 @@ def create_launchplane_fastapi_app(
                 status_code=404,
                 trace_id=trace_id,
                 code="not_found",
-                message=(f"No Launchplane route for {MANAGER_PREVIEW_APPROVAL_WEBHOOK_ROUTE}."),
+                message=f"No Launchplane route for {MANAGER_PREVIEW_APPROVAL_WEBHOOK_ROUTE}.",
             )
         status_code, payload = manager_preview_approval_github_webhook_handler(
             await request.body(),
@@ -4364,8 +4458,8 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> dict[str, object]:
         trace_id = next_trace_id()
-        list_profiles = getattr(record_store, "list_product_profile_records", None)
-        if not callable(list_profiles):
+        list_profiles = optional_callable_attribute(record_store, "list_product_profile_records")
+        if list_profiles is None:
             raise _launchplane_http_error(
                 status_code=503,
                 trace_id=trace_id,
@@ -4451,7 +4545,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=next_trace_id(),
                 code="authorization_denied",
-                message=("Terminal agent credentials can only read redacted Launchplane context."),
+                message="Terminal agent credentials can only read redacted Launchplane context.",
             )
         try:
             oidc_identity = verifier.verify(bearer_token)
@@ -4494,7 +4588,7 @@ def create_launchplane_fastapi_app(
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
         target_resolver=resolved_engineering_review_target_resolver,
-        repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
+        repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
     )
     engineering_review_decision_route_dependencies = EngineeringReviewDecisionRouteDependencies(
         read_write_identity=read_write_identity,
@@ -4503,14 +4597,14 @@ def create_launchplane_fastapi_app(
         authorization_allows=resolved_authz_policy_runtime.allows,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
-        repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
+        repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
         github_app_token=lambda repository, repository_id: mint_repository_installation_token(
             identity=resolve_advisory_github_app_identity(
                 control_plane_root=resolved_control_plane_root
             ),
             repository=repository,
             repository_id=repository_id,
-            api_request=github_api_request,
+            api_request=injected_github_api_request,
         ),
         github_api=github_api_request,
     )
@@ -4631,9 +4725,9 @@ def create_launchplane_fastapi_app(
             identity=identity,
             trace_id=trace_id,
         )
-        schema_revision_reader = getattr(record_store, "schema_revision", None)
+        schema_revision_reader = optional_callable_attribute(record_store, "schema_revision")
         database_schema_revision = (
-            str(schema_revision_reader()).strip() if callable(schema_revision_reader) else ""
+            str(schema_revision_reader()).strip() if schema_revision_reader is not None else ""
         )
         runtime = LaunchplaneRuntimeStatus.model_validate(
             control_plane_service_status.launchplane_runtime_payload(
@@ -5009,7 +5103,7 @@ def create_launchplane_fastapi_app(
         detail: dict[str, object] = {"trace_id": trace_id, "code": code, "message": message}
         if record_id:
             detail["records"] = {"agent_write_intent_record_id": record_id}
-        return HTTPException(
+        return LaunchplaneHTTPException(
             status_code=404 if code == "agent_write_intent_not_found" else 409,
             detail=detail,
         )
@@ -5306,7 +5400,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         normalized_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = build_request_fingerprint(raw_payload)
         if normalized_idempotency_key:
             (
                 normalized_idempotency_key,
@@ -5480,7 +5574,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         normalized_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = build_request_fingerprint(raw_payload)
         if normalized_idempotency_key:
             (
                 normalized_idempotency_key,
@@ -5580,7 +5674,7 @@ def create_launchplane_fastapi_app(
 
             admission_evaluator = LiveMergeAdmissionEvaluator(
                 store=record_store,
-                repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
+                repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
                 technical_check_client=TenantAdmissionControllerGitHubClient(
                     transport=UrllibMergeTrainGitHubTransport(
                         token=token,
@@ -5727,7 +5821,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_artifact_publish,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -5783,7 +5877,7 @@ def create_launchplane_fastapi_app(
 
         response = accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
         if should_store_odoo_artifact_publish_idempotency(driver_result):
@@ -5855,7 +5949,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_artifact_publish_inputs,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -5988,7 +6082,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_preview_apply_inputs,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -6022,7 +6116,7 @@ def create_launchplane_fastapi_app(
             )
         payload_fingerprint = idempotency_request_fingerprint(
             route_path=_ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
-            payload=cast(dict[str, object], raw_payload),
+            payload=raw_payload,
         )
         plan_id = build_odoo_preview_plan_id(
             scope=idempotency_scope(identity),
@@ -6153,7 +6247,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_preview_apply,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -6226,7 +6320,7 @@ def create_launchplane_fastapi_app(
             ) from error
         payload_fingerprint = idempotency_request_fingerprint(
             route_path=_ODOO_PREVIEW_APPLY_ROUTE,
-            payload=cast(dict[str, object], raw_payload),
+            payload=raw_payload,
         )
         adapter = _OdooPreviewProviderMutationAdapter(
             control_plane_root=resolved_control_plane_root,
@@ -6279,11 +6373,11 @@ def create_launchplane_fastapi_app(
                     "A matching Odoo preview apply is already running. "
                     "Retry with the same Idempotency-Key."
                 ),
-                reconcile_message=("The Odoo preview apply requires reconciliation before retry."),
+                reconcile_message="The Odoo preview apply requires reconciliation before retry.",
                 target_supersession=target_supersession,
             )
             driver_result = response.result or {}
-            if str(driver_result.get("status") or "").strip() != "pass":
+            if string_value(driver_result.get("status") or "").strip() != "pass":
                 return response
             validate_odoo_preview_lifecycle_response_current(
                 record_store=record_store,
@@ -6398,7 +6492,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_post_deploy,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -6455,7 +6549,7 @@ def create_launchplane_fastapi_app(
 
         response = accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
         store_apply_idempotency(
@@ -6529,7 +6623,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_app_maintenance,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -6586,7 +6680,7 @@ def create_launchplane_fastapi_app(
 
         response = accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
         if should_store_odoo_app_maintenance_idempotency(driver_result):
@@ -6661,7 +6755,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_config_parameter_override,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -6791,7 +6885,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_website_bootstrap_override,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -6921,7 +7015,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_backup_gate,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -6978,7 +7072,7 @@ def create_launchplane_fastapi_app(
 
         response = accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
         if should_store_odoo_prod_backup_gate_idempotency(driver_result):
@@ -7053,7 +7147,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_backup_verification,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -7110,7 +7204,7 @@ def create_launchplane_fastapi_app(
 
         response = accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
         if should_store_odoo_prod_backup_verification_idempotency(driver_result):
@@ -7174,7 +7268,7 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_backup_restore_plan,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -7262,7 +7356,7 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_backup_restore_apply,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -7288,7 +7382,7 @@ def create_launchplane_fastapi_app(
         try:
             operation_authorization = capture_durable_operation_authorization(
                 identity=identity,
-                action=native_routes._native_driver_route_authz_action(
+                action=native_routes.native_driver_route_authz_action(
                     write_odoo_prod_backup_restore_apply
                 ),
                 product=apply_request.product,
@@ -7311,7 +7405,7 @@ def create_launchplane_fastapi_app(
                 request=apply_request,
                 idempotency_key=normalized_idempotency_key,
                 idempotency_scope=idempotency_scope(identity),
-                request_fingerprint=request_fingerprint(raw_payload),
+                request_fingerprint=build_request_fingerprint(raw_payload),
                 created_at=created_at,
                 authorization=operation_authorization,
             )
@@ -7371,7 +7465,7 @@ def create_launchplane_fastapi_app(
             ) from error
         return accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
 
@@ -7429,7 +7523,7 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_retained_volume_backup_import_plan,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -7455,7 +7549,7 @@ def create_launchplane_fastapi_app(
         try:
             operation_authorization = capture_durable_operation_authorization(
                 identity=identity,
-                action=native_routes._native_driver_route_authz_action(
+                action=native_routes.native_driver_route_authz_action(
                     write_odoo_prod_retained_volume_backup_import_plan
                 ),
                 product=plan_request.product,
@@ -7477,7 +7571,7 @@ def create_launchplane_fastapi_app(
                 request=plan_request,
                 idempotency_key=normalized_idempotency_key,
                 idempotency_scope=idempotency_scope(identity),
-                request_fingerprint=request_fingerprint(raw_payload),
+                request_fingerprint=build_request_fingerprint(raw_payload),
                 created_at=created_at,
                 authorization=operation_authorization,
             )
@@ -7525,7 +7619,7 @@ def create_launchplane_fastapi_app(
             ) from error
         return accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
 
@@ -7583,7 +7677,7 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_retained_volume_backup_import_apply,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -7609,7 +7703,7 @@ def create_launchplane_fastapi_app(
         try:
             operation_authorization = capture_durable_operation_authorization(
                 identity=identity,
-                action=native_routes._native_driver_route_authz_action(
+                action=native_routes.native_driver_route_authz_action(
                     write_odoo_prod_retained_volume_backup_import_apply
                 ),
                 product=apply_request.product,
@@ -7632,7 +7726,7 @@ def create_launchplane_fastapi_app(
                     request=apply_request,
                     idempotency_key=normalized_idempotency_key,
                     idempotency_scope=idempotency_scope(identity),
-                    request_fingerprint=request_fingerprint(raw_payload),
+                    request_fingerprint=build_request_fingerprint(raw_payload),
                     created_at=created_at,
                     authorization=operation_authorization,
                 )
@@ -7688,7 +7782,7 @@ def create_launchplane_fastapi_app(
             ) from error
         return accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
 
@@ -7703,9 +7797,9 @@ def create_launchplane_fastapi_app(
         cancel_method_name: str,
         cancellation_request: DurableOperationCancellationRequest,
     ) -> Any:
-        read_operation = getattr(record_store, read_method_name, None)
-        cancel_operation = getattr(record_store, cancel_method_name, None)
-        if not callable(read_operation) or not callable(cancel_operation):
+        read_operation = optional_callable_attribute(record_store, read_method_name)
+        cancel_operation = optional_callable_attribute(record_store, cancel_method_name)
+        if read_operation is None or cancel_operation is None:
             raise _launchplane_http_error(
                 status_code=503,
                 trace_id=trace_id,
@@ -7869,7 +7963,7 @@ def create_launchplane_fastapi_app(
             operation_id=operation_id,
             action="odoo_target_replacement_apply.execute",
             read_method_name="read_odoo_stable_target_replacement_operation_record",
-            cancel_method_name=("cancel_pending_odoo_stable_target_replacement_operation_record"),
+            cancel_method_name="cancel_pending_odoo_stable_target_replacement_operation_record",
             cancellation_request=cancellation_request,
         )
         return DurableOperationCancellationResponse(
@@ -7906,12 +8000,11 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> DurableOperationCancellationResponse:
         trace_id = next_trace_id()
-        read_operation = getattr(
+        read_operation = optional_callable_attribute(
             record_store,
             "read_odoo_prod_retained_volume_backup_import_operation_record",
-            None,
         )
-        if not callable(read_operation):
+        if read_operation is None:
             raise _launchplane_http_error(
                 status_code=503,
                 trace_id=trace_id,
@@ -7938,7 +8031,7 @@ def create_launchplane_fastapi_app(
             identity=identity,
             operation_id=operation_id,
             action=action,
-            read_method_name=("read_odoo_prod_retained_volume_backup_import_operation_record"),
+            read_method_name="read_odoo_prod_retained_volume_backup_import_operation_record",
             cancel_method_name=(
                 "cancel_pending_odoo_prod_retained_volume_backup_import_operation_record"
             ),
@@ -8032,7 +8125,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_stable_bootstrap,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -8062,7 +8155,7 @@ def create_launchplane_fastapi_app(
         try:
             operation_authorization = capture_durable_operation_authorization(
                 identity=identity,
-                action=native_routes._native_driver_route_authz_action(write_odoo_stable_bootstrap),
+                action=native_routes.native_driver_route_authz_action(write_odoo_stable_bootstrap),
                 product=bootstrap_request.product,
                 context=bootstrap_request.bootstrap.context,
                 instances=(bootstrap_request.bootstrap.instance,),
@@ -8081,7 +8174,7 @@ def create_launchplane_fastapi_app(
                 record_store=record_store,
                 request=bootstrap_request,
                 idempotency_key=normalized_idempotency_key,
-                request_fingerprint=request_fingerprint(raw_payload),
+                request_fingerprint=build_request_fingerprint(raw_payload),
                 created_at=created_at,
                 authorization=operation_authorization,
             )
@@ -8128,7 +8221,7 @@ def create_launchplane_fastapi_app(
 
         return accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
 
@@ -8190,7 +8283,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_target_replacement_plan,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -8289,7 +8382,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_target_replacement_apply,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -8319,7 +8412,7 @@ def create_launchplane_fastapi_app(
         try:
             operation_authorization = capture_durable_operation_authorization(
                 identity=identity,
-                action=native_routes._native_driver_route_authz_action(
+                action=native_routes.native_driver_route_authz_action(
                     write_odoo_target_replacement_apply
                 ),
                 product=apply_request.product,
@@ -8342,7 +8435,7 @@ def create_launchplane_fastapi_app(
                 context=lane.context,
                 idempotency_key=normalized_idempotency_key,
                 idempotency_scope=idempotency_scope(identity),
-                request_fingerprint=request_fingerprint(raw_payload),
+                request_fingerprint=build_request_fingerprint(raw_payload),
                 created_at=created_at,
                 authorization=operation_authorization,
             )
@@ -8396,7 +8489,7 @@ def create_launchplane_fastapi_app(
 
         return accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
 
@@ -8460,7 +8553,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_rollback,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -8517,7 +8610,7 @@ def create_launchplane_fastapi_app(
 
         response = accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
         if should_store_odoo_prod_rollback_idempotency(driver_result):
@@ -8595,7 +8688,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_promotion,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -8657,7 +8750,7 @@ def create_launchplane_fastapi_app(
 
         response = accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
         if should_store_prod_promotion_idempotency(driver_result):
@@ -8735,7 +8828,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_promotion_inputs,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -8799,7 +8892,7 @@ def create_launchplane_fastapi_app(
 
         response = accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
         if should_store_prod_promotion_idempotency(driver_result):
@@ -8877,7 +8970,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=write_odoo_prod_promotion_run,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -8941,7 +9034,7 @@ def create_launchplane_fastapi_app(
 
         response = accepted_evidence_response(
             trace_id=trace_id,
-            records={key: str(value) for key, value in records.items()},
+            records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
         if should_store_prod_promotion_idempotency(driver_result):
@@ -8990,7 +9083,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         normalized_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = build_request_fingerprint(raw_payload)
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="launchplane_service_deploy.execute",
@@ -9084,7 +9177,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         normalized_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = build_request_fingerprint(raw_payload)
         if normalized_idempotency_key:
             (
                 normalized_idempotency_key,
@@ -9289,7 +9382,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         normalized_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = build_request_fingerprint(raw_payload)
         if normalized_idempotency_key:
             (
                 normalized_idempotency_key,
@@ -9516,7 +9609,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         normalized_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = build_request_fingerprint(raw_payload)
         if normalized_idempotency_key:
             (
                 normalized_idempotency_key,
@@ -9597,6 +9690,22 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     recorded_at=utc_now_timestamp(),
                 )
+                run_record_store.write_merge_train_run_record(run_once_result.run_record)
+                response = accepted_evidence_response(
+                    trace_id=trace_id,
+                    records=run_once_result.records,
+                    result=run_once_result.accepted_result,
+                )
+                store_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_MERGE_TRAIN_RUN_ONCE_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=response,
+                )
+                return response
             else:
                 with merge_train_controller_mutation_fence(
                     record_store=controller_state_store,
@@ -9642,6 +9751,7 @@ def create_launchplane_fastapi_app(
                         trace_id=trace_id,
                         response=response,
                     )
+                    return response
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
         except MergeTrainGitHubError as error:
@@ -9653,23 +9763,6 @@ def create_launchplane_fastapi_app(
             MergeTrainControllerAdoptionRejectedError,
         ) as error:
             raise merge_train_controller_fence_http_error(trace_id=trace_id, error=error) from error
-        if controller_state_store is None:
-            run_record_store.write_merge_train_run_record(run_once_result.run_record)
-            response = accepted_evidence_response(
-                trace_id=trace_id,
-                records=run_once_result.records,
-                result=run_once_result.accepted_result,
-            )
-            store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
-                route_path=_MERGE_TRAIN_RUN_ONCE_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
-            )
-        return response
 
     async def write_merge_train_pr_feedback(
         request: Request,
@@ -9705,7 +9798,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
         normalized_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = build_request_fingerprint(raw_payload)
         if normalized_idempotency_key:
             (
                 normalized_idempotency_key,
@@ -10136,6 +10229,7 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
+        del idempotency_key
         trace_id = next_trace_id()
         worker_token_authorized = every_code_worker_token_authorized(
             request.headers.get("Authorization", "")
@@ -10166,7 +10260,7 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         now = utc_now_timestamp()
-        new_lease_expires_at = _add_lease_seconds(now, heartbeat_request.lease_seconds)
+        new_lease_expires_at = add_lease_seconds(now, heartbeat_request.lease_seconds)
         accepted = heartbeat_store.heartbeat_every_code_work_request_record(
             request_id=heartbeat_request.request_id.strip(),
             host=heartbeat_request.host.strip(),
@@ -10202,6 +10296,7 @@ def create_launchplane_fastapi_app(
         ],
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> AcceptedEvidenceResponse:
+        del payload
         trace_id = next_trace_id()
         worker_token_authorized = every_code_worker_token_authorized(
             request.headers.get("Authorization", "")
@@ -10899,7 +10994,7 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Product expected config request failed validation.",
             )
-        request_payload = cast(dict[str, object], raw_payload)
+        request_payload = raw_payload
         try:
             expected_config_request = ProductExpectedConfigApplyEnvelope.model_validate(
                 request_payload
@@ -11115,7 +11210,7 @@ def create_launchplane_fastapi_app(
         if health_monitoring_request.mode == "apply":
             payload_fingerprint = idempotency_request_fingerprint(
                 route_path=_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE,
-                payload=cast(dict[str, object], raw_payload),
+                payload=raw_payload,
             )
             replay_response = prepare_product_health_monitoring_mutation()
             if replay_response is not None:
@@ -11430,7 +11525,7 @@ def create_launchplane_fastapi_app(
         if prelaunch_rebuild_request.mode == "apply":
             payload_fingerprint = idempotency_request_fingerprint(
                 route_path=_PRODUCT_PRELAUNCH_REBUILD_POLICY_APPLY_ROUTE,
-                payload=cast(dict[str, object], raw_payload),
+                payload=raw_payload,
             )
             replay_response = prepare_product_prelaunch_rebuild_policy_mutation()
             if replay_response is not None:
@@ -11725,7 +11820,7 @@ def create_launchplane_fastapi_app(
         if preview_tls_request.mode == "apply":
             payload_fingerprint = idempotency_request_fingerprint(
                 route_path=_PRODUCT_PREVIEW_TLS_APPLY_ROUTE,
-                payload=cast(dict[str, object], raw_payload),
+                payload=raw_payload,
             )
             replay_response = prepare_product_preview_tls_mutation()
             if replay_response is not None:
@@ -11993,7 +12088,7 @@ def create_launchplane_fastapi_app(
         if repair_request.mode == "apply":
             payload_fingerprint = idempotency_request_fingerprint(
                 route_path=_PRODUCT_STABLE_LANE_REPAIR_APPLY_ROUTE,
-                payload=cast(dict[str, object], raw_payload),
+                payload=raw_payload,
             )
             replay_response = prepare_product_stable_lane_repair_mutation()
             if replay_response is not None:
@@ -12344,7 +12439,7 @@ def create_launchplane_fastapi_app(
         normalized_idempotency_key = idempotency_key.strip()
         normalized_scope = idempotency_scope(identity)
         raw_payload = await request.json()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = build_request_fingerprint(raw_payload)
         idempotency_store = idempotency_capable_store(record_store)
         if idempotency_store is not None and normalized_idempotency_key:
             stored_record = idempotency_store.read_idempotency_record(
@@ -12465,7 +12560,7 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="mutation_reconciliation_required",
-                message=("The prior Launchplane mutation requires reconciliation before retry."),
+                message="The prior Launchplane mutation requires reconciliation before retry.",
             )
         return replay_idempotent_response(
             trace_id=trace_id,
@@ -12489,7 +12584,7 @@ def create_launchplane_fastapi_app(
         raw_payload = request_payload if request_payload is not None else await request.json()
         payload_fingerprint = idempotency_request_fingerprint(
             route_path=route_path,
-            payload=cast(dict[str, object], raw_payload),
+            payload=raw_payload,
         )
         if normalized_idempotency_key and check_replay:
             replay_response = replay_stored_apply_idempotency(
@@ -12694,15 +12789,20 @@ def create_launchplane_fastapi_app(
         except asyncio.CancelledError as cancellation:
             while not operation_task.done():
                 try:
-                    await asyncio.shield(operation_task)
+                    await asyncio.shield(asyncio.wait({operation_task}))
                 except asyncio.CancelledError:
                     continue
-                except Exception:
-                    _LOGGER.exception(
-                        "Provider mutation failed after request cancellation",
-                        extra={"trace_id": trace_id},
-                    )
-                    break
+            operation_error = operation_task.exception()
+            if operation_error is not None:
+                _LOGGER.error(
+                    "Provider mutation failed after request cancellation",
+                    exc_info=(
+                        type(operation_error),
+                        operation_error,
+                        operation_error.__traceback__,
+                    ),
+                    extra={"trace_id": trace_id},
+                )
             raise cancellation
         return provider_mutation_http_response(
             result=result,
@@ -12850,7 +12950,7 @@ def create_launchplane_fastapi_app(
                 message="Operator product-config apply requires a prior matching dry-run.",
             )
         try:
-            driver_result, authority_bundle = (
+            planned_driver_result, authority_bundle = (
                 control_plane_product_config.plan_product_config_authority_bundle(
                     record_store=database_store,
                     payload=product_config_request.product_config_payload(),
@@ -12869,8 +12969,8 @@ def create_launchplane_fastapi_app(
                 code=product_config_error.code,
                 message=product_config_error.message,
             )
-        driver_result = {
-            **driver_result,
+        driver_result: dict[str, object] = {
+            **planned_driver_result,
             "reason": product_config_request.reason,
         }
         next_actions = product_config_live_target_next_actions(
@@ -13547,7 +13647,7 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Managed-secret re-encryption request failed validation.",
             )
-        request_payload = cast(dict[str, object], raw_payload)
+        request_payload = raw_payload
         try:
             reencryption_request = SecretReencryptionRequest.model_validate(request_payload)
         except ValidationError as error:
@@ -13600,9 +13700,7 @@ def create_launchplane_fastapi_app(
         operation_token = ""
         if reencryption_request.mode == "apply":
             operation_token = hashlib.sha256(
-                "\x1f".join((actor, normalized_idempotency_key, payload_fingerprint)).encode(
-                    "utf-8"
-                )
+                "\x1f".join((actor, normalized_idempotency_key, payload_fingerprint)).encode()
             ).hexdigest()
 
         def reencryption_idempotency_record(
@@ -13773,7 +13871,7 @@ def create_launchplane_fastapi_app(
                         "product": onboarding_request.generic_web.product,
                         "repository": onboarding_request.generic_web.repository,
                         "repository_id": onboarding_request.generic_web.repository_id,
-                        "repository_owner_id": (onboarding_request.generic_web.repository_owner_id),
+                        "repository_owner_id": onboarding_request.generic_web.repository_owner_id,
                         "default_branch": onboarding_request.generic_web.default_branch,
                         "testing_context": onboarding_request.generic_web.testing_context,
                         "preview_context": onboarding_request.generic_web.preview_context,
@@ -13787,7 +13885,7 @@ def create_launchplane_fastapi_app(
                     status_code=409,
                     trace_id=trace_id,
                     code="product_onboarding_plan_mismatch",
-                    message=("Generic-web onboarding inputs no longer match the reviewed dry-run."),
+                    message="Generic-web onboarding inputs no longer match the reviewed dry-run.",
                 )
             try:
                 onboarding_manifest = build_generic_web_onboarding_manifest(
@@ -13828,11 +13926,13 @@ def create_launchplane_fastapi_app(
         onboarding_response = accepted_evidence_response(
             trace_id=trace_id,
             records={
-                "product_profile": str(result["product_profile"]),
-                "provider_target_count": str(result["provider_target_count"]),
-                "provider_target_id_count": str(result["provider_target_id_count"]),
-                "runtime_environment_record_count": str(result["runtime_environment_record_count"]),
-                "secret_binding_count": str(result["secret_binding_count"]),
+                "product_profile": string_value(result["product_profile"]),
+                "provider_target_count": string_value(result["provider_target_count"]),
+                "provider_target_id_count": string_value(result["provider_target_id_count"]),
+                "runtime_environment_record_count": string_value(
+                    result["runtime_environment_record_count"]
+                ),
+                "secret_binding_count": string_value(result["secret_binding_count"]),
             },
             result=driver_result,
         )
@@ -13905,7 +14005,7 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
         )
         normalized_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = build_request_fingerprint(raw_payload)
         if policy_import_request.mode == "apply":
             (
                 normalized_idempotency_key,
@@ -13959,7 +14059,7 @@ def create_launchplane_fastapi_app(
         record_id = result.get("authz_policy_record_id")
         if record_id is None:
             return {}
-        return {"authz_policy_record_id": str(record_id)}
+        return {"authz_policy_record_id": string_value(record_id)}
 
     async def plan_generic_web_preview_authz(
         planning_request: GenericWebPreviewAuthzPlanRequest,
@@ -13970,7 +14070,7 @@ def create_launchplane_fastapi_app(
         database_store = require_authz_policy_database_store(
             record_store=record_store,
             trace_id=trace_id,
-            message=("Generic-web preview authz planning requires Launchplane database storage."),
+            message="Generic-web preview authz planning requires Launchplane database storage.",
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
@@ -14129,7 +14229,7 @@ def create_launchplane_fastapi_app(
         database_store = require_authz_policy_database_store(
             record_store=record_store,
             trace_id=trace_id,
-            message=("Managed authz policy reconciliation requires Launchplane database storage."),
+            message="Managed authz policy reconciliation requires Launchplane database storage.",
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
@@ -14145,7 +14245,7 @@ def create_launchplane_fastapi_app(
             )
         route_path = _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE
         normalized_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = build_request_fingerprint(raw_payload)
         if authz_request.mode == "apply" and not normalized_idempotency_key:
             raise _launchplane_http_error(
                 status_code=400,
@@ -14223,18 +14323,14 @@ def create_launchplane_fastapi_app(
         if authz_request.mode == "apply":
             mutation_scope = idempotency_scope(identity)
             idempotency_record_digest = hashlib.sha256(
-                "\x1f".join((mutation_scope, route_path, normalized_idempotency_key)).encode(
-                    "utf-8"
-                )
+                "\x1f".join((mutation_scope, route_path, normalized_idempotency_key)).encode()
             ).hexdigest()
             audit_context: dict[str, object] = {
                 "request_fingerprint": payload_fingerprint,
-                "idempotency_scope_sha256": hashlib.sha256(
-                    mutation_scope.encode("utf-8")
-                ).hexdigest(),
+                "idempotency_scope_sha256": hashlib.sha256(mutation_scope.encode()).hexdigest(),
                 "idempotency_record_id": f"mutation-reservation-{idempotency_record_digest}",
                 "idempotency_key_sha256": hashlib.sha256(
-                    normalized_idempotency_key.encode("utf-8")
+                    normalized_idempotency_key.encode()
                 ).hexdigest(),
             }
             route_result.authz_policy_record.audit.update(audit_context)
@@ -14379,6 +14475,176 @@ def create_launchplane_fastapi_app(
             policy=control_plane_authz_grant_service.summarize_active_authz_policy_record(
                 active_records[0]
             ),
+        )
+
+    def read_single_active_authz_policy_record(
+        *,
+        database_store: PostgresRecordStore,
+        trace_id: str,
+    ) -> LaunchplaneAuthzPolicyRecord:
+        active_records = database_store.list_authz_policy_records(status="active", limit=2)
+        if not active_records:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_policy_unavailable",
+                message="Launchplane active authz policy is unavailable.",
+            )
+        if len(active_records) > 1:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="active_authz_policy_ambiguous",
+                message="Multiple active Launchplane authz policy records were found.",
+            )
+        return active_records[0]
+
+    async def evaluate_effective_access(
+        evaluation_request: EffectiveAccessEvaluateRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> EffectiveAccessEvaluateResponse:
+        trace_id = next_trace_id()
+        is_administrator = isinstance(identity, LocalAdminIdentity) or (
+            isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
+        )
+        preflight_authorized = resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=EFFECTIVE_ACCESS_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        )
+        if not is_administrator or not preflight_authorized:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot evaluate Launchplane effective access.",
+            )
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Effective access reads require Launchplane database storage.",
+        )
+        active_record = read_single_active_authz_policy_record(
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        if not active_record.policy.allows(
+            identity=identity,
+            action=EFFECTIVE_ACCESS_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot evaluate Launchplane effective access.",
+                authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
+            )
+        target = (
+            AuthorizationTarget(scope="instance", instances=(evaluation_request.instance,))
+            if evaluation_request.target_scope == "instance"
+            else AuthorizationTarget(scope="context")
+        )
+        evaluation = active_record.policy.evaluate(
+            identity=evaluation_request.identity(),
+            action=evaluation_request.action,
+            product=evaluation_request.product,
+            context=evaluation_request.context,
+            target=target,
+            record_context=False,
+        )
+        return EffectiveAccessEvaluateResponse(
+            trace_id=trace_id,
+            policy_record_id=active_record.record_id,
+            policy_revision=active_record.revision,
+            policy_sha256=active_record.policy_sha256,
+            request=EffectiveAccessRequestSummary(
+                principal_type=evaluation_request.principal.principal_type,
+                action=evaluation_request.action,
+                product=evaluation_request.product,
+                context=evaluation_request.context,
+                target_scope=evaluation_request.target_scope,
+                instance=evaluation_request.instance,
+            ),
+            evaluation=EffectiveAccessDecision(
+                decision=evaluation.decision,
+                reason_code=evaluation.reason_code,
+            ),
+        )
+
+    async def explain_authz_denial(
+        trace_id: str,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AuthzDenialExplanationResponse:
+        request_trace_id = next_trace_id()
+        is_support_reader = isinstance(
+            identity,
+            GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity,
+        )
+        preflight_authorized = resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        )
+        if not is_support_reader or not preflight_authorized:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=request_trace_id,
+                code="authorization_denied",
+                message="Identity cannot explain Launchplane authorization denials.",
+            )
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=request_trace_id,
+            message="Authorization denial explanations require Launchplane database storage.",
+        )
+        active_record = read_single_active_authz_policy_record(
+            database_store=database_store,
+            trace_id=request_trace_id,
+        )
+        if not active_record.policy.allows(
+            identity=identity,
+            action=AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=request_trace_id,
+                code="authorization_denied",
+                message="Identity cannot explain Launchplane authorization denials.",
+                authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
+            )
+        denial_record = database_store.read_authz_denial_record(
+            trace_id=trace_id,
+            observed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        if denial_record is None:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=request_trace_id,
+                code="authz_denial_not_found",
+                message="Authorization denial evidence was not found.",
+            )
+        return AuthzDenialExplanationResponse(
+            trace_id=denial_record.trace_id,
+            recorded_at=denial_record.recorded_at,
+            route_path=denial_record.route_path,
+            principal_type=denial_record.principal_type,
+            action=denial_record.action,
+            product=denial_record.product,
+            context=denial_record.context,
+            target_scope=denial_record.target_scope,
+            instance_specified=denial_record.instance_specified,
+            reason_code=denial_record.reason_code,
+            policy_record_id=denial_record.policy_record_id,
+            policy_revision=denial_record.policy_revision,
+            policy_sha256=denial_record.policy_sha256,
         )
 
     async def evaluate_github_actions_authz_diagnostic(
@@ -14611,7 +14877,7 @@ def create_launchplane_fastapi_app(
                 message="Workflow cannot run Launchplane provider-target operations.",
             )
         normalized_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = build_request_fingerprint(raw_payload)
         if provider_target_request.mode == "backfill-apply":
             if not normalized_idempotency_key:
                 raise _launchplane_http_error(
@@ -15196,7 +15462,7 @@ def create_launchplane_fastapi_app(
             product=binding_request.product,
             context_name=binding_request.context,
             instance_name=binding_request.instance,
-            message=("Workflow cannot reconcile external route bindings for the requested lane."),
+            message="Workflow cannot reconcile external route bindings for the requested lane.",
         )
         if binding_request.mode == "apply" and not idempotency_key.strip():
             raise _launchplane_http_error(
@@ -15230,7 +15496,7 @@ def create_launchplane_fastapi_app(
             raw_payload = await request.json()
             payload_fingerprint = idempotency_request_fingerprint(
                 route_path=_EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE,
-                payload=cast(dict[str, object], raw_payload),
+                payload=raw_payload,
             )
             preflight = mutation_store.prepare_db_only_mutation(
                 scope=idempotency_scope(identity),
@@ -15428,7 +15694,7 @@ def create_launchplane_fastapi_app(
             product=binding_request.product,
             context_name=binding_request.context,
             instance_name=binding_request.instance,
-            message=("Workflow cannot reconcile route bindings for the requested product/context."),
+            message="Workflow cannot reconcile route bindings for the requested product/context.",
         )
         if binding_request.mode == "apply" and not idempotency_key.strip():
             raise _launchplane_http_error(
@@ -15462,7 +15728,7 @@ def create_launchplane_fastapi_app(
             raw_payload = await request.json()
             payload_fingerprint = idempotency_request_fingerprint(
                 route_path=_ROUTE_BINDING_RECONCILE_ROUTE,
-                payload=cast(dict[str, object], raw_payload),
+                payload=raw_payload,
             )
             preflight = mutation_store.prepare_db_only_mutation(
                 scope=idempotency_scope(identity),
@@ -15726,7 +15992,7 @@ def create_launchplane_fastapi_app(
                 product=outcome.product,
                 context_name=outcome.context,
                 instance_name=outcome.instance,
-                message=("Workflow cannot refresh a discovered Odoo testing route binding."),
+                message="Workflow cannot refresh a discovered Odoo testing route binding.",
             )
 
         controller_reservation: LaunchplaneIdempotencyRecord | None = None
@@ -15869,7 +16135,7 @@ def create_launchplane_fastapi_app(
                     "Odoo testing route binding refresh apply requires a mutation store."
                 )
             binding_key = reconcile_plan.current_record.binding_key
-            binding_token = hashlib.sha256(binding_key.encode("utf-8")).hexdigest()[:16]
+            binding_token = hashlib.sha256(binding_key.encode()).hexdigest()[:16]
             binding_idempotency_key = f"{normalized_key}:{binding_token}"
             binding_response_payload: dict[str, object] = {
                 "status": "accepted",
@@ -15932,7 +16198,7 @@ def create_launchplane_fastapi_app(
             else (
                 "attention"
                 if any(
-                    str(outcome.get("status") or "") in attention_statuses
+                    string_value(outcome.get("status") or "") in attention_statuses
                     for outcome in result_outcomes
                 )
                 else "ok"
@@ -16036,9 +16302,9 @@ def create_launchplane_fastapi_app(
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
         authz_action = (
-            native_routes._native_driver_route_authz_action(apply_ingress_route)
+            native_routes.native_driver_route_authz_action(apply_ingress_route)
             if route_request.ingress.mode == "apply"
-            else native_routes._native_driver_route_alternate_authz_action(apply_ingress_route)
+            else native_routes.native_driver_route_alternate_authz_action(apply_ingress_route)
         )
         instance_name = route_request.instance.strip()
         if not resolved_authz_policy_runtime.policy.allows(
@@ -16599,6 +16865,7 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Identity is not authorized for product retirement.",
             )
+        bound: control_plane_product_retirement.BoundProductRetirement | None = None
         try:
             retirement_store = cast(
                 control_plane_product_retirement.ProductRetirementStore,
@@ -16673,6 +16940,8 @@ def create_launchplane_fastapi_app(
         actor_identity = product_retirement_identity(identity)
         requested_at = utc_now_timestamp()
         if retirement_request.mode == "plan":
+            if bound is None:
+                raise RuntimeError("Product retirement plan authority was not bound.")
             existing_plans = retirement_store.list_product_retirement_records(
                 product=retirement_request.product,
                 actor=actor_identity.actor,
@@ -16883,9 +17152,12 @@ def create_launchplane_fastapi_app(
         try:
             retirement_store = cast(
                 control_plane_detached_application_retirement.DetachedApplicationRetirementStore,
-                require_provider_operation_store(
-                    record_store=record_store,
-                    trace_id=trace_id,
+                cast(
+                    object,
+                    require_provider_operation_store(
+                        record_store=record_store,
+                        trace_id=trace_id,
+                    ),
                 ),
             )
             plan_record = None
@@ -17404,7 +17676,7 @@ def create_launchplane_fastapi_app(
                         repository=feedback_request.repository,
                         pull_request_number=feedback_request.anchor_pr_number,
                     )
-            except Exception:
+            except (OSError, RequestException, RuntimeError, ValueError):
                 owner_review_status = "unavailable"
                 owner_review_url = ""
                 _LOGGER.exception(
@@ -17581,7 +17853,7 @@ def create_launchplane_fastapi_app(
 
     def raise_verireel_product_mismatch_error(
         *, trace_id: str, error: VeriReelProductMismatchError
-    ) -> None:
+    ) -> NoReturn:
         raise _launchplane_http_error(
             status_code=403,
             trace_id=trace_id,
@@ -17591,7 +17863,7 @@ def create_launchplane_fastapi_app(
 
     def raise_verireel_invalid_request_error(
         *, trace_id: str, error: ValueError | click.ClickException
-    ) -> None:
+    ) -> NoReturn:
         raise _launchplane_http_error(
             status_code=400,
             trace_id=trace_id,
@@ -17599,7 +17871,7 @@ def create_launchplane_fastapi_app(
             message="Request could not be completed.",
         ) from error
 
-    def raise_verireel_unexpected_driver_error(*, trace_id: str, error: Exception) -> None:
+    def raise_verireel_unexpected_driver_error(*, trace_id: str, error: Exception) -> NoReturn:
         _LOGGER.exception("Unexpected Launchplane service error", extra={"trace_id": trace_id})
         raise _launchplane_http_error(
             status_code=500,
@@ -17632,7 +17904,7 @@ def create_launchplane_fastapi_app(
             raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
         except (ValueError, click.ClickException) as error:
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=apply_verireel_prod_deploy,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -17718,7 +17990,7 @@ def create_launchplane_fastapi_app(
             raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
         except (ValueError, click.ClickException) as error:
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=apply_verireel_prod_backup_gate,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -17754,7 +18026,7 @@ def create_launchplane_fastapi_app(
         try:
             operation_authorization = capture_durable_operation_authorization(
                 identity=identity,
-                action=native_routes._native_driver_route_authz_action(
+                action=native_routes.native_driver_route_authz_action(
                     apply_verireel_prod_backup_gate
                 ),
                 product=authorization_product,
@@ -17830,7 +18102,7 @@ def create_launchplane_fastapi_app(
             raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
         except (ValueError, click.ClickException) as error:
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=apply_verireel_prod_promotion,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -17919,7 +18191,7 @@ def create_launchplane_fastapi_app(
             raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
         except (ValueError, click.ClickException) as error:
             raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=apply_verireel_prod_rollback,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -18015,7 +18287,7 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=apply_verireel_testing_deploy,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -18107,7 +18379,7 @@ def create_launchplane_fastapi_app(
                 code="product_driver_mismatch",
                 message="Product is not configured for the requested driver route.",
             ) from error
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=apply_verireel_app_maintenance,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -18205,7 +18477,7 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=apply_verireel_testing_verification,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -18295,7 +18567,7 @@ def create_launchplane_fastapi_app(
                 code="product_driver_mismatch",
                 message="Product is not configured for the requested driver route.",
             ) from error
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=read_verireel_stable_environment,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -18355,7 +18627,7 @@ def create_launchplane_fastapi_app(
                 code="product_driver_mismatch",
                 message="Product is not configured for the requested driver route.",
             ) from error
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=run_verireel_runtime_verification,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -18418,7 +18690,7 @@ def create_launchplane_fastapi_app(
                 message="Product is not configured for the requested driver route.",
             ) from error
         authorization_context = inventory_request.inventory.context.strip() or authorization_context
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=read_verireel_preview_inventory,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -18480,7 +18752,7 @@ def create_launchplane_fastapi_app(
                 message="Product is not configured for the requested driver route.",
             ) from error
         authorization_context = refresh_request.refresh.context.strip() or authorization_context
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=apply_verireel_preview_refresh,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -18583,7 +18855,7 @@ def create_launchplane_fastapi_app(
                 message="Product is not configured for the requested driver route.",
             ) from error
         authorization_context = destroy_request.destroy.context.strip() or authorization_context
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=apply_verireel_preview_destroy,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -18680,7 +18952,7 @@ def create_launchplane_fastapi_app(
         authorization_context = (
             verification_request.verification.context.strip() or authorization_context
         )
-        if not native_routes._native_driver_route_authorization_allows(
+        if not native_routes.native_driver_route_authorization_allows(
             endpoint=apply_verireel_preview_verification,
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             identity=identity,
@@ -19052,7 +19324,7 @@ def create_launchplane_fastapi_app(
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={
-                "runtime_key_safety_policy_record_id": str(
+                "runtime_key_safety_policy_record_id": string_value(
                     route_result.result["runtime_key_safety_policy_record_id"]
                 ),
             },
@@ -19299,7 +19571,7 @@ def create_launchplane_fastapi_app(
         normalized_idempotency_key = idempotency_key.strip()
         normalized_scope = idempotency_scope(identity)
         raw_payload = await request.json()
-        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        payload_fingerprint = build_request_fingerprint(raw_payload)
         if idempotency_store is not None and normalized_idempotency_key:
             stored_record = idempotency_store.read_idempotency_record(
                 scope=normalized_scope,
@@ -20398,7 +20670,7 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    for route_path, endpoint, operation_id, summary in (
+    for registered_route_path, registered_endpoint, registered_operation_id, summary in (
         (
             _ODOO_STABLE_BOOTSTRAP_OPERATION_CANCEL_ROUTE,
             cancel_odoo_stable_bootstrap_operation,
@@ -20431,12 +20703,12 @@ def create_launchplane_fastapi_app(
         ),
     ):
         app.add_api_route(
-            route_path,
-            endpoint,
+            registered_route_path,
+            registered_endpoint,
             methods=["POST"],
             response_model=DurableOperationCancellationResponse,
             response_model_exclude_none=True,
-            operation_id=operation_id,
+            operation_id=registered_operation_id,
             summary=summary,
             responses={
                 400: {"model": LaunchplaneErrorResponse},
@@ -21133,7 +21405,7 @@ def create_launchplane_fastapi_app(
         dependencies=ChangeImpactReadRouteDependencies(
             common=read_route_dependencies,
             read_evaluation_identity=read_bearer_identity,
-            repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
+            repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
         ),
     )
     register_owner_acceptance_routes(
@@ -21142,14 +21414,14 @@ def create_launchplane_fastapi_app(
             common=read_route_dependencies,
             read_write_identity=read_write_identity,
             read_browser_mutation_identity=read_browser_mutation_identity,
-            repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
+            repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
             github_app_token=lambda repository, repository_id: mint_repository_installation_token(
                 identity=resolve_advisory_github_app_identity(
                     control_plane_root=resolved_control_plane_root
                 ),
                 repository=repository,
                 repository_id=repository_id,
-                api_request=github_api_request,
+                api_request=injected_github_api_request,
             ),
             github_api=github_api_request,
             public_origin=(human_session_manager.public_origin if human_session_manager else None),
@@ -21160,7 +21432,7 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=GovernanceProjectionRouteDependencies(
             common=read_route_dependencies,
-            repository_evidence_provider=(resolved_change_impact_repository_evidence_provider),
+            repository_evidence_provider=resolved_change_impact_repository_evidence_provider,
             current_readiness_provider=LiveGovernanceCurrentReadinessProvider(
                 github_token=lambda env_var: os.environ.get(env_var, "").strip(),
             ),
@@ -22006,6 +22278,31 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _AUTHZ_EFFECTIVE_ACCESS_EVALUATE_ROUTE,
+        evaluate_effective_access,
+        methods=["POST"],
+        response_model=EffectiveAccessEvaluateResponse,
+        response_model_exclude_none=True,
+        operation_id="evaluate_effective_access",
+        summary="Evaluate one principal and scope against active authorization",
+        responses=authz_diagnostic_route_responses,
+    )
+
+    app.add_api_route(
+        _AUTHZ_DENIAL_EXPLANATION_ROUTE,
+        explain_authz_denial,
+        methods=["GET"],
+        response_model=AuthzDenialExplanationResponse,
+        response_model_exclude_none=True,
+        operation_id="explain_authz_denial",
+        summary="Read one redacted authorization denial explanation",
+        responses={
+            **authz_diagnostic_route_responses,
+            404: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _GENERIC_WEB_PREVIEW_AUTHZ_PLAN_ROUTE,
         plan_generic_web_preview_authz,
         methods=["POST"],
@@ -22233,23 +22530,87 @@ def create_launchplane_fastapi_app(
         include_in_schema=False,
     )
 
-    def launchplane_http_exception_handler(request: Request, error: Exception) -> JSONResponse:
+    async def persist_authz_denial_best_effort(
+        *,
+        request: Request,
+        trace_id: str,
+        evaluation: AuthzEvaluation | None,
+        policy_provenance: AuthzPolicyProvenance | None,
+    ) -> None:
+        if evaluation is None:
+            evaluation = current_authz_evaluation()
+        if evaluation is None or evaluation.decision != "denied" or policy_provenance is None:
+            return
+
+        def write_denial_record() -> None:
+            store = get_record_store()
+            if not isinstance(store, PostgresRecordStore):
+                return
+            if policy_provenance.source != "db" or not policy_provenance.record_id:
+                return
+            recorded_at = datetime.now(timezone.utc)
+            route = request.scope.get("route")
+            route_path = str(getattr(route, "path", request.url.path))
+            store.write_authz_denial_record(
+                build_authz_denial_record(
+                    trace_id=trace_id,
+                    recorded_at=recorded_at.isoformat(),
+                    expires_at=(recorded_at + timedelta(days=30)).isoformat(),
+                    route_path=route_path,
+                    evaluation=evaluation,
+                    policy_record_id=policy_provenance.record_id,
+                    policy_revision=policy_provenance.revision,
+                    policy_sha256=policy_provenance.policy_sha256,
+                )
+            )
+
+        try:
+            await run_in_threadpool(write_denial_record)
+        except (OSError, RuntimeError, SQLAlchemyError, TypeError, ValueError):
+            logging.exception("Failed to persist redacted authorization denial evidence.")
+
+    async def launchplane_http_exception_handler(
+        request: Request, error: Exception
+    ) -> JSONResponse:
         if not isinstance(error, HTTPException):
             raise error
-        http_error = error
+        http_error: HTTPException = error
         trace_id = next_trace_id()
         code = "authentication_required" if http_error.status_code == 401 else "http_error"
-        if isinstance(http_error.detail, dict):
-            detail = http_error.detail
-            trace_id = str(detail.get("trace_id", trace_id))
-            code = str(detail.get("code", code))
-            message = str(detail.get("message", "Launchplane request failed."))
+        if isinstance(http_error, LaunchplaneHTTPException):
+            detail = http_error.structured_detail
+            trace_id = string_value(detail.get("trace_id", trace_id))
+            code = string_value(detail.get("code", code))
+            message = string_value(detail.get("message", "Launchplane request failed."))
             records = detail.get("records")
             authz = detail.get("authz")
+            authz_evaluation = http_error.authz_evaluation
+            authz_policy_provenance = http_error.authz_policy_provenance
         else:
-            message = str(http_error.detail)
+            message = (
+                http_error.detail
+                if isinstance(http_error.detail, str)
+                else "Launchplane request failed."
+            )
             records = None
             authz = None
+            authz_evaluation = None
+            authz_policy_provenance = None
+        if http_error.status_code == 403 and code == "authorization_denied":
+            if authz_policy_provenance is None:
+                request_provenance = getattr(
+                    request.state,
+                    "launchplane_authz_policy_provenance",
+                    None,
+                )
+                if isinstance(request_provenance, AuthzPolicyProvenance):
+                    authz_policy_provenance = request_provenance
+            await persist_authz_denial_best_effort(
+                request=request,
+                trace_id=trace_id,
+                evaluation=authz_evaluation,
+                policy_provenance=authz_policy_provenance,
+            )
         payload = LaunchplaneErrorResponse(
             trace_id=trace_id,
             error=LaunchplaneErrorDetail(code=code, message=message),
@@ -22267,21 +22628,26 @@ def create_launchplane_fastapi_app(
     def launchplane_starlette_http_exception_handler(
         request: Request, error: Exception
     ) -> JSONResponse:
-        if not isinstance(error, StarletteHTTPException):
+        if not isinstance(error, STARLETTE_HTTP_EXCEPTION):
             raise error
+        http_error: Any = error
         trace_id = next_trace_id()
-        if error.status_code == 404:
+        if http_error.status_code == 404:
             status_code = 404
             code = "not_found"
             message = f"No Launchplane route for {request.url.path}."
-        elif error.status_code == 405:
+        elif http_error.status_code == 405:
             status_code = 405
             code = "method_not_allowed"
             message = "Only GET and POST are allowed for Launchplane routes."
         else:
-            status_code = error.status_code
+            status_code = http_error.status_code
             code = "http_error"
-            message = str(error.detail)
+            message = (
+                http_error.detail
+                if isinstance(http_error.detail, str)
+                else "Launchplane request failed."
+            )
         payload = LaunchplaneErrorResponse(
             trace_id=trace_id,
             error=LaunchplaneErrorDetail(code=code, message=message),
@@ -22289,7 +22655,7 @@ def create_launchplane_fastapi_app(
         response = JSONResponse(
             status_code=status_code,
             content=payload.model_dump(mode="json", exclude_none=True),
-            headers=error.headers,
+            headers=http_error.headers,
         )
         preserve_renewed_session_cookie(request, response)
         return response
@@ -22323,7 +22689,7 @@ def create_launchplane_fastapi_app(
     )
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
     app.add_exception_handler(
-        StarletteHTTPException,
+        STARLETTE_HTTP_EXCEPTION,
         launchplane_starlette_http_exception_handler,
     )
     app.add_exception_handler(
@@ -22367,13 +22733,21 @@ def _launchplane_http_error(
     code: str,
     message: str,
     authz: dict[str, object] | None = None,
-) -> HTTPException:
+    authz_policy_provenance: AuthzPolicyProvenance | None = None,
+) -> LaunchplaneHTTPException:
     detail: dict[str, object] = {"trace_id": trace_id, "code": code, "message": message}
     if authz is not None:
         detail["authz"] = authz
-    return HTTPException(
+    authz_evaluation = None
+    if code == "authorization_denied":
+        evaluation = current_authz_evaluation()
+        if evaluation is not None and evaluation.decision == "denied":
+            authz_evaluation = evaluation
+    return LaunchplaneHTTPException(
         status_code=status_code,
         detail=detail,
+        authz_evaluation=authz_evaluation,
+        authz_policy_provenance=authz_policy_provenance,
     )
 
 
@@ -22459,8 +22833,8 @@ def _record_slug(value: str) -> str:
     return normalized or "launchplane-record"
 
 
-def _authentication_required_error(message: str) -> HTTPException:
-    return HTTPException(
+def _authentication_required_error(message: str) -> LaunchplaneHTTPException:
+    return LaunchplaneHTTPException(
         status_code=401,
         detail={"code": "authentication_required", "message": message},
         headers=_BEARER_CHALLENGE_HEADER,

@@ -2332,6 +2332,15 @@ preflights.
 - Agent-facing authorization diagnostics include an `agent_audit` response
   provenance envelope with decision, safe reason code, subject, action, product,
   context, policy source, policy digest, and `authz_policy` source kind.
+- Redacted HTTP authorization denials are persisted in
+  `launchplane_authz_denials` when a standard `authorization_denied` response has
+  bounded policy-evaluation evidence. The trace-keyed record stores only the
+  principal type, requested action/product/context, target scope, whether an
+  instance was supplied, a closed reason code, route path, and active policy
+  record/revision/digest. It never stores principal identifiers, token labels,
+  raw claims, selector values, matching rule IDs, or managed-set topology.
+  Records expire after 30 days; writes opportunistically remove expired rows,
+  and read APIs do not expose a list operation.
 - Agent write-intent evaluations are persisted as
   `launchplane_agent_write_intents` records. Each record stores the request,
   evaluation result, `agent_audit` envelope, trace id, optional idempotency key,

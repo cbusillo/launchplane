@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from types import SimpleNamespace
+from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 
@@ -26,6 +27,8 @@ from control_plane.service_auth import (
     action_safety,
     agent_authz_audit,
     agent_consumer_subject,
+    clear_authz_evaluation,
+    current_authz_evaluation,
     limited_remote_user_action_allowed,
     migrate_authz_policy_to_schema_v2,
     parse_authz_policy_toml,
@@ -39,8 +42,8 @@ from control_plane.service_human_auth import (
 )
 
 
-def _actions_identity(**overrides: object) -> GitHubActionsIdentity:
-    claims: dict[str, object] = {
+def _actions_identity(**overrides: Any) -> GitHubActionsIdentity:
+    claims: dict[str, Any] = {
         "repository": "cbusillo/verireel",
         "repository_owner": "cbusillo",
         "repository_id": "1001",
@@ -72,8 +75,8 @@ def _actions_identity(**overrides: object) -> GitHubActionsIdentity:
     )
 
 
-def _human_identity(**overrides: object) -> GitHubHumanIdentity:
-    values: dict[str, object] = {
+def _human_identity(**overrides: Any) -> GitHubHumanIdentity:
+    values: dict[str, Any] = {
         "login": "alice",
         "github_id": 123,
         "name": "Alice Example",
@@ -85,17 +88,17 @@ def _human_identity(**overrides: object) -> GitHubHumanIdentity:
     values.update(overrides)
     return GitHubHumanIdentity(
         login=str(values["login"]),
-        github_id=values["github_id"],  # type: ignore[arg-type]
+        github_id=values["github_id"],
         name=str(values["name"]),
         email=str(values["email"]),
-        organizations=values["organizations"],  # type: ignore[arg-type]
-        teams=values["teams"],  # type: ignore[arg-type]
-        role=values["role"],  # type: ignore[arg-type]
+        organizations=values["organizations"],
+        teams=values["teams"],
+        role=values["role"],
     )
 
 
-def _terminal_agent_identity(**overrides: object) -> TerminalAgentIdentity:
-    values: dict[str, object] = {
+def _terminal_agent_identity(**overrides: Any) -> TerminalAgentIdentity:
+    values: dict[str, Any] = {
         "subject": "local-owner-agent",
         "token_label": "local-owner-read",
     }
@@ -106,8 +109,8 @@ def _terminal_agent_identity(**overrides: object) -> TerminalAgentIdentity:
     )
 
 
-def _local_operator_identity(**overrides: object) -> LocalOperatorIdentity:
-    values: dict[str, object] = {
+def _local_operator_identity(**overrides: Any) -> LocalOperatorIdentity:
+    values: dict[str, Any] = {
         "subject": "local-owner-agent",
         "token_label": "local-owner-write",
     }
@@ -118,8 +121,8 @@ def _local_operator_identity(**overrides: object) -> LocalOperatorIdentity:
     )
 
 
-def _local_admin_identity(**overrides: object) -> LocalAdminIdentity:
-    values: dict[str, object] = {
+def _local_admin_identity(**overrides: Any) -> LocalAdminIdentity:
+    values: dict[str, Any] = {
         "subject": "local-owner-admin",
         "token_label": "local-owner-admin",
     }
@@ -201,8 +204,8 @@ class GitHubOidcVerifierBoundaryTests(unittest.TestCase):
                     "repository_id": "1001",
                     "repository_owner_id": "2001",
                     "workflow_ref": "cbusillo/verireel/.github/workflows/preview.yml@refs/heads/main",
+                    missing_claim: "",
                 }
-                claims[missing_claim] = ""
 
                 with patch("control_plane.service_auth.jwt.decode", return_value=claims):
                     verifier = GitHubOidcVerifier(
@@ -214,6 +217,41 @@ class GitHubOidcVerifierBoundaryTests(unittest.TestCase):
 
 
 class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
+    def test_evaluate_records_only_bounded_reason_categories(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_operators": [
+                    {
+                        "subjects": ["local-owner-agent"],
+                        "token_labels": ["local-owner-write"],
+                        "products": ["example-product"],
+                        "contexts": ["example-context"],
+                        "actions": ["example_access.read"],
+                    }
+                ],
+            }
+        )
+        clear_authz_evaluation()
+        self.addCleanup(clear_authz_evaluation)
+
+        allowed = policy.evaluate(
+            identity=_local_operator_identity(),
+            action="example_access.read",
+            product="example-product",
+            context="example-context",
+        )
+        denied = policy.evaluate(
+            identity=_local_operator_identity(),
+            action="example_access.write",
+            product="example-product",
+            context="example-context",
+        )
+
+        self.assertEqual(allowed.reason_code, "allowed")
+        self.assertEqual(denied.reason_code, "no_matching_grant")
+        self.assertEqual(current_authz_evaluation(), denied)
+
     def test_agent_consumer_subject_classifies_terminal_agent_as_read_only_context(self) -> None:
         subject = agent_consumer_subject(
             identity=_terminal_agent_identity(),
@@ -1030,7 +1068,8 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
 
 
 class HumanSessionBoundaryTests(unittest.TestCase):
-    def _session_manager(self) -> tuple[HumanSessionManager, InMemoryHumanSessionStore]:
+    @staticmethod
+    def _session_manager() -> tuple[HumanSessionManager, InMemoryHumanSessionStore]:
         config = GitHubOAuthConfig(
             client_id="client-id",
             client_secret="client-secret",
@@ -1136,7 +1175,7 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
         legacy_payload.pop("local_operators", None)
         legacy_payload.pop("local_admins", None)
         legacy_sha256 = hashlib.sha256(
-            json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
         self.assertEqual(authz_policy_sha256(policy), legacy_sha256)
@@ -1163,7 +1202,7 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
         self.assertEqual(
             authz_policy_sha256(policy),
             hashlib.sha256(
-                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest(),
         )
 
