@@ -11,10 +11,9 @@ inputs:
     default: ""
   request-json:
     description: >-
-      Optional exact legacy deploy coordinates and operator reason as JSON.
-      Supplying a reviewed expected_recovery_digest selects digest-bound apply
-      mode. When omitted, the action downloads and validates the approved
-      recovery apply artifact for the current workflow_run event.
+      Optional exact legacy deploy coordinates and operator reason as JSON for
+      dry-run mode only. When omitted, the action downloads and validates the
+      approved digest-bound apply artifact for the current workflow_run event.
     required: false
     default: ""
   expected-product:
