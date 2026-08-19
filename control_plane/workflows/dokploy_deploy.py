@@ -15,6 +15,19 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import api as dokploy_api
 
 
+def dokploy_deploy_artifact_reference(
+    *,
+    ship_request: ShipRequest,
+    target_type: str,
+) -> str:
+    if target_type == "application":
+        return provider_image_reference(
+            artifact_id=ship_request.artifact_id,
+            deploy_reference=ship_request.deploy_reference,
+        )
+    return ship_request.artifact_id.strip()
+
+
 def update_dokploy_target_artifact(
     *,
     host: str,
@@ -209,12 +222,10 @@ def execute_dokploy_artifact_deploy(
         target_type=resolved_target.target_type,
         target_id=resolved_target.target_id,
     )
-    deploy_reference = ship_request.artifact_id
-    if resolved_target.target_type == "application":
-        deploy_reference = provider_image_reference(
-            artifact_id=ship_request.artifact_id,
-            deploy_reference=ship_request.deploy_reference,
-        )
+    deploy_reference = dokploy_deploy_artifact_reference(
+        ship_request=ship_request,
+        target_type=resolved_target.target_type,
+    )
     update_dokploy_target_artifact(
         host=host,
         token=token,

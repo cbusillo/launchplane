@@ -126,6 +126,7 @@ class _GenericWebDeployRecoveryInspection:
     retry_safe: bool
     proposed_action: GenericWebDeployRecoveryAction
     provider_observation_payload: dict[str, object]
+    legacy_correlation_digest_evidence: dict[str, object] | None = None
     adapter: GenericWebDeployProviderMutationAdapter | None = None
     provider_inspection: Any | None = None
 
@@ -134,7 +135,7 @@ class _GenericWebDeployRecoveryInspection:
         return build_generic_web_deploy_recovery_digest(self.digest_payload())
 
     def digest_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": 1,
             "request": self.request.model_dump(
                 mode="json",
@@ -149,6 +150,9 @@ class _GenericWebDeployRecoveryInspection:
             "retry_safe": self.retry_safe,
             "proposed_action": self.proposed_action,
         }
+        if self.legacy_correlation_digest_evidence is not None:
+            payload["legacy_correlation"] = self.legacy_correlation_digest_evidence
+        return payload
 
     def dry_run_response(self) -> GenericWebDeployRecoveryDryRunResponse:
         return GenericWebDeployRecoveryDryRunResponse(
@@ -490,6 +494,7 @@ async def _inspect_generic_web_deploy_recovery(
     operation_context: str
     operation_instance = recovery_request.original_deploy.deploy.instance.strip()
     authoritative_lane = lane
+    legacy_provider_effect_started_at = ""
 
     if reservation.state == "completed":
         stored_result = reservation.response_payload.get("result")
@@ -591,6 +596,19 @@ async def _inspect_generic_web_deploy_recovery(
                 code="reservation_target_conflict",
                 message="Stored generic web deploy recovery target identity conflicts.",
             )
+        if (
+            legacy_snapshot_without_product
+            and reservation.provider_effect_phase == "deploy_trigger"
+        ):
+            try:
+                parse_launchplane_mutation_timestamp(
+                    reservation.provider_effect_started_at,
+                    field_name="provider_effect_started_at",
+                )
+            except ValueError:
+                legacy_provider_effect_started_at = ""
+            else:
+                legacy_provider_effect_started_at = reservation.provider_effect_started_at
 
     if not _recovery_authorization_allows(
         dependencies=dependencies,
@@ -661,6 +679,7 @@ async def _inspect_generic_web_deploy_recovery(
                 provider_effect_phase=reservation.provider_effect_phase,
                 reconciliation_key=reservation.reconciliation_key,
                 expected_provider_target_key=reservation.provider_target_key,
+                legacy_provider_effect_started_at=legacy_provider_effect_started_at,
             )
             if not provider_inspection.identity_matches:
                 raise dependencies.http_error(
@@ -674,7 +693,18 @@ async def _inspect_generic_web_deploy_recovery(
                 provider_inspection.observation.deployment_status
             )
             retry_safe = provider_inspection.retry_safe
-            provider_observation_payload = provider_inspection.observation.model_dump(mode="json")
+            legacy_correlation_digest_evidence = (
+                provider_inspection.legacy_correlation_digest_evidence
+            )
+            if legacy_correlation_digest_evidence is None:
+                provider_observation_payload = provider_inspection.observation.model_dump(
+                    mode="json"
+                )
+            else:
+                provider_observation_payload = {
+                    "outcome": provider_outcome,
+                    "deployment_status": provider_status,
+                }
             if provider_outcome == "present":
                 proposed_action = "adopt_observed"
             elif provider_outcome == "absent" and retry_safe:
@@ -697,6 +727,11 @@ async def _inspect_generic_web_deploy_recovery(
         retry_safe=retry_safe,
         proposed_action=proposed_action,
         provider_observation_payload=provider_observation_payload,
+        legacy_correlation_digest_evidence=(
+            provider_inspection.legacy_correlation_digest_evidence
+            if provider_inspection is not None
+            else None
+        ),
         adapter=adapter,
         provider_inspection=provider_inspection,
     )

@@ -25,6 +25,8 @@ from control_plane.storage.postgres import (
 )
 from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
 from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebLegacyDeploymentCorrelation,
+    GenericWebLegacyDeploymentCorrelationEvidence,
     GenericWebProviderDeploymentObservation,
     GenericWebResolvedDeployTarget,
     build_generic_web_provider_reconciliation_key,
@@ -239,11 +241,16 @@ def _generic_web_recovery_reservation(
     lease_expires_at: str = "2099-08-16T18:00:00Z",
     provider_effect_phase: str = "target_update",
     provider_target_key: str | None = None,
+    legacy_snapshot_without_product: bool = False,
 ) -> LaunchplaneIdempotencyRecord:
     target = _generic_web_recovery_target(context=context)
-    reconciliation_key = build_generic_web_provider_reconciliation_key(
-        target,
-        product="sellyouroutboard",
+    reconciliation_key = (
+        _legacy_generic_web_reconciliation_key(target)
+        if legacy_snapshot_without_product
+        else build_generic_web_provider_reconciliation_key(
+            target,
+            product="sellyouroutboard",
+        )
     )
     return LaunchplaneIdempotencyRecord(
         record_id=f"idempotency-{idempotency_key}",
@@ -317,6 +324,54 @@ class _FailingRecoveryObservationProvider(_RecoveryObservationProvider):
     def observe_artifact_deploy(self, **_kwargs: object) -> GenericWebProviderDeploymentObservation:
         self.observation_calls += 1
         raise ClickException("provider read failed")
+
+
+def _legacy_correlation(
+    *,
+    deployment_id_sha256: str = "1" * 64,
+    deployment_title_sha256: str = "2" * 64,
+    artifact_reference_sha256: str = "3" * 64,
+) -> GenericWebLegacyDeploymentCorrelation:
+    return GenericWebLegacyDeploymentCorrelation(
+        observation=GenericWebProviderDeploymentObservation(
+            outcome="present",
+            deployment_status="done",
+            deployment_id="provider-legacy-deployment-secret",
+            started_at="2026-08-15T12:00:02.000000Z",
+            finished_at="2026-08-15T12:00:20.000000Z",
+        ),
+        digest_evidence=GenericWebLegacyDeploymentCorrelationEvidence(
+            deployment_id_sha256=deployment_id_sha256,
+            deployment_title_sha256=deployment_title_sha256,
+            deployment_created_at="2026-08-15T12:00:01.000000Z",
+            deployment_started_at="2026-08-15T12:00:02.000000Z",
+            deployment_finished_at="2026-08-15T12:00:20.000000Z",
+            artifact_reference_sha256=artifact_reference_sha256,
+        ),
+    )
+
+
+class _LegacyRecoveryObservationProvider(_RecoveryObservationProvider):
+    def __init__(
+        self,
+        correlations: tuple[GenericWebLegacyDeploymentCorrelation | BaseException, ...],
+    ) -> None:
+        super().__init__(GenericWebProviderDeploymentObservation(outcome="absent"))
+        self.correlations = list(correlations)
+        self.legacy_observation_calls = 0
+
+    def observe_legacy_artifact_deploy(
+        self, **_kwargs: object
+    ) -> GenericWebLegacyDeploymentCorrelation:
+        if self.observation_calls != self.legacy_observation_calls + 1:
+            raise AssertionError("legacy observation ran before exact-title observation")
+        self.legacy_observation_calls += 1
+        if not self.correlations:
+            raise AssertionError("unexpected legacy observation")
+        correlation = self.correlations.pop(0)
+        if isinstance(correlation, BaseException):
+            raise correlation
+        return correlation
 
 
 class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
@@ -941,6 +996,374 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         self.assertEqual(payload["provider_evidence"], "provider_read_failed")
         self.assertEqual(payload["provider_read_error_class"], "provider_request_failed")
         self.assertNotIn("provider read failed", json.dumps(payload, sort_keys=True))
+
+    def test_legacy_correlation_is_bounded_read_only_and_adoption_only(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            original_deploy = _generic_web_recovery_original_deploy()
+            reservation = _write_generic_web_recovery_reservation(
+                store,
+                _generic_web_recovery_reservation(
+                    original_deploy=original_deploy,
+                    idempotency_key="legacy-correlation-bounded",
+                    provider_effect_phase="deploy_trigger",
+                    legacy_snapshot_without_product=True,
+                ),
+            )
+            provider = _LegacyRecoveryObservationProvider(
+                (_legacy_correlation(), _legacy_correlation())
+            )
+            app = _create_recovery_app(root=root, store=store)
+            with (
+                patch(
+                    "control_plane.generic_web_deploy_provider_adapter."
+                    "default_generic_web_deploy_provider",
+                    return_value=provider,
+                ),
+                patch.object(store, "reserve_mutation", side_effect=AssertionError("reserve")),
+                patch(
+                    "control_plane.storage.postgres.PostgresRecordStore.write_deployment_record",
+                    side_effect=AssertionError("deployment write"),
+                ),
+                patch(
+                    "control_plane.storage.postgres.PostgresRecordStore."
+                    "write_environment_inventory",
+                    side_effect=AssertionError("inventory write"),
+                ),
+                patch(
+                    "control_plane.storage.postgres.PostgresRecordStore.write_idempotency_record",
+                    side_effect=AssertionError("idempotency write"),
+                ),
+            ):
+                evidence_status, evidence_payload = _invoke_provider_evidence(
+                    app,
+                    original_deploy=original_deploy,
+                    idempotency_key=reservation.idempotency_key,
+                    reason="Inspect bounded legacy correlation evidence.",
+                )
+                dry_status, dry_payload = _invoke_recovery(
+                    app,
+                    original_deploy=original_deploy,
+                    idempotency_key=reservation.idempotency_key,
+                    reason="Inspect bounded legacy correlation evidence.",
+                )
+            store.close()
+
+        self.assertEqual(evidence_status, 200)
+        self.assertEqual(evidence_payload["provider_evidence"], "deployment_correlated_legacy")
+        self.assertEqual(evidence_payload["provider_status"], "done")
+        self.assertEqual(dry_status, 200)
+        self.assertEqual(dry_payload["provider_outcome"], "present")
+        self.assertEqual(dry_payload["proposed_action"], "adopt_observed")
+        self.assertFalse(dry_payload["retry_safe"])
+        self.assertEqual(provider.observation_calls, 2)
+        self.assertEqual(provider.legacy_observation_calls, 2)
+        serialized = json.dumps(
+            {"evidence": evidence_payload, "dry_run": dry_payload},
+            sort_keys=True,
+        )
+        self.assertNotIn("provider-legacy-deployment-secret", serialized)
+        self.assertNotIn("2026-08-15T12:00:01", serialized)
+        self.assertNotIn("legacy/github-actions/scope", serialized)
+
+    def test_legacy_fallback_requires_legacy_snapshot_and_actionable_lease(self) -> None:
+        for name, legacy_snapshot, state, lease_expires_at, expected_exact_calls in (
+            ("modern snapshot", False, "reconcile_required", "", 1),
+            ("active lease", True, "running", "2099-08-16T18:00:00Z", 0),
+        ):
+            with (
+                self.subTest(name=name),
+                TemporaryDirectory() as temporary_directory_name,
+            ):
+                root = Path(temporary_directory_name)
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+                )
+                store.ensure_schema()
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+                )
+                original_deploy = _generic_web_recovery_original_deploy()
+                reservation = _write_generic_web_recovery_reservation(
+                    store,
+                    _generic_web_recovery_reservation(
+                        original_deploy=original_deploy,
+                        idempotency_key=f"legacy-gate-{name}",
+                        state=cast(Literal["running", "reconcile_required"], state),
+                        lease_expires_at=lease_expires_at,
+                        provider_effect_phase="deploy_trigger",
+                        legacy_snapshot_without_product=legacy_snapshot,
+                    ),
+                )
+                provider = _LegacyRecoveryObservationProvider((_legacy_correlation(),))
+                app = _create_recovery_app(root=root, store=store)
+                with patch(
+                    "control_plane.generic_web_deploy_provider_adapter."
+                    "default_generic_web_deploy_provider",
+                    return_value=provider,
+                ):
+                    status_code, payload = _invoke_recovery(
+                        app,
+                        original_deploy=original_deploy,
+                        idempotency_key=reservation.idempotency_key,
+                        reason="Verify legacy fallback gating.",
+                    )
+                store.close()
+
+            self.assertEqual(status_code, 200)
+            self.assertEqual(
+                payload["proposed_action"],
+                "hold_unknown" if name == "modern snapshot" else "wait_for_active_lease",
+            )
+            self.assertEqual(provider.observation_calls, expected_exact_calls)
+            self.assertEqual(provider.legacy_observation_calls, 0)
+
+    def test_legacy_correlation_error_holds_unknown(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            original_deploy = _generic_web_recovery_original_deploy()
+            reservation = _write_generic_web_recovery_reservation(
+                store,
+                _generic_web_recovery_reservation(
+                    original_deploy=original_deploy,
+                    idempotency_key="legacy-correlation-ambiguous",
+                    provider_effect_phase="deploy_trigger",
+                    legacy_snapshot_without_product=True,
+                ),
+            )
+            provider = _LegacyRecoveryObservationProvider(
+                (
+                    ValueError("raw provider ambiguity secret"),
+                    ValueError("raw provider ambiguity secret"),
+                )
+            )
+            app = _create_recovery_app(root=root, store=store)
+            with patch(
+                "control_plane.generic_web_deploy_provider_adapter."
+                "default_generic_web_deploy_provider",
+                return_value=provider,
+            ):
+                evidence_status, evidence_payload = _invoke_provider_evidence(
+                    app,
+                    original_deploy=original_deploy,
+                    idempotency_key=reservation.idempotency_key,
+                    reason="Hold ambiguous legacy evidence.",
+                )
+                status_code, payload = _invoke_recovery(
+                    app,
+                    original_deploy=original_deploy,
+                    idempotency_key=reservation.idempotency_key,
+                    reason="Hold ambiguous legacy evidence.",
+                )
+            store.close()
+
+        self.assertEqual(evidence_status, 200)
+        self.assertEqual(evidence_payload["provider_evidence"], "provider_status_unknown")
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["provider_outcome"], "unknown")
+        self.assertEqual(payload["proposed_action"], "hold_unknown")
+        self.assertFalse(payload["retry_safe"])
+        self.assertNotIn("raw provider ambiguity secret", json.dumps(payload, sort_keys=True))
+
+    def test_optional_legacy_capability_does_not_change_nonlegacy_recovery_digest(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            original_deploy = _generic_web_recovery_original_deploy()
+            reservation = _write_generic_web_recovery_reservation(
+                store,
+                _generic_web_recovery_reservation(
+                    original_deploy=original_deploy,
+                    idempotency_key="nonlegacy-digest-stability",
+                ),
+            )
+            without_capability = _RecoveryObservationProvider(
+                GenericWebProviderDeploymentObservation(outcome="absent")
+            )
+            with_capability = _LegacyRecoveryObservationProvider((_legacy_correlation(),))
+            app = _create_recovery_app(root=root, store=store)
+            with patch(
+                "control_plane.generic_web_deploy_provider_adapter."
+                "default_generic_web_deploy_provider",
+                return_value=without_capability,
+            ):
+                first_status, first_payload = _invoke_recovery(
+                    app,
+                    original_deploy=original_deploy,
+                    idempotency_key=reservation.idempotency_key,
+                    reason="Verify nonlegacy digest stability.",
+                )
+            with patch(
+                "control_plane.generic_web_deploy_provider_adapter."
+                "default_generic_web_deploy_provider",
+                return_value=with_capability,
+            ):
+                second_status, second_payload = _invoke_recovery(
+                    app,
+                    original_deploy=original_deploy,
+                    idempotency_key=reservation.idempotency_key,
+                    reason="Verify nonlegacy digest stability.",
+                )
+            store.close()
+
+        self.assertEqual(first_status, 200)
+        self.assertEqual(second_status, 200)
+        self.assertEqual(first_payload["recovery_digest"], second_payload["recovery_digest"])
+        self.assertEqual(with_capability.legacy_observation_calls, 0)
+
+    def test_legacy_apply_reinspection_stales_changed_correlation_evidence(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            original_deploy = _generic_web_recovery_original_deploy()
+            reservation = _write_generic_web_recovery_reservation(
+                store,
+                _generic_web_recovery_reservation(
+                    original_deploy=original_deploy,
+                    idempotency_key="legacy-stale-apply",
+                    provider_effect_phase="deploy_trigger",
+                    legacy_snapshot_without_product=True,
+                ),
+            )
+            provider = _LegacyRecoveryObservationProvider(
+                (
+                    _legacy_correlation(),
+                    _legacy_correlation(deployment_id_sha256="4" * 64),
+                )
+            )
+            app = _create_recovery_app(root=root, store=store)
+            with patch(
+                "control_plane.generic_web_deploy_provider_adapter."
+                "default_generic_web_deploy_provider",
+                return_value=provider,
+            ):
+                dry_status, dry_payload = _invoke_recovery(
+                    app,
+                    original_deploy=original_deploy,
+                    idempotency_key=reservation.idempotency_key,
+                    reason="Review legacy correlation evidence.",
+                )
+                apply_status, apply_payload = _invoke_recovery_apply(
+                    app,
+                    original_deploy=original_deploy,
+                    idempotency_key=reservation.idempotency_key,
+                    reason="Review legacy correlation evidence.",
+                    expected_recovery_digest=dry_payload["recovery_digest"],
+                )
+            stored = store.read_idempotency_record(
+                scope=reservation.scope,
+                route_path=reservation.route_path,
+                idempotency_key=reservation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(dry_status, 200)
+        self.assertEqual(apply_status, 409)
+        self.assertEqual(apply_payload["error"]["code"], "stale_recovery_digest")
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.state, "reconcile_required")
+
+    def test_legacy_apply_adopts_without_retrying_provider_effect(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            original_deploy = _generic_web_recovery_original_deploy()
+            reservation = _write_generic_web_recovery_reservation(
+                store,
+                _generic_web_recovery_reservation(
+                    original_deploy=original_deploy,
+                    idempotency_key="legacy-adoption-only",
+                    provider_effect_phase="deploy_trigger",
+                    legacy_snapshot_without_product=True,
+                ),
+            )
+            provider = _LegacyRecoveryObservationProvider(
+                (_legacy_correlation(), _legacy_correlation())
+            )
+            app = _create_recovery_app(root=root, store=store)
+            with patch(
+                "control_plane.generic_web_deploy_provider_adapter."
+                "default_generic_web_deploy_provider",
+                return_value=provider,
+            ):
+                reason = "Adopt exact bounded legacy correlation evidence."
+                dry_status, dry_payload = _invoke_recovery(
+                    app,
+                    original_deploy=original_deploy,
+                    idempotency_key=reservation.idempotency_key,
+                    reason=reason,
+                )
+            with (
+                patch(
+                    "control_plane.generic_web_deploy_provider_adapter."
+                    "default_generic_web_deploy_provider",
+                    return_value=provider,
+                ),
+                patch(
+                    "control_plane.generic_web_deploy_provider_adapter."
+                    "GenericWebDeployProviderMutationAdapter.apply",
+                    side_effect=AssertionError("provider retry"),
+                ),
+            ):
+                apply_status, apply_payload = _invoke_recovery_apply(
+                    app,
+                    original_deploy=original_deploy,
+                    idempotency_key=reservation.idempotency_key,
+                    reason=reason,
+                    expected_recovery_digest=dry_payload["recovery_digest"],
+                )
+            stored = store.read_idempotency_record(
+                scope=reservation.scope,
+                route_path=reservation.route_path,
+                idempotency_key=reservation.idempotency_key,
+            )
+            store.close()
+
+        self.assertEqual(dry_status, 200)
+        self.assertEqual(dry_payload["proposed_action"], "adopt_observed")
+        self.assertFalse(dry_payload["retry_safe"])
+        self.assertEqual(apply_status, 202)
+        self.assertEqual(apply_payload["recovery_action"], "adopt_observed")
+        self.assertFalse(apply_payload["retry_safe"])
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.state, "completed")
+        serialized = json.dumps(apply_payload, sort_keys=True)
+        self.assertNotIn("provider-legacy-deployment-secret", serialized)
+        self.assertNotIn("2026-08-15T12:00:02", serialized)
 
     def test_provider_evidence_supports_dedicated_and_execute_authorization(self) -> None:
         for actions in (
