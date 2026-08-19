@@ -1,6 +1,6 @@
 ---
-name: Generic-web deploy recovery dry run
-description: Inspect one exact legacy generic-web deploy reservation through Launchplane.
+name: Generic-web deploy recovery
+description: Inspect or apply one exact legacy generic-web deploy recovery through Launchplane.
 
 inputs:
   launchplane-url:
@@ -10,7 +10,9 @@ inputs:
     required: false
     default: ""
   request-json:
-    description: Exact legacy deploy coordinates and operator reason as JSON.
+    description: >-
+      Exact legacy deploy coordinates and operator reason as JSON. Supplying a
+      reviewed expected_recovery_digest selects digest-bound apply mode.
     required: true
   audience:
     description: Optional GitHub OIDC audience. Defaults to the service URL host.
@@ -22,12 +24,22 @@ inputs:
     default: "120000"
 
 outputs:
+  status:
+    description: Apply request status when a reviewed digest is supplied.
+  mode:
+    description: Recovery response mode.
+  trace_id:
+    description: Launchplane trace identifier for apply.
   recovery_digest:
     description: Canonical digest binding the observed recovery plan.
   proposed_action:
     description: Recovery action proposed by Launchplane.
   reservation_state:
     description: Current durable reservation state.
+  reservation_attempt:
+    description: Existing reservation attempt for apply.
+  recovery_action:
+    description: Applied recovery action.
   provider_outcome:
     description: Bounded provider inspection outcome.
   provider_status:

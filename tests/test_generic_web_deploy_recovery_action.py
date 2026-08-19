@@ -34,6 +34,35 @@ class GenericWebDeployRecoveryActionTests(unittest.TestCase):
         )
         if launchplane_url:
             env["INPUT_LAUNCHPLANE-URL"] = launchplane_url
+        if "expected_recovery_digest" in request:
+            response_status = 202
+            response_payload = {
+                "schema_version": 1,
+                "status": "accepted",
+                "mode": "apply",
+                "trace_id": "recovery-apply-trace",
+                "product": "repairshopr-sync",
+                "context": "repairshopr-sync",
+                "instance": "prod",
+                "reservation_state": "completed",
+                "reservation_attempt": 1,
+                "recovery_action": "adopt_observed",
+                "recovery_digest": "a" * 64,
+                "provider_outcome": "present",
+                "provider_status": "done",
+                "retry_safe": False,
+            }
+        else:
+            response_status = 200
+            response_payload = {
+                "recovery_digest": "a" * 64,
+                "proposed_action": "retry_original_operation",
+                "reservation_state": "reconcile_required",
+                "provider_outcome": "absent",
+                "provider_status": "missing",
+                "retry_safe": True,
+                "observed_at": "2026-08-16T22:00:00Z",
+            }
         script = f"""
 const calls = [];
 global.fetch = async (url, init) => {{
@@ -41,15 +70,7 @@ global.fetch = async (url, init) => {{
   if (url.startsWith('https://oidc.example/token')) {{
     return new Response(JSON.stringify({{value: 'oidc-token'}}), {{status: 200}});
   }}
-  return new Response(JSON.stringify({{
-    recovery_digest: '{"a" * 64}',
-    proposed_action: 'retry_original_operation',
-    reservation_state: 'reconcile_required',
-    provider_outcome: 'absent',
-    provider_status: 'missing',
-    retry_safe: true,
-    observed_at: '2026-08-16T22:00:00Z'
-  }}), {{status: 200}});
+  return new Response(JSON.stringify({json.dumps(response_payload)}), {{status: {response_status}}});
 }};
 process.on('beforeExit', () => {{
   console.error(JSON.stringify(calls.map((call) => ({{
@@ -68,15 +89,19 @@ import('./{ACTION_ENTRYPOINT.as_posix()}');
             text=True,
         )
 
-    def test_action_metadata_is_dry_run_only_and_declares_bounded_outputs(self) -> None:
+    def test_action_metadata_declares_bounded_dry_run_and_apply_outputs(self) -> None:
         metadata = ACTION_METADATA.read_text(encoding="utf-8")
 
         self.assertIn("using: node24", metadata)
-        self.assertNotIn("apply", metadata.lower())
         for output_name in (
+            "status",
+            "mode",
+            "trace_id",
             "recovery_digest",
             "proposed_action",
             "reservation_state",
+            "reservation_attempt",
+            "recovery_action",
             "provider_outcome",
             "provider_status",
             "retry_safe",
@@ -146,6 +171,96 @@ import('./{ACTION_ENTRYPOINT.as_posix()}');
                 with self.subTest(output_name=output_name):
                     self.assertIn(f"{output_name}<<", outputs)
                     self.assertIn(f"\n{output_value}\n", outputs)
+
+    def test_action_reconstructs_digest_bound_apply_and_projects_result(self) -> None:
+        request = {
+            "schema_version": 1,
+            "product": "repairshopr-sync",
+            "instance": "prod",
+            "artifact_id": "ghcr.io/cbusillo/repairshopr_api@sha256:" + "b" * 64,
+            "source_git_ref": "2d66fb6b2708f975b1645ac912a5b576a9282853",
+            "original_run_id": "29609495343",
+            "original_run_attempt": "1",
+            "expected_recovery_digest": "a" * 64,
+            "reason": "Adopt the reviewed legacy deploy effect.",
+        }
+        with TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory) / "github-output.txt"
+            result = self.run_action(request=request, output_path=output_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = json.loads(result.stderr.splitlines()[-1])
+            self.assertEqual(len(calls), 2)
+            launchplane_call = calls[1]
+            self.assertEqual(
+                launchplane_call["url"],
+                "https://launchplane.example/v1/admin/generic-web/deploy-recovery/apply",
+            )
+            self.assertEqual(launchplane_call["method"], "POST")
+            self.assertEqual(
+                launchplane_call["headers"]["Idempotency-Key"],
+                "generic-web-stable-deploy:repairshopr-sync:prod:29609495343:1",
+            )
+            self.assertEqual(
+                json.loads(launchplane_call["body"]),
+                {
+                    "schema_version": 1,
+                    "product": "repairshopr-sync",
+                    "instance": "prod",
+                    "original_deploy": {
+                        "schema_version": 1,
+                        "product": "repairshopr-sync",
+                        "deploy": {
+                            "schema_version": 1,
+                            "product": "repairshopr-sync",
+                            "instance": "prod",
+                            "artifact_id": request["artifact_id"],
+                            "source_git_ref": request["source_git_ref"],
+                        },
+                    },
+                    "reason": request["reason"],
+                    "expected_recovery_digest": request["expected_recovery_digest"],
+                },
+            )
+            outputs = output_path.read_text(encoding="utf-8")
+            for output_name, output_value in (
+                ("status", "accepted"),
+                ("mode", "apply"),
+                ("trace_id", "recovery-apply-trace"),
+                ("reservation_state", "completed"),
+                ("reservation_attempt", "1"),
+                ("recovery_action", "adopt_observed"),
+                ("recovery_digest", "a" * 64),
+                ("provider_outcome", "present"),
+                ("provider_status", "done"),
+                ("retry_safe", "false"),
+            ):
+                with self.subTest(output_name=output_name):
+                    self.assertIn(f"{output_name}<<", outputs)
+                    self.assertIn(f"\n{output_value}\n", outputs)
+
+    def test_action_rejects_invalid_apply_digest_before_oidc(self) -> None:
+        request = {
+            "schema_version": 1,
+            "product": "repairshopr-sync",
+            "instance": "prod",
+            "artifact_id": "artifact",
+            "source_git_ref": "source",
+            "original_run_id": "29609495343",
+            "original_run_attempt": "1",
+            "expected_recovery_digest": "not-a-digest",
+            "reason": "Adopt the reviewed legacy deploy effect.",
+        }
+        with TemporaryDirectory() as temporary_directory:
+            result = self.run_action(
+                request=request,
+                output_path=Path(temporary_directory) / "github-output.txt",
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be a lowercase SHA-256 digest", result.stderr)
+        calls = json.loads(result.stderr.splitlines()[-1])
+        self.assertEqual(calls, [])
 
     def test_action_rejects_unknown_request_fields_before_oidc(self) -> None:
         request = {
