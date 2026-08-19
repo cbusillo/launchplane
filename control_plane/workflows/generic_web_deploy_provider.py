@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
+from datetime import datetime, timedelta
 import hashlib
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, cast, runtime_checkable
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -21,6 +22,7 @@ from control_plane.contracts.deploy_reference import validate_provider_deploy_re
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -29,7 +31,10 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
-from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
+from control_plane.workflows.dokploy_deploy import (
+    dokploy_deploy_artifact_reference,
+    execute_dokploy_artifact_deploy,
+)
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 
@@ -84,7 +89,7 @@ def build_generic_web_provider_target_key(
             resolved_deploy_target.resolved_target.target_id,
         )
     )
-    return f"generic-web-provider-target:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
+    return f"generic-web-provider-target:{hashlib.sha256(identity.encode()).hexdigest()}"
 
 
 def build_generic_web_provider_reconciliation_key(
@@ -107,7 +112,7 @@ def build_generic_web_provider_reconciliation_key(
         provider_deploy_mode=ship_request.provider_deploy_mode,
         deploy_timeout_seconds=resolved_deploy_target.deploy_timeout_seconds,
     )
-    encoded = base64.urlsafe_b64encode(snapshot.model_dump_json().encode("utf-8")).decode("ascii")
+    encoded = base64.urlsafe_b64encode(snapshot.model_dump_json().encode()).decode("ascii")
     return f"{_GENERIC_WEB_RECONCILIATION_KEY_PREFIX}{encoded.rstrip('=')}"
 
 
@@ -217,6 +222,31 @@ class GenericWebProviderDeploymentObservation(BaseModel):
         return self
 
 
+class GenericWebLegacyDeploymentCorrelationEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    deployment_id_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    deployment_title_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    deployment_created_at: str
+    deployment_started_at: str
+    deployment_finished_at: str
+    artifact_reference_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class GenericWebLegacyDeploymentCorrelation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observation: GenericWebProviderDeploymentObservation
+    digest_evidence: GenericWebLegacyDeploymentCorrelationEvidence
+
+    @model_validator(mode="after")
+    def _validate_observation(self) -> "GenericWebLegacyDeploymentCorrelation":
+        if self.observation.outcome != "present":
+            raise ValueError("Legacy deployment correlation requires a present observation.")
+        return self
+
+
 class DokployGenericWebDeployStore(control_plane_secrets.SecretReadStore, Protocol):
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
@@ -275,9 +305,25 @@ class GenericWebDeployProvider(Protocol):
     ) -> GenericWebProviderDeploymentObservation: ...
 
 
+@runtime_checkable
+class GenericWebDeployLegacyCorrelationProvider(Protocol):
+    def observe_legacy_artifact_deploy(
+        self,
+        *,
+        control_plane_root: Path,
+        resolved_deploy_target: GenericWebResolvedDeployTarget,
+        provider_effect_started_at: str,
+    ) -> GenericWebLegacyDeploymentCorrelation: ...
+
+
 class DokployGenericWebDeployProvider:
     provider_id = "dokploy"
     delegated_executor = "control-plane.dokploy"
+
+    def _read_provider_config(self, *, control_plane_root: Path) -> tuple[str, str]:
+        if self.provider_id != "dokploy":
+            raise RuntimeError("Dokploy provider identity is invalid.")
+        return dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
 
     def resolve_deploy_target(
         self,
@@ -294,7 +340,7 @@ class DokployGenericWebDeployProvider:
         fallback_target_name: str,
         request_deploy_reference: str = "",
     ) -> GenericWebResolvedDeployTarget:
-        del request_artifact_id, profile
+        del control_plane_root, request_artifact_id, profile
         dokploy_store = _require_dokploy_deploy_store(record_store)
         context_name = lane.context.strip()
         instance_name = lane.instance.strip()
@@ -394,7 +440,7 @@ class DokployGenericWebDeployProvider:
         before_provider_mutation: Callable[[str], None],
         effect_started: Callable[[], None],
     ) -> None:
-        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
         execute_dokploy_artifact_deploy(
             host=host,
             token=token,
@@ -414,7 +460,7 @@ class DokployGenericWebDeployProvider:
         resolved_deploy_target: GenericWebResolvedDeployTarget,
         deployment_title: str,
     ) -> GenericWebProviderDeploymentObservation:
-        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
         target = resolved_deploy_target.resolved_target
         deployment = dokploy_api.deployment_for_target_by_title(
             host=host,
@@ -465,6 +511,261 @@ class DokployGenericWebDeployProvider:
                 deployment.get("errorMessage") or deployment.get("error_message") or ""
             ).strip(),
         )
+
+    def observe_legacy_artifact_deploy(
+        self,
+        *,
+        control_plane_root: Path,
+        resolved_deploy_target: GenericWebResolvedDeployTarget,
+        provider_effect_started_at: str,
+    ) -> GenericWebLegacyDeploymentCorrelation:
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        target = resolved_deploy_target.resolved_target
+        deployments = dokploy_api.list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type=target.target_type,
+            target_id=target.target_id,
+        )
+        target_payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type=target.target_type,
+            target_id=target.target_id,
+        )
+        return correlate_legacy_dokploy_deployment(
+            deployments=deployments,
+            target_payload=target_payload,
+            target_type=target.target_type,
+            target_id=target.target_id,
+            provider_effect_started_at=provider_effect_started_at,
+            expected_artifact_reference=dokploy_deploy_artifact_reference(
+                ship_request=resolved_deploy_target.ship_request,
+                target_type=target.target_type,
+            ),
+        )
+
+
+def correlate_legacy_dokploy_deployment(
+    *,
+    deployments: list[dokploy_api.JsonObject],
+    target_payload: dokploy_api.JsonObject,
+    target_type: str,
+    target_id: str,
+    provider_effect_started_at: str,
+    expected_artifact_reference: str,
+) -> GenericWebLegacyDeploymentCorrelation:
+    effect_started_at, _ = _parse_legacy_provider_timestamp(
+        provider_effect_started_at,
+        field_name="provider_effect_started_at",
+    )
+    window_started_at = effect_started_at - timedelta(seconds=5)
+    window_finished_at = effect_started_at + timedelta(seconds=65)
+    parsed_deployments: list[tuple[dokploy_api.JsonObject, datetime, dict[str, str]]] = []
+    for deployment in deployments:
+        parsed_timestamps = _parse_all_legacy_deployment_timestamps(deployment)
+        created_at = _required_legacy_deployment_timestamp(
+            parsed_timestamps,
+            deployment,
+            aliases=("createdAt", "created_at"),
+            field_name="created_at",
+        )[0]
+        parsed_deployments.append((deployment, created_at, parsed_timestamps))
+    if not any(created_at < window_started_at for _, created_at, _ in parsed_deployments):
+        raise ValueError("Legacy deployment correlation requires older retained history.")
+    candidates = [
+        parsed
+        for parsed in parsed_deployments
+        if window_started_at <= parsed[1] <= window_finished_at
+    ]
+    if len(candidates) != 1:
+        raise ValueError("Legacy deployment correlation requires exactly one window candidate.")
+    candidate, candidate_created_at, candidate_timestamps = candidates[0]
+    if candidate_created_at != max(created_at for _, created_at, _ in parsed_deployments):
+        raise ValueError("Legacy deployment correlation candidate is not newest overall.")
+    title = _required_legacy_deployment_string(candidate, "title")
+    normalized_title = title.casefold()
+    if normalized_title.startswith(("launchplane operation ", "launchplane post-deploy ")):
+        raise ValueError("Legacy deployment correlation candidate has a Launchplane title.")
+    status = dokploy_api.deployment_status(candidate)
+    if not generic_web_provider_deployment_succeeded(status):
+        raise ValueError("Legacy deployment correlation candidate is not successful.")
+    deployment_id = dokploy_api.deployment_key(candidate).strip()
+    if not deployment_id:
+        raise ValueError("Legacy deployment correlation candidate has no deployment id.")
+    started_at, normalized_started_at = _required_legacy_deployment_timestamp(
+        candidate_timestamps,
+        candidate,
+        aliases=("startedAt", "started_at"),
+        field_name="started_at",
+    )
+    finished_at, normalized_finished_at = _required_legacy_deployment_timestamp(
+        candidate_timestamps,
+        candidate,
+        aliases=("finishedAt", "finished_at"),
+        field_name="finished_at",
+    )
+    if finished_at < started_at:
+        raise ValueError("Legacy deployment correlation candidate timestamps are inconsistent.")
+    normalized_target_id = target_id.strip()
+    if (
+        not normalized_target_id
+        or _dokploy_deployment_target_id(
+            deployment=candidate,
+            target_type=target_type,
+        )
+        != normalized_target_id
+        or _dokploy_target_payload_id(
+            target_payload=target_payload,
+            target_type=target_type,
+        )
+        != normalized_target_id
+    ):
+        raise ValueError("Legacy deployment correlation target identity is not exact.")
+    expected_reference = expected_artifact_reference.strip()
+    if (
+        not expected_reference
+        or _dokploy_target_artifact_reference(
+            target_payload=target_payload,
+            target_type=target_type,
+        )
+        != expected_reference
+    ):
+        raise ValueError("Legacy deployment correlation artifact reference does not match.")
+    normalized_created_at = _normalized_legacy_deployment_timestamp(
+        candidate_timestamps,
+        candidate,
+        aliases=("createdAt", "created_at"),
+        field_name="created_at",
+    )
+    return GenericWebLegacyDeploymentCorrelation(
+        observation=GenericWebProviderDeploymentObservation(
+            outcome="present",
+            deployment_status=status,
+            deployment_id=deployment_id,
+            started_at=normalized_started_at,
+            finished_at=normalized_finished_at,
+        ),
+        digest_evidence=GenericWebLegacyDeploymentCorrelationEvidence(
+            deployment_id_sha256=_legacy_correlation_sha256(deployment_id),
+            deployment_title_sha256=_legacy_correlation_sha256(title),
+            deployment_created_at=normalized_created_at,
+            deployment_started_at=normalized_started_at,
+            deployment_finished_at=normalized_finished_at,
+            artifact_reference_sha256=_legacy_correlation_sha256(expected_reference),
+        ),
+    )
+
+
+def _parse_all_legacy_deployment_timestamps(
+    deployment: dokploy_api.JsonObject,
+) -> dict[str, str]:
+    parsed_timestamps: dict[str, str] = {}
+    for field_name, value in deployment.items():
+        if not (field_name.endswith("At") or field_name.endswith("_at")):
+            continue
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str):
+            raise ValueError("Legacy deployment timestamps must be strings.")
+        _, normalized = _parse_legacy_provider_timestamp(value, field_name=field_name)
+        parsed_timestamps[field_name] = normalized
+    return parsed_timestamps
+
+
+def _required_legacy_deployment_timestamp(
+    parsed_timestamps: dict[str, str],
+    deployment: dokploy_api.JsonObject,
+    *,
+    aliases: tuple[str, ...],
+    field_name: str,
+) -> tuple[datetime, str]:
+    normalized = _normalized_legacy_deployment_timestamp(
+        parsed_timestamps,
+        deployment,
+        aliases=aliases,
+        field_name=field_name,
+    )
+    return _parse_legacy_provider_timestamp(normalized, field_name=field_name)
+
+
+def _normalized_legacy_deployment_timestamp(
+    parsed_timestamps: dict[str, str],
+    deployment: dokploy_api.JsonObject,
+    *,
+    aliases: tuple[str, ...],
+    field_name: str,
+) -> str:
+    values = {
+        parsed_timestamps[alias]
+        for alias in aliases
+        if alias in deployment and alias in parsed_timestamps
+    }
+    if len(values) != 1:
+        raise ValueError(f"Legacy deployment correlation requires exact {field_name} evidence.")
+    return values.pop()
+
+
+def _parse_legacy_provider_timestamp(value: str, *, field_name: str) -> tuple[datetime, str]:
+    utc_timestamp = parse_launchplane_mutation_timestamp(value, field_name=field_name)
+    return (
+        utc_timestamp,
+        utc_timestamp.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+    )
+
+
+def _required_legacy_deployment_string(
+    deployment: dokploy_api.JsonObject,
+    field_name: str,
+) -> str:
+    value = deployment.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Legacy deployment correlation requires {field_name}.")
+    return value.strip()
+
+
+def _dokploy_target_payload_id(*, target_payload: dokploy_api.JsonObject, target_type: str) -> str:
+    field_name = {"application": "applicationId", "compose": "composeId"}.get(target_type)
+    if field_name is None:
+        raise ValueError("Legacy deployment correlation target type is unsupported.")
+    value = target_payload.get(field_name)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _dokploy_deployment_target_id(*, deployment: dokploy_api.JsonObject, target_type: str) -> str:
+    field_name = {"application": "applicationId", "compose": "composeId"}.get(target_type)
+    if field_name is None:
+        raise ValueError("Legacy deployment correlation target type is unsupported.")
+    value = deployment.get(field_name)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _dokploy_target_artifact_reference(
+    *, target_payload: dokploy_api.JsonObject, target_type: str
+) -> str:
+    if target_type == "application":
+        value = target_payload.get("dockerImage")
+        return value.strip() if isinstance(value, str) else ""
+    if target_type == "compose":
+        raw_env = target_payload.get("env")
+        if not isinstance(raw_env, str):
+            return ""
+        references: list[str] = []
+        for raw_line in raw_env.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            key, separator, value = line.partition("=")
+            if separator and key.strip() == "DOCKER_IMAGE_REFERENCE":
+                references.append(value.strip())
+        return references[0] if len(references) == 1 else ""
+    raise ValueError("Legacy deployment correlation target type is unsupported.")
+
+
+def _legacy_correlation_sha256(value: str) -> str:
+    return hashlib.sha256(value.strip().encode()).hexdigest()
 
 
 def _resolve_dokploy_deploy_mode(*, configured_ship_mode: str, target_type: str) -> str:
@@ -571,13 +872,15 @@ def _dokploy_target_definition_for_lane(
 def _dokploy_target_type_from_provider_target(
     *, provider_target: ProviderTargetRecord
 ) -> DeployTargetCompatibilityType:
-    if provider_target.provider_target_type not in {"application", "compose"}:
-        raise click.ClickException(
-            "Provider-target type mismatch for "
-            f"{provider_target.context}/{provider_target.instance}: "
-            "Dokploy execution only supports provider-target type 'application' or 'compose'."
-        )
-    return cast(DeployTargetCompatibilityType, provider_target.provider_target_type)
+    if provider_target.provider_target_type == "application":
+        return "application"
+    if provider_target.provider_target_type == "compose":
+        return "compose"
+    raise click.ClickException(
+        "Provider-target type mismatch for "
+        f"{provider_target.context}/{provider_target.instance}: "
+        "Dokploy execution only supports provider-target type 'application' or 'compose'."
+    )
 
 
 def _validate_dokploy_provider_target(

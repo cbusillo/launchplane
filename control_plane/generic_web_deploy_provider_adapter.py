@@ -33,7 +33,9 @@ from control_plane.workflows.generic_web_deploy import (
     record_observed_generic_web_deploy,
 )
 from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebDeployLegacyCorrelationProvider,
     GenericWebDeployProvider,
+    GenericWebLegacyDeploymentCorrelation,
     GenericWebProviderDeploymentObservation,
     GenericWebResolvedDeployTarget,
     build_generic_web_provider_reconciliation_key,
@@ -71,6 +73,7 @@ class _GenericWebDeployProviderInspection:
     post_deploy_unobserved: bool = False
     provider_evidence: GenericWebDeployProviderEvidenceClassification = "not_inspected"
     provider_read_error_class: GenericWebDeployProviderReadErrorClass = ""
+    legacy_correlation_digest_evidence: dict[str, object] | None = None
 
 
 class GenericWebDeployProviderMutationAdapter:
@@ -183,6 +186,7 @@ class GenericWebDeployProviderMutationAdapter:
         provider_effect_phase: str,
         reconciliation_key: str,
         expected_provider_target_key: str = "",
+        legacy_provider_effect_started_at: str = "",
     ) -> _GenericWebDeployProviderInspection:
         evidence = self.inspect_evidence(
             provider_operation_key=provider_operation_key,
@@ -196,22 +200,41 @@ class GenericWebDeployProviderMutationAdapter:
         resolved_target = evidence.resolved_deploy_target
         if observation.outcome != "present":
             if observation.outcome == "absent" and provider_effect_phase == "deploy_trigger":
-                return _GenericWebDeployProviderInspection(
-                    observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                (
+                    legacy_correlation,
+                    legacy_provider_evidence,
+                    legacy_read_error_class,
+                ) = self._inspect_legacy_artifact_deploy(
+                    resolved_target=resolved_target,
+                    provider_effect_started_at=legacy_provider_effect_started_at,
+                )
+                if legacy_correlation is None:
+                    return _GenericWebDeployProviderInspection(
+                        observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                        resolved_deploy_target=resolved_target,
+                        provider_evidence=legacy_provider_evidence,
+                        provider_read_error_class=legacy_read_error_class,
+                    )
+                observation = legacy_correlation.observation
+                evidence = _GenericWebDeployProviderInspection(
+                    observation=observation,
                     resolved_deploy_target=resolved_target,
+                    provider_evidence="deployment_correlated_legacy",
+                    legacy_correlation_digest_evidence=(
+                        legacy_correlation.digest_evidence.model_dump(mode="json")
+                    ),
+                )
+            else:
+                return _GenericWebDeployProviderInspection(
+                    observation=observation,
+                    resolved_deploy_target=resolved_target,
+                    retry_safe=(
+                        observation.outcome == "absent"
+                        and provider_effect_phase in {"", "target_update"}
+                    ),
                     provider_evidence=evidence.provider_evidence,
                     provider_read_error_class=evidence.provider_read_error_class,
                 )
-            return _GenericWebDeployProviderInspection(
-                observation=observation,
-                resolved_deploy_target=resolved_target,
-                retry_safe=(
-                    observation.outcome == "absent"
-                    and provider_effect_phase in {"", "target_update"}
-                ),
-                provider_evidence=evidence.provider_evidence,
-                provider_read_error_class=evidence.provider_read_error_class,
-            )
         if resolved_target is None:
             return _GenericWebDeployProviderInspection(
                 observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
@@ -247,7 +270,41 @@ class GenericWebDeployProviderMutationAdapter:
             post_deploy_unobserved=post_deploy_unobserved,
             provider_evidence=evidence.provider_evidence,
             provider_read_error_class=evidence.provider_read_error_class,
+            legacy_correlation_digest_evidence=evidence.legacy_correlation_digest_evidence,
         )
+
+    def _inspect_legacy_artifact_deploy(
+        self,
+        *,
+        resolved_target: GenericWebResolvedDeployTarget | None,
+        provider_effect_started_at: str,
+    ) -> tuple[
+        GenericWebLegacyDeploymentCorrelation | None,
+        GenericWebDeployProviderEvidenceClassification,
+        GenericWebDeployProviderReadErrorClass,
+    ]:
+        normalized_effect_started_at = provider_effect_started_at.strip()
+        if resolved_target is None or not normalized_effect_started_at:
+            return None, "deployment_absent_after_effect", ""
+        if not isinstance(
+            self._deploy_provider,
+            GenericWebDeployLegacyCorrelationProvider,
+        ):
+            return None, "deployment_absent_after_effect", ""
+        try:
+            return (
+                self._deploy_provider.observe_legacy_artifact_deploy(
+                    control_plane_root=self._control_plane_root,
+                    resolved_deploy_target=resolved_target,
+                    provider_effect_started_at=normalized_effect_started_at,
+                ),
+                "deployment_correlated_legacy",
+                "",
+            )
+        except ValueError:
+            return None, "provider_status_unknown", ""
+        except (FileNotFoundError, click.ClickException):
+            return None, "provider_read_failed", "provider_request_failed"
 
     def inspect_evidence(
         self,

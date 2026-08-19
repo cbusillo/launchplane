@@ -436,6 +436,9 @@ snapshot. It reports one bounded classification:
 
 - `deployment_present` when the exact titled provider deployment has complete
   terminal evidence;
+- `deployment_correlated_legacy` only when the exact title is absent and a
+  legacy generic-web reservation can be correlated from bounded read-only
+  provider evidence;
 - `deployment_absent_before_effect` when no exact deployment is visible before
   the provider effect started;
 - `deployment_absent_after_effect` when no exact deployment is visible after
@@ -446,14 +449,42 @@ snapshot. It reports one bounded classification:
   error category; or
 - `not_inspected` for completed reservations and active leases.
 
-This diagnostic never returns or changes `retry_safe`, `proposed_action`, or the
-recovery digest. In particular, `deployment_absent_after_effect` is not proof
-that the original provider effect never occurred and cannot make recovery
-retryable automatically. The response omits raw scope, idempotency key,
-reconciliation key, provider target or operation identity, deployment id,
-provider timestamps, URL, payload, logs, credentials, and exception messages.
-It performs no reservation, deployment, inventory, provider-operation, outbox,
-or provider mutation writes.
+The legacy fallback is available only for an actionable reservation under the
+existing lease rules, an exact stored target identity, `deploy_trigger` with an
+authoritative `provider_effect_started_at`, and a legacy reconciliation snapshot
+that predates the stored product field. Exact provider-operation title
+observation always runs first. Dokploy correlation then reads only retained
+deployment history and the current exact target payload. It parses every
+retained deployment timestamp and requires all of the following:
+
+- at least one older deployment before the correlation window;
+- exactly one deployment created in the inclusive window from five seconds
+  before through 65 seconds after the provider-effect checkpoint;
+- that candidate is the newest retained deployment overall and does not use a
+  Launchplane operation title;
+- terminal successful status plus deployment id, start time, and finish time;
+- an exact current artifact match: `DOCKER_IMAGE_REFERENCE` for compose targets
+  or the application image field for application targets, using the same
+  normalized provider image reference as deploy execution.
+
+Zero, multiple, stale, malformed, incomplete, conflicting, or provider-error
+evidence remains `unknown` / `hold_unknown` with `retry_safe=false`. A successful
+legacy correlation is adoption-only and never enables provider retry. Where the
+product driver has a post-deploy phase, adoption records that post-deploy work
+as unobserved rather than claiming it completed.
+
+The bounded provider-evidence route reports failed correlation invariants as
+`provider_status_unknown`; provider request failures remain `provider_read_failed`
+with only the existing bounded read-error class.
+
+The diagnostic never returns `retry_safe`, `proposed_action`, or raw evidence.
+The response omits raw scope, idempotency key, reconciliation key, provider
+target or operation identity, deployment title or id, provider timestamps,
+target environment, URL, payload, logs, credentials, and exception messages. It
+performs no reservation, deployment, inventory, provider-operation, outbox, or
+provider mutation writes. In particular, ordinary
+`deployment_absent_after_effect` remains non-retryable and is not proof that the
+original provider effect never occurred.
 
 Authorization checks the dedicated
 `generic_web_deploy_recovery_provider_evidence.read` action first and accepts
@@ -470,7 +501,11 @@ inspection and requires an exact digest match before it writes anything. The
 digest intentionally excludes `observed_at`, so routine database observation
 time changes do not stale a reviewed recovery; all reservation identity,
 provider classification, action, request, and bounded provider observation
-inputs remain part of the digest.
+inputs remain part of the digest. Non-legacy digest inputs are unchanged. Only a
+successful legacy correlation adds normalized timestamps and hashes of the
+deployment identity, title, and exact artifact reference. Apply reinspects the
+provider, so any change to that derived evidence stales the reviewed digest
+before adoption.
 
 Apply never creates a new reservation, releases a reservation, or supersedes a
 provider target. If the reviewed reservation is an expired `running` mutation,

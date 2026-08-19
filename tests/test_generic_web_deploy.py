@@ -11,7 +11,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
+from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -31,6 +31,7 @@ from control_plane.contracts.secret_record import (
 )
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
+from control_plane.dokploy import api as dokploy_api
 from control_plane import secrets as control_plane_secrets
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_deploy_provider_adapter import (
@@ -48,11 +49,14 @@ from control_plane.workflows.generic_web_deploy import (
 )
 from control_plane.workflows.generic_web_deploy_provider import DokployGenericWebDeployProvider
 from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebLegacyDeploymentCorrelation,
+    GenericWebLegacyDeploymentCorrelationEvidence,
     GenericWebProviderDeploymentObservation,
 )
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebResolvedDeployTarget,
     build_generic_web_provider_reconciliation_key,
+    correlate_legacy_dokploy_deployment,
     resolve_generic_web_provider_reconciliation_target,
 )
 from control_plane.workflows.ship import build_deployment_record
@@ -239,7 +243,8 @@ class _DokployGenericWebDeployStore(_GenericWebDeployStore):
         )
         return bindings[:limit] if limit is not None else bindings
 
-    def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]:
+    @staticmethod
+    def list_secret_audit_events(*, secret_id: str) -> tuple[SecretAuditEvent, ...]:
         del secret_id
         return ()
 
@@ -316,7 +321,11 @@ def _runtime_secret_record(
 def _runtime_secret_version(
     *, secret_id: str, version_id: str, plaintext_value: str
 ) -> SecretVersion:
-    ciphertext, key_id = control_plane_secrets._encrypt_secret_value(plaintext_value)
+    encrypt_secret_value = cast(
+        Callable[[str], tuple[str, str]],
+        getattr(control_plane_secrets, "_encrypt_secret_value"),
+    )
+    ciphertext, key_id = encrypt_secret_value(plaintext_value)
     return SecretVersion(
         version_id=version_id,
         secret_id=secret_id,
@@ -472,9 +481,37 @@ class _FakeGenericWebDeployProvider:
         return self.observation
 
 
+class _LegacyFakeGenericWebDeployProvider(_FakeGenericWebDeployProvider):
+    def __init__(self) -> None:
+        super().__init__(observation=GenericWebProviderDeploymentObservation(outcome="absent"))
+        self.legacy_observation_calls = 0
+
+    def observe_legacy_artifact_deploy(
+        self, **_kwargs: object
+    ) -> GenericWebLegacyDeploymentCorrelation:
+        self.legacy_observation_calls += 1
+        return GenericWebLegacyDeploymentCorrelation(
+            observation=GenericWebProviderDeploymentObservation(
+                outcome="present",
+                deployment_status="done",
+                deployment_id="deployment-legacy",
+                started_at="2026-08-15T12:00:02.000000Z",
+                finished_at="2026-08-15T12:00:20.000000Z",
+            ),
+            digest_evidence=GenericWebLegacyDeploymentCorrelationEvidence(
+                deployment_id_sha256="1" * 64,
+                deployment_title_sha256="2" * 64,
+                deployment_created_at="2026-08-15T12:00:01.000000Z",
+                deployment_started_at="2026-08-15T12:00:02.000000Z",
+                deployment_finished_at="2026-08-15T12:00:20.000000Z",
+                artifact_reference_sha256="3" * 64,
+            ),
+        )
+
+
 class GenericWebDeployTests(unittest.TestCase):
+    @staticmethod
     def _provider_mutation_adapter(
-        self,
         *,
         profile: LaunchplaneProductProfileRecord,
         store: _GenericWebDeployStore,
@@ -1488,6 +1525,33 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(observation.outcome, "unknown")
         self.assertEqual(store.deployments, [])
 
+    def test_provider_adapter_legacy_correlation_is_adoption_only_and_marks_post_deploy(
+        self,
+    ) -> None:
+        profile = _profile(driver_id="odoo")
+        store = _GenericWebDeployStore(profile)
+        provider = _LegacyFakeGenericWebDeployProvider()
+        adapter = self._provider_mutation_adapter(
+            profile=profile,
+            store=store,
+            provider=provider,
+        )
+
+        inspection = adapter.inspect(
+            provider_operation_key="provider-operation:legacy-correlation",
+            provider_effect_phase="deploy_trigger",
+            reconciliation_key=adapter.reconciliation_key(),
+            legacy_provider_effect_started_at="2026-08-15T12:00:00Z",
+        )
+
+        self.assertEqual(inspection.observation.outcome, "present")
+        self.assertEqual(inspection.provider_evidence, "deployment_correlated_legacy")
+        self.assertFalse(inspection.retry_safe)
+        self.assertTrue(inspection.post_deploy_unobserved)
+        self.assertIsNotNone(inspection.legacy_correlation_digest_evidence)
+        self.assertEqual(len(provider.observed_target_ids), 1)
+        self.assertEqual(provider.legacy_observation_calls, 1)
+
     def test_present_provider_observation_requires_exact_terminal_evidence(self) -> None:
         with self.assertRaisesRegex(ValueError, "deployment_id, started_at, finished_at"):
             GenericWebProviderDeploymentObservation(
@@ -1647,6 +1711,332 @@ class GenericWebDeployTests(unittest.TestCase):
             )
 
         self.assertEqual(observation.outcome, "absent")
+
+    def test_legacy_dokploy_correlation_accepts_exact_application_and_compose_evidence(
+        self,
+    ) -> None:
+        success_cases: tuple[tuple[str, dokploy_api.JsonObject, str, str], ...] = (
+            (
+                "application",
+                {
+                    "applicationId": "target-123",
+                    "dockerImage": "ghcr.io/example/app:sha-abc123",
+                },
+                "ghcr.io/example/app:sha-abc123",
+                "2026-08-15T11:59:55Z",
+            ),
+            (
+                "compose",
+                {
+                    "composeId": "target-123",
+                    "env": "OTHER=value\nDOCKER_IMAGE_REFERENCE=ghcr.io/example/app@sha256:abc123\n",
+                },
+                "ghcr.io/example/app@sha256:abc123",
+                "2026-08-15T12:01:05Z",
+            ),
+        )
+        for target_type, target_payload, expected_reference, candidate_created_at in success_cases:
+            with self.subTest(target_type=target_type):
+                target_field = "applicationId" if target_type == "application" else "composeId"
+                correlation = correlate_legacy_dokploy_deployment(
+                    deployments=[
+                        {
+                            "deploymentId": "deployment-old",
+                            target_field: "target-123",
+                            "title": "older deployment",
+                            "status": "done",
+                            "createdAt": "2026-08-15T11:59:54Z",
+                            "startedAt": "2026-08-15T11:59:54Z",
+                            "finishedAt": "2026-08-15T11:59:54.500Z",
+                        },
+                        {
+                            "deploymentId": "deployment-candidate",
+                            target_field: "target-123",
+                            "title": "abc123",
+                            "status": "done",
+                            "createdAt": candidate_created_at,
+                            "startedAt": candidate_created_at,
+                            "finishedAt": "2026-08-15T12:01:06Z",
+                        },
+                    ],
+                    target_payload=target_payload,
+                    target_type=target_type,
+                    target_id="target-123",
+                    provider_effect_started_at="2026-08-15T12:00:00Z",
+                    expected_artifact_reference=expected_reference,
+                )
+
+            self.assertEqual(correlation.observation.outcome, "present")
+            self.assertEqual(correlation.observation.deployment_status, "done")
+            self.assertEqual(
+                correlation.digest_evidence.deployment_created_at,
+                candidate_created_at.replace("Z", ".000000Z")
+                if "." not in candidate_created_at
+                else candidate_created_at,
+            )
+            self.assertNotIn(
+                "deployment-candidate",
+                correlation.digest_evidence.model_dump_json(),
+            )
+            self.assertNotIn("abc123", correlation.digest_evidence.model_dump_json())
+
+    def test_legacy_dokploy_correlation_rejects_every_ambiguous_invariant(self) -> None:
+        candidate: dokploy_api.JsonObject = {
+            "deploymentId": "deployment-candidate",
+            "applicationId": "target-123",
+            "title": "abc123",
+            "status": "done",
+            "createdAt": "2026-08-15T12:00:01Z",
+            "startedAt": "2026-08-15T12:00:02Z",
+            "finishedAt": "2026-08-15T12:00:20Z",
+        }
+        older: dokploy_api.JsonObject = {
+            "deploymentId": "deployment-old",
+            "applicationId": "target-123",
+            "title": "older",
+            "status": "done",
+            "createdAt": "2026-08-15T11:59:54Z",
+            "startedAt": "2026-08-15T11:59:54Z",
+            "finishedAt": "2026-08-15T11:59:54.500Z",
+        }
+        target_payload: dokploy_api.JsonObject = {
+            "applicationId": "target-123",
+            "dockerImage": "ghcr.io/example/app:sha-abc123",
+        }
+
+        cases: list[
+            tuple[
+                str,
+                list[dokploy_api.JsonObject],
+                dokploy_api.JsonObject,
+                str,
+                str,
+            ]
+        ] = [
+            (
+                "no older history",
+                [dict(candidate)],
+                dict(target_payload),
+                "application",
+                "target-123",
+            ),
+            (
+                "no window candidate",
+                [dict(older), {**candidate, "createdAt": "2026-08-15T12:01:06Z"}],
+                dict(target_payload),
+                "application",
+                "target-123",
+            ),
+            (
+                "multiple window candidates",
+                [dict(older), dict(candidate), {**candidate, "deploymentId": "deployment-second"}],
+                dict(target_payload),
+                "application",
+                "target-123",
+            ),
+            (
+                "candidate not newest",
+                [
+                    dict(older),
+                    dict(candidate),
+                    {
+                        **candidate,
+                        "deploymentId": "deployment-newer",
+                        "createdAt": "2026-08-15T12:01:06Z",
+                    },
+                ],
+                dict(target_payload),
+                "application",
+                "target-123",
+            ),
+            (
+                "launchplane title",
+                [dict(older), {**candidate, "title": "Launchplane operation abcdef"}],
+                dict(target_payload),
+                "application",
+                "target-123",
+            ),
+            (
+                "launchplane post-deploy title",
+                [dict(older), {**candidate, "title": "Launchplane post-deploy abcdef"}],
+                dict(target_payload),
+                "application",
+                "target-123",
+            ),
+            (
+                "non-success status",
+                [dict(older), {**candidate, "status": "failed"}],
+                dict(target_payload),
+                "application",
+                "target-123",
+            ),
+            (
+                "missing deployment id",
+                [
+                    dict(older),
+                    {key: value for key, value in candidate.items() if key != "deploymentId"},
+                ],
+                dict(target_payload),
+                "application",
+                "target-123",
+            ),
+            (
+                "missing started at",
+                [
+                    dict(older),
+                    {key: value for key, value in candidate.items() if key != "startedAt"},
+                ],
+                dict(target_payload),
+                "application",
+                "target-123",
+            ),
+            (
+                "missing finished at",
+                [
+                    dict(older),
+                    {key: value for key, value in candidate.items() if key != "finishedAt"},
+                ],
+                dict(target_payload),
+                "application",
+                "target-123",
+            ),
+            (
+                "invalid retained timestamp",
+                [{**older, "updatedAt": "not-a-time"}, dict(candidate)],
+                dict(target_payload),
+                "application",
+                "target-123",
+            ),
+            (
+                "target identity mismatch",
+                [dict(older), {**candidate, "applicationId": "target-other"}],
+                dict(target_payload),
+                "application",
+                "target-123",
+            ),
+            (
+                "artifact mismatch",
+                [dict(older), dict(candidate)],
+                {**target_payload, "dockerImage": "ghcr.io/example/app:sha-other"},
+                "application",
+                "target-123",
+            ),
+            (
+                "ambiguous compose artifact",
+                [
+                    {**older, "composeId": "target-123"},
+                    {**candidate, "composeId": "target-123"},
+                ],
+                {
+                    "composeId": "target-123",
+                    "env": (
+                        "DOCKER_IMAGE_REFERENCE=ghcr.io/example/app:sha-abc123\n"
+                        "DOCKER_IMAGE_REFERENCE=ghcr.io/example/app:sha-other\n"
+                    ),
+                },
+                "compose",
+                "target-123",
+            ),
+        ]
+        for name, deployments, payload, target_type, target_id in cases:
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                correlate_legacy_dokploy_deployment(
+                    deployments=deployments,
+                    target_payload=payload,
+                    target_type=target_type,
+                    target_id=target_id,
+                    provider_effect_started_at="2026-08-15T12:00:00Z",
+                    expected_artifact_reference="ghcr.io/example/app:sha-abc123",
+                )
+
+    def test_dokploy_legacy_observation_uses_only_history_and_current_target_reads(self) -> None:
+        provider = DokployGenericWebDeployProvider()
+        resolved = GenericWebResolvedDeployTarget(
+            ship_request=ShipRequest(
+                artifact_id=f"ghcr.io/example/app@sha256:{'a' * 64}",
+                deploy_reference="ghcr.io/example/app:sha-abc123",
+                context="example-testing",
+                instance="testing",
+                source_git_ref="abc123",
+                target_name="example",
+                target_type="application",
+                provider_id="dokploy",
+                target_category="application",
+                provider_target_type="application",
+                deploy_mode="dokploy-application-api",
+                provider_deploy_mode="dokploy-application-api",
+                destination_health=HealthcheckEvidence(status="skipped"),
+            ),
+            resolved_target=ResolvedTargetEvidence(
+                target_type="application",
+                target_id="target-123",
+                target_name="example",
+            ),
+            deploy_timeout_seconds=45,
+        )
+        with (
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider."
+                "dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider."
+                "dokploy_api.list_deployments_for_target",
+                return_value=[
+                    {
+                        "deploymentId": "deployment-old",
+                        "applicationId": "target-123",
+                        "title": "older",
+                        "status": "done",
+                        "createdAt": "2026-08-15T11:59:54Z",
+                        "startedAt": "2026-08-15T11:59:54Z",
+                        "finishedAt": "2026-08-15T11:59:54.500Z",
+                    },
+                    {
+                        "deploymentId": "deployment-candidate",
+                        "applicationId": "target-123",
+                        "title": "abc123",
+                        "status": "done",
+                        "createdAt": "2026-08-15T12:00:01Z",
+                        "startedAt": "2026-08-15T12:00:02Z",
+                        "finishedAt": "2026-08-15T12:00:20Z",
+                    },
+                ],
+            ) as history_read,
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider."
+                "dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "applicationId": "target-123",
+                    "dockerImage": "ghcr.io/example/app:sha-abc123",
+                },
+            ) as target_read,
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider."
+                "dokploy_api.trigger_deployment",
+                side_effect=AssertionError("provider write"),
+            ),
+        ):
+            correlation = provider.observe_legacy_artifact_deploy(
+                control_plane_root=Path("."),
+                resolved_deploy_target=resolved,
+                provider_effect_started_at="2026-08-15T12:00:00Z",
+            )
+
+        self.assertEqual(correlation.observation.outcome, "present")
+        history_read.assert_called_once_with(
+            host="https://dokploy.example",
+            token="token",
+            target_type="application",
+            target_id="target-123",
+        )
+        target_read.assert_called_once_with(
+            host="https://dokploy.example",
+            token="token",
+            target_type="application",
+            target_id="target-123",
+        )
 
     def test_reconciliation_key_reconstructs_original_target_after_authority_change(
         self,
