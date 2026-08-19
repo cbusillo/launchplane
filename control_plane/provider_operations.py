@@ -144,6 +144,18 @@ class DurableProviderMutationAdapter(Protocol):
         """Perform the provider mutation and return its terminal evidence."""
 
 
+@runtime_checkable
+class ProviderEffectTimestampObserver(Protocol):
+    def observe_with_effect_started_at(
+        self,
+        provider_operation_key: str,
+        provider_effect_phase: str,
+        reconciliation_key: str,
+        provider_effect_started_at: str,
+    ) -> ProviderObservation:
+        """Observe a provider effect using its authoritative checkpoint time."""
+
+
 class DurableProviderOperationStore(Protocol):
     def reserve_mutation(
         self,
@@ -255,14 +267,14 @@ def build_provider_operation_key(
     )
     if not all(identity.split("\x1f")):
         raise ValueError("Provider operation keys require complete durable identity.")
-    return f"provider-operation:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
+    return f"provider-operation:{hashlib.sha256(identity.encode()).hexdigest()}"
 
 
 def provider_operation_title(provider_operation_key: str) -> str:
     normalized_key = provider_operation_key.strip()
     if not normalized_key:
         raise ValueError("Provider operation titles require an operation key.")
-    digest = hashlib.sha256(normalized_key.encode("utf-8")).hexdigest()[:24]
+    digest = hashlib.sha256(normalized_key.encode()).hexdigest()[:24]
     return f"Launchplane operation {digest}"
 
 
@@ -360,6 +372,23 @@ class _ReservationHeartbeat:
                 continue
 
 
+def _resolve_heartbeat_interval(
+    *,
+    lease_seconds: int,
+    heartbeat_interval_seconds: float | None,
+) -> float:
+    if lease_seconds < 1:
+        raise ValueError("Durable provider operation leases must be positive.")
+    resolved_interval = heartbeat_interval_seconds
+    if resolved_interval is None:
+        resolved_interval = max(0.1, min(30.0, lease_seconds / 3))
+    if resolved_interval <= 0:
+        raise ValueError("Durable provider operation heartbeat intervals must be positive.")
+    if resolved_interval >= lease_seconds:
+        raise ValueError("Durable provider operation heartbeats must run before lease expiry.")
+    return resolved_interval
+
+
 def run_durable_provider_operation(
     *,
     store: DurableProviderOperationStore,
@@ -374,15 +403,10 @@ def run_durable_provider_operation(
     heartbeat_interval_seconds: float | None = None,
     target_supersession: ProviderTargetSupersession | None = None,
 ) -> DurableProviderOperationResult:
-    if lease_seconds < 1:
-        raise ValueError("Durable provider operation leases must be positive.")
-    resolved_heartbeat_interval = heartbeat_interval_seconds
-    if resolved_heartbeat_interval is None:
-        resolved_heartbeat_interval = max(0.1, min(30.0, lease_seconds / 3))
-    if resolved_heartbeat_interval <= 0:
-        raise ValueError("Durable provider operation heartbeat intervals must be positive.")
-    if resolved_heartbeat_interval >= lease_seconds:
-        raise ValueError("Durable provider operation heartbeats must run before lease expiry.")
+    resolved_heartbeat_interval = _resolve_heartbeat_interval(
+        lease_seconds=lease_seconds,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+    )
     if target_supersession is not None and target_supersession.minimum_expired_seconds < 0:
         raise ValueError("Provider target supersession delays cannot be negative.")
     provider_target_key = adapter.target_key().strip()
@@ -506,15 +530,10 @@ def resume_acquired_provider_operation(
     normalized_response_trace_id = response_trace_id.strip()
     if not normalized_response_trace_id:
         raise ValueError("Provider operation resume requires a response trace id.")
-    if lease_seconds < 1:
-        raise ValueError("Durable provider operation leases must be positive.")
-    resolved_heartbeat_interval = heartbeat_interval_seconds
-    if resolved_heartbeat_interval is None:
-        resolved_heartbeat_interval = max(0.1, min(30.0, lease_seconds / 3))
-    if resolved_heartbeat_interval <= 0:
-        raise ValueError("Durable provider operation heartbeat intervals must be positive.")
-    if resolved_heartbeat_interval >= lease_seconds:
-        raise ValueError("Durable provider operation heartbeats must run before lease expiry.")
+    resolved_heartbeat_interval = _resolve_heartbeat_interval(
+        lease_seconds=lease_seconds,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+    )
     provider_operation_key = build_provider_operation_key(
         scope=reservation.scope,
         route_path=reservation.route_path,
@@ -645,6 +664,35 @@ def _apply_acquired(
     )
 
 
+def _adopt_reconciled_result(
+    *,
+    store: DurableProviderOperationStore,
+    reservation: LaunchplaneIdempotencyRecord,
+    response_status_code: int,
+    response_trace_id: str,
+    response_payload: dict[str, object],
+) -> tuple[DurableProviderOperationResult | None, LaunchplaneIdempotencyRecord | None]:
+    adoption = store.adopt_reconciled_mutation(
+        reservation=reservation,
+        response_status_code=response_status_code,
+        response_trace_id=response_trace_id,
+        response_payload=response_payload,
+    )
+    if adoption.status == "adopted":
+        return (
+            DurableProviderOperationResult(
+                "adopted",
+                adoption.record,
+                response_status_code,
+                response_payload,
+            ),
+            adoption.record,
+        )
+    if adoption.status == "replayed":
+        return _replayed_result(adoption.record), adoption.record
+    return None, adoption.record
+
+
 def _complete_or_adopt_outcome(
     *,
     store: DurableProviderOperationStore,
@@ -670,21 +718,15 @@ def _complete_or_adopt_outcome(
     if completion_result.status == "replayed":
         return _replayed_result(completion_result.record)
     if completion_result.status == "reconcile_required":
-        adoption = store.adopt_reconciled_mutation(
+        adoption_result, _ = _adopt_reconciled_result(
+            store=store,
             reservation=reservation,
             response_status_code=outcome.response_status_code,
             response_trace_id=response_trace_id,
             response_payload=outcome.response_payload,
         )
-        if adoption.status == "adopted":
-            return DurableProviderOperationResult(
-                "adopted",
-                adoption.record,
-                outcome.response_status_code,
-                outcome.response_payload,
-            )
-        if adoption.status == "replayed":
-            return _replayed_result(adoption.record)
+        if adoption_result is not None:
+            return adoption_result
     return DurableProviderOperationResult(
         "reconcile_required",
         completion_result.record,
@@ -723,11 +765,22 @@ def _reconcile(
     provider_effect_phase = (
         fallback_record.provider_effect_phase if fallback_record is not None else ""
     )
-    observation = adapter.observe(
-        provider_operation_key,
-        provider_effect_phase,
-        bound_reconciliation_key,
+    provider_effect_started_at = (
+        fallback_record.provider_effect_started_at if fallback_record is not None else ""
     )
+    if isinstance(adapter, ProviderEffectTimestampObserver):
+        observation = adapter.observe_with_effect_started_at(
+            provider_operation_key,
+            provider_effect_phase,
+            bound_reconciliation_key,
+            provider_effect_started_at,
+        )
+    else:
+        observation = adapter.observe(
+            provider_operation_key,
+            provider_effect_phase,
+            bound_reconciliation_key,
+        )
     provider_effect_started = bool(
         fallback_record is not None and fallback_record.provider_effect_started_at
     )
@@ -771,24 +824,18 @@ def _reconcile(
             409,
             {},
         )
-    adoption = store.adopt_reconciled_mutation(
+    adoption_result, adoption_record = _adopt_reconciled_result(
+        store=store,
         reservation=fallback_record,
         response_status_code=observation.response_status_code,
         response_trace_id=response_trace_id,
         response_payload=observation.response_payload,
     )
-    if adoption.status == "adopted":
-        return DurableProviderOperationResult(
-            "adopted",
-            adoption.record,
-            observation.response_status_code,
-            observation.response_payload,
-        )
-    if adoption.status == "replayed":
-        return _replayed_result(adoption.record)
+    if adoption_result is not None:
+        return adoption_result
     return DurableProviderOperationResult(
         "reconcile_required",
-        adoption.record or fallback_record,
+        adoption_record or fallback_record,
         409,
         {},
     )

@@ -208,6 +208,20 @@ class _GenericWebRecoveryApplyAdapter:
             reconciliation_key,
         )
 
+    def observe_with_effect_started_at(
+        self,
+        provider_operation_key: str,
+        provider_effect_phase: str,
+        reconciliation_key: str,
+        provider_effect_started_at: str,
+    ) -> ProviderObservation:
+        return self._delegate.observe_with_effect_started_at(
+            provider_operation_key,
+            provider_effect_phase,
+            reconciliation_key,
+            provider_effect_started_at,
+        )
+
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
