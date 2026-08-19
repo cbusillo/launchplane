@@ -2,6 +2,7 @@ const runtime = Reflect.get(globalThis, "process");
 const environment = runtime.env;
 const requestKeys = new Set([
   "artifact_id",
+  "expected_recovery_digest",
   "instance",
   "launchplane_url",
   "original_run_attempt",
@@ -44,6 +45,19 @@ function requestPositiveInteger(request, name) {
   return value;
 }
 
+function optionalRequestDigest(request) {
+  const value = request.expected_recovery_digest;
+  if (value === undefined) {
+    return "";
+  }
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value.trim())) {
+    throw new Error(
+      "request-json.expected_recovery_digest must be a lowercase SHA-256 digest.",
+    );
+  }
+  return value.trim();
+}
+
 function parseRequest(value) {
   let request;
   try {
@@ -76,6 +90,7 @@ function configureRequestAction() {
   const sourceGitRef = requestString(request, "source_git_ref");
   const originalRunId = requestPositiveInteger(request, "original_run_id");
   const originalRunAttempt = requestPositiveInteger(request, "original_run_attempt");
+  const expectedRecoveryDigest = optionalRequestDigest(request);
   const reason = requestString(request, "reason");
   const idempotencyKey = [
     "generic-web-stable-deploy",
@@ -101,24 +116,46 @@ function configureRequestAction() {
     },
     reason,
   };
+  if (expectedRecoveryDigest) {
+    payload.expected_recovery_digest = expectedRecoveryDigest;
+  }
 
   environment[environmentKey("launchplane-url")] = launchplaneUrl;
-  environment[environmentKey("route-path")] =
-    "/v1/admin/generic-web/deploy-recovery/dry-run";
+  environment[environmentKey("route-path")] = expectedRecoveryDigest
+    ? "/v1/admin/generic-web/deploy-recovery/apply"
+    : "/v1/admin/generic-web/deploy-recovery/dry-run";
   environment[environmentKey("payload")] = JSON.stringify(payload);
   environment[environmentKey("idempotency-key")] = idempotencyKey;
   environment[environmentKey("audience")] = input("audience");
   environment[environmentKey("timeout-ms")] = input("timeout-ms", "120000");
   environment[environmentKey("log-response-body")] = "false";
-  environment[environmentKey("output-paths")] = [
-    "recovery_digest=recovery_digest",
-    "proposed_action=proposed_action",
-    "reservation_state=reservation_state",
-    "provider_outcome=provider_outcome",
-    "provider_status=provider_status",
-    "retry_safe=retry_safe",
-    "observed_at=observed_at",
-  ].join(",");
+  if (expectedRecoveryDigest) {
+    environment[environmentKey("expected-status")] = "202";
+    environment[environmentKey("fail-result-paths")] = "";
+    environment[environmentKey("retry-attempts")] = "3";
+    environment[environmentKey("output-paths")] = [
+      "status=status",
+      "mode=mode",
+      "trace_id=trace_id",
+      "reservation_state=reservation_state",
+      "reservation_attempt=reservation_attempt",
+      "recovery_action=recovery_action",
+      "recovery_digest=recovery_digest",
+      "provider_outcome=provider_outcome",
+      "provider_status=provider_status",
+      "retry_safe=retry_safe",
+    ].join(",");
+  } else {
+    environment[environmentKey("output-paths")] = [
+      "recovery_digest=recovery_digest",
+      "proposed_action=proposed_action",
+      "reservation_state=reservation_state",
+      "provider_outcome=provider_outcome",
+      "provider_status=provider_status",
+      "retry_safe=retry_safe",
+      "observed_at=observed_at",
+    ].join(",");
+  }
 }
 
 try {
