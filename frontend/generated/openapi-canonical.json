@@ -7094,6 +7094,101 @@
         "title": "GenericWebDeployRecoveryDryRunResponse",
         "type": "object"
       },
+      "GenericWebDeployRecoveryProviderEvidenceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "const": "provider-evidence",
+            "default": "provider-evidence",
+            "title": "Mode",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "provider_effect_phase": {
+            "maxLength": 128,
+            "title": "Provider Effect Phase",
+            "type": "string"
+          },
+          "provider_evidence": {
+            "enum": [
+              "deployment_present",
+              "deployment_absent_before_effect",
+              "deployment_absent_after_effect",
+              "provider_status_unknown",
+              "provider_read_failed",
+              "not_inspected"
+            ],
+            "title": "Provider Evidence",
+            "type": "string"
+          },
+          "provider_read_error_class": {
+            "default": "",
+            "enum": [
+              "",
+              "target_resolution_failed",
+              "provider_request_failed"
+            ],
+            "title": "Provider Read Error Class",
+            "type": "string"
+          },
+          "provider_status": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Provider Status",
+            "type": "string"
+          },
+          "provider_target_key_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Provider Target Key Sha256",
+            "type": "string"
+          },
+          "reconciliation_key_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Reconciliation Key Sha256",
+            "type": "string"
+          },
+          "reservation_attempt": {
+            "minimum": 1.0,
+            "title": "Reservation Attempt",
+            "type": "integer"
+          },
+          "reservation_state": {
+            "enum": [
+              "running",
+              "completed",
+              "reconcile_required"
+            ],
+            "title": "Reservation State",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reservation_state",
+          "reservation_attempt",
+          "observed_at",
+          "reconciliation_key_sha256",
+          "provider_target_key_sha256",
+          "provider_effect_phase",
+          "provider_evidence"
+        ],
+        "title": "GenericWebDeployRecoveryProviderEvidenceResponse",
+        "type": "object"
+      },
       "GenericWebDeployRequest": {
         "additionalProperties": false,
         "properties": {
@@ -34588,6 +34683,115 @@
           }
         },
         "summary": "Inspect an existing generic web deploy reservation without writing"
+      }
+    },
+    "/v1/admin/generic-web/deploy-recovery/provider-evidence": {
+      "post": {
+        "operationId": "inspect_generic_web_deploy_recovery_provider_evidence",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWebDeployRecoveryDryRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericWebDeployRecoveryProviderEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Inspect exact provider evidence for a generic web deploy reservation"
       }
     },
     "/v1/agent/context": {

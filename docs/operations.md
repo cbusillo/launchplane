@@ -427,6 +427,42 @@ triggering run, enforces a single-file and size bound, and passes the compact
 request through the same bounded dry-run action. This mode also skips stable
 deploy and exposes no apply path.
 
+The same protected recovery job performs an advisory exact-provider evidence
+read before the authoritative dry-run. It calls
+`POST /v1/admin/generic-web/deploy-recovery/provider-evidence` with the identical
+request and original `Idempotency-Key`. The route derives provider operation and
+target identity only from the exact stored reservation and reconciliation
+snapshot. It reports one bounded classification:
+
+- `deployment_present` when the exact titled provider deployment has complete
+  terminal evidence;
+- `deployment_absent_before_effect` when no exact deployment is visible before
+  the provider effect started;
+- `deployment_absent_after_effect` when no exact deployment is visible after
+  the provider effect started;
+- `provider_status_unknown` when the exact deployment is present but pending or
+  has an unrecognized status;
+- `provider_read_failed` with only a bounded target-resolution or provider-read
+  error category; or
+- `not_inspected` for completed reservations and active leases.
+
+This diagnostic never returns or changes `retry_safe`, `proposed_action`, or the
+recovery digest. In particular, `deployment_absent_after_effect` is not proof
+that the original provider effect never occurred and cannot make recovery
+retryable automatically. The response omits raw scope, idempotency key,
+reconciliation key, provider target or operation identity, deployment id,
+provider timestamps, URL, payload, logs, credentials, and exception messages.
+It performs no reservation, deployment, inventory, provider-operation, outbox,
+or provider mutation writes.
+
+Authorization checks the dedicated
+`generic_web_deploy_recovery_provider_evidence.read` action first and accepts
+`generic_web_deploy.execute` as the more-privileged compatibility path. The
+compatibility path avoids a new production grant for the existing protected
+recovery workflow while authorization redesign issue `#2058` remains open. It
+must be removed under `#2167` once DB-native policy administration can grant the
+dedicated read action to the exact workflow identity.
+
 Stage 2 apply is explicit and digest-gated. Operators call
 `POST /v1/admin/generic-web/deploy-recovery/apply` with the same request body as
 the dry-run plus `expected_recovery_digest`. The service recomputes a fresh

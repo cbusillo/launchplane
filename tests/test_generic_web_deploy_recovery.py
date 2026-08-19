@@ -14,7 +14,11 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.http_app import idempotency_request_fingerprint
-from control_plane.service_auth import BearerIdentityConfig
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
+)
 from control_plane.storage.postgres import (
     ExistingMutationReservationLookupResult,
     PostgresRecordStore,
@@ -26,13 +30,14 @@ from control_plane.workflows.generic_web_deploy_provider import (
     build_generic_web_provider_reconciliation_key,
     build_generic_web_provider_target_key,
 )
-from tests.support.auth import _StubVerifier, _identity, _local_operator_policy
-from tests.support.profiles import _product_profile_payload
-from tests.support.stores import _sqlite_database_url
+from tests.support.auth import StubVerifier, identity, local_operator_policy
+from tests.support.profiles import product_profile_payload as _product_profile_payload
+from tests.support.stores import sqlite_database_url as _sqlite_database_url
 from tests.test_service import _invoke_app, create_launchplane_fastapi_test_app
 
 
 _RECOVERY_ROUTE = "/v1/admin/generic-web/deploy-recovery/dry-run"
+_PROVIDER_EVIDENCE_ROUTE = "/v1/admin/generic-web/deploy-recovery/provider-evidence"
 _RECOVERY_APPLY_ROUTE = "/v1/admin/generic-web/deploy-recovery/apply"
 _OPERATOR_TOKEN = "local-operator-token"
 
@@ -43,12 +48,14 @@ def _create_recovery_app(
     store: PostgresRecordStore,
     actions: tuple[str, ...] = ("generic_web_deploy.execute",),
     contexts: tuple[str, ...] = ("sellyouroutboard-testing",),
+    authz_policy: LaunchplaneAuthzPolicy | None = None,
 ) -> Any:
     return create_launchplane_fastapi_test_app(
         local_record_store_for_tests=store,
         state_dir=root / "state",
-        verifier=_StubVerifier(_identity()),
-        authz_policy=_local_operator_policy(
+        verifier=StubVerifier(identity()),
+        authz_policy=authz_policy
+        or local_operator_policy(
             actions=actions,
             products=("sellyouroutboard",),
             contexts=contexts,
@@ -105,6 +112,29 @@ def _invoke_recovery_apply(
             "original_deploy": original_deploy,
             "reason": reason,
             "expected_recovery_digest": expected_recovery_digest,
+        },
+        headers={"Idempotency-Key": idempotency_key},
+    )
+
+
+def _invoke_provider_evidence(
+    app: Any,
+    *,
+    original_deploy: dict[str, object],
+    idempotency_key: str,
+    reason: str,
+) -> tuple[int, dict[str, Any]]:
+    return _invoke_app(
+        app,
+        method="POST",
+        path=_PROVIDER_EVIDENCE_ROUTE,
+        authorization=f"Bearer {_OPERATOR_TOKEN}",
+        payload={
+            "schema_version": 1,
+            "product": "sellyouroutboard",
+            "instance": "testing",
+            "original_deploy": original_deploy,
+            "reason": reason,
         },
         headers={"Idempotency-Key": idempotency_key},
     )
@@ -195,7 +225,7 @@ def _legacy_generic_web_reconciliation_key(
         "deploy_timeout_seconds": target.deploy_timeout_seconds,
     }
     encoded = base64.urlsafe_b64encode(
-        json.dumps(legacy_snapshot, separators=(",", ":")).encode("utf-8")
+        json.dumps(legacy_snapshot, separators=(",", ":")).encode()
     ).decode("ascii")
     return f"generic-web-provider-target:{encoded.rstrip('=')}"
 
@@ -250,7 +280,6 @@ def _write_generic_web_recovery_reservation(
         idempotency_key=reservation.idempotency_key,
         request_fingerprint=reservation.request_fingerprint,
         lease_owner=reservation.lease_owner,
-        lease_seconds=300,
         reconciliation_key=reservation.reconciliation_key,
         provider_target_key=reservation.provider_target_key,
     ).record
@@ -258,7 +287,6 @@ def _write_generic_web_recovery_reservation(
         checkpointed = store.checkpoint_mutation_provider_effect(
             reservation=reserved,
             effect_phase=reservation.provider_effect_phase,
-            lease_seconds=300,
         )
         assert checkpointed.record is not None
         reserved = checkpointed.record
@@ -486,7 +514,6 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                             else stored_fingerprint
                         ),
                         lease_owner=f"worker-{index}",
-                        lease_seconds=300,
                     )
                 app = _create_recovery_app(root=root, store=store)
                 status_code, payload = _invoke_app(
@@ -656,18 +683,18 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                         return_value=provider,
                     ),
                     patch.object(store, "reserve_mutation", side_effect=AssertionError("reserve")),
-                    patch.object(
-                        store,
+                    patch(
+                        "control_plane.storage.postgres.PostgresRecordStore."
                         "write_deployment_record",
                         side_effect=AssertionError("deployment write"),
                     ),
-                    patch.object(
-                        store,
+                    patch(
+                        "control_plane.storage.postgres.PostgresRecordStore."
                         "write_environment_inventory",
                         side_effect=AssertionError("inventory write"),
                     ),
-                    patch.object(
-                        store,
+                    patch(
+                        "control_plane.storage.postgres.PostgresRecordStore."
                         "write_idempotency_record",
                         side_effect=AssertionError("idempotency write"),
                     ),
@@ -756,6 +783,290 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         self.assertEqual(payload["provider_outcome"], "unknown")
         self.assertEqual(payload["proposed_action"], "hold_unknown")
         self.assertEqual(provider.observation_calls, 1)
+
+    def test_provider_evidence_distinguishes_bounded_observations_without_writes(
+        self,
+    ) -> None:
+        present = GenericWebProviderDeploymentObservation(
+            outcome="present",
+            deployment_status="success",
+            deployment_id="deployment-secret",
+            started_at="2026-08-15T12:00:00Z",
+            finished_at="2026-08-15T12:05:00Z",
+            error_message="provider-secret-message",
+        )
+        cases = (
+            (present, "target_update", "deployment_present", "success"),
+            (
+                GenericWebProviderDeploymentObservation(outcome="absent"),
+                "target_update",
+                "deployment_absent_before_effect",
+                "",
+            ),
+            (
+                GenericWebProviderDeploymentObservation(outcome="absent"),
+                "deploy_trigger",
+                "deployment_absent_after_effect",
+                "",
+            ),
+            (
+                GenericWebProviderDeploymentObservation(
+                    outcome="unknown", deployment_status="running"
+                ),
+                "deploy_trigger",
+                "provider_status_unknown",
+                "running",
+            ),
+        )
+        expected_keys = {
+            "schema_version",
+            "status",
+            "mode",
+            "reservation_state",
+            "reservation_attempt",
+            "observed_at",
+            "reconciliation_key_sha256",
+            "provider_target_key_sha256",
+            "provider_effect_phase",
+            "provider_evidence",
+            "provider_status",
+            "provider_read_error_class",
+        }
+        for observation, effect_phase, expected_evidence, expected_status in cases:
+            with (
+                self.subTest(expected_evidence=expected_evidence),
+                TemporaryDirectory() as temporary_directory_name,
+            ):
+                root = Path(temporary_directory_name)
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+                )
+                store.ensure_schema()
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+                )
+                original_deploy = _generic_web_recovery_original_deploy()
+                reservation = _write_generic_web_recovery_reservation(
+                    store,
+                    _generic_web_recovery_reservation(
+                        original_deploy=original_deploy,
+                        idempotency_key=f"provider-evidence-{expected_evidence}",
+                        provider_effect_phase=effect_phase,
+                    ),
+                )
+                provider = _RecoveryObservationProvider(observation)
+                app = _create_recovery_app(root=root, store=store)
+                with (
+                    patch(
+                        "control_plane.generic_web_deploy_provider_adapter."
+                        "default_generic_web_deploy_provider",
+                        return_value=provider,
+                    ),
+                    patch.object(store, "reserve_mutation", side_effect=AssertionError("reserve")),
+                    patch(
+                        "control_plane.storage.postgres.PostgresRecordStore."
+                        "write_deployment_record",
+                        side_effect=AssertionError("deployment write"),
+                    ),
+                    patch(
+                        "control_plane.storage.postgres.PostgresRecordStore."
+                        "write_environment_inventory",
+                        side_effect=AssertionError("inventory write"),
+                    ),
+                    patch(
+                        "control_plane.storage.postgres.PostgresRecordStore."
+                        "write_idempotency_record",
+                        side_effect=AssertionError("idempotency write"),
+                    ),
+                ):
+                    status_code, payload = _invoke_provider_evidence(
+                        app,
+                        original_deploy=original_deploy,
+                        idempotency_key=reservation.idempotency_key,
+                        reason="Inspect exact provider evidence without mutation.",
+                    )
+                store.close()
+
+            self.assertEqual(status_code, 200)
+            self.assertEqual(set(payload), expected_keys)
+            self.assertEqual(payload["provider_evidence"], expected_evidence)
+            self.assertEqual(payload["provider_status"], expected_status)
+            self.assertEqual(payload["provider_read_error_class"], "")
+            self.assertNotIn("retry_safe", payload)
+            self.assertNotIn("recovery_digest", payload)
+            serialized = json.dumps(payload, sort_keys=True)
+            self.assertNotIn("deployment-secret", serialized)
+            self.assertNotIn("provider-secret-message", serialized)
+            self.assertNotIn(reservation.idempotency_key, serialized)
+            self.assertNotIn(reservation.scope, serialized)
+            self.assertEqual(provider.observation_calls, 1)
+
+    def test_provider_evidence_reports_bounded_provider_read_failure(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            original_deploy = _generic_web_recovery_original_deploy()
+            reservation = _write_generic_web_recovery_reservation(
+                store,
+                _generic_web_recovery_reservation(
+                    original_deploy=original_deploy,
+                    idempotency_key="provider-evidence-read-failure",
+                    provider_effect_phase="deploy_trigger",
+                ),
+            )
+            provider = _FailingRecoveryObservationProvider(
+                GenericWebProviderDeploymentObservation(outcome="unknown")
+            )
+            app = _create_recovery_app(root=root, store=store)
+            with patch(
+                "control_plane.generic_web_deploy_provider_adapter."
+                "default_generic_web_deploy_provider",
+                return_value=provider,
+            ):
+                status_code, payload = _invoke_provider_evidence(
+                    app,
+                    original_deploy=original_deploy,
+                    idempotency_key=reservation.idempotency_key,
+                    reason="Classify provider read failure without exposing details.",
+                )
+            store.close()
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["provider_evidence"], "provider_read_failed")
+        self.assertEqual(payload["provider_read_error_class"], "provider_request_failed")
+        self.assertNotIn("provider read failed", json.dumps(payload, sort_keys=True))
+
+    def test_provider_evidence_supports_dedicated_and_execute_authorization(self) -> None:
+        for actions in (
+            ("generic_web_deploy_recovery_provider_evidence.read",),
+            ("generic_web_deploy.execute",),
+        ):
+            with (
+                self.subTest(actions=actions),
+                TemporaryDirectory() as temporary_directory_name,
+            ):
+                root = Path(temporary_directory_name)
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+                )
+                store.ensure_schema()
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+                )
+                original_deploy = _generic_web_recovery_original_deploy()
+                reservation = _write_generic_web_recovery_reservation(
+                    store,
+                    _generic_web_recovery_reservation(
+                        original_deploy=original_deploy,
+                        idempotency_key=f"provider-evidence-authz-{actions[0]}",
+                    ),
+                )
+                app = _create_recovery_app(root=root, store=store, actions=actions)
+                with patch(
+                    "control_plane.generic_web_deploy_provider_adapter."
+                    "default_generic_web_deploy_provider",
+                    return_value=_RecoveryObservationProvider(
+                        GenericWebProviderDeploymentObservation(outcome="absent")
+                    ),
+                ):
+                    status_code, _payload = _invoke_provider_evidence(
+                        app,
+                        original_deploy=original_deploy,
+                        idempotency_key=reservation.idempotency_key,
+                        reason="Verify provider evidence authorization compatibility.",
+                    )
+                store.close()
+
+            self.assertEqual(status_code, 200)
+
+    def test_provider_evidence_dedicated_authorization_supports_schema_v2(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            original_deploy = _generic_web_recovery_original_deploy()
+            reservation = _write_generic_web_recovery_reservation(
+                store,
+                _generic_web_recovery_reservation(
+                    original_deploy=original_deploy,
+                    idempotency_key="provider-evidence-authz-schema-v2",
+                ),
+            )
+            app = _create_recovery_app(
+                root=root,
+                store=store,
+                authz_policy=LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    local_operators=(
+                        LocalOperatorPolicyRule(
+                            subjects=("local-owner-agent",),
+                            token_labels=("local-owner-write",),
+                            products=("sellyouroutboard",),
+                            contexts=("sellyouroutboard-testing",),
+                            instances=("testing",),
+                            actions=("generic_web_deploy_recovery_provider_evidence.read",),
+                        ),
+                    ),
+                ),
+            )
+            with patch(
+                "control_plane.generic_web_deploy_provider_adapter."
+                "default_generic_web_deploy_provider",
+                return_value=_RecoveryObservationProvider(
+                    GenericWebProviderDeploymentObservation(outcome="absent")
+                ),
+            ):
+                status_code, _payload = _invoke_provider_evidence(
+                    app,
+                    original_deploy=original_deploy,
+                    idempotency_key=reservation.idempotency_key,
+                    reason="Verify schema-v2 dedicated provider evidence authorization.",
+                )
+            store.close()
+
+        self.assertEqual(status_code, 200)
+
+    def test_provider_evidence_denies_before_reservation_lookup(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = _create_recovery_app(
+                root=root,
+                store=store,
+                actions=("generic_web_preview.execute",),
+            )
+            with patch.object(
+                store,
+                "lookup_existing_mutation_reservation",
+                side_effect=AssertionError("lookup disclosure"),
+            ):
+                status_code, payload = _invoke_provider_evidence(
+                    app,
+                    original_deploy=_generic_web_recovery_original_deploy(),
+                    idempotency_key="provider-evidence-denied",
+                    reason="Verify denial before reservation lookup.",
+                )
+            store.close()
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_generic_web_deploy_recovery_digest_ignores_observed_at(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1126,28 +1437,28 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
             original_mark_reconcile = store.mark_mutation_reconcile_required
             original_retry_reconciled = store.retry_reconciled_mutation
 
-            def mark_reconcile_side_effect(
-                *,
-                reservation: LaunchplaneIdempotencyRecord,
-                reconciliation_key: str,
-            ) -> object:
+            def mark_reconcile_side_effect(**call_kwargs: object) -> object:
                 transitions.append("mark")
                 return original_mark_reconcile(
-                    reservation=reservation,
-                    reconciliation_key=reconciliation_key,
+                    reservation=cast(LaunchplaneIdempotencyRecord, call_kwargs["reservation"]),
+                    reconciliation_key=cast(str, call_kwargs["reconciliation_key"]),
                 )
 
-            def retry_reconciled_side_effect(
-                *,
-                reservation: LaunchplaneIdempotencyRecord,
-                lease_owner: str,
-                lease_seconds: int = 300,
-            ) -> object:
+            def retry_reconciled_side_effect(**call_kwargs: object) -> object:
                 transitions.append("retry")
+                candidate_reservation = cast(
+                    LaunchplaneIdempotencyRecord, call_kwargs["reservation"]
+                )
+                lease_owner = cast(str, call_kwargs["lease_owner"])
+                if "lease_seconds" not in call_kwargs:
+                    return original_retry_reconciled(
+                        reservation=candidate_reservation,
+                        lease_owner=lease_owner,
+                    )
                 return original_retry_reconciled(
-                    reservation=reservation,
+                    reservation=candidate_reservation,
                     lease_owner=lease_owner,
-                    lease_seconds=lease_seconds,
+                    lease_seconds=cast(int, call_kwargs["lease_seconds"]),
                 )
 
             with (

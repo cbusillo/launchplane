@@ -184,6 +184,9 @@ jobs:
       provider_status: ${{ steps.recovery.outputs.provider_status }}
       retry_safe: ${{ steps.recovery.outputs.retry_safe }}
       observed_at: ${{ steps.recovery.outputs.observed_at }}
+      provider_evidence: ${{ steps.provider_evidence.outputs.provider_evidence }}
+      provider_read_error_class: >-
+        ${{ steps.provider_evidence.outputs.provider_read_error_class }}
     runs-on: ubuntu-latest
     steps:
       - name: Download staged recovery request
@@ -279,6 +282,72 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Resolve provider evidence request
+        id: provider_evidence_request
+        continue-on-error: true
+        env:
+          RECOVERY_REQUEST: ${{ steps.request.outputs.request }}
+        run: |
+          set -euo pipefail
+
+          launchplane_url="$(jq -er '.launchplane_url | select(type == "string" and length > 0)' <<< "$RECOVERY_REQUEST")"
+          product="$(jq -er '.product | select(type == "string" and length > 0)' <<< "$RECOVERY_REQUEST")"
+          instance="$(jq -er '.instance | select(type == "string" and length > 0)' <<< "$RECOVERY_REQUEST")"
+          artifact_id="$(jq -er '.artifact_id | select(type == "string" and length > 0)' <<< "$RECOVERY_REQUEST")"
+          source_git_ref="$(jq -er '.source_git_ref | select(type == "string" and length > 0)' <<< "$RECOVERY_REQUEST")"
+          original_run_id="$(jq -er '.original_run_id | select(type == "string" and test("^[1-9][0-9]*$"))' <<< "$RECOVERY_REQUEST")"
+          original_run_attempt="$(jq -er '.original_run_attempt | select(type == "string" and test("^[1-9][0-9]*$"))' <<< "$RECOVERY_REQUEST")"
+          reason="$(jq -er '.reason | select(type == "string" and length > 0)' <<< "$RECOVERY_REQUEST")"
+          payload="$(jq -cn \
+            --arg product "$product" \
+            --arg instance "$instance" \
+            --arg artifact_id "$artifact_id" \
+            --arg source_git_ref "$source_git_ref" \
+            --arg reason "$reason" \
+            '{
+              schema_version: 1,
+              product: $product,
+              instance: $instance,
+              original_deploy: {
+                schema_version: 1,
+                product: $product,
+                deploy: {
+                  schema_version: 1,
+                  product: $product,
+                  instance: $instance,
+                  artifact_id: $artifact_id,
+                  source_git_ref: $source_git_ref
+                }
+              },
+              reason: $reason
+            }')"
+          idempotency_key="generic-web-stable-deploy:${product}:${instance}:${original_run_id}:${original_run_attempt}"
+
+          {
+            echo "launchplane_url=$launchplane_url"
+            echo "idempotency_key=$idempotency_key"
+            echo "payload<<EOF"
+            echo "$payload"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Inspect exact provider evidence
+        id: provider_evidence
+        continue-on-error: true
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dcfe6fb13cdd5f7c66428ce9ef108ebbe215fff5 # launchplane-request
+        with:
+          launchplane-url: ${{ steps.provider_evidence_request.outputs.launchplane_url }}
+          audience: ${{ inputs.launchplane_audience }}
+          route-path: /v1/admin/generic-web/deploy-recovery/provider-evidence
+          payload: ${{ steps.provider_evidence_request.outputs.payload }}
+          idempotency-key: ${{ steps.provider_evidence_request.outputs.idempotency_key }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: ""
+          output-paths: >-
+            provider_evidence=provider_evidence,
+            provider_read_error_class=provider_read_error_class
+          log-response-body: false
+
       - name: Request Launchplane recovery dry run
         id: recovery
         uses: cbusillo/launchplane/.github/actions/generic-web-deploy-recovery-dry-run@b2055d2944626234664390d6fcd96975ded38511 # main
@@ -295,6 +364,10 @@ jobs:
           PROVIDER_STATUS: ${{ steps.recovery.outputs.provider_status }}
           RETRY_SAFE: ${{ steps.recovery.outputs.retry_safe }}
           OBSERVED_AT: ${{ steps.recovery.outputs.observed_at }}
+          PROVIDER_EVIDENCE: ${{ steps.provider_evidence.outputs.provider_evidence }}
+          PROVIDER_READ_ERROR_CLASS: >-
+            ${{ steps.provider_evidence.outputs.provider_read_error_class }}
+          PROVIDER_EVIDENCE_STEP_OUTCOME: ${{ steps.provider_evidence.outcome }}
         run: |
           set -euo pipefail
 
@@ -308,4 +381,7 @@ jobs:
             echo "- Provider status: \`$PROVIDER_STATUS\`"
             echo "- Retry safe: \`$RETRY_SAFE\`"
             echo "- Observed at: \`$OBSERVED_AT\`"
+            echo "- Exact provider evidence: \`${PROVIDER_EVIDENCE:-unavailable}\`"
+            echo "- Provider read error class: \`${PROVIDER_READ_ERROR_CLASS:-}\`"
+            echo "- Provider evidence step: \`$PROVIDER_EVIDENCE_STEP_OUTCOME\`"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -22,6 +22,19 @@ GenericWebDeployRecoveryProviderOutcome = Literal[
     "unknown",
     "not_inspected",
 ]
+GenericWebDeployProviderEvidenceClassification = Literal[
+    "deployment_present",
+    "deployment_absent_before_effect",
+    "deployment_absent_after_effect",
+    "provider_status_unknown",
+    "provider_read_failed",
+    "not_inspected",
+]
+GenericWebDeployProviderReadErrorClass = Literal[
+    "",
+    "target_resolution_failed",
+    "provider_request_failed",
+]
 
 
 class GenericWebDeployRecoveryDryRunRequest(BaseModel):
@@ -85,6 +98,23 @@ class GenericWebDeployRecoveryDryRunResponse(BaseModel):
     recovery_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class GenericWebDeployRecoveryProviderEvidenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    status: Literal["ok"] = "ok"
+    mode: Literal["provider-evidence"] = "provider-evidence"
+    reservation_state: Literal["running", "completed", "reconcile_required"]
+    reservation_attempt: int = Field(ge=1)
+    observed_at: str
+    reconciliation_key_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    provider_target_key_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    provider_effect_phase: str = Field(max_length=128)
+    provider_evidence: GenericWebDeployProviderEvidenceClassification
+    provider_status: str = Field(default="", max_length=128)
+    provider_read_error_class: GenericWebDeployProviderReadErrorClass = ""
+
+
 class GenericWebDeployRecoveryApplyResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -105,7 +135,9 @@ class GenericWebDeployRecoveryApplyResponse(BaseModel):
 
 
 def generic_web_deploy_recovery_identifier_sha256(value: str) -> str:
-    return hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
+    digest = hashlib.sha256()
+    digest.update(value.strip().encode())
+    return digest.hexdigest()
 
 
 def build_generic_web_deploy_recovery_digest(payload: dict[str, object]) -> str:
@@ -115,4 +147,6 @@ def build_generic_web_deploy_recovery_digest(payload: dict[str, object]) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256()
+    digest.update(canonical.encode())
+    return digest.hexdigest()

@@ -218,6 +218,12 @@ import('./{ACTION_ENTRYPOINT.as_posix()}');
             "RECOVERY_ARTIFACT_RUN_ID: ${{ github.event.workflow_run.id }}",
             "Recovery request artifact must contain exactly one file.",
             "Recovery request artifact exceeds the size limit.",
+            "name: Resolve provider evidence request",
+            "name: Inspect exact provider evidence",
+            "route-path: /v1/admin/generic-web/deploy-recovery/provider-evidence",
+            "provider_evidence=provider_evidence",
+            "provider_read_error_class=provider_read_error_class",
+            "continue-on-error: true",
             "name: Request Launchplane recovery dry run",
             "uses: cbusillo/launchplane/.github/actions/"
             "generic-web-deploy-recovery-dry-run@b2055d2944626234664390d6fcd96975ded38511",
@@ -225,6 +231,8 @@ import('./{ACTION_ENTRYPOINT.as_posix()}');
             "Recovery digest:",
             "Proposed action:",
             "Reservation state:",
+            "Exact provider evidence:",
+            "Provider read error class:",
         )
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):

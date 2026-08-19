@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any
 
 import click
 from fastapi import Depends, Header, Request
@@ -13,6 +13,7 @@ from control_plane.contracts.generic_web_deploy_recovery import (
     GenericWebDeployRecoveryApplyResponse,
     GenericWebDeployRecoveryDryRunRequest,
     GenericWebDeployRecoveryDryRunResponse,
+    GenericWebDeployRecoveryProviderEvidenceResponse,
     GenericWebDeployRecoveryProviderOutcome,
     build_generic_web_deploy_recovery_digest,
     generic_web_deploy_recovery_identifier_sha256,
@@ -52,14 +53,23 @@ from control_plane.workflows.generic_web_deploy_provider import (
 
 
 GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE = "/v1/admin/generic-web/deploy-recovery/dry-run"
+GENERIC_WEB_DEPLOY_RECOVERY_PROVIDER_EVIDENCE_ROUTE = (
+    "/v1/admin/generic-web/deploy-recovery/provider-evidence"
+)
 GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE = "/v1/admin/generic-web/deploy-recovery/apply"
+GENERIC_WEB_DEPLOY_RECOVERY_PROVIDER_EVIDENCE_READ_ACTION = (
+    "generic_web_deploy_recovery_provider_evidence.read"
+)
 
 __all__ = [
     "GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE",
+    "GENERIC_WEB_DEPLOY_RECOVERY_PROVIDER_EVIDENCE_ROUTE",
+    "GENERIC_WEB_DEPLOY_RECOVERY_PROVIDER_EVIDENCE_READ_ACTION",
     "GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE",
     "GenericWebDeployRecoveryDependencies",
     "build_generic_web_deploy_recovery_apply_handler",
     "build_generic_web_deploy_recovery_dry_run_handler",
+    "build_generic_web_deploy_recovery_provider_evidence_handler",
 ]
 
 
@@ -75,7 +85,29 @@ class GenericWebDeployRecoveryDependencies:
 
 
 def _bounded_recovery_value(value: object, *, limit: int = 128) -> str:
-    return str(value or "").strip()[:limit]
+    return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def _recovery_authorization_allows(
+    *,
+    dependencies: GenericWebDeployRecoveryDependencies,
+    identity: LaunchplaneIdentity,
+    actions: tuple[str, ...],
+    product: str,
+    context: str,
+    instance: str,
+) -> bool:
+    target = AuthorizationTarget(scope="instance", instances=(instance,))
+    return any(
+        dependencies.authorization_allows(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+            target=target,
+        )
+        for action in actions
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,20 +232,19 @@ def _stored_recovery_metadata(
         return None
     digest = str(stored_recovery.get("recovery_digest") or "").strip()
     action = str(stored_recovery.get("recovery_action") or "").strip()
-    if (
-        len(digest) != 64
-        or any(character not in "0123456789abcdef" for character in digest)
-        or action
-        not in {
-            "replay_completed",
-            "wait_for_active_lease",
-            "adopt_observed",
-            "retry_original_operation",
-            "hold_unknown",
-        }
-    ):
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
         return None
-    return digest, cast(GenericWebDeployRecoveryAction, action)
+    match action:
+        case (
+            "replay_completed"
+            | "wait_for_active_lease"
+            | "adopt_observed"
+            | "retry_original_operation"
+            | "hold_unknown"
+        ):
+            return digest, action
+        case _:
+            return None
 
 
 def _recovery_metadata(
@@ -329,6 +360,7 @@ async def _inspect_generic_web_deploy_recovery(
     idempotency_key: str,
     trace_id: str,
     dependencies: GenericWebDeployRecoveryDependencies,
+    authorization_actions: tuple[str, ...] = ("generic_web_deploy.execute",),
 ) -> _GenericWebDeployRecoveryInspection:
     try:
         profile, lane = resolve_generic_web_deploy_lane(
@@ -357,12 +389,13 @@ async def _inspect_generic_web_deploy_recovery(
             code="invalid_request",
             message="Request could not be completed.",
         ) from error
-    if not dependencies.authorization_allows(
+    if not _recovery_authorization_allows(
+        dependencies=dependencies,
         identity=identity,
-        action="generic_web_deploy.execute",
+        actions=authorization_actions,
         product=profile.product,
         context=lane.context,
-        target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
+        instance=lane.instance,
     ):
         raise dependencies.http_error(
             status_code=403,
@@ -399,7 +432,7 @@ async def _inspect_generic_web_deploy_recovery(
         )
     original_fingerprint = dependencies.idempotency_request_fingerprint(
         route_path=GENERIC_WEB_DEPLOY_ROUTE,
-        payload=cast(dict[str, object], original_payload),
+        payload=original_payload,
     )
     lookup = record_store.lookup_existing_mutation_reservation(
         route_path=GENERIC_WEB_DEPLOY_ROUTE,
@@ -454,7 +487,7 @@ async def _inspect_generic_web_deploy_recovery(
     provider_operation_key = ""
     provider_observation_payload: dict[str, object] = {"outcome": provider_outcome}
     operation_product = recovery_request.original_deploy.product.strip()
-    operation_context = ""
+    operation_context: str
     operation_instance = recovery_request.original_deploy.deploy.instance.strip()
     authoritative_lane = lane
 
@@ -559,12 +592,13 @@ async def _inspect_generic_web_deploy_recovery(
                 message="Stored generic web deploy recovery target identity conflicts.",
             )
 
-    if not dependencies.authorization_allows(
+    if not _recovery_authorization_allows(
+        dependencies=dependencies,
         identity=identity,
-        action="generic_web_deploy.execute",
+        actions=authorization_actions,
         product=operation_product,
         context=operation_context,
-        target=AuthorizationTarget(scope="instance", instances=(operation_instance,)),
+        instance=operation_instance,
     ):
         raise dependencies.http_error(
             status_code=403,
@@ -691,6 +725,60 @@ def build_generic_web_deploy_recovery_dry_run_handler(
         return inspection.dry_run_response()
 
     return dry_run_generic_web_deploy_recovery
+
+
+def build_generic_web_deploy_recovery_provider_evidence_handler(
+    *, dependencies: GenericWebDeployRecoveryDependencies
+) -> Callable[..., Any]:
+    async def inspect_generic_web_deploy_recovery_provider_evidence(
+        request: Request,
+        recovery_request: GenericWebDeployRecoveryDryRunRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_write_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> GenericWebDeployRecoveryProviderEvidenceResponse:
+        trace_id = dependencies.next_trace_id()
+        inspection = await _inspect_generic_web_deploy_recovery(
+            request=request,
+            recovery_request=recovery_request,
+            identity=identity,
+            record_store=record_store,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            dependencies=dependencies,
+            authorization_actions=(
+                GENERIC_WEB_DEPLOY_RECOVERY_PROVIDER_EVIDENCE_READ_ACTION,
+                "generic_web_deploy.execute",
+            ),
+        )
+        provider_inspection = inspection.provider_inspection
+        return GenericWebDeployRecoveryProviderEvidenceResponse(
+            reservation_state=inspection.reservation.state,
+            reservation_attempt=inspection.reservation.attempt,
+            observed_at=inspection.observed_at,
+            reconciliation_key_sha256=generic_web_deploy_recovery_identifier_sha256(
+                inspection.reservation.reconciliation_key
+            ),
+            provider_target_key_sha256=generic_web_deploy_recovery_identifier_sha256(
+                inspection.reservation.provider_target_key
+            ),
+            provider_effect_phase=_bounded_recovery_value(
+                inspection.reservation.provider_effect_phase
+            ),
+            provider_evidence=(
+                provider_inspection.provider_evidence
+                if provider_inspection is not None
+                else "not_inspected"
+            ),
+            provider_status=inspection.provider_status,
+            provider_read_error_class=(
+                provider_inspection.provider_read_error_class
+                if provider_inspection is not None
+                else ""
+            ),
+        )
+
+    return inspect_generic_web_deploy_recovery_provider_evidence
 
 
 def build_generic_web_deploy_recovery_apply_handler(

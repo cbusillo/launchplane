@@ -17,8 +17,11 @@ from control_plane.contracts.runtime_key_safety_policy import (
 from control_plane.storage.postgres import PostgresRecordStore
 
 
-def _sqlite_database_url(database_path: Path) -> str:
+def sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
+
+
+_sqlite_database_url = sqlite_database_url
 
 
 def _write_odoo_preview_template_runtime_environment(
