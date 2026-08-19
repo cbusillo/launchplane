@@ -21,15 +21,18 @@ ARG GITHUB_CLI_X_TEXT_VERSION=v0.39.0
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local
 
-RUN mkdir -p /tmp/github-cli-build \
+RUN github_cli_x_mod_version=v0.40.0 \
+    && mkdir -p /tmp/github-cli-build \
     && cd /tmp/github-cli-build \
     && go mod init launchplane.local/github-cli-build \
     && go get "github.com/cli/cli/v2/cmd/gh@${GITHUB_CLI_VERSION}" \
     && go get "google.golang.org/grpc@${GITHUB_CLI_GRPC_VERSION}" \
+    && go get "golang.org/x/mod@${github_cli_x_mod_version}" \
     && go get "golang.org/x/text@${GITHUB_CLI_X_TEXT_VERSION}" \
     && go build -trimpath -o /go/bin/gh github.com/cli/cli/v2/cmd/gh \
     && go version -m /go/bin/gh | grep -F "github.com/cli/cli/v2" | grep -F "${GITHUB_CLI_VERSION}" \
     && go version -m /go/bin/gh | grep -F "google.golang.org/grpc" | grep -F "${GITHUB_CLI_GRPC_VERSION}" \
+    && go version -m /go/bin/gh | grep -F "golang.org/x/mod" | grep -F "${github_cli_x_mod_version}" \
     && go version -m /go/bin/gh | grep -F "golang.org/x/text" | grep -F "${GITHUB_CLI_X_TEXT_VERSION}"
 
 FROM mirror.gcr.io/library/python:3.13-slim

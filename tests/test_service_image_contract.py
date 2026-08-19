@@ -19,6 +19,9 @@ GITHUB_CLI_MODULE_CONTRACTS = {
         "GITHUB_CLI_X_TEXT_VERSION",
     ),
 }
+GITHUB_CLI_INTERNAL_MODULE_CONTRACTS = {
+    "golang.org/x/mod": ("golang.org/x/mod", "github_cli_x_mod_version"),
+}
 RUNTIME_SECURITY_UPGRADE_PACKAGES = {
     "bsdutils",
     "libblkid1",
@@ -39,8 +42,9 @@ ARG_PATTERN = re.compile(r"^ARG\s+(?P<name>[A-Z0-9_]+)=(?P<value>\S+)\s*$", re.M
 GO_GET_PATTERN = re.compile(r'\bgo\s+get\s+"(?P<module>[^"@\s]+)@(?P<reference>[^"\s]+)"')
 GO_PROVENANCE_PATTERN = re.compile(
     r'\bgo\s+version\s+-m\s+/go/bin/gh\s+\|\s+grep\s+-F\s+"'
-    r'(?P<module>[^"\s]+)"\s+\|\s+grep\s+-F\s+"\$\{(?P<argument>[A-Z0-9_]+)\}"'
+    r'(?P<module>[^"\s]+)"\s+\|\s+grep\s+-F\s+"\$\{(?P<argument>[A-Za-z_][A-Za-z0-9_]*)\}"'
 )
+SHELL_VERSION_PATTERN = re.compile(r"\b(?P<name>[a-z][a-z0-9_]*)=(?P<value>v\S+)\s+\\")
 
 
 class ServiceImageContractTests(unittest.TestCase):
@@ -70,6 +74,18 @@ class ServiceImageContractTests(unittest.TestCase):
         for argument_name in expected_argument_names:
             self.assertRegex(arguments[argument_name], GO_VERSION_PATTERN)
 
+        shell_versions = {
+            match.group("name"): match.group("value")
+            for match in SHELL_VERSION_PATTERN.finditer(build_stage_text)
+        }
+        expected_shell_version_names = {
+            version_name for _, version_name in GITHUB_CLI_INTERNAL_MODULE_CONTRACTS.values()
+        }
+
+        self.assertTrue(expected_shell_version_names.issubset(shell_versions))
+        for version_name in expected_shell_version_names:
+            self.assertRegex(shell_versions[version_name], GO_VERSION_PATTERN)
+
         go_gets = {
             match.group("module"): match.group("reference")
             for match in GO_GET_PATTERN.finditer(build_stage_text)
@@ -78,6 +94,12 @@ class ServiceImageContractTests(unittest.TestCase):
             package_path: f"${{{argument_name}}}"
             for package_path, (_, argument_name) in GITHUB_CLI_MODULE_CONTRACTS.items()
         }
+        expected_go_gets.update(
+            {
+                package_path: f"${{{version_name}}}"
+                for package_path, (_, version_name) in GITHUB_CLI_INTERNAL_MODULE_CONTRACTS.items()
+            }
+        )
 
         self.assertEqual(go_gets, expected_go_gets)
         self.assertNotRegex(build_stage_text, r"\bgo\s+install\b")
@@ -96,6 +118,7 @@ class ServiceImageContractTests(unittest.TestCase):
             (module_path, argument_name)
             for _, (module_path, argument_name) in GITHUB_CLI_MODULE_CONTRACTS.items()
         }
+        expected_provenance.update(GITHUB_CLI_INTERNAL_MODULE_CONTRACTS.values())
 
         self.assertEqual(provenance, expected_provenance)
 
