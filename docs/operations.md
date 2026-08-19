@@ -332,6 +332,11 @@ former replaces the previous process-local apply lock. Both require an
   marker after a deployment-trigger checkpoint remains unknown. Genuinely
   unknown state stays `reconcile_required`; adapters are the only place
   provider-specific reconciliation lives.
+- Reconciliation supplies the stored provider-effect start timestamp to the
+  adapter. Generic-web deploys use it only as a bounded fallback when Dokploy
+  did not retain the deterministic operation title, requiring one newest,
+  successful deployment in the exact time window plus exact target and artifact
+  identity before adoption.
 - Migrated Dokploy adapters attach a deterministic, per-request operation title
   to the provider deployment. Both the initial deployment wait and restart
   reconciliation search for that exact marker; desired state or another recent
@@ -395,6 +400,10 @@ or provider state. The bounded response reports only reservation state and
 timestamps, hashed identifiers, provider outcome/status, retry safety, one of
 `replay_completed`, `wait_for_active_lease`, `adopt_observed`,
 `retry_original_operation`, or `hold_unknown`, and a canonical recovery digest.
+Recovery apply recomputes that evidence and rejects a stale digest. After a
+Launchplane deployment changes provider observation or reconciliation behavior,
+run a fresh dry-run and review the new bounded evidence instead of reusing a
+pre-deployment digest.
 Raw scopes, idempotency keys, reconciliation keys, provider-target keys,
 original payloads, target URLs, and provider payloads are never returned.
 Product repositories that need an OIDC-authenticated inspection should use the

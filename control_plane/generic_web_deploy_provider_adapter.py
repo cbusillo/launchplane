@@ -132,10 +132,25 @@ class GenericWebDeployProviderMutationAdapter:
         provider_effect_phase: str,
         reconciliation_key: str,
     ) -> ProviderObservation:
+        return self.observe_with_effect_started_at(
+            provider_operation_key,
+            provider_effect_phase,
+            reconciliation_key,
+            "",
+        )
+
+    def observe_with_effect_started_at(
+        self,
+        provider_operation_key: str,
+        provider_effect_phase: str,
+        reconciliation_key: str,
+        provider_effect_started_at: str,
+    ) -> ProviderObservation:
         inspection = self.inspect(
             provider_operation_key=provider_operation_key,
             provider_effect_phase=provider_effect_phase,
             reconciliation_key=reconciliation_key,
+            legacy_provider_effect_started_at=provider_effect_started_at,
         )
         return self.provider_observation_from_inspection(
             provider_operation_key=provider_operation_key,

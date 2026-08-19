@@ -1552,6 +1552,28 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(len(provider.observed_target_ids), 1)
         self.assertEqual(provider.legacy_observation_calls, 1)
 
+    def test_provider_adapter_observe_uses_effect_start_for_legacy_correlation(self) -> None:
+        profile = _profile()
+        store = _GenericWebDeployStore(profile)
+        provider = _LegacyFakeGenericWebDeployProvider()
+        adapter = self._provider_mutation_adapter(
+            profile=profile,
+            store=store,
+            provider=provider,
+        )
+
+        observation = adapter.observe_with_effect_started_at(
+            "provider-operation:legacy-correlation",
+            "deploy_trigger",
+            adapter.reconciliation_key(),
+            "2026-08-15T12:00:00Z",
+        )
+
+        self.assertEqual(observation.outcome, "present")
+        self.assertEqual(observation.response_status_code, 202)
+        self.assertEqual(provider.legacy_observation_calls, 1)
+        self.assertEqual(len(store.deployments), 1)
+
     def test_present_provider_observation_requires_exact_terminal_evidence(self) -> None:
         with self.assertRaisesRegex(ValueError, "deployment_id, started_at, finished_at"):
             GenericWebProviderDeploymentObservation(
