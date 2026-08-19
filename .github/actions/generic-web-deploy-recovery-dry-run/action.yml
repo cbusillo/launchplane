@@ -11,9 +11,28 @@ inputs:
     default: ""
   request-json:
     description: >-
-      Exact legacy deploy coordinates and operator reason as JSON. Supplying a
-      reviewed expected_recovery_digest selects digest-bound apply mode.
-    required: true
+      Optional exact legacy deploy coordinates and operator reason as JSON.
+      Supplying a reviewed expected_recovery_digest selects digest-bound apply
+      mode. When omitted, the action downloads and validates the approved
+      recovery apply artifact for the current workflow_run event.
+    required: false
+    default: ""
+  expected-product:
+    description: Expected Launchplane product for artifact-backed apply mode.
+    required: false
+    default: ""
+  expected-instance:
+    description: Expected Launchplane instance for artifact-backed apply mode.
+    required: false
+    default: ""
+  workflow-run-id:
+    description: Source workflow run containing the approved apply request artifact.
+    required: false
+    default: ${{ github.event.workflow_run.id }}
+  github-token:
+    description: GitHub token used only to download the source workflow artifact.
+    required: false
+    default: ${{ github.token }}
   audience:
     description: Optional GitHub OIDC audience. Defaults to the service URL host.
     required: false
