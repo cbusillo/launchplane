@@ -52,7 +52,7 @@ _StubVerifier = StubVerifier
 _identity = identity
 
 
-def _local_operator_policy(
+def local_operator_policy(
     *,
     actions: tuple[str, ...],
     products: tuple[str, ...] = ("*",),
@@ -71,3 +71,6 @@ def _local_operator_policy(
             ),
         )
     )
+
+
+_local_operator_policy = local_operator_policy

@@ -71,6 +71,9 @@ from control_plane import live_target_runtime as control_plane_live_target_runti
 from control_plane.change_impact_github import GitHubChangeImpactRepositoryEvidenceProvider
 from control_plane.change_impact_service import ChangeImpactRepositoryEvidenceProvider
 from control_plane.contracts.change_impact import ChangeImpactTargetReference
+from control_plane.contracts.generic_web_deploy_recovery import (
+    GenericWebDeployRecoveryProviderEvidenceResponse,
+)
 from control_plane.contracts.authz_access_read import (
     AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
     EFFECTIVE_ACCESS_READ_ACTION,
@@ -174,6 +177,11 @@ from control_plane.http_routes import (
     replay_idempotent_response,
     request_fingerprint as build_request_fingerprint,
     require_product_profile_read_store,
+)
+from control_plane.generic_web_deploy_recovery_http import (
+    GENERIC_WEB_DEPLOY_RECOVERY_PROVIDER_EVIDENCE_ROUTE,
+    GenericWebDeployRecoveryDependencies,
+    build_generic_web_deploy_recovery_provider_evidence_handler,
 )
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -20012,6 +20020,38 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=generic_web_write_route_dependencies,
         handlers=generic_web_write_route_handlers,
+    )
+    inspect_generic_web_deploy_recovery_provider_evidence = (
+        build_generic_web_deploy_recovery_provider_evidence_handler(
+            dependencies=GenericWebDeployRecoveryDependencies(
+                read_write_identity=generic_web_write_route_dependencies.read_write_identity,
+                get_record_store=generic_web_write_route_dependencies.get_record_store,
+                next_trace_id=generic_web_write_route_dependencies.next_trace_id,
+                authorization_allows=generic_web_write_route_dependencies.authorization_allows,
+                http_error=generic_web_write_route_dependencies.http_error,
+                control_plane_root=generic_web_write_route_dependencies.control_plane_root,
+                idempotency_request_fingerprint=(
+                    generic_web_write_route_dependencies.idempotency_request_fingerprint
+                ),
+            )
+        )
+    )
+    app.add_api_route(
+        GENERIC_WEB_DEPLOY_RECOVERY_PROVIDER_EVIDENCE_ROUTE,
+        inspect_generic_web_deploy_recovery_provider_evidence,
+        methods=["POST"],
+        response_model=GenericWebDeployRecoveryProviderEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="inspect_generic_web_deploy_recovery_provider_evidence",
+        summary="Inspect exact provider evidence for a generic web deploy reservation",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     app.add_api_route(

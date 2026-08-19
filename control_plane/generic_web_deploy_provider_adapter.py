@@ -1,10 +1,14 @@
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 import click
 
+from control_plane.contracts.generic_web_deploy_recovery import (
+    GenericWebDeployProviderEvidenceClassification,
+    GenericWebDeployProviderReadErrorClass,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -49,6 +53,15 @@ __all__ = [
 ]
 
 
+def _string_field(payload: dict[str, object], key: str) -> str:
+    value = payload.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+class _DeploymentRecordReader(Protocol):
+    def read_deployment_record(self, record_id: str) -> object: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _GenericWebDeployProviderInspection:
     observation: GenericWebProviderDeploymentObservation
@@ -56,6 +69,8 @@ class _GenericWebDeployProviderInspection:
     retry_safe: bool = False
     identity_matches: bool = True
     post_deploy_unobserved: bool = False
+    provider_evidence: GenericWebDeployProviderEvidenceClassification = "not_inspected"
+    provider_read_error_class: GenericWebDeployProviderReadErrorClass = ""
 
 
 class GenericWebDeployProviderMutationAdapter:
@@ -150,7 +165,7 @@ class GenericWebDeployProviderMutationAdapter:
             )
         except (FileNotFoundError, ValueError, click.ClickException):
             return ProviderObservation(outcome="unknown")
-        terminal_failure = str(driver_result.get("deploy_status", "")).strip() == "fail"
+        terminal_failure = _string_field(driver_result, "deploy_status") == "fail"
         return ProviderObservation(
             outcome="present",
             response_status_code=502 if terminal_failure else 202,
@@ -162,6 +177,79 @@ class GenericWebDeployProviderMutationAdapter:
         )
 
     def inspect(
+        self,
+        *,
+        provider_operation_key: str,
+        provider_effect_phase: str,
+        reconciliation_key: str,
+        expected_provider_target_key: str = "",
+    ) -> _GenericWebDeployProviderInspection:
+        evidence = self.inspect_evidence(
+            provider_operation_key=provider_operation_key,
+            provider_effect_phase=provider_effect_phase,
+            reconciliation_key=reconciliation_key,
+            expected_provider_target_key=expected_provider_target_key,
+        )
+        if not evidence.identity_matches:
+            return evidence
+        observation = evidence.observation
+        resolved_target = evidence.resolved_deploy_target
+        if observation.outcome != "present":
+            if observation.outcome == "absent" and provider_effect_phase == "deploy_trigger":
+                return _GenericWebDeployProviderInspection(
+                    observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                    resolved_deploy_target=resolved_target,
+                    provider_evidence=evidence.provider_evidence,
+                    provider_read_error_class=evidence.provider_read_error_class,
+                )
+            return _GenericWebDeployProviderInspection(
+                observation=observation,
+                resolved_deploy_target=resolved_target,
+                retry_safe=(
+                    observation.outcome == "absent"
+                    and provider_effect_phase in {"", "target_update"}
+                ),
+                provider_evidence=evidence.provider_evidence,
+                provider_read_error_class=evidence.provider_read_error_class,
+            )
+        if resolved_target is None:
+            return _GenericWebDeployProviderInspection(
+                observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                provider_evidence="provider_read_failed",
+                provider_read_error_class="target_resolution_failed",
+            )
+        post_deploy_unobserved = (
+            generic_web_provider_deployment_succeeded(observation.deployment_status)
+            and generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None
+        )
+        deployment_record_id = self._deployment_record_id(provider_operation_key)
+        if provider_effect_phase.startswith("post_deploy_"):
+            read_deployment_record_value = getattr(
+                self._record_store, "read_deployment_record", None
+            )
+            if not callable(read_deployment_record_value):
+                return _GenericWebDeployProviderInspection(
+                    observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                    provider_evidence=evidence.provider_evidence,
+                )
+            record_reader = cast(_DeploymentRecordReader, self._record_store)
+            try:
+                record_reader.read_deployment_record(deployment_record_id)
+            except FileNotFoundError:
+                return _GenericWebDeployProviderInspection(
+                    observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                    provider_evidence=evidence.provider_evidence,
+                )
+            post_deploy_unobserved = False
+        return _GenericWebDeployProviderInspection(
+            observation=observation,
+            resolved_deploy_target=resolved_target,
+            post_deploy_unobserved=post_deploy_unobserved,
+            provider_evidence=evidence.provider_evidence,
+            provider_read_error_class=evidence.provider_read_error_class,
+        )
+
+    def inspect_evidence(
         self,
         *,
         provider_operation_key: str,
@@ -192,8 +280,17 @@ class GenericWebDeployProviderMutationAdapter:
                 return _GenericWebDeployProviderInspection(
                     observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
                     identity_matches=False,
+                    provider_evidence="provider_read_failed",
+                    provider_read_error_class="target_resolution_failed",
                 )
             self._resolved_deploy_target = resolved_target
+        except (FileNotFoundError, ValueError, click.ClickException):
+            return _GenericWebDeployProviderInspection(
+                observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                provider_evidence="provider_read_failed",
+                provider_read_error_class="target_resolution_failed",
+            )
+        try:
             observation = self._deploy_provider.observe_artifact_deploy(
                 control_plane_root=self._control_plane_root,
                 resolved_deploy_target=resolved_target,
@@ -201,46 +298,31 @@ class GenericWebDeployProviderMutationAdapter:
             )
         except (FileNotFoundError, ValueError, click.ClickException):
             return _GenericWebDeployProviderInspection(
-                observation=GenericWebProviderDeploymentObservation(outcome="unknown")
+                observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                resolved_deploy_target=resolved_target,
+                provider_evidence="provider_read_failed",
+                provider_read_error_class="provider_request_failed",
             )
-        if observation.outcome != "present":
-            if observation.outcome == "absent" and provider_effect_phase == "deploy_trigger":
-                return _GenericWebDeployProviderInspection(
-                    observation=GenericWebProviderDeploymentObservation(outcome="unknown")
-                )
-            return _GenericWebDeployProviderInspection(
-                observation=observation,
-                retry_safe=(
-                    observation.outcome == "absent"
-                    and provider_effect_phase in {"", "target_update"}
-                ),
+        if observation.outcome == "present":
+            provider_evidence: GenericWebDeployProviderEvidenceClassification = "deployment_present"
+        elif observation.outcome == "absent":
+            provider_evidence = (
+                "deployment_absent_before_effect"
+                if provider_effect_phase in {"", "target_update"}
+                else "deployment_absent_after_effect"
             )
-        post_deploy_unobserved = (
-            generic_web_provider_deployment_succeeded(observation.deployment_status)
-            and generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None
-        )
-        deployment_record_id = self._deployment_record_id(provider_operation_key)
-        if provider_effect_phase.startswith("post_deploy_"):
-            read_deployment_record = getattr(self._record_store, "read_deployment_record", None)
-            if not callable(read_deployment_record):
-                return _GenericWebDeployProviderInspection(
-                    observation=GenericWebProviderDeploymentObservation(outcome="unknown")
-                )
-            try:
-                read_deployment_record(deployment_record_id)
-            except FileNotFoundError:
-                return _GenericWebDeployProviderInspection(
-                    observation=GenericWebProviderDeploymentObservation(outcome="unknown")
-                )
-            post_deploy_unobserved = False
+        else:
+            provider_evidence = "provider_status_unknown"
         return _GenericWebDeployProviderInspection(
             observation=observation,
             resolved_deploy_target=resolved_target,
-            post_deploy_unobserved=post_deploy_unobserved,
+            provider_evidence=provider_evidence,
         )
 
     def _deployment_record_id(self, provider_operation_key: str) -> str:
-        operation_digest = hashlib.sha256(provider_operation_key.encode("utf-8")).hexdigest()[:24]
+        digest = hashlib.sha256()
+        digest.update(provider_operation_key.encode())
+        operation_digest = digest.hexdigest()[:24]
         return (
             f"deployment-provider-operation-{operation_digest}-"
             f"{self._lane.context}-{self._lane.instance}"
@@ -267,9 +349,9 @@ class GenericWebDeployProviderMutationAdapter:
         except click.ClickException as error:
             raise ProviderMutationUnknownError(str(error)) from error
         provider_effect_attempted = result.pop("provider_effect_attempted", False) is True
-        if str(result.get("deploy_status", "")).strip() == "fail" and provider_effect_attempted:
+        if _string_field(result, "deploy_status") == "fail" and provider_effect_attempted:
             raise ProviderMutationUnknownError(
-                str(result.get("error_message", "")).strip()
+                _string_field(result, "error_message")
                 or "Generic web provider outcome requires reconciliation."
             )
         return ProviderMutationOutcome(

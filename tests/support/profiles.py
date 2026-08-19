@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import cast
 
 
-def _product_profile_payload(product: str = "sellyouroutboard") -> dict[str, object]:
+def product_profile_payload(product: str = "sellyouroutboard") -> dict[str, object]:
     return {
         "schema_version": 1,
         "product": product,
@@ -29,6 +29,9 @@ def _product_profile_payload(product: str = "sellyouroutboard") -> dict[str, obj
         "updated_at": "2026-04-30T21:30:00Z",
         "source": "test",
     }
+
+
+_product_profile_payload = product_profile_payload
 
 
 def _odoo_preview_profile_payload(product: str = "odoo-tenant-cm") -> dict[str, object]:
