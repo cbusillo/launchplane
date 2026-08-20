@@ -14,7 +14,9 @@ Treat this file as the launch checklist for each Every Code session in
 - This repo owns control-plane contracts, persisted records, and promotion/
   deploy orchestration.
 - This repo does not own addon code, Odoo application/business logic, or local
-  Odoo DX. It does own Launchplane's Odoo operational driver logic.
+  Odoo DX. It does own Launchplane-side Odoo operational drivers: control-plane
+  code that invokes Odoo operations, not addon models, views, controllers, or
+  tenant business logic.
 - Use `.github/github.json` for repo commands and quality gates;
   do not rely on system Python directly.
 - Persist file-backed local, test, and rehearsal runtime records under `state/`

@@ -2820,9 +2820,12 @@ job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-product-retirem
 
 This describes an existing transitional authorization path, not approval to
 create or expand it. While #2058 remains open, new grants and managed-set
-changes are frozen unless the owning issue and operator boundary explicitly
-approve bounded maintenance of an already-authorized path. Routine authority
-migration belongs to #2061 and #2182.
+changes are frozen. The only exceptions are those permitted by the
+[Active Freeze](authorization-authority.md#active-freeze): explicitly reviewed
+maintenance of an already-authorized transitional path or a documented
+bootstrap/break-glass recovery operation, with separate approval required by
+the owning issue and operator boundary. Routine authority migration belongs to
+issues #2061 and #2182.
 
 ## Detached Application Retirement
 
