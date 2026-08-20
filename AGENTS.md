@@ -13,11 +13,13 @@ Treat this file as the launch checklist for each Every Code session in
 
 - This repo owns control-plane contracts, persisted records, and promotion/
   deploy orchestration.
-- This repo does not own addon code, Odoo business logic, or local Odoo DX.
+- This repo does not own addon code, Odoo application/business logic, or local
+  Odoo DX. It does own Launchplane's Odoo operational driver logic.
 - Use `.github/github.json` for repo commands and quality gates;
   do not rely on system Python directly.
-- Persist runtime records under `state/` or another explicit state directory,
-  not in git-tracked history.
+- Persist file-backed local, test, and rehearsal runtime records under `state/`
+  or another explicit state directory, not in git-tracked history. Shared
+  runtime truth is DB-backed.
 - Do not store real product, tenant, repository, branch, domain, lane,
   provider-target, runtime-environment, authz, operator, or other mutable
   runtime configuration as authority in production code or checked-in config

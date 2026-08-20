@@ -61,7 +61,9 @@ bodies or long planning prose into Launchplane. `safe_to_start` is true only for
 ready items that are in the active/next lane or have a failing check/deploy
 signal that needs attention. Waiting and blocked items stay visible for
 awareness, but agents should inspect the blocker or external signal before
-starting implementation.
+starting implementation. `safe_to_start` means eligible for live issue
+inspection, not blanket permission to implement: agents must still read the
+current status, finish line, comments, and native relationships before acting.
 
 `evidence` entries carry small source-linked signals with a trust state of
 `verified`, `recorded`, `stale`, `missing`, or `unsupported`. The first slice
@@ -157,11 +159,13 @@ GET /v1/work-graph/github/issues
 ```
 
 The native FastAPI route uses the same `work_graph.rank` authorization as the
-snapshot route and never writes GitHub or Launchplane state. Enable it with
+snapshot route and never writes GitHub or Launchplane state. The current
+transitional implementation reads
 `LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES`, a comma or newline separated
 list of `owner/repo` values. `LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT` bounds
-the open issue reads per repository and defaults to `100`. The provider shells
-out to:
+the open issue reads per repository and defaults to `100`. These source values
+are migration inputs, not steady-state authority; issue #2193 owns moving them
+to DB-backed work-graph source records. The provider shells out to:
 
 ```sh
 gh issue list --repo <owner>/<repo> --state open --limit <limit> \

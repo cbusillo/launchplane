@@ -65,8 +65,8 @@ Use these docs as the source of truth for `launchplane`.
   contract.
 - [operations.md](operations.md) — operator workflows and runtime boundary rules.
 - [records.md](records.md) — persisted record formats and storage policy.
-- [public-readiness.md](public-readiness.md) — current blockers and exit criteria
-  before making Launchplane public.
+- [public-readiness.md](public-readiness.md) — current public-repository posture,
+  remaining blockers, and safe-public exit criteria.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
   and local contract.
 - [github-actions-security.md](github-actions-security.md) — GitHub Actions
