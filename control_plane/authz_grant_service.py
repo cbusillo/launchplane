@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
@@ -23,13 +24,24 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.authz_access_read import (
     AuthzManagedSetCollectionSummary,
     AuthzManagedSetSummary,
+    AuthzPolicyCandidatePreviewRequest,
+    AuthzPolicyCandidatePreviewResponse,
+    AuthzPolicyCandidateProbeDelta,
+    AuthzPolicyCandidateProbeResult,
+    AuthzPolicyCandidateReadinessReason,
+    AuthzPolicyCandidateReadinessSummary,
+    AuthzPolicyCandidateStructuralDiff,
+    AuthzPolicyCandidateSummary,
     AuthzPolicyHealthReasonCode,
     AuthzPolicyHealthSnapshot,
     AuthzPolicyHealthState,
     AuthzPolicyHealthSummary,
     AuthzPolicyRecordSummary,
     AuthzPrincipalRuleCounts,
+    AuthzPolicyPrincipalType,
     AuthzReachableAdministratorSummary,
+    EffectiveAccessDecision,
+    EffectiveAccessRequestSummary,
 )
 from control_plane.contracts.owner_acceptance import (
     OWNER_ACCEPTANCE_EVENT_WRITE_ACTION,
@@ -42,6 +54,7 @@ from control_plane.contracts.product_owner import (
     PRODUCT_OWNER_REQUIREMENT_WRITE_ACTION,
 )
 from control_plane.service_auth import (
+    AuthorizationTarget,
     AuthzInstanceSelectors,
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
@@ -96,13 +109,7 @@ AuthzApplyingIdentity: TypeAlias = (
     | LocalOperatorIdentity
     | LocalAdminIdentity
 )
-AuthzPrincipalType: TypeAlias = Literal[
-    "github_actions",
-    "github_humans",
-    "terminal_agents",
-    "local_operators",
-    "local_admins",
-]
+AuthzPrincipalType: TypeAlias = AuthzPolicyPrincipalType
 _AUTHZ_PRINCIPAL_TYPES: tuple[AuthzPrincipalType, ...] = (
     "github_actions",
     "github_humans",
@@ -447,7 +454,8 @@ class AuthzManagedCompatibilityRetirement(BaseModel):
     )
 
 
-AuthzOperationalReadinessBlockerCode: TypeAlias = Literal[
+AuthzOperationalReadinessBlockerCode: TypeAlias = AuthzPolicyCandidateReadinessReason
+_AUTHZ_OPERATIONAL_READINESS_BLOCKER_CODES: tuple[AuthzOperationalReadinessBlockerCode, ...] = (
     "repository_not_exact",
     "workflow_refs_not_singleton",
     "workflow_ref_not_exact",
@@ -461,7 +469,7 @@ AuthzOperationalReadinessBlockerCode: TypeAlias = Literal[
     "context_not_exact",
     "instances_not_singleton",
     "instance_not_exact",
-]
+)
 
 
 class AuthzManagedOperationalReadinessBlocker(BaseModel):
@@ -606,12 +614,16 @@ def _authz_principal_rule_counts(
     return AuthzPrincipalRuleCounts(**counts)
 
 
-def summarize_active_authz_policy_health_record(
+def summarize_authz_policy_health(
     *,
-    record: LaunchplaneAuthzPolicyRecord,
+    policy: LaunchplaneAuthzPolicy,
     caller_identity: AuthzApplyingIdentity,
-) -> AuthzPolicyHealthSnapshot:
-    rules_by_principal = _authz_policy_rule_collections(record.policy)
+) -> tuple[
+    AuthzPolicyHealthSummary,
+    AuthzManagedSetCollectionSummary,
+    AuthzReachableAdministratorSummary,
+]:
+    rules_by_principal = _authz_policy_rule_collections(policy)
     rule_entries = [
         AuthzPolicyRuleEntry(principal_type=principal_type, rule=rule)
         for principal_type, rules in rules_by_principal
@@ -644,7 +656,7 @@ def summarize_active_authz_policy_health_record(
         _authz_rule_allows_identity(
             rule=entry.rule,
             identity=caller_identity,
-            schema_version=record.policy.schema_version,
+            schema_version=policy.schema_version,
         )
         for entry in administrator_entries
     )
@@ -655,12 +667,8 @@ def summarize_active_authz_policy_health_record(
         entry.rule.managed_set_id is not None for entry in administrator_entries
     )
 
-    immutable_repository_rule_count = sum(
-        1 for rule in record.policy.github_actions if rule.repository_id
-    )
-    legacy_name_only_rule_count = (
-        len(record.policy.github_actions) - immutable_repository_rule_count
-    )
+    immutable_repository_rule_count = sum(1 for rule in policy.github_actions if rule.repository_id)
+    legacy_name_only_rule_count = len(policy.github_actions) - immutable_repository_rule_count
     privileged_unpinned_rule_count = sum(
         _github_rule_requires_immutable_workflow(rule)
         and (
@@ -670,7 +678,7 @@ def summarize_active_authz_policy_health_record(
                 for job_workflow_ref in rule.job_workflow_refs
             )
         )
-        for rule in record.policy.github_actions
+        for rule in policy.github_actions
     )
 
     reason_codes: list[AuthzPolicyHealthReasonCode] = []
@@ -678,7 +686,7 @@ def summarize_active_authz_policy_health_record(
         reason_codes.append("authz_policy_admin_unreachable")
     elif not independent_administrator_rule_count:
         reason_codes.append("authz_policy_independent_admin_unreachable")
-    if record.policy.schema_version == 1:
+    if policy.schema_version == 1:
         reason_codes.append("policy_schema_legacy")
     if unmanaged_rule_count:
         reason_codes.append("unmanaged_rules_present")
@@ -695,15 +703,8 @@ def summarize_active_authz_policy_health_record(
     else:
         health_state = "healthy"
 
-    return AuthzPolicyHealthSnapshot(
-        policy=AuthzPolicyRecordSummary(
-            record_id=record.record_id,
-            revision=record.revision,
-            policy_sha256=record.policy_sha256,
-            updated_at=record.updated_at,
-            schema_version=record.policy.schema_version,
-        ),
-        health=AuthzPolicyHealthSummary(
+    return (
+        AuthzPolicyHealthSummary(
             state=health_state,
             reason_codes=tuple(reason_codes),
             managed_rule_count=len(managed_entries),
@@ -711,13 +712,13 @@ def summarize_active_authz_policy_health_record(
             github_actions_legacy_name_only_rule_count=legacy_name_only_rule_count,
             github_actions_privileged_unpinned_reusable_rule_count=privileged_unpinned_rule_count,
         ),
-        managed_sets=AuthzManagedSetCollectionSummary(
+        AuthzManagedSetCollectionSummary(
             total_count=len(sorted_managed_set_ids),
             returned_count=len(managed_set_items),
             truncated=len(sorted_managed_set_ids) > len(managed_set_items),
             items=managed_set_items,
         ),
-        reachable_administrators=AuthzReachableAdministratorSummary(
+        AuthzReachableAdministratorSummary(
             policy_reachable=bool(administrator_entries),
             rule_count=len(administrator_entries),
             managed_rule_count=managed_administrator_rule_count,
@@ -727,6 +728,29 @@ def summarize_active_authz_policy_health_record(
             independent_from_caller_reachable=bool(independent_administrator_rule_count),
             independent_from_caller_rule_count=independent_administrator_rule_count,
         ),
+    )
+
+
+def summarize_active_authz_policy_health_record(
+    *,
+    record: LaunchplaneAuthzPolicyRecord,
+    caller_identity: AuthzApplyingIdentity,
+) -> AuthzPolicyHealthSnapshot:
+    health, managed_sets, reachable_administrators = summarize_authz_policy_health(
+        policy=record.policy,
+        caller_identity=caller_identity,
+    )
+    return AuthzPolicyHealthSnapshot(
+        policy=AuthzPolicyRecordSummary(
+            record_id=record.record_id,
+            revision=record.revision,
+            policy_sha256=record.policy_sha256,
+            updated_at=record.updated_at,
+            schema_version=record.policy.schema_version,
+        ),
+        health=health,
+        managed_sets=managed_sets,
+        reachable_administrators=reachable_administrators,
     )
 
 
@@ -913,6 +937,323 @@ def _managed_operational_readiness_blockers(
             )
         )
     return tuple(blockers)
+
+
+def _candidate_managed_set_policies(
+    policy: LaunchplaneAuthzPolicy,
+) -> dict[str, LaunchplaneAuthzPolicy]:
+    grouped: dict[str, dict[AuthzPrincipalType, list[AuthzPolicyRule]]] = {}
+    for principal_type, rules in _authz_policy_rule_collections(policy):
+        for rule in rules:
+            if rule.managed_set_id is None:
+                continue
+            collections = grouped.setdefault(
+                rule.managed_set_id,
+                {candidate_type: [] for candidate_type in _AUTHZ_PRINCIPAL_TYPES},
+            )
+            collections[principal_type].append(rule)
+    return {
+        managed_set_id: LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                **{
+                    principal_type: tuple(collections[principal_type])
+                    for principal_type in _AUTHZ_PRINCIPAL_TYPES
+                },
+            }
+        )
+        for managed_set_id, collections in grouped.items()
+    }
+
+
+def validate_authz_candidate_policy(
+    policy: LaunchplaneAuthzPolicy,
+) -> LaunchplaneAuthzPolicy:
+    if policy.schema_version != 2:
+        raise ValueError("Authorization candidate policy preview requires schema version 2.")
+    normalized_policy = _normalize_desired_authz_policy(policy)
+    for managed_set_id, managed_set_policy in sorted(
+        _candidate_managed_set_policies(normalized_policy).items()
+    ):
+        AuthzManagedPolicyReconcileEnvelope(
+            product="launchplane",
+            managed_set_id=managed_set_id,
+            desired_policy=managed_set_policy,
+        )
+    return normalized_policy
+
+
+def _authz_policy_rule_count(policy: LaunchplaneAuthzPolicy) -> int:
+    return sum(len(rules) for _, rules in _authz_policy_rule_collections(policy))
+
+
+def _authz_policy_principal_rule_counts(
+    policy: LaunchplaneAuthzPolicy,
+) -> AuthzPrincipalRuleCounts:
+    return AuthzPrincipalRuleCounts(
+        **{
+            principal_type: len(rules)
+            for principal_type, rules in _authz_policy_rule_collections(policy)
+        }
+    )
+
+
+def _authz_policy_managed_rule_entries(
+    policy: LaunchplaneAuthzPolicy,
+) -> dict[tuple[str, str], AuthzPolicyRuleEntry]:
+    return {
+        (rule.managed_set_id, rule.managed_rule_id): AuthzPolicyRuleEntry(
+            principal_type=principal_type,
+            rule=rule,
+        )
+        for principal_type, rules in _authz_policy_rule_collections(policy)
+        for rule in rules
+        if rule.managed_set_id is not None and rule.managed_rule_id is not None
+    }
+
+
+def _authz_policy_unmanaged_rule_hashes(
+    policy: LaunchplaneAuthzPolicy,
+) -> dict[AuthzPrincipalType, Counter[str]]:
+    rule_hashes: dict[AuthzPrincipalType, Counter[str]] = {
+        "github_actions": Counter(),
+        "github_humans": Counter(),
+        "terminal_agents": Counter(),
+        "local_operators": Counter(),
+        "local_admins": Counter(),
+    }
+    for principal_type, rules in _authz_policy_rule_collections(policy):
+        for rule in rules:
+            if rule.managed_set_id is None:
+                rule_hashes[principal_type][_authz_rule_sha256(rule)] += 1
+    return rule_hashes
+
+
+def build_authz_candidate_policy_structural_diff(
+    *,
+    active_policy: LaunchplaneAuthzPolicy,
+    candidate_policy: LaunchplaneAuthzPolicy,
+) -> AuthzPolicyCandidateStructuralDiff:
+    active_managed = _authz_policy_managed_rule_entries(active_policy)
+    candidate_managed = _authz_policy_managed_rule_entries(candidate_policy)
+    active_unmanaged = _authz_policy_unmanaged_rule_hashes(active_policy)
+    candidate_unmanaged = _authz_policy_unmanaged_rule_hashes(candidate_policy)
+
+    managed_keys = active_managed.keys() | candidate_managed.keys()
+    added_managed_rule_count = 0
+    removed_managed_rule_count = 0
+    updated_managed_rule_count = 0
+    unchanged_managed_rule_count = 0
+    changed_principal_types: set[AuthzPrincipalType] = set()
+    for managed_key in managed_keys:
+        active_entry = active_managed.get(managed_key)
+        candidate_entry = candidate_managed.get(managed_key)
+        if active_entry is None:
+            assert candidate_entry is not None
+            added_managed_rule_count += 1
+            changed_principal_types.add(candidate_entry.principal_type)
+            continue
+        if candidate_entry is None:
+            removed_managed_rule_count += 1
+            changed_principal_types.add(active_entry.principal_type)
+            continue
+        if active_entry.principal_type == candidate_entry.principal_type and _authz_rule_sha256(
+            active_entry.rule
+        ) == _authz_rule_sha256(candidate_entry.rule):
+            unchanged_managed_rule_count += 1
+            continue
+        updated_managed_rule_count += 1
+        changed_principal_types.update(
+            (active_entry.principal_type, candidate_entry.principal_type)
+        )
+
+    added_unmanaged_rule_count = 0
+    removed_unmanaged_rule_count = 0
+    unchanged_unmanaged_rule_count = 0
+    for principal_type in _AUTHZ_PRINCIPAL_TYPES:
+        active_hashes = active_unmanaged[principal_type]
+        candidate_hashes = candidate_unmanaged[principal_type]
+        for rule_sha256 in active_hashes.keys() | candidate_hashes.keys():
+            active_count = active_hashes[rule_sha256]
+            candidate_count = candidate_hashes[rule_sha256]
+            unchanged_unmanaged_rule_count += min(active_count, candidate_count)
+            if candidate_count > active_count:
+                added_unmanaged_rule_count += candidate_count - active_count
+                changed_principal_types.add(principal_type)
+            elif active_count > candidate_count:
+                removed_unmanaged_rule_count += active_count - candidate_count
+                changed_principal_types.add(principal_type)
+
+    active_managed_sets = {managed_set_id for managed_set_id, _ in active_managed}
+    candidate_managed_sets = {managed_set_id for managed_set_id, _ in candidate_managed}
+    added_rule_count = added_managed_rule_count + added_unmanaged_rule_count
+    removed_rule_count = removed_managed_rule_count + removed_unmanaged_rule_count
+    schema_changed = active_policy.schema_version != candidate_policy.schema_version
+    changed = bool(
+        schema_changed or added_rule_count or updated_managed_rule_count or removed_rule_count
+    )
+    return AuthzPolicyCandidateStructuralDiff(
+        changed=changed,
+        schema_changed=schema_changed,
+        active_rule_count=_authz_policy_rule_count(active_policy),
+        candidate_rule_count=_authz_policy_rule_count(candidate_policy),
+        added_rule_count=added_rule_count,
+        updated_rule_count=updated_managed_rule_count,
+        removed_rule_count=removed_rule_count,
+        unchanged_rule_count=(unchanged_managed_rule_count + unchanged_unmanaged_rule_count),
+        active_managed_rule_count=len(active_managed),
+        candidate_managed_rule_count=len(candidate_managed),
+        active_unmanaged_rule_count=sum(
+            sum(rule_hashes.values()) for rule_hashes in active_unmanaged.values()
+        ),
+        candidate_unmanaged_rule_count=sum(
+            sum(rule_hashes.values()) for rule_hashes in candidate_unmanaged.values()
+        ),
+        added_managed_set_count=len(candidate_managed_sets - active_managed_sets),
+        removed_managed_set_count=len(active_managed_sets - candidate_managed_sets),
+        retained_managed_set_count=len(active_managed_sets & candidate_managed_sets),
+        changed_principal_types=tuple(
+            principal_type
+            for principal_type in _AUTHZ_PRINCIPAL_TYPES
+            if principal_type in changed_principal_types
+        ),
+        active_principal_rule_counts=_authz_policy_principal_rule_counts(active_policy),
+        candidate_principal_rule_counts=_authz_policy_principal_rule_counts(candidate_policy),
+    )
+
+
+def _candidate_policy_readiness(
+    policy: LaunchplaneAuthzPolicy,
+) -> AuthzPolicyCandidateReadinessSummary:
+    blockers = tuple(
+        blocker
+        for managed_set_id, managed_set_policy in sorted(
+            _candidate_managed_set_policies(policy).items()
+        )
+        for blocker in _managed_operational_readiness_blockers(
+            desired_policy=managed_set_policy,
+            managed_set_id=managed_set_id,
+        )
+    )
+    reason_codes: set[AuthzPolicyCandidateReadinessReason] = {
+        reason_code for blocker in blockers for reason_code in blocker.reason_codes
+    }
+    return AuthzPolicyCandidateReadinessSummary(
+        blocked_rule_count=len(blockers),
+        reason_codes=tuple(
+            reason_code
+            for reason_code in _AUTHZ_OPERATIONAL_READINESS_BLOCKER_CODES
+            if reason_code in reason_codes
+        ),
+    )
+
+
+def preview_authz_candidate_policy(
+    *,
+    active_record: LaunchplaneAuthzPolicyRecord,
+    caller_identity: AuthzApplyingIdentity,
+    request: AuthzPolicyCandidatePreviewRequest,
+    trace_id: str,
+) -> AuthzPolicyCandidatePreviewResponse:
+    submitted_candidate_sha256 = authz_policy_sha256(request.candidate_policy)
+    candidate_policy = validate_authz_candidate_policy(request.candidate_policy)
+    evaluated_candidate_sha256 = authz_policy_sha256(candidate_policy)
+    normalized_active_policy = _normalize_desired_authz_policy(active_record.policy)
+    _validate_github_managed_workflow_transition(
+        current_rules=active_record.policy.github_actions,
+        desired_rules=tuple(
+            rule for rule in candidate_policy.github_actions if rule.managed_set_id is not None
+        ),
+    )
+    active_health, _, active_reachable_administrators = summarize_authz_policy_health(
+        policy=active_record.policy,
+        caller_identity=caller_identity,
+    )
+    candidate_health, _, candidate_reachable_administrators = summarize_authz_policy_health(
+        policy=candidate_policy,
+        caller_identity=caller_identity,
+    )
+    probe_results: list[AuthzPolicyCandidateProbeResult] = []
+    for probe in request.probes:
+        target = (
+            AuthorizationTarget(scope="instance", instances=(probe.instance,))
+            if probe.target_scope == "instance"
+            else AuthorizationTarget(scope="context")
+        )
+        active_evaluation = active_record.policy.evaluate(
+            identity=probe.identity(),
+            action=probe.action,
+            product=probe.product,
+            context=probe.context,
+            target=target,
+            record_context=False,
+        )
+        candidate_evaluation = candidate_policy.evaluate(
+            identity=probe.identity(),
+            action=probe.action,
+            product=probe.product,
+            context=probe.context,
+            target=target,
+            record_context=False,
+        )
+        delta: AuthzPolicyCandidateProbeDelta
+        if active_evaluation.decision == candidate_evaluation.decision:
+            delta = (
+                "unchanged"
+                if active_evaluation.reason_code == candidate_evaluation.reason_code
+                else "reason_changed"
+            )
+        elif candidate_evaluation.decision == "allowed":
+            delta = "granted"
+        else:
+            delta = "revoked"
+        probe_results.append(
+            AuthzPolicyCandidateProbeResult(
+                request=EffectiveAccessRequestSummary(
+                    principal_type=probe.principal.principal_type,
+                    action=probe.action,
+                    product=probe.product,
+                    context=probe.context,
+                    target_scope=probe.target_scope,
+                    instance=probe.instance,
+                ),
+                active_evaluation=EffectiveAccessDecision(
+                    decision=active_evaluation.decision,
+                    reason_code=active_evaluation.reason_code,
+                ),
+                candidate_evaluation=EffectiveAccessDecision(
+                    decision=candidate_evaluation.decision,
+                    reason_code=candidate_evaluation.reason_code,
+                ),
+                delta=delta,
+            )
+        )
+    return AuthzPolicyCandidatePreviewResponse(
+        trace_id=trace_id,
+        active_policy=AuthzPolicyRecordSummary(
+            record_id=active_record.record_id,
+            revision=active_record.revision,
+            policy_sha256=active_record.policy_sha256,
+            updated_at=active_record.updated_at,
+            schema_version=active_record.policy.schema_version,
+        ),
+        candidate_policy=AuthzPolicyCandidateSummary(
+            submitted_policy_sha256=submitted_candidate_sha256,
+            evaluated_policy_sha256=evaluated_candidate_sha256,
+            normalized=submitted_candidate_sha256 != evaluated_candidate_sha256,
+            rule_count=_authz_policy_rule_count(candidate_policy),
+        ),
+        diff=build_authz_candidate_policy_structural_diff(
+            active_policy=normalized_active_policy,
+            candidate_policy=candidate_policy,
+        ),
+        active_health=active_health,
+        candidate_health=candidate_health,
+        active_reachable_administrators=active_reachable_administrators,
+        candidate_reachable_administrators=candidate_reachable_administrators,
+        candidate_readiness=_candidate_policy_readiness(candidate_policy),
+        probes=tuple(probe_results),
+    )
 
 
 def _github_transition_selector_payload(rule: GitHubActionsPolicyRule) -> dict[str, Any]:

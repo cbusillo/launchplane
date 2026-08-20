@@ -304,6 +304,7 @@ cleanup scope so the store is always closed.
 - authz policy administration routes:
   - `GET /v1/authz-policies/active`
   - `GET /v1/authz-diagnostics/active-policy/health`
+  - `POST /v1/authz-diagnostics/candidate-policy/preview`
   - `POST /v1/authz-policies/managed-rule-sets/reconcile`
     (native FastAPI for bearer-token and signed-in GitHub human-session
     callers and DB-backed policy records; managed-rule-set dry-runs return a
@@ -730,6 +731,21 @@ does not expose managed rule IDs, rule hashes, selectors, actions, repositories,
 workflows, or principal identifiers. Missing active state returns `503`, and
 multiple active records return `409`; the service never falls back to cached
 policy state for the response.
+
+`POST /v1/authz-diagnostics/candidate-policy/preview` is a separate
+administrator-read contract protected by `authz_policy_candidate_preview.read`.
+It accepts one exact schema-v2 candidate authorization policy and at most 25
+explicit probes, reloads and reauthorizes against the single active DB policy,
+and evaluates both policies through the ordinary effective-access evaluator.
+The response contains immutable active-policy provenance, submitted and
+canonical evaluated-candidate digests, a normalization flag, bounded health and
+administrator counts, count/category-only structural changes,
+operational-readiness reason categories, and old/new probe decisions. It never
+returns rule IDs or hashes, managed-set IDs, raw rules, selectors, actions,
+principal identifiers, tokens, secrets, or topology. Same-origin browser calls
+verify CSRF without renewing the session or rotating its token, and the route
+performs no policy, session, denial-evidence, idempotency, outbox, provider,
+runtime, secret, durable-operation, or other persistence write.
 
 New managed GitHub Actions rules require immutable GitHub `repository_id` and
 `repository_owner_id` selectors. Production-capable, destructive,

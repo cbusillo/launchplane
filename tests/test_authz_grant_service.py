@@ -13,11 +13,14 @@ from control_plane.authz_grant_service import (
     AuthzPolicyConflictError,
     AuthzPolicyRequestError,
     AuthzPolicySafetyError,
+    build_authz_candidate_policy_structural_diff,
     execute_managed_authz_policy_reconcile,
     plan_managed_authz_policy_reconcile,
+    preview_authz_candidate_policy,
     summarize_active_authz_policy_record,
     summarize_active_authz_policy_health_record,
 )
+from control_plane.contracts.authz_access_read import AuthzPolicyCandidatePreviewRequest
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -2311,3 +2314,297 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         self.assertEqual(summary.health.unmanaged_rule_count, 1)
         self.assertTrue(summary.reachable_administrators.policy_reachable)
         self.assertTrue(summary.reachable_administrators.independent_from_caller_reachable)
+
+    def test_candidate_policy_structural_diff_is_bounded_and_deterministic(self) -> None:
+        active_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_admins": [
+                    {
+                        "managed_set_id": "operator.authz-preview",
+                        "managed_rule_id": "reader",
+                        "subjects": ["admin-secret"],
+                        "token_labels": ["admin-token-secret"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_candidate_preview.read"],
+                    }
+                ],
+                "local_operators": [
+                    {
+                        "managed_set_id": "operator.authz-preview",
+                        "managed_rule_id": "removed-rule-secret",
+                        "subjects": ["removed-subject-secret"],
+                        "token_labels": ["removed-token-secret"],
+                        "products": ["example"],
+                        "contexts": ["testing"],
+                        "actions": ["artifact_protection.read"],
+                    }
+                ],
+            }
+        )
+        candidate_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_admins": [
+                    {
+                        "managed_set_id": "operator.authz-preview",
+                        "managed_rule_id": "reader",
+                        "subjects": ["admin-secret"],
+                        "token_labels": ["admin-token-secret"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [
+                            "authz_policy_candidate_preview.read",
+                            "authz_policy_grant.write",
+                        ],
+                    }
+                ],
+                "terminal_agents": [
+                    {
+                        "managed_set_id": "operator.new-set-secret",
+                        "managed_rule_id": "added-rule-secret",
+                        "subjects": ["added-subject-secret"],
+                        "token_labels": ["added-token-secret"],
+                        "products": ["example"],
+                        "contexts": ["testing"],
+                        "actions": ["artifact_protection.read"],
+                    }
+                ],
+            }
+        )
+
+        first = build_authz_candidate_policy_structural_diff(
+            active_policy=active_policy,
+            candidate_policy=candidate_policy,
+        )
+        second = build_authz_candidate_policy_structural_diff(
+            active_policy=active_policy,
+            candidate_policy=candidate_policy,
+        )
+
+        self.assertEqual(first, second)
+        self.assertTrue(first.changed)
+        self.assertEqual(first.added_rule_count, 1)
+        self.assertEqual(first.updated_rule_count, 1)
+        self.assertEqual(first.removed_rule_count, 1)
+        self.assertEqual(first.unchanged_rule_count, 0)
+        self.assertEqual(first.added_managed_set_count, 1)
+        self.assertEqual(first.removed_managed_set_count, 0)
+        self.assertEqual(
+            first.changed_principal_types,
+            ("terminal_agents", "local_operators", "local_admins"),
+        )
+        serialized = json.dumps(first.model_dump(mode="json"), sort_keys=True)
+        for private_value in (
+            "admin-secret",
+            "admin-token-secret",
+            "removed-rule-secret",
+            "removed-subject-secret",
+            "removed-token-secret",
+            "operator.new-set-secret",
+            "added-rule-secret",
+            "added-subject-secret",
+            "added-token-secret",
+        ):
+            self.assertNotIn(private_value, serialized)
+
+    def test_candidate_policy_preview_round_trips_exact_noop_policy(self) -> None:
+        active_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_admins": [
+                    {
+                        "managed_set_id": "operator.authz-preview",
+                        "managed_rule_id": "zzz-reader",
+                        "subjects": ["z-authz-admin", "authz-admin", "authz-admin"],
+                        "token_labels": ["z-label", "authz-admin-label"],
+                        "products": ["launchplane", "launchplane"],
+                        "contexts": ["launchplane", "launchplane"],
+                        "actions": [
+                            "authz_policy_grant.write",
+                            "authz_policy_candidate_preview.read",
+                            "authz_policy_grant.write",
+                        ],
+                    },
+                    {
+                        "subjects": ["independent-admin"],
+                        "token_labels": ["independent-admin-label"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_grant.write", "authz_policy_grant.write"],
+                    },
+                ],
+            }
+        )
+        active_record = _active_record_for_policy(active_policy)
+        request = AuthzPolicyCandidatePreviewRequest.model_validate(
+            {"candidate_policy": active_policy.model_dump(mode="json")}
+        )
+
+        response = preview_authz_candidate_policy(
+            active_record=active_record,
+            caller_identity=LocalAdminIdentity(
+                subject="authz-admin",
+                token_label="authz-admin-label",
+            ),
+            request=request,
+            trace_id="launchplane_req_noop_preview",
+        )
+
+        self.assertFalse(response.diff.changed)
+        self.assertEqual(response.diff.added_rule_count, 0)
+        self.assertEqual(response.diff.updated_rule_count, 0)
+        self.assertEqual(response.diff.removed_rule_count, 0)
+        self.assertEqual(response.diff.unchanged_rule_count, 2)
+        self.assertEqual(response.diff.changed_principal_types, ())
+        self.assertEqual(
+            response.candidate_policy.submitted_policy_sha256,
+            active_record.policy_sha256,
+        )
+        self.assertNotEqual(
+            response.candidate_policy.evaluated_policy_sha256,
+            active_record.policy_sha256,
+        )
+        self.assertTrue(response.candidate_policy.normalized)
+
+    def test_candidate_policy_preview_reuses_effective_access_without_recording_context(
+        self,
+    ) -> None:
+        active_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_admins": [
+                    {
+                        "managed_set_id": "operator.authz-preview",
+                        "managed_rule_id": "reader",
+                        "subjects": ["authz-admin"],
+                        "token_labels": ["authz-admin-label"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [
+                            "authz_policy_candidate_preview.read",
+                            "authz_policy_grant.write",
+                        ],
+                    },
+                    {
+                        "managed_set_id": "operator.recovery",
+                        "managed_rule_id": "independent-admin",
+                        "subjects": ["independent-admin"],
+                        "token_labels": ["independent-admin-label"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_grant.write"],
+                    },
+                ],
+            }
+        )
+        candidate_policy = active_policy.model_copy(
+            update={
+                "local_operators": (
+                    LocalOperatorPolicyRule(
+                        managed_set_id="operator.probe",
+                        managed_rule_id="probe-reader",
+                        subjects=("probe-subject",),
+                        token_labels=("probe-token",),
+                        products=("example",),
+                        contexts=("testing",),
+                        actions=("artifact_protection.read",),
+                    ),
+                )
+            }
+        )
+        request = AuthzPolicyCandidatePreviewRequest.model_validate(
+            {
+                "candidate_policy": candidate_policy.model_dump(mode="json"),
+                "probes": [
+                    {
+                        "principal": {
+                            "principal_type": "local_operator",
+                            "subject": "probe-subject",
+                            "token_label": "probe-token",
+                        },
+                        "action": "artifact_protection.read",
+                        "product": "example",
+                        "context": "testing",
+                        "target_scope": "context",
+                    }
+                ],
+            }
+        )
+
+        response = preview_authz_candidate_policy(
+            active_record=_active_record_for_policy(active_policy),
+            caller_identity=LocalAdminIdentity(
+                subject="authz-admin",
+                token_label="authz-admin-label",
+            ),
+            request=request,
+            trace_id="launchplane_req_preview",
+        )
+
+        self.assertEqual(response.trace_id, "launchplane_req_preview")
+        self.assertEqual(response.probes[0].active_evaluation.decision, "denied")
+        self.assertEqual(response.probes[0].candidate_evaluation.decision, "allowed")
+        self.assertEqual(response.probes[0].delta, "granted")
+        self.assertEqual(response.candidate_readiness.blocked_rule_count, 0)
+        self.assertTrue(response.candidate_reachable_administrators.policy_reachable)
+        self.assertTrue(
+            response.candidate_reachable_administrators.independent_from_caller_reachable
+        )
+
+    def test_candidate_policy_preview_reuses_managed_workflow_transition_validation(
+        self,
+    ) -> None:
+        active_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_admins": [
+                    {
+                        "managed_set_id": "operator.authz-preview",
+                        "managed_rule_id": "reader",
+                        "subjects": ["authz-admin"],
+                        "token_labels": ["authz-admin-label"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["authz_policy_candidate_preview.read"],
+                    }
+                ],
+            }
+        )
+        candidate_payload = active_policy.model_dump(mode="json")
+        candidate_payload["github_actions"] = [
+            {
+                "managed_set_id": "operator.workflow",
+                "managed_rule_id": "mutable-worker",
+                "repository": "example/repository",
+                "repository_id": "1001",
+                "repository_owner_id": "2001",
+                "workflow_refs": [
+                    "example/repository/.github/workflows/caller.yml@refs/heads/main"
+                ],
+                "job_workflow_refs": [
+                    "example/repository/.github/workflows/worker.yml@refs/heads/main"
+                ],
+                "products": ["launchplane"],
+                "contexts": ["launchplane"],
+                "actions": ["authz_policy_grant.write"],
+            }
+        ]
+        request = AuthzPolicyCandidatePreviewRequest.model_validate(
+            {"candidate_policy": candidate_payload}
+        )
+
+        with self.assertRaisesRegex(
+            AuthzPolicyRequestError,
+            "pinned to a full commit SHA",
+        ):
+            preview_authz_candidate_policy(
+                active_record=_active_record_for_policy(active_policy),
+                caller_identity=LocalAdminIdentity(
+                    subject="authz-admin",
+                    token_label="authz-admin-label",
+                ),
+                request=request,
+                trace_id="launchplane_req_invalid_transition",
+            )

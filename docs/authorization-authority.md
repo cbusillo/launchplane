@@ -109,6 +109,34 @@ and fails closed when active policy state is missing or ambiguous. It performs
 no policy, provider, runtime, bootstrap, secret, or deployment mutation. Landing
 the action and route does not grant production access to them.
 
+The next read-only administration slice adds
+`authz_policy_candidate_preview.read` for an authenticated GitHub administrator
+or local administrator. It accepts one complete schema-v2 candidate policy and
+at most 25 explicit effective-access probes, validates every managed set through
+the existing reconciliation contract, and compares the candidate with the exact
+single active DB policy record. The response binds to the active record ID,
+revision, and digest and contains only submitted and canonical evaluated-
+candidate digests, a normalization flag, bounded health and
+administrator counts, count/category-only structural changes, operational-
+readiness reason categories, and old/new probe decisions from the ordinary
+effective-access evaluator.
+
+The preview permission includes the bounded active-policy health and reachable-
+administrator summaries returned in the comparison; callers do not also need
+`authz_policy_health.read`. Both permissions remain restricted to authenticated
+administrators, and neither implies policy-write authority.
+
+Candidate preview responses never return raw policy, active or candidate rule
+IDs, rule hashes, selectors, repositories, workflows, actions, principal
+identifiers, token labels, secrets, or managed-set topology. Probe evaluation
+disables request-local denial recording so caller-supplied identities cannot
+contaminate support-readable denial evidence. Browser administrators use
+same-origin and CSRF verification without session renewal or token rotation;
+the preview performs no policy, session, denial-evidence, idempotency, outbox,
+provider, runtime, secret, durable-operation, or other persistence write. The
+preview does not produce an apply digest, does not prove future applying-
+administrator continuity, and does not authorize any production grant.
+
 Landing these read contracts does not authorize their production grants and
 does not relax the active freeze. Production policy changes still require the
 separate reviewed administration and recovery gates owned by `#2058`/`#2061`.
