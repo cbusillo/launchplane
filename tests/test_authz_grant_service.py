@@ -16,6 +16,7 @@ from control_plane.authz_grant_service import (
     execute_managed_authz_policy_reconcile,
     plan_managed_authz_policy_reconcile,
     summarize_active_authz_policy_record,
+    summarize_active_authz_policy_health_record,
 )
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -26,6 +27,7 @@ from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
     LaunchplaneAuthzPolicy,
+    LocalAdminIdentity,
     LocalAdminPolicyRule,
     LocalOperatorPolicyRule,
     TerminalAgentPolicyRule,
@@ -2228,3 +2230,84 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
             summary["github_actions_privileged_unpinned_reusable_rule_count"],
             1,
         )
+
+    def test_policy_health_summary_bounds_and_sorts_managed_sets(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            local_operators=tuple(
+                LocalOperatorPolicyRule(
+                    managed_set_id=f"operator.set-{index:03d}",
+                    managed_rule_id="reader",
+                    subjects=(f"operator-{index:03d}",),
+                    token_labels=(f"token-{index:03d}",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("product_profile.read",),
+                )
+                for index in range(100)
+            ),
+            local_admins=(
+                LocalAdminPolicyRule(
+                    managed_set_id="operator.admin",
+                    managed_rule_id="policy-admin",
+                    subjects=("authz-admin",),
+                    token_labels=("authz-admin-label",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("authz_policy_grant.write",),
+                ),
+            ),
+        )
+        summary = summarize_active_authz_policy_health_record(
+            record=_active_record_for_policy(policy),
+            caller_identity=LocalAdminIdentity(
+                subject="authz-admin",
+                token_label="authz-admin-label",
+            ),
+        )
+
+        self.assertEqual(summary.managed_sets.total_count, 101)
+        self.assertEqual(summary.managed_sets.returned_count, 100)
+        self.assertTrue(summary.managed_sets.truncated)
+        returned_ids = tuple(item.managed_set_id for item in summary.managed_sets.items)
+        self.assertEqual(returned_ids, tuple(sorted(returned_ids)))
+        self.assertEqual(returned_ids[0], "operator.admin")
+        self.assertEqual(returned_ids[-1], "operator.set-098")
+
+    def test_policy_health_summary_reports_legacy_unmanaged_github_risks(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=1,
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="example/repository",
+                    workflow_refs=(
+                        "example/repository/.github/workflows/caller.yml@refs/heads/main",
+                    ),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("authz_policy_grant.write",),
+                ),
+            ),
+        )
+        summary = summarize_active_authz_policy_health_record(
+            record=_active_record_for_policy(policy),
+            caller_identity=LocalAdminIdentity(
+                subject="authz-admin",
+                token_label="authz-admin-label",
+            ),
+        )
+
+        self.assertEqual(summary.health.state, "attention_required")
+        self.assertEqual(
+            summary.health.reason_codes,
+            (
+                "policy_schema_legacy",
+                "unmanaged_rules_present",
+                "github_actions_legacy_name_only_rules_present",
+                "github_actions_privileged_unpinned_reusable_rules_present",
+            ),
+        )
+        self.assertEqual(summary.health.managed_rule_count, 0)
+        self.assertEqual(summary.health.unmanaged_rule_count, 1)
+        self.assertTrue(summary.reachable_administrators.policy_reachable)
+        self.assertTrue(summary.reachable_administrators.independent_from_caller_reachable)

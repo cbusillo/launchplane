@@ -339,6 +339,7 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             "preview_destroy.execute": "destructive",
             "odoo_prod_backup_restore_apply.execute": "destructive",
             "secret_binding.apply": "secret_backed",
+            "authz_policy_health.read": "policy_admin",
             "authz_policy_grant.write": "policy_admin",
         }
 

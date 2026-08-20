@@ -592,6 +592,7 @@ Current implementation scope:
 - `POST /v1/authz-policies/managed-rule-sets/generic-web-preview/plan`
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
 - `POST /v1/authz-diagnostics/github-actions/evaluate`
+- `GET /v1/authz-diagnostics/active-policy/health`
 - `GET /v1/route-bindings/records/current`
 - `POST /v1/route-bindings/reconcile`
 - `POST /v1/route-bindings/odoo-testing/controller/run-once`
@@ -658,6 +659,16 @@ single active DB policy record, delegates the decision to the ordinary policy
 evaluator, and returns only the supplied scope, allowed/denied decision, one
 bounded reason code, and active record/revision/digest. It does not return rule
 matches, selector values, managed IDs, principal values, or permission lists.
+
+`GET /v1/authz-diagnostics/active-policy/health` is the separately authorized
+DB-native administrator health read. The caller must be a GitHub administrator
+or local administrator with `authz_policy_health.read`. The route authorizes
+against the runtime policy, reloads the single active DB policy record, and
+authorizes again before returning immutable policy provenance, bounded health
+reason codes, managed-set rule counts, and reachable policy-administrator rule
+counts. It never returns managed rule IDs, rule hashes, selectors, actions, or
+principal identities. Missing or multiple active records fail closed, and the
+read does not authorize a policy write or production grant.
 
 Standard `authorization_denied` HTTP failures with a captured policy evaluation
 write a redacted `launchplane_authz_denials` audit record on a best-effort basis.

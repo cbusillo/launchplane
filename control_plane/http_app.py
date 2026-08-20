@@ -76,8 +76,10 @@ from control_plane.contracts.generic_web_deploy_recovery import (
 )
 from control_plane.contracts.authz_access_read import (
     AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
+    AUTHZ_POLICY_HEALTH_READ_ACTION,
     EFFECTIVE_ACCESS_READ_ACTION,
     AuthzDenialExplanationResponse,
+    AuthzPolicyHealthResponse,
     EffectiveAccessDecision,
     EffectiveAccessEvaluateRequest,
     EffectiveAccessEvaluateResponse,
@@ -1021,6 +1023,7 @@ _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
 _AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE = "/v1/authz-diagnostics/github-actions/evaluate"
 _AUTHZ_EFFECTIVE_ACCESS_EVALUATE_ROUTE = "/v1/authz-diagnostics/effective-access/evaluate"
+_AUTHZ_POLICY_HEALTH_ROUTE = "/v1/authz-diagnostics/active-policy/health"
 _AUTHZ_DENIAL_EXPLANATION_ROUTE = "/v1/authz-diagnostics/denials/{trace_id}"
 _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE = "/v1/authz-policies/managed-rule-sets/reconcile"
 _GENERIC_WEB_PREVIEW_AUTHZ_PLAN_ROUTE = (
@@ -14507,6 +14510,58 @@ def create_launchplane_fastapi_app(
             )
         return active_records[0]
 
+    async def read_authz_policy_health(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AuthzPolicyHealthResponse:
+        trace_id = next_trace_id()
+        is_administrator = isinstance(identity, LocalAdminIdentity) or (
+            isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
+        )
+        preflight_authorized = resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=AUTHZ_POLICY_HEALTH_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        )
+        if not is_administrator or not preflight_authorized:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read Launchplane authz policy health.",
+            )
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Authz policy health reads require Launchplane database storage.",
+        )
+        active_record = read_single_active_authz_policy_record(
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        if not active_record.policy.allows(
+            identity=identity,
+            action=AUTHZ_POLICY_HEALTH_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read Launchplane authz policy health.",
+                authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
+            )
+        snapshot = control_plane_authz_grant_service.summarize_active_authz_policy_health_record(
+            record=active_record,
+            caller_identity=identity,
+        )
+        return AuthzPolicyHealthResponse(
+            trace_id=trace_id,
+            **snapshot.model_dump(),
+        )
+
     async def evaluate_effective_access(
         evaluation_request: EffectiveAccessEvaluateRequest,
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
@@ -22314,6 +22369,20 @@ def create_launchplane_fastapi_app(
             403: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _AUTHZ_POLICY_HEALTH_ROUTE,
+        read_authz_policy_health,
+        methods=["GET"],
+        response_model=AuthzPolicyHealthResponse,
+        response_model_exclude_none=True,
+        operation_id="read_authz_policy_health",
+        summary="Read bounded active authorization policy health",
+        responses={
+            **authz_diagnostic_route_responses,
+            409: {"model": LaunchplaneErrorResponse},
         },
     )
 

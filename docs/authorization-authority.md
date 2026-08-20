@@ -92,6 +92,23 @@ The first DB-native read-only slice keeps those capabilities separate:
 - denial records contain no principal identifier or token label, expire after
   30 days, and return the same not-found response when absent or expired.
 
+The next read-only administration slice adds `authz_policy_health.read` for an
+authenticated GitHub administrator or local administrator. It reads the exact
+active DB policy record and returns only immutable policy provenance, bounded
+health reason codes, managed-set rule counts, and policy-administrator rule
+counts. Managed summaries may identify a managed set but never expose managed
+rule IDs, rule hashes, selectors, actions, repositories, workflows, logins,
+GitHub IDs, subjects, token labels, or raw policy payloads. "Reachable
+administrator" means a rule satisfies the existing policy-administration safety
+predicate; it does not prove that an external credential or identity provider
+is currently available.
+
+The health read checks the caller against both the current runtime policy and
+the freshly loaded active DB record, rejects non-administrator principal types,
+and fails closed when active policy state is missing or ambiguous. It performs
+no policy, provider, runtime, bootstrap, secret, or deployment mutation. Landing
+the action and route does not grant production access to them.
+
 Landing these read contracts does not authorize their production grants and
 does not relax the active freeze. Production policy changes still require the
 separate reviewed administration and recovery gates owned by `#2058`/`#2061`.
