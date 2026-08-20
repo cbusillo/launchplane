@@ -151,13 +151,18 @@ Shared/live apply runs through the deployed service route and is normally
 launched by the manual `Provider Target Operations` workflow:
 
 ```bash
-gh workflow run provider-target-operations.yml \
-  -f mode=backfill-apply \
-  -f target_set=configured-json \
-  -f routes_json='[{"context":"<context>","instance":"<instance>"}]' \
-  -f provider_id='<provider-id>' \
-  -f confirmation='APPLY PROVIDER TARGET BACKFILL' \
-  -f reason="issue-backed provider-target backfill"
+skills_home="${CODE_HOME:-${CODEX_HOME:-$HOME/.code}}/skills"
+uv run "$skills_home/github/scripts/github_workflow_babysit.py" dispatch \
+  --repo OWNER/REPO \
+  --workflow provider-target-operations.yml \
+  --ref main \
+  --field mode=backfill-apply \
+  --field target_set=configured-json \
+  --field 'routes_json=[{"context":"<context>","instance":"<instance>"}]' \
+  --field provider_id=<provider-id> \
+  --field 'confirmation=APPLY PROVIDER TARGET BACKFILL' \
+  --field 'reason=issue-backed provider-target backfill' \
+  --timeout-seconds 1800
 ```
 
 Service-backed backfill writes only complete, non-conflicting Dokploy-derived
@@ -2813,6 +2818,15 @@ workflow_ref=cbusillo/launchplane/.github/workflows/product-retirement.yml@refs/
 job_workflow_ref=cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml@c922d5f1a0bf3ab17a829196042a96ba89d7b693
 ```
 
+This describes an existing transitional authorization path, not approval to
+create or expand it. While #2058 remains open, new grants and managed-set
+changes are frozen. The only exceptions are those permitted by the
+[Active Freeze](authorization-authority.md#active-freeze): explicitly reviewed
+maintenance of an already-authorized transitional path or a documented
+bootstrap/break-glass recovery operation, with separate approval required by
+the owning issue and operator boundary. Routine authority migration belongs to
+issues #2061 and #2182.
+
 ## Detached Application Retirement
 
 Phase one provides **Reusable Detached Application Retirement** as a
@@ -2853,17 +2867,19 @@ lacks consistent application-typed target evidence and still names the
 candidate. Provider-target records use the same target-ID binding. Do not
 rewrite append-only deployment history or adopted target authority to bypass
 either gate.
-Apply repeats all proofs under a durable provider-operation lease before checkpointing the sole
-`application.delete`. Reconciliation and already-absent retries reuse the same
-apply idempotency key. Completion requires candidate absence, unchanged
-protected fingerprints, and zero authority writes.
+Apply repeats all proofs under a durable provider-operation lease before
+checkpointing the sole `application.delete`. Reconciliation and already-absent
+retries reuse the same apply idempotency key. Completion requires candidate
+absence, unchanged protected fingerprints, and zero authority writes.
 
 Managed authz routing is reserved through the
 `detached-application-retirement` selector, managed-set ID
 `operator.detached-application-retirement`, and secret name
 `LAUNCHPLANE_AUTHZ_DETACHED_APPLICATION_RETIREMENT_MANAGED_SET_JSON`. Neither
 phase creates or populates that secret or reconciles a live rule. The remaining
-sequence is: merge and deploy this wrapper, configure the exact caller and
-worker authz pair through the managed authz path, then run the reviewed plan and
+sequence is blocked by the #2058 authorization freeze. Merge/deploy of code may
+continue, but do not configure a new caller/worker grant through the managed
+authz workflow. After #2061 and #2182 provide the reviewed DB-native migration
+path, register the exact caller and worker there, then run the reviewed plan and
 apply sequence. Never substitute a mutable ref, a checked-in target value, or a
 local CLI live-target fallback.
