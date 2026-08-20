@@ -181,11 +181,17 @@ and roll caller pins forward before the deployed service starts emitting it.
 ## Required Workflow Shape
 
 Same-repository PR refresh uses `pull_request` because the workflow may check
-out and build the PR head:
+out and build the PR head. The product-repo caller must invoke the reusable
+generic-web preview workflow only when all of these conditions hold:
 
-- `opened`, `reopened`, `synchronize`, `edited`, or adding the preview label
-  with the label present: `refresh`.
-- Any PR without the preview label: `ignore`.
+- The PR head repository equals `github.repository`.
+- The PR author is not `dependabot[bot]`.
+- The PR currently has the `preview` label.
+- For `labeled` events, the changed label is `preview`.
+
+This preserves `opened`, `reopened`, `synchronize`, and `edited` refreshes for
+trusted same-repository PRs that already carry the preview label. Any PR not
+meeting every condition must skip the reusable refresh workflow.
 
 Same-repository preview cleanup uses `pull_request_target`: closing the PR or
 removing the preview label runs `destroy` from the base-branch workflow. This

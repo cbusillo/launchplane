@@ -414,6 +414,22 @@ class DocsContractsTests(TestCase):
 
         self.assertIn("Reusable Generic-Web Lifecycle Workflows", product_repo_contract)
         self.assertIn(
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            product_repo_contract,
+        )
+        self.assertIn(
+            "github.event.pull_request.user.login != 'dependabot[bot]'",
+            product_repo_contract,
+        )
+        self.assertIn(
+            "contains(github.event.pull_request.labels.*.name, 'preview')",
+            product_repo_contract,
+        )
+        self.assertIn(
+            "github.event.action != 'labeled' || github.event.label.name == 'preview'",
+            product_repo_contract,
+        )
+        self.assertIn(
             "reusable-generic-web-stable-deploy.yml@<launchplane-sha>",
             product_repo_contract,
         )
