@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,8 +14,10 @@ from pydantic import ValidationError
 
 from control_plane.contracts.authz_access_read import (
     AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
+    AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
     AUTHZ_POLICY_HEALTH_READ_ACTION,
     EFFECTIVE_ACCESS_READ_ACTION,
+    AuthzPolicyCandidatePreviewRequest,
     EffectiveAccessEvaluateRequest,
 )
 from control_plane.contracts.authz_denial_record import build_authz_denial_record
@@ -27,7 +31,15 @@ from control_plane.service_auth import (
     AuthzEvaluation,
     BearerIdentityConfig,
     GitHubActionsIdentity,
+    GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
+)
+from control_plane.service_human_auth import (
+    GitHubOAuthConfig,
+    HumanSessionManager,
+    InMemoryHumanSessionStore,
+    LaunchplaneHumanSession,
+    build_browser_mutation_request_headers,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -99,6 +111,7 @@ def _app(
     root: Path,
     store: object,
     record: LaunchplaneAuthzPolicyRecord,
+    human_session_manager: HumanSessionManager | None = None,
 ) -> FastAPI:
     return create_launchplane_fastapi_app(
         verifier=_RejectingVerifier(),
@@ -111,6 +124,7 @@ def _app(
             revision=record.revision,
         ),
         record_store_factory=lambda: store,
+        human_session_manager=human_session_manager,
         bearer_identity_config=BearerIdentityConfig(
             local_admin_token="admin-token",
             local_admin_subject="authz-admin",
@@ -122,6 +136,29 @@ def _app(
         control_plane_root_path=root,
         state_dir=root / "state",
     )
+
+
+@contextmanager
+def _database_app(
+    policy: LaunchplaneAuthzPolicy,
+    *,
+    human_session_manager: HumanSessionManager | None = None,
+) -> Iterator[tuple[PostgresRecordStore, LaunchplaneAuthzPolicyRecord, FastAPI]]:
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        store = PostgresRecordStore(database_url=_database_url(root / "launchplane.sqlite3"))
+        store.ensure_schema()
+        record = _seed_policy(store, policy)
+        app = _app(
+            root=root,
+            store=store,
+            record=record,
+            human_session_manager=human_session_manager,
+        )
+        try:
+            yield store, record, app
+        finally:
+            store.close()
 
 
 class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -214,6 +251,431 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         route = app.openapi()["paths"]["/v1/authz-diagnostics/active-policy/health"]
         self.assertEqual(route["get"]["operationId"], "read_authz_policy_health")
+
+    async def test_administrator_previews_exact_candidate_policy_without_persistence_or_leakage(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_database_url(root / "launchplane.sqlite3"))
+            store.ensure_schema()
+            active_policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "local_admins": [
+                        {
+                            "managed_set_id": "operator.authz-preview",
+                            "managed_rule_id": "reader",
+                            "subjects": ["authz-admin"],
+                            "token_labels": ["authz-admin-label"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [
+                                AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
+                                "authz_policy_grant.write",
+                            ],
+                        },
+                        {
+                            "managed_set_id": "operator.recovery",
+                            "managed_rule_id": "independent-admin",
+                            "subjects": ["independent-admin-secret"],
+                            "token_labels": ["independent-token-secret"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        },
+                    ],
+                }
+            )
+            candidate_payload = active_policy.model_dump(mode="json")
+            candidate_payload["local_operators"] = [
+                {
+                    "managed_set_id": "operator.candidate-secret",
+                    "managed_rule_id": "probe-reader-secret",
+                    "subjects": ["probe-subject-secret"],
+                    "token_labels": ["probe-token-secret"],
+                    "products": ["example"],
+                    "contexts": ["testing"],
+                    "actions": ["artifact_protection.read"],
+                }
+            ]
+            candidate_policy = LaunchplaneAuthzPolicy.model_validate(candidate_payload)
+            record = _seed_policy(store, active_policy)
+            app = _app(root=root, store=store, record=record)
+            records_before_preview = store.list_authz_policy_records()
+            try:
+                async with lifespan_client(app) as client:
+                    with patch.object(
+                        store,
+                        "write_authz_denial_record",
+                        side_effect=AssertionError(
+                            "candidate previews must not persist denial rows"
+                        ),
+                    ):
+                        response = await client.post(
+                            "/v1/authz-diagnostics/candidate-policy/preview",
+                            headers={"Authorization": "Bearer admin-token"},
+                            json={
+                                "candidate_policy": candidate_policy.model_dump(mode="json"),
+                                "probes": [
+                                    {
+                                        "principal": {
+                                            "principal_type": "local_operator",
+                                            "subject": "probe-subject-secret",
+                                            "token_label": "probe-token-secret",
+                                        },
+                                        "action": "artifact_protection.read",
+                                        "product": "example",
+                                        "context": "testing",
+                                        "target_scope": "context",
+                                    }
+                                ],
+                            },
+                        )
+                records_after_preview = store.list_authz_policy_records()
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(records_after_preview, records_before_preview)
+        payload = response.json()
+        self.assertEqual(payload["active_policy"]["record_id"], record.record_id)
+        self.assertEqual(payload["active_policy"]["revision"], record.revision)
+        self.assertEqual(payload["active_policy"]["policy_sha256"], record.policy_sha256)
+        self.assertTrue(payload["diff"]["changed"])
+        self.assertEqual(payload["diff"]["added_rule_count"], 1)
+        self.assertEqual(payload["probes"][0]["active_evaluation"]["decision"], "denied")
+        self.assertEqual(payload["probes"][0]["candidate_evaluation"]["decision"], "allowed")
+        self.assertEqual(payload["probes"][0]["delta"], "granted")
+        serialized = json.dumps(payload, sort_keys=True)
+        for private_value in (
+            "authz-admin",
+            "authz-admin-label",
+            "independent-admin-secret",
+            "independent-token-secret",
+            "operator.candidate-secret",
+            "probe-reader-secret",
+            "probe-subject-secret",
+            "probe-token-secret",
+        ):
+            self.assertNotIn(private_value, serialized)
+        self.assertTrue(
+            {
+                "managed_set_id",
+                "managed_rule_id",
+                "subjects",
+                "token_labels",
+                "actions",
+                "products",
+                "contexts",
+                "policy",
+                "rule_sha256",
+            }.isdisjoint(_nested_mapping_keys(payload))
+        )
+        route = app.openapi()["paths"]["/v1/authz-diagnostics/candidate-policy/preview"]
+        self.assertEqual(route["post"]["operationId"], "preview_authz_candidate_policy")
+
+    async def test_browser_administrator_preview_does_not_renew_or_rotate_session(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_database_url(root / "launchplane.sqlite3"))
+            store.ensure_schema()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "github_humans": [
+                        {
+                            "managed_set_id": "operator.authz-preview",
+                            "managed_rule_id": "browser-admin",
+                            "github_ids": [12345],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [
+                                AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
+                                "authz_policy_grant.write",
+                            ],
+                        }
+                    ],
+                    "local_admins": [
+                        {
+                            "managed_set_id": "operator.recovery",
+                            "managed_rule_id": "independent-admin",
+                            "subjects": ["independent-admin"],
+                            "token_labels": ["independent-admin-label"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        }
+                    ],
+                }
+            )
+            record = _seed_policy(store, policy)
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=GitHubOAuthConfig(
+                    client_id="client-id",
+                    client_secret="client-secret",
+                    public_url="https://launchplane.example",
+                    session_secret="session-secret",
+                    cookie_secure=False,
+                ),
+                session_store=session_store,
+            )
+            session = session_manager.issue(
+                GitHubHumanIdentity(
+                    login="browser-admin",
+                    github_id=12345,
+                    name="Browser Admin",
+                    email="browser-admin@example.test",
+                    organizations=frozenset(),
+                    teams=frozenset(),
+                    role="admin",
+                )
+            )
+            app = _app(
+                root=root,
+                store=store,
+                record=record,
+                human_session_manager=session_manager,
+            )
+            csrf_token = session_manager.csrf_token(session)
+            headers = build_browser_mutation_request_headers(
+                origin="https://launchplane.example",
+                csrf_token=csrf_token,
+            )
+            headers["Cookie"] = session_manager.session_cookie_header(session).split(";", 1)[0]
+            session_before_preview = session_store.read_session(session.session_id)
+            try:
+                async with lifespan_client(app) as client:
+                    response = await client.post(
+                        "/v1/authz-diagnostics/candidate-policy/preview",
+                        headers=headers,
+                        json={"candidate_policy": policy.model_dump(mode="json")},
+                    )
+                    rejected_headers = dict(headers)
+                    rejected_headers.pop("X-CSRF-Token")
+                    rejected_response = await client.post(
+                        "/v1/authz-diagnostics/candidate-policy/preview",
+                        headers=rejected_headers,
+                        json={"candidate_policy": policy.model_dump(mode="json")},
+                    )
+                session_after_preview = session_store.read_session(session.session_id)
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(session_after_preview, session_before_preview)
+        self.assertTrue(session_manager.csrf_token_is_valid(session, csrf_token))
+        self.assertNotIn("set-cookie", response.headers)
+        self.assertEqual(rejected_response.status_code, 403, rejected_response.text)
+        self.assertEqual(
+            rejected_response.json()["error"]["code"],
+            "browser_mutation_denied",
+        )
+
+    async def test_unauthorized_candidate_preview_skips_route_database_reads(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_admins": [
+                    {
+                        "subjects": ["authz-admin"],
+                        "token_labels": ["authz-admin-label"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [AUTHZ_POLICY_HEALTH_READ_ACTION],
+                    }
+                ],
+            }
+        )
+        with _database_app(policy) as (store, _record, app):
+            async with lifespan_client(app) as client:
+                with (
+                    patch.object(
+                        store,
+                        "list_authz_policy_records",
+                        create=True,
+                        side_effect=AssertionError("unauthorized preview must not read DB policy"),
+                    ),
+                    patch.object(
+                        store,
+                        "write_authz_denial_record",
+                        create=True,
+                        side_effect=AssertionError(
+                            "unauthorized preview must not persist denial evidence"
+                        ),
+                    ),
+                ):
+                    response = await client.post(
+                        "/v1/authz-diagnostics/candidate-policy/preview",
+                        headers={"Authorization": "Bearer admin-token"},
+                        json={"candidate_policy": {"schema_version": 2}},
+                    )
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_non_administrator_cannot_use_granted_candidate_preview_action(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_operators": [
+                    {
+                        "subjects": ["support-reader"],
+                        "token_labels": ["support-reader-label"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION],
+                    }
+                ],
+            }
+        )
+        with _database_app(policy) as (store, _record, app):
+            async with lifespan_client(app) as client:
+                with (
+                    patch.object(
+                        store,
+                        "list_authz_policy_records",
+                        create=True,
+                        side_effect=AssertionError(
+                            "non-administrator preview must not read DB policy"
+                        ),
+                    ),
+                    patch.object(
+                        store,
+                        "write_authz_denial_record",
+                        create=True,
+                        side_effect=AssertionError(
+                            "non-administrator preview must not persist denial evidence"
+                        ),
+                    ),
+                ):
+                    response = await client.post(
+                        "/v1/authz-diagnostics/candidate-policy/preview",
+                        headers={"Authorization": "Bearer support-token"},
+                        json={"candidate_policy": {"schema_version": 2}},
+                    )
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_candidate_preview_rechecks_fresh_database_policy_without_denial_write(
+        self,
+    ) -> None:
+        runtime_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_admins": [
+                    {
+                        "subjects": ["authz-admin"],
+                        "token_labels": ["authz-admin-label"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION],
+                    }
+                ],
+            }
+        )
+        denied_policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_admins": [
+                    {
+                        "subjects": ["independent-admin"],
+                        "token_labels": ["independent-label"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION],
+                    }
+                ],
+            }
+        )
+        denied_digest = authz_policy_sha256(denied_policy)
+        denied_record = LaunchplaneAuthzPolicyRecord(
+            record_id=build_authz_policy_record_id(
+                revision=2,
+                policy_sha256=denied_digest,
+            ),
+            revision=2,
+            status="active",
+            source="test:authz-candidate-preview-recheck",
+            updated_at="2026-08-20T19:45:00+00:00",
+            policy_sha256=denied_digest,
+            policy=denied_policy,
+        )
+        with _database_app(runtime_policy) as (store, _record, app):
+            async with lifespan_client(app) as client:
+                with (
+                    patch.object(
+                        store,
+                        "list_authz_policy_records",
+                        create=True,
+                        return_value=(denied_record,),
+                    ),
+                    patch.object(
+                        store,
+                        "write_authz_denial_record",
+                        create=True,
+                        side_effect=AssertionError(
+                            "fresh-record denial must not persist denial evidence"
+                        ),
+                    ),
+                ):
+                    response = await client.post(
+                        "/v1/authz-diagnostics/candidate-policy/preview",
+                        headers={"Authorization": "Bearer admin-token"},
+                        json={"candidate_policy": {"schema_version": 2}},
+                    )
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_candidate_preview_rejects_invalid_complete_managed_contract(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_admins": [
+                    {
+                        "subjects": ["authz-admin"],
+                        "token_labels": ["authz-admin-label"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION],
+                    }
+                ],
+            }
+        )
+        with _database_app(policy) as (store, _record, app):
+            async with lifespan_client(app) as client:
+                with patch.object(
+                    store,
+                    "write_authz_denial_record",
+                    create=True,
+                    side_effect=AssertionError("invalid previews must not persist"),
+                ):
+                    response = await client.post(
+                        "/v1/authz-diagnostics/candidate-policy/preview",
+                        headers={"Authorization": "Bearer admin-token"},
+                        json={
+                            "candidate_policy": {
+                                "schema_version": 2,
+                                "local_operators": [
+                                    {
+                                        "managed_set_id": "operator.invalid",
+                                        "managed_rule_id": "missing-actions",
+                                        "subjects": ["operator"],
+                                        "token_labels": ["operator-label"],
+                                        "products": ["launchplane"],
+                                        "contexts": ["launchplane"],
+                                    }
+                                ],
+                            }
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["error"]["code"], "authz_candidate_policy_invalid")
 
     async def test_policy_health_reports_missing_reachable_policy_administrator(self) -> None:
         with TemporaryDirectory() as directory:
@@ -763,6 +1225,82 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AuthzDenialRecordStoreTests(unittest.TestCase):
+    def test_postgres_compatible_nonpersisting_session_read_keeps_expired_row(self) -> None:
+        with TemporaryDirectory() as directory:
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            store = PostgresRecordStore(
+                database_url=_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            session_manager = HumanSessionManager(
+                config=GitHubOAuthConfig(
+                    client_id="client-id",
+                    client_secret="client-secret",
+                    public_url="https://launchplane.example",
+                    session_secret="session-secret",
+                    cookie_secure=False,
+                ),
+                session_store=store,
+                now=lambda: now,
+            )
+            expired_session = LaunchplaneHumanSession(
+                session_id="expired-postgres-compatible-read",
+                identity=GitHubHumanIdentity(
+                    login="expired-admin",
+                    github_id=12345,
+                    name="Expired Admin",
+                    email="expired-admin@example.test",
+                    organizations=frozenset(),
+                    teams=frozenset(),
+                    role="admin",
+                ),
+                created_at=now - timedelta(days=15),
+                expires_at=now - timedelta(seconds=1),
+            )
+            store.write_session(expired_session)
+
+            resolved_session = session_manager.read_cookie_without_renewal(
+                session_manager.session_cookie_header(expired_session)
+            )
+            stored_session = store.read_session_without_cleanup(expired_session.session_id)
+            store.close()
+
+        self.assertIsNone(resolved_session)
+        self.assertEqual(stored_session, expired_session)
+
+    def test_candidate_policy_preview_requires_schema_v2_and_unique_probes(self) -> None:
+        with self.assertRaises(ValidationError):
+            AuthzPolicyCandidatePreviewRequest.model_validate(
+                {"candidate_policy": {"schema_version": 1}}
+            )
+
+        probe = {
+            "principal": {
+                "principal_type": "local_operator",
+                "subject": "operator",
+                "token_label": "operator-label",
+            },
+            "action": "example_access.read",
+            "product": "example-product",
+            "context": "example-context",
+            "target_scope": "context",
+        }
+        with self.assertRaises(ValidationError):
+            AuthzPolicyCandidatePreviewRequest.model_validate(
+                {
+                    "candidate_policy": {"schema_version": 2},
+                    "probes": [probe, probe],
+                }
+            )
+
+        with self.assertRaises(ValidationError):
+            AuthzPolicyCandidatePreviewRequest.model_validate(
+                {
+                    "candidate_policy": {"schema_version": 2},
+                    "unexpected": True,
+                }
+            )
+
     def test_effective_access_target_scope_requires_one_exact_instance(self) -> None:
         base_request = {
             "principal": {

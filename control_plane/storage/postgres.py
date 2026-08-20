@@ -8234,6 +8234,21 @@ class PostgresRecordStore(HumanSessionStore):
                 return None
             return human_session
 
+    def read_session_without_cleanup(
+        self,
+        session_id: str,
+    ) -> LaunchplaneHumanSession | None:
+        statement = (
+            select(LaunchplaneHumanSessionRow.payload)
+            .where(LaunchplaneHumanSessionRow.session_id == session_id)
+            .limit(1)
+        )
+        with self._session_factory() as session:
+            payload = session.scalar(statement)
+            if payload is None:
+                return None
+            return _human_session_from_payload(payload)
+
     def delete_session(self, session_id: str) -> None:
         with self._session_factory() as session:
             session.execute(

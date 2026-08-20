@@ -593,6 +593,7 @@ Current implementation scope:
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
 - `POST /v1/authz-diagnostics/github-actions/evaluate`
 - `GET /v1/authz-diagnostics/active-policy/health`
+- `POST /v1/authz-diagnostics/candidate-policy/preview`
 - `GET /v1/route-bindings/records/current`
 - `POST /v1/route-bindings/reconcile`
 - `POST /v1/route-bindings/odoo-testing/controller/run-once`
@@ -669,6 +670,23 @@ reason codes, managed-set rule counts, and reachable policy-administrator rule
 counts. It never returns managed rule IDs, rule hashes, selectors, actions, or
 principal identities. Missing or multiple active records fail closed, and the
 read does not authorize a policy write or production grant.
+
+`POST /v1/authz-diagnostics/candidate-policy/preview` is the non-persisting
+administrator preview for one exact schema-v2 candidate policy. The caller must
+be a GitHub administrator or local administrator with
+`authz_policy_candidate_preview.read`; Launchplane authorizes against runtime
+policy, reloads the single active DB record, and authorizes again. The service
+validates every managed candidate set through the existing reconciliation
+contract and evaluates at most 25 caller-supplied probes against the active and
+candidate policies through the ordinary evaluator with denial-context recording
+disabled. Responses contain only active record/revision/digest, submitted and
+canonical evaluated-candidate digests, a normalization flag, bounded counts and
+reason categories, and old/new probe decisions. They expose
+no rules, managed IDs, rule hashes, selectors, actions, principal identifiers,
+tokens, secrets, or topology. Browser calls retain same-origin and CSRF checks
+without session renewal or rotation, and no policy, session, denial, audit,
+idempotency, outbox, provider, runtime, secret, or durable-operation record is
+written.
 
 Standard `authorization_denied` HTTP failures with a captured policy evaluation
 write a redacted `launchplane_authz_denials` audit record on a best-effort basis.

@@ -76,9 +76,12 @@ from control_plane.contracts.generic_web_deploy_recovery import (
 )
 from control_plane.contracts.authz_access_read import (
     AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
+    AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
     AUTHZ_POLICY_HEALTH_READ_ACTION,
     EFFECTIVE_ACCESS_READ_ACTION,
     AuthzDenialExplanationResponse,
+    AuthzPolicyCandidatePreviewRequest,
+    AuthzPolicyCandidatePreviewResponse,
     AuthzPolicyHealthResponse,
     EffectiveAccessDecision,
     EffectiveAccessEvaluateRequest,
@@ -1024,6 +1027,7 @@ _AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
 _AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE = "/v1/authz-diagnostics/github-actions/evaluate"
 _AUTHZ_EFFECTIVE_ACCESS_EVALUATE_ROUTE = "/v1/authz-diagnostics/effective-access/evaluate"
 _AUTHZ_POLICY_HEALTH_ROUTE = "/v1/authz-diagnostics/active-policy/health"
+_AUTHZ_POLICY_CANDIDATE_PREVIEW_ROUTE = "/v1/authz-diagnostics/candidate-policy/preview"
 _AUTHZ_DENIAL_EXPLANATION_ROUTE = "/v1/authz-diagnostics/denials/{trace_id}"
 _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE = "/v1/authz-policies/managed-rule-sets/reconcile"
 _GENERIC_WEB_PREVIEW_AUTHZ_PLAN_ROUTE = (
@@ -4031,6 +4035,33 @@ def create_launchplane_fastapi_app(
         request.state.launchplane_human_session = session
         return session.identity
 
+    def read_nonrenewing_human_session(
+        *,
+        cookie_header: str,
+    ) -> LaunchplaneHumanSession | None:
+        if human_session_manager is None:
+            return None
+        session = human_session_manager.read_cookie_without_renewal(cookie_header)
+        if session is None:
+            return None
+        if not enforce_human_policy_revalidation:
+            return session
+        if not human_session_manager.authorization_claims_are_current(session):
+            return None
+        current_role = human_session_manager.authorized_role(
+            identity=session.identity,
+            authz_policy=resolved_authz_policy_runtime.policy,
+        )
+        if current_role not in {"admin", "read_only"}:
+            return None
+        resolved_role: Literal["read_only", "admin"] = current_role
+        if resolved_role == session.identity.role:
+            return session
+        return replace(
+            session,
+            identity=replace(session.identity, role=resolved_role),
+        )
+
     def human_identity_response(identity: GitHubHumanIdentity) -> GitHubHumanIdentityResponse:
         return GitHubHumanIdentityResponse(
             login=identity.login,
@@ -4283,6 +4314,32 @@ def create_launchplane_fastapi_app(
             reject_browser_mutation()
         consume_browser_mutation_request(request=request, session=session)
         return identity
+
+    def read_nonpersisting_sensitive_identity(
+        request: Request,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        bearer_identity = resolve_bearer_identity(authorization)
+        if bearer_identity is not None:
+            return bearer_identity
+        session = read_nonrenewing_human_session(cookie_header=cookie)
+        if session is None or human_session_manager is None:
+            raise _authentication_required_error("Authorization header is required.")
+        try:
+            csrf_token = validate_browser_mutation_request_headers(
+                expected_origin=human_session_manager.public_origin,
+                origin_values=tuple(request.headers.getlist("Origin")),
+                sec_fetch_site_values=tuple(request.headers.getlist("Sec-Fetch-Site")),
+                sec_fetch_mode_values=tuple(request.headers.getlist("Sec-Fetch-Mode")),
+                sec_fetch_dest_values=tuple(request.headers.getlist("Sec-Fetch-Dest")),
+                csrf_token_values=tuple(request.headers.getlist(BROWSER_CSRF_HEADER_NAME)),
+            )
+        except (PermissionError, ValueError):
+            reject_browser_mutation()
+        if not human_session_manager.csrf_token_is_valid(session, csrf_token):
+            reject_browser_mutation()
+        return session.identity
 
     def read_work_graph_rank_identity(
         request: Request,
@@ -14562,6 +14619,80 @@ def create_launchplane_fastapi_app(
             **snapshot.model_dump(),
         )
 
+    async def preview_authz_candidate_policy(
+        preview_request: AuthzPolicyCandidatePreviewRequest,
+        identity: Annotated[
+            LaunchplaneIdentity,
+            Depends(read_nonpersisting_sensitive_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AuthzPolicyCandidatePreviewResponse:
+        trace_id = next_trace_id()
+        is_administrator = isinstance(identity, LocalAdminIdentity) or (
+            isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
+        )
+        preflight_authorized = (
+            resolved_authz_policy_runtime.policy.evaluate(
+                identity=identity,
+                action=AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
+                product="launchplane",
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                record_context=False,
+            ).decision
+            == "allowed"
+        )
+        if not is_administrator or not preflight_authorized:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot preview Launchplane authz candidate policy.",
+            )
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message="Authz candidate policy previews require Launchplane database storage.",
+        )
+        active_record = read_single_active_authz_policy_record(
+            database_store=database_store,
+            trace_id=trace_id,
+        )
+        active_policy_authorized = (
+            active_record.policy.evaluate(
+                identity=identity,
+                action=AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
+                product="launchplane",
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                record_context=False,
+            ).decision
+            == "allowed"
+        )
+        if not active_policy_authorized:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot preview Launchplane authz candidate policy.",
+                authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
+            )
+        try:
+            return control_plane_authz_grant_service.preview_authz_candidate_policy(
+                active_record=active_record,
+                caller_identity=identity,
+                request=preview_request,
+                trace_id=trace_id,
+            )
+        except (
+            control_plane_authz_grant_service.AuthzPolicyRequestError,
+            ValueError,
+        ) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="authz_candidate_policy_invalid",
+                message="Authorization candidate policy is invalid.",
+            ) from error
+
     async def evaluate_effective_access(
         evaluation_request: EffectiveAccessEvaluateRequest,
         identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
@@ -22380,6 +22511,20 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="read_authz_policy_health",
         summary="Read bounded active authorization policy health",
+        responses={
+            **authz_diagnostic_route_responses,
+            409: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _AUTHZ_POLICY_CANDIDATE_PREVIEW_ROUTE,
+        preview_authz_candidate_policy,
+        methods=["POST"],
+        response_model=AuthzPolicyCandidatePreviewResponse,
+        response_model_exclude_none=True,
+        operation_id="preview_authz_candidate_policy",
+        summary="Preview one exact authorization candidate policy",
         responses={
             **authz_diagnostic_route_responses,
             409: {"model": LaunchplaneErrorResponse},

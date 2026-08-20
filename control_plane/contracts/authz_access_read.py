@@ -11,6 +11,7 @@ from control_plane.service_auth import (
     LaunchplaneIdentity,
     LocalAdminIdentity,
     LocalOperatorIdentity,
+    LaunchplaneAuthzPolicy,
     TerminalAgentIdentity,
 )
 
@@ -18,6 +19,31 @@ from control_plane.service_auth import (
 EFFECTIVE_ACCESS_READ_ACTION = "authz_policy_effective_access.read"
 AUTHZ_DENIAL_EXPLANATION_READ_ACTION = "authz_denial_explanation.read"
 AUTHZ_POLICY_HEALTH_READ_ACTION = "authz_policy_health.read"
+AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION = "authz_policy_candidate_preview.read"
+AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_PROBES = 25
+AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_RULES = 500
+AuthzPolicyPrincipalType: TypeAlias = Literal[
+    "github_actions",
+    "github_humans",
+    "terminal_agents",
+    "local_operators",
+    "local_admins",
+]
+AuthzPolicyCandidateReadinessReason: TypeAlias = Literal[
+    "repository_not_exact",
+    "workflow_refs_not_singleton",
+    "workflow_ref_not_exact",
+    "job_workflow_refs_not_singleton",
+    "job_workflow_ref_not_immutable",
+    "actions_not_singleton",
+    "action_not_exact",
+    "products_not_singleton",
+    "product_not_exact",
+    "contexts_not_singleton",
+    "context_not_exact",
+    "instances_not_singleton",
+    "instance_not_exact",
+]
 
 
 class GitHubActionsAccessPrincipal(BaseModel):
@@ -253,6 +279,37 @@ class EffectiveAccessEvaluateResponse(BaseModel):
     evaluation: EffectiveAccessDecision
 
 
+class AuthzPolicyCandidatePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_policy: LaunchplaneAuthzPolicy
+    probes: tuple[EffectiveAccessEvaluateRequest, ...] = Field(
+        default=(),
+        max_length=AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_PROBES,
+    )
+
+    @model_validator(mode="after")
+    def _validate_candidate(self) -> "AuthzPolicyCandidatePreviewRequest":
+        if self.candidate_policy.schema_version != 2:
+            raise ValueError("Authorization candidate policy preview requires schema version 2.")
+        rule_count = sum(
+            len(rules)
+            for rules in (
+                self.candidate_policy.github_actions,
+                self.candidate_policy.github_humans,
+                self.candidate_policy.terminal_agents,
+                self.candidate_policy.local_operators,
+                self.candidate_policy.local_admins,
+            )
+        )
+        if rule_count > AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_RULES:
+            raise ValueError("Authorization candidate policy preview contains too many rules.")
+        probe_keys = tuple(probe.model_dump_json() for probe in self.probes)
+        if len(set(probe_keys)) != len(probe_keys):
+            raise ValueError("Authorization candidate policy preview probes must be unique.")
+        return self
+
+
 class AuthzDenialExplanationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -356,5 +413,81 @@ class AuthzPolicyHealthSnapshot(BaseModel):
 
 
 class AuthzPolicyHealthResponse(AuthzPolicyHealthSnapshot):
+    status: Literal["ok"] = "ok"
+    trace_id: str
+
+
+class AuthzPolicyCandidateSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    submitted_policy_sha256: str
+    evaluated_policy_sha256: str
+    normalized: bool
+    schema_version: Literal[2] = 2
+    rule_count: int = Field(ge=0)
+
+
+class AuthzPolicyCandidateStructuralDiff(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    changed: bool
+    schema_changed: bool
+    active_rule_count: int = Field(ge=0)
+    candidate_rule_count: int = Field(ge=0)
+    added_rule_count: int = Field(ge=0)
+    updated_rule_count: int = Field(ge=0)
+    removed_rule_count: int = Field(ge=0)
+    unchanged_rule_count: int = Field(ge=0)
+    active_managed_rule_count: int = Field(ge=0)
+    candidate_managed_rule_count: int = Field(ge=0)
+    active_unmanaged_rule_count: int = Field(ge=0)
+    candidate_unmanaged_rule_count: int = Field(ge=0)
+    added_managed_set_count: int = Field(ge=0)
+    removed_managed_set_count: int = Field(ge=0)
+    retained_managed_set_count: int = Field(ge=0)
+    changed_principal_types: tuple[AuthzPolicyPrincipalType, ...]
+    active_principal_rule_counts: AuthzPrincipalRuleCounts
+    candidate_principal_rule_counts: AuthzPrincipalRuleCounts
+
+
+class AuthzPolicyCandidateReadinessSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    blocked_rule_count: int = Field(ge=0)
+    reason_codes: tuple[AuthzPolicyCandidateReadinessReason, ...]
+
+
+AuthzPolicyCandidateProbeDelta: TypeAlias = Literal[
+    "unchanged",
+    "granted",
+    "revoked",
+    "reason_changed",
+]
+
+
+class AuthzPolicyCandidateProbeResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request: EffectiveAccessRequestSummary
+    active_evaluation: EffectiveAccessDecision
+    candidate_evaluation: EffectiveAccessDecision
+    delta: AuthzPolicyCandidateProbeDelta
+
+
+class AuthzPolicyCandidatePreviewSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    active_policy: AuthzPolicyRecordSummary
+    candidate_policy: AuthzPolicyCandidateSummary
+    diff: AuthzPolicyCandidateStructuralDiff
+    active_health: AuthzPolicyHealthSummary
+    candidate_health: AuthzPolicyHealthSummary
+    active_reachable_administrators: AuthzReachableAdministratorSummary
+    candidate_reachable_administrators: AuthzReachableAdministratorSummary
+    candidate_readiness: AuthzPolicyCandidateReadinessSummary
+    probes: tuple[AuthzPolicyCandidateProbeResult, ...]
+
+
+class AuthzPolicyCandidatePreviewResponse(AuthzPolicyCandidatePreviewSnapshot):
     status: Literal["ok"] = "ok"
     trace_id: str

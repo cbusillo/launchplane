@@ -69,6 +69,11 @@ class HumanSessionStore(Protocol):
 
     def read_session(self, session_id: str) -> LaunchplaneHumanSession | None: ...
 
+    def read_session_without_cleanup(
+        self,
+        session_id: str,
+    ) -> LaunchplaneHumanSession | None: ...
+
     def delete_session(self, session_id: str) -> None: ...
 
     def write_session_if_csrf_generation(
@@ -109,6 +114,13 @@ class InMemoryHumanSessionStore:
                 self._sessions.pop(session_id, None)
                 return None
             return session
+
+    def read_session_without_cleanup(
+        self,
+        session_id: str,
+    ) -> LaunchplaneHumanSession | None:
+        with self._lock:
+            return self._sessions.get(session_id)
 
     def delete_session(self, session_id: str) -> None:
         with self._lock:
@@ -405,6 +417,18 @@ class HumanSessionManager:
             return None
         return self._session_store.read_session(session_id)
 
+    def read_cookie_without_renewal(self, cookie_header: str) -> LaunchplaneHumanSession | None:
+        signed_session_id = _cookie_value(cookie_header, SESSION_COOKIE_NAME)
+        if not signed_session_id:
+            return None
+        session_id = self._verify_cookie_value(signed_session_id)
+        if not session_id:
+            return None
+        session = self._session_store.read_session_without_cleanup(session_id)
+        if session is None or session.expires_at <= self._now():
+            return None
+        return session
+
     def authorization_claims_are_current(self, session: LaunchplaneHumanSession) -> bool:
         now = self._now()
         return (
@@ -452,20 +476,23 @@ class HumanSessionManager:
         )
         return f"{_BROWSER_CSRF_TOKEN_VERSION}.{generation}.{signature}"
 
+    def csrf_token_is_valid(self, session: LaunchplaneHumanSession, token: str) -> bool:
+        normalized_token = token.strip()
+        if not normalized_token.isascii():
+            return False
+        generation = _csrf_token_generation(normalized_token)
+        if generation is None or generation != session.csrf_generation:
+            return False
+        return hmac.compare_digest(normalized_token, self.csrf_token(session))
+
     def consume_csrf_token(
         self,
         session: LaunchplaneHumanSession,
         token: str,
     ) -> LaunchplaneHumanSession | None:
-        normalized_token = token.strip()
-        if not normalized_token.isascii():
+        if not self.csrf_token_is_valid(session, token):
             return None
-        generation = _csrf_token_generation(normalized_token)
-        if generation is None or generation != session.csrf_generation:
-            return None
-        expected_token = self.csrf_token(session)
-        if not hmac.compare_digest(normalized_token, expected_token):
-            return None
+        generation = session.csrf_generation
         rotated_session = replace(session, csrf_generation=generation + 1)
         if not self._session_store.write_session_if_csrf_generation(
             rotated_session,

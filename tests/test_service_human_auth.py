@@ -321,6 +321,59 @@ class HumanSessionManagerTests(unittest.TestCase):
         self.assertNotEqual(manager.csrf_token(rotated_session), csrf_token)
         self.assertIsNone(manager.consume_csrf_token(session, csrf_token))
 
+    def test_nonpersisting_csrf_validation_does_not_rotate_or_renew_session(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        store = InMemoryHumanSessionStore()
+        manager = HumanSessionManager(
+            config=_config(),
+            session_store=store,
+            now=lambda: now,
+        )
+        session = LaunchplaneHumanSession(
+            session_id="nonpersisting-read",
+            identity=_identity(),
+            created_at=now - timedelta(days=13),
+            expires_at=now + timedelta(hours=1),
+        )
+        store.write_session(session)
+        token = manager.csrf_token(session)
+
+        read_session = manager.read_cookie_without_renewal(manager.session_cookie_header(session))
+
+        self.assertEqual(read_session, session)
+        assert read_session is not None
+        self.assertTrue(manager.csrf_token_is_valid(read_session, token))
+        self.assertEqual(store.read_session(session.session_id), session)
+        stored_session = store.read_session(session.session_id)
+        assert stored_session is not None
+        self.assertEqual(stored_session.csrf_generation, 0)
+
+    def test_nonpersisting_session_read_does_not_delete_expired_session(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        store = InMemoryHumanSessionStore()
+        manager = HumanSessionManager(
+            config=_config(),
+            session_store=store,
+            now=lambda: now,
+        )
+        expired_session = LaunchplaneHumanSession(
+            session_id="expired-nonpersisting-read",
+            identity=_identity(),
+            created_at=now - timedelta(days=15),
+            expires_at=now - timedelta(seconds=1),
+        )
+        store.write_session(expired_session)
+
+        resolved_session = manager.read_cookie_without_renewal(
+            manager.session_cookie_header(expired_session)
+        )
+
+        self.assertIsNone(resolved_session)
+        self.assertEqual(
+            store.read_session_without_cleanup(expired_session.session_id),
+            expired_session,
+        )
+
     def test_csrf_token_rejects_other_session_and_stale_generation(self) -> None:
         store = InMemoryHumanSessionStore()
         manager = HumanSessionManager(config=_config(), session_store=store)
