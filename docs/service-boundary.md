@@ -303,6 +303,7 @@ cleanup scope so the store is always closed.
     and optional `Idempotency-Key` replay/conflict handling)
 - authz policy administration routes:
   - `GET /v1/authz-policies/active`
+  - `GET /v1/authz-diagnostics/active-policy/health`
   - `POST /v1/authz-policies/managed-rule-sets/reconcile`
     (native FastAPI for bearer-token and signed-in GitHub human-session
     callers and DB-backed policy records; managed-rule-set dry-runs return a
@@ -717,6 +718,18 @@ returns full workflow refs or principal selectors. Its removal readiness fields
 include managed and unmanaged rule totals, unmanaged counts by principal type,
 and the count of privileged GitHub Actions rules that still lack an immutable
 reusable-workflow identity.
+
+`GET /v1/authz-diagnostics/active-policy/health` is a separate read-only
+administrator contract. It requires a GitHub administrator or local
+administrator with `authz_policy_health.read`, reloads the exact active DB
+policy after preflight authorization, and reauthorizes against that record. The
+response contains active-record identity, revision, digest, schema version,
+bounded health reason codes, at most 100 lexically ordered managed-set summaries
+with rule and principal-type counts, and policy-administrator rule counts. It
+does not expose managed rule IDs, rule hashes, selectors, actions, repositories,
+workflows, or principal identifiers. Missing active state returns `503`, and
+multiple active records return `409`; the service never falls back to cached
+policy state for the response.
 
 New managed GitHub Actions rules require immutable GitHub `repository_id` and
 `repository_owner_id` selectors. Production-capable, destructive,

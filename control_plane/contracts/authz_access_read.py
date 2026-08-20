@@ -17,6 +17,7 @@ from control_plane.service_auth import (
 
 EFFECTIVE_ACCESS_READ_ACTION = "authz_policy_effective_access.read"
 AUTHZ_DENIAL_EXPLANATION_READ_ACTION = "authz_denial_explanation.read"
+AUTHZ_POLICY_HEALTH_READ_ACTION = "authz_policy_health.read"
 
 
 class GitHubActionsAccessPrincipal(BaseModel):
@@ -271,3 +272,89 @@ class AuthzDenialExplanationResponse(BaseModel):
     policy_record_id: str
     policy_revision: int = Field(ge=1)
     policy_sha256: str
+
+
+AuthzPolicyHealthState: TypeAlias = Literal["healthy", "attention_required", "blocked"]
+AuthzPolicyHealthReasonCode: TypeAlias = Literal[
+    "authz_policy_admin_unreachable",
+    "authz_policy_independent_admin_unreachable",
+    "policy_schema_legacy",
+    "unmanaged_rules_present",
+    "github_actions_legacy_name_only_rules_present",
+    "github_actions_privileged_unpinned_reusable_rules_present",
+]
+
+
+class AuthzPrincipalRuleCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    github_actions: int = Field(ge=0)
+    github_humans: int = Field(ge=0)
+    terminal_agents: int = Field(ge=0)
+    local_operators: int = Field(ge=0)
+    local_admins: int = Field(ge=0)
+
+
+class AuthzPolicyRecordSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    record_id: str
+    revision: int = Field(ge=1)
+    policy_sha256: str
+    updated_at: str
+    schema_version: Literal[1, 2]
+
+
+class AuthzPolicyHealthSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state: AuthzPolicyHealthState
+    reason_codes: tuple[AuthzPolicyHealthReasonCode, ...]
+    managed_rule_count: int = Field(ge=0)
+    unmanaged_rule_count: int = Field(ge=0)
+    github_actions_legacy_name_only_rule_count: int = Field(ge=0)
+    github_actions_privileged_unpinned_reusable_rule_count: int = Field(ge=0)
+
+
+class AuthzManagedSetSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    managed_set_id: str
+    rule_count: int = Field(ge=1)
+    principal_rule_counts: AuthzPrincipalRuleCounts
+
+
+class AuthzManagedSetCollectionSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    total_count: int = Field(ge=0)
+    returned_count: int = Field(ge=0)
+    truncated: bool
+    items: tuple[AuthzManagedSetSummary, ...]
+
+
+class AuthzReachableAdministratorSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    policy_reachable: bool
+    rule_count: int = Field(ge=0)
+    managed_rule_count: int = Field(ge=0)
+    unmanaged_rule_count: int = Field(ge=0)
+    principal_rule_counts: AuthzPrincipalRuleCounts
+    caller_has_policy_administration: bool
+    independent_from_caller_reachable: bool
+    independent_from_caller_rule_count: int = Field(ge=0)
+
+
+class AuthzPolicyHealthSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    policy: AuthzPolicyRecordSummary
+    health: AuthzPolicyHealthSummary
+    managed_sets: AuthzManagedSetCollectionSummary
+    reachable_administrators: AuthzReachableAdministratorSummary
+
+
+class AuthzPolicyHealthResponse(AuthzPolicyHealthSnapshot):
+    status: Literal["ok"] = "ok"
+    trace_id: str

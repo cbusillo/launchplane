@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,6 +12,7 @@ from pydantic import ValidationError
 
 from control_plane.contracts.authz_access_read import (
     AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
+    AUTHZ_POLICY_HEALTH_READ_ACTION,
     EFFECTIVE_ACCESS_READ_ACTION,
     EffectiveAccessEvaluateRequest,
 )
@@ -27,6 +29,7 @@ from control_plane.service_auth import (
     GitHubActionsIdentity,
     LaunchplaneAuthzPolicy,
 )
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.http import lifespan_client
 
@@ -38,6 +41,22 @@ class _RejectingVerifier:
 
 def _database_url(path: Path) -> str:
     return f"sqlite+pysqlite:///{path}"
+
+
+def _nested_mapping_keys(value: object) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | {
+            nested_key
+            for nested_value in value.values()
+            for nested_key in _nested_mapping_keys(nested_value)
+        }
+    if isinstance(value, list):
+        return {
+            nested_key
+            for nested_value in value
+            for nested_key in _nested_mapping_keys(nested_value)
+        }
+    return set()
 
 
 def _seed_policy(
@@ -78,7 +97,7 @@ def _support_reader_policy() -> LaunchplaneAuthzPolicy:
 def _app(
     *,
     root: Path,
-    store: PostgresRecordStore,
+    store: object,
     record: LaunchplaneAuthzPolicyRecord,
 ) -> FastAPI:
     return create_launchplane_fastapi_app(
@@ -106,6 +125,416 @@ def _app(
 
 
 class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_administrator_reads_bounded_policy_health_without_selector_leakage(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_database_url(root / "launchplane.sqlite3"))
+            store.ensure_schema()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "local_admins": [
+                        {
+                            "managed_set_id": "operator.authz-health",
+                            "managed_rule_id": "reader",
+                            "subjects": ["authz-admin"],
+                            "token_labels": ["authz-admin-label"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [
+                                AUTHZ_POLICY_HEALTH_READ_ACTION,
+                                "authz_policy_grant.write",
+                            ],
+                        },
+                        {
+                            "managed_set_id": "operator.recovery",
+                            "managed_rule_id": "independent-admin",
+                            "subjects": ["independent-admin-secret"],
+                            "token_labels": ["independent-token-secret"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        },
+                    ],
+                }
+            )
+            record = _seed_policy(store, policy)
+            app = _app(root=root, store=store, record=record)
+            records_before_read = store.list_authz_policy_records()
+            try:
+                async with lifespan_client(app) as client:
+                    with patch.object(
+                        store,
+                        "write_authz_denial_record",
+                        side_effect=AssertionError("successful health reads must not write"),
+                    ):
+                        response = await client.get(
+                            "/v1/authz-diagnostics/active-policy/health",
+                            headers={"Authorization": "Bearer admin-token"},
+                        )
+                records_after_read = store.list_authz_policy_records()
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(records_after_read, records_before_read)
+        payload = response.json()
+        self.assertEqual(payload["policy"]["record_id"], record.record_id)
+        self.assertEqual(payload["policy"]["revision"], record.revision)
+        self.assertEqual(payload["policy"]["policy_sha256"], record.policy_sha256)
+        self.assertEqual(payload["health"]["state"], "healthy")
+        self.assertEqual(payload["health"]["reason_codes"], [])
+        self.assertEqual(payload["managed_sets"]["total_count"], 2)
+        self.assertEqual(
+            [item["managed_set_id"] for item in payload["managed_sets"]["items"]],
+            ["operator.authz-health", "operator.recovery"],
+        )
+        self.assertTrue(payload["reachable_administrators"]["policy_reachable"])
+        self.assertTrue(payload["reachable_administrators"]["caller_has_policy_administration"])
+        self.assertTrue(payload["reachable_administrators"]["independent_from_caller_reachable"])
+        serialized = json.dumps(payload, sort_keys=True)
+        for secret_value in (
+            "authz-admin",
+            "authz-admin-label",
+            "independent-admin-secret",
+            "independent-token-secret",
+        ):
+            self.assertNotIn(secret_value, serialized)
+        self.assertTrue(
+            {
+                "managed_rule_id",
+                "subjects",
+                "token_labels",
+                "actions",
+                "products",
+                "contexts",
+            }.isdisjoint(_nested_mapping_keys(payload))
+        )
+        route = app.openapi()["paths"]["/v1/authz-diagnostics/active-policy/health"]
+        self.assertEqual(route["get"]["operationId"], "read_authz_policy_health")
+
+    async def test_policy_health_reports_missing_reachable_policy_administrator(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_database_url(root / "launchplane.sqlite3"))
+            store.ensure_schema()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "local_admins": [
+                        {
+                            "managed_set_id": "operator.authz-health",
+                            "managed_rule_id": "reader",
+                            "subjects": ["authz-admin"],
+                            "token_labels": ["authz-admin-label"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [AUTHZ_POLICY_HEALTH_READ_ACTION],
+                        }
+                    ],
+                }
+            )
+            record = _seed_policy(store, policy)
+            app = _app(root=root, store=store, record=record)
+            try:
+                async with lifespan_client(app) as client:
+                    response = await client.get(
+                        "/v1/authz-diagnostics/active-policy/health",
+                        headers={"Authorization": "Bearer admin-token"},
+                    )
+                    active_policy_response = await client.get(
+                        "/v1/authz-policies/active",
+                        headers={"Authorization": "Bearer admin-token"},
+                    )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["health"]["state"], "blocked")
+        self.assertIn("authz_policy_admin_unreachable", payload["health"]["reason_codes"])
+        self.assertFalse(payload["reachable_administrators"]["policy_reachable"])
+        self.assertEqual(payload["reachable_administrators"]["rule_count"], 0)
+        self.assertEqual(active_policy_response.status_code, 403, active_policy_response.text)
+
+    async def test_policy_health_reports_when_caller_is_only_policy_administrator(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_database_url(root / "launchplane.sqlite3"))
+            store.ensure_schema()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "local_admins": [
+                        {
+                            "managed_set_id": "operator.authz-health",
+                            "managed_rule_id": "sole-administrator",
+                            "subjects": ["authz-admin"],
+                            "token_labels": ["authz-admin-label"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [
+                                AUTHZ_POLICY_HEALTH_READ_ACTION,
+                                "authz_policy_grant.write",
+                            ],
+                        }
+                    ],
+                }
+            )
+            record = _seed_policy(store, policy)
+            app = _app(root=root, store=store, record=record)
+            try:
+                async with lifespan_client(app) as client:
+                    response = await client.get(
+                        "/v1/authz-diagnostics/active-policy/health",
+                        headers={"Authorization": "Bearer admin-token"},
+                    )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["health"]["state"], "attention_required")
+        self.assertEqual(
+            payload["health"]["reason_codes"],
+            ["authz_policy_independent_admin_unreachable"],
+        )
+        self.assertTrue(payload["reachable_administrators"]["caller_has_policy_administration"])
+        self.assertFalse(payload["reachable_administrators"]["independent_from_caller_reachable"])
+        self.assertEqual(
+            payload["reachable_administrators"]["independent_from_caller_rule_count"],
+            0,
+        )
+
+    async def test_unauthorized_policy_health_skips_route_database_reads(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_database_url(root / "launchplane.sqlite3"))
+            store.ensure_schema()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "local_operators": [
+                        {
+                            "subjects": ["support-reader"],
+                            "token_labels": ["support-reader-label"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [AUTHZ_POLICY_HEALTH_READ_ACTION],
+                        }
+                    ],
+                }
+            )
+            record = _seed_policy(store, policy)
+            app = _app(root=root, store=store, record=record)
+            try:
+                async with lifespan_client(app) as client:
+                    with patch.object(
+                        store,
+                        "list_authz_policy_records",
+                        side_effect=AssertionError("authorization must precede policy reads"),
+                    ):
+                        response = await client.get(
+                            "/v1/authz-diagnostics/active-policy/health",
+                            headers={"Authorization": "Bearer support-token"},
+                        )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 403, response.text)
+
+    async def test_policy_health_rechecks_authorization_against_active_database_policy(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_database_url(root / "launchplane.sqlite3"))
+            store.ensure_schema()
+            runtime_policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "local_admins": [
+                        {
+                            "subjects": ["authz-admin"],
+                            "token_labels": ["authz-admin-label"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [AUTHZ_POLICY_HEALTH_READ_ACTION],
+                        }
+                    ],
+                }
+            )
+            runtime_record = _seed_policy(store, runtime_policy)
+            denied_policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "local_admins": [
+                        {
+                            "subjects": ["independent-admin"],
+                            "token_labels": ["independent-label"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [AUTHZ_POLICY_HEALTH_READ_ACTION],
+                        }
+                    ],
+                }
+            )
+            denied_digest = authz_policy_sha256(denied_policy)
+            denied_record = LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=2,
+                    policy_sha256=denied_digest,
+                ),
+                revision=2,
+                status="active",
+                source="test:authz-policy-health-recheck",
+                updated_at="2026-08-20T12:00:00+00:00",
+                policy_sha256=denied_digest,
+                policy=denied_policy,
+            )
+            app = _app(root=root, store=store, record=runtime_record)
+            try:
+                async with lifespan_client(app) as client:
+                    with patch.object(
+                        store,
+                        "list_authz_policy_records",
+                        return_value=(denied_record,),
+                    ):
+                        response = await client.get(
+                            "/v1/authz-diagnostics/active-policy/health",
+                            headers={"Authorization": "Bearer admin-token"},
+                        )
+                    denial_record = store.read_authz_denial_record(
+                        trace_id=response.json()["trace_id"],
+                        observed_at=datetime.now(timezone.utc).isoformat(),
+                    )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertIsNotNone(denial_record)
+        assert denial_record is not None
+        self.assertEqual(denial_record.policy_record_id, denied_record.record_id)
+        self.assertEqual(denial_record.policy_revision, denied_record.revision)
+        self.assertEqual(denial_record.policy_sha256, denied_record.policy_sha256)
+
+    async def test_policy_health_requires_authentication_and_database_storage(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "local_admins": [
+                        {
+                            "subjects": ["authz-admin"],
+                            "token_labels": ["authz-admin-label"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [AUTHZ_POLICY_HEALTH_READ_ACTION],
+                        }
+                    ],
+                }
+            )
+            digest = authz_policy_sha256(policy)
+            record = LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+                revision=1,
+                status="active",
+                source="test:authz-policy-health-database-required",
+                updated_at="2026-08-20T12:00:00+00:00",
+                policy_sha256=digest,
+                policy=policy,
+            )
+            app = _app(
+                root=root,
+                store=FilesystemRecordStore(root / "filesystem-state"),
+                record=record,
+            )
+            async with lifespan_client(app) as client:
+                unauthenticated_response = await client.get(
+                    "/v1/authz-diagnostics/active-policy/health"
+                )
+                database_required_response = await client.get(
+                    "/v1/authz-diagnostics/active-policy/health",
+                    headers={"Authorization": "Bearer admin-token"},
+                )
+
+        self.assertEqual(unauthenticated_response.status_code, 401)
+        self.assertEqual(
+            unauthenticated_response.json()["error"]["code"],
+            "authentication_required",
+        )
+        self.assertEqual(database_required_response.status_code, 503)
+        self.assertEqual(
+            database_required_response.json()["error"]["code"],
+            "database_required",
+        )
+
+    async def test_policy_health_fails_closed_for_missing_or_ambiguous_active_policy(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_database_url(root / "launchplane.sqlite3"))
+            store.ensure_schema()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "local_admins": [
+                        {
+                            "subjects": ["authz-admin"],
+                            "token_labels": ["authz-admin-label"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [AUTHZ_POLICY_HEALTH_READ_ACTION],
+                        }
+                    ],
+                }
+            )
+            record = _seed_policy(store, policy)
+            second_record = record.model_copy(
+                update={
+                    "record_id": f"{record.record_id}-duplicate",
+                    "revision": record.revision + 1,
+                }
+            )
+            app = _app(root=root, store=store, record=record)
+            try:
+                async with lifespan_client(app) as client:
+                    with patch.object(
+                        store,
+                        "list_authz_policy_records",
+                        return_value=(),
+                    ):
+                        missing_response = await client.get(
+                            "/v1/authz-diagnostics/active-policy/health",
+                            headers={"Authorization": "Bearer admin-token"},
+                        )
+                    with patch.object(
+                        store,
+                        "list_authz_policy_records",
+                        return_value=(record, second_record),
+                    ):
+                        ambiguous_response = await client.get(
+                            "/v1/authz-diagnostics/active-policy/health",
+                            headers={"Authorization": "Bearer admin-token"},
+                        )
+            finally:
+                store.close()
+
+        self.assertEqual(missing_response.status_code, 503, missing_response.text)
+        self.assertEqual(
+            missing_response.json()["error"]["code"],
+            "authz_policy_unavailable",
+        )
+        self.assertEqual(ambiguous_response.status_code, 409, ambiguous_response.text)
+        self.assertEqual(
+            ambiguous_response.json()["error"]["code"],
+            "active_authz_policy_ambiguous",
+        )
+
     async def test_administrator_evaluates_one_explicit_principal_without_selector_leakage(
         self,
     ) -> None:
