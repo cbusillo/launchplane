@@ -29,6 +29,7 @@ from requests.exceptions import RequestException
 from sqlalchemy.exc import SQLAlchemyError
 from control_plane import authz_grant_service as control_plane_authz_grant_service
 from control_plane import authz_diagnostics as control_plane_authz_diagnostics
+from control_plane import authz_repository_scope as control_plane_authz_repository_scope
 from control_plane import ingress_route_scope as control_plane_ingress_route_scope
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
@@ -78,11 +79,14 @@ from control_plane.contracts.authz_access_read import (
     AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
     AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
     AUTHZ_POLICY_HEALTH_READ_ACTION,
+    AUTHZ_REPOSITORY_SCOPE_READ_ACTION,
     EFFECTIVE_ACCESS_READ_ACTION,
     AuthzDenialExplanationResponse,
     AuthzPolicyCandidatePreviewRequest,
     AuthzPolicyCandidatePreviewResponse,
     AuthzPolicyHealthResponse,
+    AuthzRepositoryScopeReadRequest,
+    AuthzRepositoryScopeResponse,
     EffectiveAccessDecision,
     EffectiveAccessEvaluateRequest,
     EffectiveAccessEvaluateResponse,
@@ -1028,6 +1032,7 @@ _AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE = "/v1/authz-diagnostics/github-actions/evaluat
 _AUTHZ_EFFECTIVE_ACCESS_EVALUATE_ROUTE = "/v1/authz-diagnostics/effective-access/evaluate"
 _AUTHZ_POLICY_HEALTH_ROUTE = "/v1/authz-diagnostics/active-policy/health"
 _AUTHZ_POLICY_CANDIDATE_PREVIEW_ROUTE = "/v1/authz-diagnostics/candidate-policy/preview"
+_AUTHZ_REPOSITORY_SCOPE_READ_ROUTE = "/v1/authz-diagnostics/repository-scope/read"
 _AUTHZ_DENIAL_EXPLANATION_ROUTE = "/v1/authz-diagnostics/denials/{trace_id}"
 _AUTHZ_POLICY_MANAGED_RECONCILE_ROUTE = "/v1/authz-policies/managed-rule-sets/reconcile"
 _GENERIC_WEB_PREVIEW_AUTHZ_PLAN_ROUTE = (
@@ -14619,6 +14624,115 @@ def create_launchplane_fastapi_app(
             **snapshot.model_dump(),
         )
 
+    async def read_authz_repository_scope(
+        scope_request: AuthzRepositoryScopeReadRequest,
+        response: Response,
+        identity: Annotated[
+            LaunchplaneIdentity,
+            Depends(read_nonpersisting_sensitive_identity),
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AuthzRepositoryScopeResponse:
+        trace_id = next_trace_id()
+        eligible_reader = isinstance(
+            identity,
+            GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity,
+        )
+        preflight = resolved_authz_policy_runtime.policy.evaluate(
+            identity=identity,
+            action=AUTHZ_REPOSITORY_SCOPE_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        )
+        if not eligible_reader or preflight.decision != "allowed":
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read Launchplane authorization repository scope.",
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            database_store = require_authz_policy_database_store(
+                record_store=record_store,
+                trace_id=trace_id,
+                message=(
+                    "Authorization repository scope reads require Launchplane database storage."
+                ),
+            )
+            active_record = read_single_active_authz_policy_record(
+                database_store=database_store,
+                trace_id=trace_id,
+            )
+        except LaunchplaneHTTPException as error:
+            error.headers = {**(error.headers or {}), "Cache-Control": "no-store"}
+            raise
+        except (TypeError, ValueError) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_repository_scope_invalid",
+                message="Authorization repository scope evidence is invalid.",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        except (OSError, SQLAlchemyError) as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_repository_scope_unavailable",
+                message="Authorization repository scope evidence is unavailable.",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        active_policy_evaluation = active_record.policy.evaluate(
+            identity=identity,
+            action=AUTHZ_REPOSITORY_SCOPE_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        )
+        if active_policy_evaluation.decision != "allowed":
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read Launchplane authorization repository scope.",
+                authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            result = control_plane_authz_repository_scope.build_authz_repository_scope_response(
+                trace_id=trace_id,
+                generated_at=datetime.now(timezone.utc).isoformat(),
+                request=scope_request,
+                active_policy_record=active_record,
+                store=database_store,
+            )
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_repository_scope_handle_unavailable",
+                message="Authorization repository scope handles are unavailable.",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        except (TypeError, ValueError) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_repository_scope_invalid",
+                message="Authorization repository scope evidence is invalid.",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        except (OSError, RuntimeError, SQLAlchemyError) as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_repository_scope_unavailable",
+                message="Authorization repository scope evidence is unavailable.",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        response.headers["Cache-Control"] = "no-store"
+        return result
+
     async def preview_authz_candidate_policy(
         preview_request: AuthzPolicyCandidatePreviewRequest,
         identity: Annotated[
@@ -22518,6 +22632,20 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        _AUTHZ_REPOSITORY_SCOPE_READ_ROUTE,
+        read_authz_repository_scope,
+        methods=["POST"],
+        response_model=AuthzRepositoryScopeResponse,
+        response_model_exclude_none=True,
+        operation_id="read_authz_repository_scope",
+        summary="Read bounded authorization repository scope",
+        responses={
+            **authz_diagnostic_route_responses,
+            409: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
         _AUTHZ_POLICY_CANDIDATE_PREVIEW_ROUTE,
         preview_authz_candidate_policy,
         methods=["POST"],
@@ -22929,6 +23057,11 @@ def create_launchplane_fastapi_app(
         response = JSONResponse(
             status_code=400,
             content=payload.model_dump(mode="json", exclude_none=True),
+            headers=(
+                {"Cache-Control": "no-store"}
+                if request.url.path == _AUTHZ_REPOSITORY_SCOPE_READ_ROUTE
+                else None
+            ),
         )
         preserve_renewed_session_cookie(request, response)
         return response
@@ -22988,6 +23121,7 @@ def _launchplane_http_error(
     message: str,
     authz: dict[str, object] | None = None,
     authz_policy_provenance: AuthzPolicyProvenance | None = None,
+    headers: dict[str, str] | None = None,
 ) -> LaunchplaneHTTPException:
     detail: dict[str, object] = {"trace_id": trace_id, "code": code, "message": message}
     if authz is not None:
@@ -23000,6 +23134,7 @@ def _launchplane_http_error(
     return LaunchplaneHTTPException(
         status_code=status_code,
         detail=detail,
+        headers=headers,
         authz_evaluation=authz_evaluation,
         authz_policy_provenance=authz_policy_provenance,
     )
