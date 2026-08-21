@@ -2,18 +2,23 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 import click
 from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 
+from control_plane.authz_repository_scope import build_authz_repository_scope_response
 from control_plane.cli_shared import (
     DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
     direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
     require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
 )
+from control_plane.contracts.authz_access_read import AuthzRepositoryScopeReadRequest
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
     MergeTrainPolicyRecordStatus,
@@ -237,6 +242,16 @@ def _product_profile_store(database_url: str) -> PostgresRecordStore:
     return store
 
 
+def _load_authz_repository_scope_request(request_file: Path) -> AuthzRepositoryScopeReadRequest:
+    try:
+        payload = _load_json_file(request_file)
+        return AuthzRepositoryScopeReadRequest.model_validate(payload)
+    except (click.ClickException, JSONDecodeError, OSError, UnicodeError, ValidationError) as error:
+        raise click.ClickException(
+            "Authorization repository-scope request JSON is invalid."
+        ) from error
+
+
 @click.group("authz-policies")
 def authz_policies() -> None:
     """DB-backed Launchplane authorization policy commands."""
@@ -310,6 +325,54 @@ def authz_policies_reconcile_managed(
         idempotency_key=idempotency_key,
     )
     click.echo(json.dumps(response_payload, indent=2, sort_keys=True))
+
+
+@authz_policies.command("repository-scope-evidence")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane authorization evidence records.",
+)
+@click.option(
+    "--request-file",
+    required=True,
+    help="Exact-candidate repository-scope request JSON.",
+)
+def authz_policies_repository_scope_evidence(database_url: str, request_file: str) -> None:
+    """Read redacted repository-scope evidence with configured DB credentials."""
+    scope_request = _load_authz_repository_scope_request(Path(request_file))
+    click.echo(
+        "Evidence source: configured PostgreSQL credentials; this does not prove that the "
+        "operator is authorized by the active policy.",
+        err=True,
+    )
+    try:
+        postgres_store = PostgresRecordStore(database_url=database_url)
+        try:
+            active_records = postgres_store.list_authz_policy_records(status="active", limit=2)
+            if not active_records:
+                raise click.ClickException("Launchplane active authz policy is unavailable.")
+            if len(active_records) > 1:
+                raise click.ClickException(
+                    "Multiple active Launchplane authz policy records were found."
+                )
+            response = build_authz_repository_scope_response(
+                trace_id=f"launchplane_req_{uuid4().hex}",
+                generated_at=datetime.now(UTC).isoformat(),
+                request=scope_request,
+                active_policy_record=active_records[0],
+                store=postgres_store,
+            )
+        finally:
+            postgres_store.close()
+    except click.ClickException:
+        raise
+    except (OSError, RuntimeError, SQLAlchemyError, TypeError, ValueError) as error:
+        raise click.ClickException(
+            "Authorization repository-scope evidence is unavailable."
+        ) from error
+    click.echo(json.dumps(response.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
 @runtime_key_safety.command("list-policies")

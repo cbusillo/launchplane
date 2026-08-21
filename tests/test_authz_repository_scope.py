@@ -4,12 +4,18 @@ import base64
 import hashlib
 import json
 import os
+from pathlib import Path
+import tempfile
+from typing import cast
 import unittest
 from unittest.mock import patch
 
+from click import Command
+from click.testing import CliRunner, Result
 from pydantic import ValidationError
 
 from control_plane.authz_repository_scope import build_authz_repository_scope_response
+from control_plane.cli import main
 from control_plane.contracts.authz_access_read import AuthzRepositoryScopeReadRequest
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -32,6 +38,7 @@ from control_plane import secrets as control_plane_secrets
 REPOSITORY = "example/private-product"
 REPOSITORY_ID = "123456"
 REPOSITORY_OWNER_ID = "654321"
+CLI_MAIN = cast(Command, main)
 
 
 class _Store:
@@ -98,7 +105,175 @@ class _Store:
         return records[offset : offset + limit]
 
 
+class _CliStore(_Store):
+    def __init__(
+        self,
+        *,
+        active_policy_records: tuple[LaunchplaneAuthzPolicyRecord, ...],
+        product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = (),
+        role_policies: tuple[RepositoryHumanRolePolicyRecord, ...] = (),
+        classifications: tuple[TenantRepositoryClassificationRecord, ...] = (),
+        work_requests: tuple[EveryCodeWorkRequestRecord, ...] = (),
+    ) -> None:
+        super().__init__(
+            product_profiles=product_profiles,
+            role_policies=role_policies,
+            classifications=classifications,
+            work_requests=work_requests,
+        )
+        self.active_policy_records = active_policy_records
+        self.closed = False
+        self.mutation_attempts = 0
+
+    def list_authz_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]:
+        records = tuple(
+            record for record in self.active_policy_records if not status or record.status == status
+        )
+        return records if limit is None else records[:limit]
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        if name.startswith(("write_", "compare_and_write_", "reserve_", "append_", "delete_")):
+            self.mutation_attempts += 1
+            raise AssertionError(f"Unexpected mutation method lookup: {name}")
+        raise AttributeError(name)
+
+
 class AuthzRepositoryScopeTests(unittest.TestCase):
+    def test_cli_reads_redacted_scope_without_mutation_or_authorization_claim(self) -> None:
+        store = _CliStore(
+            active_policy_records=(_policy_record(repository=REPOSITORY),),
+            product_profiles=(_product_profile(),),
+            role_policies=(_role_policy(),),
+            classifications=(_classification(),),
+            work_requests=(_work_request(),),
+        )
+
+        result = self._invoke_cli(store=store)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        response = json.loads(result.stdout)
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["coverage"]["state"], "complete")
+        self.assertEqual(response["candidates"][0]["state"], "matched")
+        self.assertNotIn(REPOSITORY, result.output)
+        self.assertNotIn(REPOSITORY_ID, result.output)
+        self.assertNotIn(REPOSITORY_OWNER_ID, result.output)
+        self.assertIn("configured PostgreSQL credentials", result.stderr)
+        self.assertIn("does not prove", result.stderr)
+        self.assertEqual(store.mutation_attempts, 0)
+        self.assertTrue(store.closed)
+
+    def test_cli_fails_closed_when_active_policy_is_missing(self) -> None:
+        store = _CliStore(active_policy_records=())
+
+        result = self._invoke_cli(store=store)
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("active authz policy is unavailable", result.output)
+        self.assertTrue(store.closed)
+
+    def test_cli_fails_closed_when_active_policy_is_ambiguous(self) -> None:
+        policy_record = _policy_record(repository=REPOSITORY)
+        store = _CliStore(active_policy_records=(policy_record, policy_record))
+
+        result = self._invoke_cli(store=store)
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Multiple active Launchplane authz policy records", result.output)
+        self.assertTrue(store.closed)
+
+    def test_cli_rejects_malformed_request_before_opening_store(self) -> None:
+        result = self._invoke_cli(
+            store=None,
+            request_payload={"candidates": [{"repository": "not-exact"}]},
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("request JSON is invalid", result.output)
+
+    def test_cli_rejects_non_object_request_without_exposing_local_path(self) -> None:
+        result = self._invoke_cli(store=None, request_payload=[])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("request JSON is invalid", result.output)
+        self.assertNotIn("repository-scope.json", result.output)
+
+    def test_cli_rejects_non_utf8_request_before_opening_store(self) -> None:
+        result = self._invoke_cli(store=None, request_bytes=b"\xff")
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("request JSON is invalid", result.output)
+
+    def test_cli_reports_unavailable_store_without_leaking_connection_details(self) -> None:
+        result = self._invoke_cli(store=OSError("postgresql://secret@example.invalid/private"))
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("repository-scope evidence is unavailable", result.output)
+        self.assertNotIn("secret", result.output)
+        self.assertNotIn("example.invalid", result.output)
+
+    @staticmethod
+    def _invoke_cli(
+        *,
+        store: _CliStore | OSError | None,
+        request_payload: object | None = None,
+        request_bytes: bytes | None = None,
+    ) -> Result:
+        payload = (
+            {
+                "candidates": [
+                    {
+                        "repository": REPOSITORY,
+                        "repository_id": REPOSITORY_ID,
+                        "repository_owner_id": REPOSITORY_OWNER_ID,
+                    }
+                ]
+            }
+            if request_payload is None
+            else request_payload
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory_name:
+            request_file = Path(temporary_directory_name) / "repository-scope.json"
+            if request_bytes is None:
+                request_file.write_text(json.dumps(payload), encoding="utf-8")
+            else:
+                request_file.write_bytes(request_bytes)
+            constructor_patch = (
+                patch(
+                    "control_plane.cli_policy_profiles.PostgresRecordStore",
+                    side_effect=store,
+                )
+                if isinstance(store, OSError)
+                else patch(
+                    "control_plane.cli_policy_profiles.PostgresRecordStore",
+                    return_value=store,
+                )
+            )
+            with constructor_patch as postgres_store:
+                with _handle_key("repository-scope-cli-key"):
+                    result = CliRunner().invoke(
+                        CLI_MAIN,
+                        [
+                            "authz-policies",
+                            "repository-scope-evidence",
+                            "--database-url",
+                            "postgresql+psycopg://localhost/launchplane",
+                            "--request-file",
+                            str(request_file),
+                        ],
+                    )
+        if store is None:
+            postgres_store.assert_not_called()
+        return result
+
     def test_complete_scope_matches_candidates_without_identity_leakage(self) -> None:
         policy_record = _policy_record(repository=REPOSITORY)
         store = _Store(

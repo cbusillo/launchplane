@@ -175,6 +175,16 @@ ambiguous. Landing this route grants no production access and authorizes no
 policy, workflow, secret, provider, runtime, deployment, or durable-operation
 change.
 
+For host-local audit recovery when the operator does not hold the HTTP action,
+`launchplane authz-policies repository-scope-evidence` accepts the same bounded
+exact-candidate request JSON and reads the same redacted response directly from
+the configured PostgreSQL record store. This command derives evidence from the
+operator's DB credentials; it does not evaluate the operator against the active
+policy and is not proof that the operator is policy-authorized. It requires
+exactly one active policy record, fails closed on missing or ambiguous active
+state, and performs no policy, secret, workflow, provider, runtime, deployment,
+session, denial, idempotency, outbox, or durable-operation write.
+
 Landing these read contracts does not authorize their production grants and
 does not relax the active freeze. Production policy changes still require the
 separate reviewed administration and recovery gates owned by `#2058`/`#2061`.
