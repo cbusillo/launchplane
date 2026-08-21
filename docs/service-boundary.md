@@ -397,6 +397,7 @@ apply requires the same `Idempotency-Key` as its matching dry-run, an exact
 confirmation phrase, a non-empty reason and related issue, and an unchanged
 managed-comment observation. If the managed comment is already absent, apply
 records `already_absent` without claiming a GitHub mutation.
+
 - work graph chooser route:
   - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`
@@ -746,6 +747,42 @@ principal identifiers, tokens, secrets, or topology. Same-origin browser calls
 verify CSRF without renewing the session or rotating its token, and the route
 performs no policy, session, denial-evidence, idempotency, outbox, provider,
 runtime, secret, durable-operation, or other persistence write.
+
+`POST /v1/authz-diagnostics/repository-scope/read` is the independently
+grantable DB-backed repository-scope audit read. It requires
+`authz_repository_scope.read` and accepts at most 100 exact caller-known
+repository candidates. GitHub humans, local operators, and local administrators
+may use the permission; GitHub Actions and terminal-agent identities are
+ineligible. The route authorizes against runtime policy before reading route
+state, reloads exactly one active DB policy, and authorizes again against that
+record.
+
+The response reconciles active product profiles, current repository human-role
+and tenant-classification records, nonterminal Every Code work requests, and
+exact GitHub Actions repository membership from the active policy. It never
+returns a repository name or numeric identifier. Matched candidates are
+referenced by request ordinal and receive only an opaque purpose-separated
+handle plus `product`, `repository_record`, `work_graph`, and/or
+`authorization_chain` membership categories. Unmatched DB repositories produce
+aggregate counts only. The response also includes generation time, bounded
+source counts/timestamps, active-policy record/revision/time provenance, an
+opaque handle-generation marker, and count/reason coverage gaps.
+Each source query is capped at 1,000 retained records. A source that exceeds its
+cap reports `source_truncated` and cannot produce complete coverage.
+Public handle derivation requires the canonical high-entropy managed-secret key
+ring; legacy passphrase-only compatibility configuration fails closed rather
+than exposing a known-plaintext verifier for the managed-secret root.
+
+`coverage.state=complete` requires exact set equality: every DB repository must
+match one submitted candidate, every candidate must exist in DB scope, and no
+conflicting, malformed, stale-only, case-variant, or missing-identity evidence
+may remain, and claimed/running work requests must retain a current lease.
+Otherwise the route returns `partial`; consumers must treat that as fail-closed
+and cannot use it as #2177 or #2062 completion evidence.
+The endpoint is a bounded repository-existence oracle, sets `Cache-Control:
+no-store`, and must remain narrowly granted. Successful and partial reads write
+nothing. A standard redacted denial record remains the only permitted
+best-effort write on HTTP 403 and contains no repository identity.
 
 New managed GitHub Actions rules require immutable GitHub `repository_id` and
 `repository_owner_id` selectors. Production-capable, destructive,
@@ -3672,6 +3709,7 @@ revision/digest and repository/PR/head/tree binding. See
    workflows still write through repo-local CLI adapters.
 3. Define the first explicit Odoo and VeriReel driver interfaces after the
    service ingress exists.
+
 ## Product retirement
 
 `POST /v1/product-retirement` is the only supported provider-mutation path for

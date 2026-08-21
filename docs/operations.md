@@ -298,7 +298,7 @@ former replaces the previous process-local apply lock. Both require an
 `503 database_storage_required` on non-database stores.
 
 - A concurrent request with the same key while the effect runs returns `409
-  mutation_in_progress`; a completed effect replays; a different request
+mutation_in_progress`; a completed effect replays; a different request
   fingerprint returns `409 idempotency_key_reused`.
 - GitHub workflow retries must preserve the original operation key. The generic
   web stable-deploy workflow keeps the first-attempt `:<run_id>:1` suffix on
@@ -687,6 +687,43 @@ tokens, secrets, or topology. Browser calls retain same-origin and CSRF checks
 without session renewal or rotation, and no policy, session, denial, audit,
 idempotency, outbox, provider, runtime, secret, or durable-operation record is
 written.
+
+`POST /v1/authz-diagnostics/repository-scope/read` provides one bounded
+DB-backed comparison for authorization portfolio audits. Supply at most 100
+exact repositories already known from the pinned GitHub/planning evidence. The
+service does not echo those identities. Candidate results use only their input
+index, a matched/not-found/ambiguous state, an opaque handle for exact matches,
+and bounded membership categories. Do not place repository identities in URLs,
+logs, issue comments, or published evidence merely to use this route.
+
+The caller needs the separate `authz_repository_scope.read` action and must be
+an authenticated GitHub human, local operator, or local administrator. The
+route performs runtime-policy preflight, reloads the single active DB policy,
+and reauthorizes before reading product, repository, and work-graph records.
+GitHub Actions and terminal agents cannot use the route; do not borrow a
+workflow identity or dispatch a protected workflow as a workaround.
+
+Treat `coverage.state=partial` as blocked. The bounded gaps report only source,
+reason code, and count. Reconcile both directions: every DB entry must match a
+candidate and every candidate must exist in DB scope. Expand or correct the
+caller-known candidate set through the sanctioned #2177 evidence process, but
+do not inspect the database directly or widen another grant. Opaque handles are
+stable only within the returned `handle_generation`; if that marker changes after
+canonical managed-secret key-ring rotation, regenerate the comparison instead of
+correlating old and new handles. Legacy passphrase-only secret configuration
+cannot derive public handles and returns a fail-closed unavailable response. The
+response is `Cache-Control: no-store` and remains a narrow repository-existence
+oracle even though it exposes no repository names.
+Each source query retains at most 1,000 records; `source_truncated` keeps the
+result partial until the authoritative source can be reconciled within bounds.
+An expired or malformed lease on a claimed/running work request likewise keeps
+coverage partial until the normal recovery path refreshes that record.
+
+Successful and partial reads perform no policy, session, idempotency, outbox,
+provider, runtime, workflow, secret, deployment, or durable-operation mutation.
+A denied request may append the ordinary redacted denial record, which contains
+no candidate or repository identity. Landing the route does not grant
+production access and does not relax #2058.
 
 Standard `authorization_denied` HTTP failures with a captured policy evaluation
 write a redacted `launchplane_authz_denials` audit record on a best-effort basis.
@@ -2049,7 +2086,7 @@ context only, and `context_instance` has both context and instance.
   labels, and timestamps only. They do not echo literal values or managed secret
   binding ids.
 - `odoo-overrides migrate-secret-transport --apply` and `odoo-overrides
-  mark-apply` require `--allow-direct-db-mutation` before they persist local DB
+mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   changes. `migrate-secret-transport` dry-run, `odoo-overrides list`, and
   `odoo-overrides show` stay read-only inspection paths.
 - Compose post-deploy updates consume deploy-phase overrides from these records

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -16,6 +19,7 @@ from control_plane.contracts.authz_access_read import (
     AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
     AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
     AUTHZ_POLICY_HEALTH_READ_ACTION,
+    AUTHZ_REPOSITORY_SCOPE_READ_ACTION,
     EFFECTIVE_ACCESS_READ_ACTION,
     AuthzPolicyCandidatePreviewRequest,
     EffectiveAccessEvaluateRequest,
@@ -26,6 +30,11 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+)
+from control_plane import secrets as control_plane_secrets
 from control_plane.http_app import LaunchplaneAuthzPolicyRuntime, create_launchplane_fastapi_app
 from control_plane.service_auth import (
     AuthzEvaluation,
@@ -106,6 +115,31 @@ def _support_reader_policy() -> LaunchplaneAuthzPolicy:
     )
 
 
+def _repository_scope_reader_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "schema_version": 2,
+            "github_actions": [
+                {
+                    "repository": "example/private-product",
+                    "repository_id": "123456",
+                    "repository_owner_id": "654321",
+                    "actions": ["deploy.write"],
+                }
+            ],
+            "local_operators": [
+                {
+                    "subjects": ["support-reader"],
+                    "token_labels": ["support-reader-label"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": [AUTHZ_REPOSITORY_SCOPE_READ_ACTION],
+                }
+            ],
+        }
+    )
+
+
 def _app(
     *,
     root: Path,
@@ -161,7 +195,267 @@ def _database_app(
             store.close()
 
 
+def _repository_scope_product_profile() -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product="example-product",
+        display_name="Example Product",
+        repository="example/private-product",
+        repository_id="123456",
+        repository_owner_id="654321",
+        driver_id="generic-web",
+        image=ProductImageProfile(),
+        updated_at="2026-08-20T21:00:00+00:00",
+        source="test:authz-access-read",
+    )
+
+
+def _repository_scope_key_ring(value: str) -> str:
+    encoded_key = base64.urlsafe_b64encode(hashlib.sha256(value.encode()).digest())
+    return json.dumps(
+        {
+            "active_key_id": "repository-scope-key",
+            "keys": {"repository-scope-key": encoded_key.decode()},
+        }
+    )
+
+
 class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_operator_reads_complete_redacted_repository_scope_without_mutation(
+        self,
+    ) -> None:
+        with _database_app(_repository_scope_reader_policy()) as (store, record, app):
+            store.write_product_profile_record(_repository_scope_product_profile())
+            policy_records_before = store.list_authz_policy_records()
+            repository_scope_operation = app.openapi()["paths"][
+                "/v1/authz-diagnostics/repository-scope/read"
+            ]["post"]
+            self.assertEqual(
+                repository_scope_operation["operationId"],
+                "read_authz_repository_scope",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: (
+                        _repository_scope_key_ring("authz-repository-scope-test-key")
+                    )
+                },
+                clear=True,
+            ):
+                with (
+                    patch(
+                        "control_plane.storage.postgres.PostgresRecordStore.write_authz_denial_record",
+                        side_effect=AssertionError(
+                            "successful repository scope reads must not write"
+                        ),
+                    ),
+                    patch(
+                        "control_plane.storage.postgres.PostgresRecordStore.write_product_profile_record",
+                        side_effect=AssertionError(
+                            "repository scope reads must not mutate products"
+                        ),
+                    ),
+                    patch(
+                        "control_plane.storage.postgres.PostgresRecordStore.write_repository_human_role_policy_record",
+                        side_effect=AssertionError(
+                            "repository scope reads must not mutate repository records"
+                        ),
+                    ),
+                    patch(
+                        "control_plane.storage.postgres.PostgresRecordStore.write_every_code_work_request_record",
+                        side_effect=AssertionError(
+                            "repository scope reads must not mutate work graph"
+                        ),
+                    ),
+                ):
+                    async with lifespan_client(app) as client:
+                        response = await client.post(
+                            "/v1/authz-diagnostics/repository-scope/read",
+                            headers={"Authorization": "Bearer support-token"},
+                            json={
+                                "candidates": [
+                                    {
+                                        "repository": "example/private-product",
+                                        "repository_id": "123456",
+                                        "repository_owner_id": "654321",
+                                    }
+                                ]
+                            },
+                        )
+            policy_records_after = store.list_authz_policy_records()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(policy_records_after, policy_records_before)
+        payload = response.json()
+        self.assertEqual(payload["coverage"]["state"], "complete")
+        self.assertEqual(payload["coverage"]["repository_count"], 1)
+        self.assertEqual(payload["coverage"]["matched_repository_count"], 1)
+        self.assertEqual(payload["candidates"][0]["state"], "matched")
+        self.assertEqual(
+            payload["candidates"][0]["memberships"],
+            ["product", "authorization_chain"],
+        )
+        self.assertEqual(
+            payload["provenance"]["authorization_chain"]["record_id"], record.record_id
+        )
+        serialized = json.dumps(payload, sort_keys=True)
+        for private_value in (
+            "example/private-product",
+            "123456",
+            "654321",
+            "support-reader",
+            "support-reader-label",
+            "deploy.write",
+        ):
+            self.assertNotIn(private_value, serialized)
+
+    async def test_repository_scope_authorization_precedes_route_database_reads(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_operators": [
+                    {
+                        "subjects": ["support-reader"],
+                        "token_labels": ["support-reader-label"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [AUTHZ_DENIAL_EXPLANATION_READ_ACTION],
+                    }
+                ],
+            }
+        )
+        with _database_app(policy) as (store, _record, app):
+            with (
+                patch(
+                    "control_plane.storage.postgres.PostgresRecordStore.list_authz_policy_records",
+                    side_effect=AssertionError("authorization must precede active policy reads"),
+                ),
+                patch(
+                    "control_plane.storage.postgres.PostgresRecordStore.list_product_profile_records",
+                    side_effect=AssertionError("authorization must precede product reads"),
+                ),
+                patch(
+                    "control_plane.storage.postgres.PostgresRecordStore.list_repository_human_role_policy_records",
+                    side_effect=AssertionError("authorization must precede repository reads"),
+                ),
+                patch(
+                    "control_plane.storage.postgres.PostgresRecordStore.list_every_code_work_request_records",
+                    side_effect=AssertionError("authorization must precede work graph reads"),
+                ),
+            ):
+                async with lifespan_client(app) as client:
+                    response = await client.post(
+                        "/v1/authz-diagnostics/repository-scope/read",
+                        headers={"Authorization": "Bearer support-token"},
+                        json={"candidates": []},
+                    )
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_repository_scope_rechecks_fresh_policy_and_only_records_denial(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_database_url(root / "launchplane.sqlite3"))
+            store.ensure_schema()
+            active_record = _seed_policy(store, _support_reader_policy())
+            runtime_policy = _repository_scope_reader_policy()
+            runtime_digest = authz_policy_sha256(runtime_policy)
+            runtime_record = LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=2,
+                    policy_sha256=runtime_digest,
+                ),
+                revision=2,
+                status="active",
+                source="test:runtime-only",
+                updated_at="2026-08-20T22:00:00+00:00",
+                policy_sha256=runtime_digest,
+                policy=runtime_policy,
+            )
+            app = _app(root=root, store=store, record=runtime_record)
+            try:
+                async with lifespan_client(app) as client:
+                    response = await client.post(
+                        "/v1/authz-diagnostics/repository-scope/read",
+                        headers={"Authorization": "Bearer support-token"},
+                        json={"candidates": []},
+                    )
+                denial_record = store.read_authz_denial_record(
+                    trace_id=response.json()["trace_id"],
+                    observed_at="2026-08-20T23:00:00+00:00",
+                )
+                policy_records = store.list_authz_policy_records()
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(policy_records, (active_record,))
+        self.assertIsNotNone(denial_record)
+        assert denial_record is not None
+        self.assertEqual(
+            denial_record.route_path,
+            "/v1/authz-diagnostics/repository-scope/read",
+        )
+        serialized = json.dumps(denial_record.model_dump(mode="json"), sort_keys=True)
+        self.assertNotIn("example/private-product", serialized)
+        self.assertNotIn("123456", serialized)
+
+    async def test_repository_scope_fails_closed_without_handle_root_or_valid_request(
+        self,
+    ) -> None:
+        with _database_app(_repository_scope_reader_policy()) as (store, _record, app):
+            store.write_product_profile_record(_repository_scope_product_profile())
+            async with lifespan_client(app) as client:
+                with patch.dict(os.environ, {}, clear=True):
+                    unavailable_response = await client.post(
+                        "/v1/authz-diagnostics/repository-scope/read",
+                        headers={"Authorization": "Bearer support-token"},
+                        json={"candidates": []},
+                    )
+                with patch.dict(
+                    os.environ,
+                    {
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: (
+                            "legacy-low-entropy-key"
+                        )
+                    },
+                    clear=True,
+                ):
+                    legacy_key_response = await client.post(
+                        "/v1/authz-diagnostics/repository-scope/read",
+                        headers={"Authorization": "Bearer support-token"},
+                        json={"candidates": []},
+                    )
+                invalid_response = await client.post(
+                    "/v1/authz-diagnostics/repository-scope/read",
+                    headers={"Authorization": "Bearer support-token"},
+                    json={
+                        "candidates": [
+                            {
+                                "repository": "example/private-product",
+                                "repository_id": "private-id-must-not-echo",
+                            }
+                        ]
+                    },
+                )
+
+        self.assertEqual(unavailable_response.status_code, 503, unavailable_response.text)
+        self.assertEqual(
+            unavailable_response.json()["error"]["code"],
+            "authz_repository_scope_handle_unavailable",
+        )
+        self.assertEqual(legacy_key_response.status_code, 503, legacy_key_response.text)
+        self.assertEqual(
+            legacy_key_response.json()["error"]["code"],
+            "authz_repository_scope_handle_unavailable",
+        )
+        self.assertEqual(invalid_response.status_code, 400, invalid_response.text)
+        self.assertEqual(invalid_response.headers["cache-control"], "no-store")
+        self.assertEqual(invalid_response.json()["error"]["code"], "invalid_request")
+        self.assertNotIn("private-id-must-not-echo", invalid_response.text)
+
     async def test_administrator_reads_bounded_policy_health_without_selector_leakage(
         self,
     ) -> None:

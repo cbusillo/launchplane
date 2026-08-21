@@ -341,6 +341,7 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             "secret_binding.apply": "secret_backed",
             "authz_policy_health.read": "policy_admin",
             "authz_policy_candidate_preview.read": "policy_admin",
+            "authz_repository_scope.read": "read",
             "authz_policy_grant.write": "policy_admin",
         }
 

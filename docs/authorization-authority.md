@@ -137,6 +137,44 @@ provider, runtime, secret, durable-operation, or other persistence write. The
 preview does not produce an apply digest, does not prove future applying-
 administrator continuity, and does not authorize any production grant.
 
+The bounded repository-scope slice adds `authz_repository_scope.read` as a
+separate human-reader permission. `POST
+/v1/authz-diagnostics/repository-scope/read` accepts at most 100 exact
+caller-known repository candidates so an authorization audit can reconcile its
+GitHub/planning evidence with DB-backed Launchplane scope without granting the
+broad active-policy or work-graph reads. The permission is available only to
+authenticated GitHub humans, local operators, and local administrators;
+GitHub Actions and terminal-agent identities remain ineligible even when a rule
+mentions the action.
+
+The route derives current membership from active product profiles, current
+repository role/classification records, nonterminal Every Code work-request
+records, and exact GitHub Actions repository membership in the single active DB
+authorization policy. It does not evaluate or return actions, principals,
+selectors, rule identities, workflow identities, or policy payloads. Every
+repository identity is redacted. Candidate results are referenced only by input
+position and return a purpose-separated opaque handle plus source-membership
+categories when matched. Handles remain stable within one opaque handle
+generation; canonical managed-secret key-ring rotation changes both the handles
+and the non-secret opaque generation marker so evidence cannot silently compare
+across generations. Legacy passphrase-only managed-secret configuration is not
+accepted for this public identifier derivation and fails closed.
+
+This permission is a bounded repository-existence oracle and must not be granted
+broadly. Unmatched DB entries appear only as counts, never as handles or names.
+Each source query retains at most 1,000 records; any truncation is an explicit
+partial-coverage gap rather than silent omission.
+Any unmatched DB entry, submitted candidate missing from DB scope, conflicting
+identity evidence, case variant that would not match the exact authorization
+evaluator, malformed timestamp, missing immutable identity evidence, or
+expired active work-request lease, or stale-only authorization membership produces
+`coverage.state=partial` with bounded count/reason gaps. Partial coverage is a
+fail-closed audit result and cannot satisfy #2177 or final #2062 review. Storage
+or active-policy absence still fails hard; multiple active policies fail as
+ambiguous. Landing this route grants no production access and authorizes no
+policy, workflow, secret, provider, runtime, deployment, or durable-operation
+change.
+
 Landing these read contracts does not authorize their production grants and
 does not relax the active freeze. Production policy changes still require the
 separate reviewed administration and recovery gates owned by `#2058`/`#2061`.

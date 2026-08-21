@@ -1974,6 +1974,333 @@
         "title": "AuthzReachableAdministratorSummary",
         "type": "object"
       },
+      "AuthzRepositoryScopeCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "repository_id": {
+            "default": "",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "repository_owner_id": {
+            "default": "",
+            "title": "Repository Owner Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository"
+        ],
+        "title": "AuthzRepositoryScopeCandidate",
+        "type": "object"
+      },
+      "AuthzRepositoryScopeCandidateResult": {
+        "additionalProperties": false,
+        "properties": {
+          "handle": {
+            "default": "",
+            "title": "Handle",
+            "type": "string"
+          },
+          "index": {
+            "minimum": 0.0,
+            "title": "Index",
+            "type": "integer"
+          },
+          "memberships": {
+            "default": [],
+            "items": {
+              "enum": [
+                "product",
+                "repository_record",
+                "work_graph",
+                "authorization_chain"
+              ],
+              "type": "string"
+            },
+            "title": "Memberships",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "matched",
+              "not_found",
+              "ambiguous"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "state"
+        ],
+        "title": "AuthzRepositoryScopeCandidateResult",
+        "type": "object"
+      },
+      "AuthzRepositoryScopeCoverage": {
+        "additionalProperties": false,
+        "properties": {
+          "gaps": {
+            "items": {
+              "$ref": "#/components/schemas/AuthzRepositoryScopeGap"
+            },
+            "title": "Gaps",
+            "type": "array"
+          },
+          "matched_repository_count": {
+            "minimum": 0.0,
+            "title": "Matched Repository Count",
+            "type": "integer"
+          },
+          "repository_count": {
+            "minimum": 0.0,
+            "title": "Repository Count",
+            "type": "integer"
+          },
+          "source_counts": {
+            "$ref": "#/components/schemas/AuthzRepositoryScopeSourceCounts"
+          },
+          "state": {
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "unmatched_repository_count": {
+            "minimum": 0.0,
+            "title": "Unmatched Repository Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "state",
+          "source_counts",
+          "repository_count",
+          "matched_repository_count",
+          "unmatched_repository_count",
+          "gaps"
+        ],
+        "title": "AuthzRepositoryScopeCoverage",
+        "type": "object"
+      },
+      "AuthzRepositoryScopeGap": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "minimum": 1.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "reason_code": {
+            "enum": [
+              "active_record_ambiguous",
+              "candidate_coverage_incomplete",
+              "candidate_repository_ambiguous",
+              "candidate_repository_missing",
+              "immutable_identity_conflict",
+              "immutable_identity_missing",
+              "record_timestamp_malformed",
+              "repository_case_variant",
+              "repository_identity_conflict",
+              "source_truncated",
+              "stale_authorization_membership",
+              "stale_work_graph_record"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "product",
+              "repository_record",
+              "work_graph",
+              "authorization_chain",
+              "candidate"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "reason_code",
+          "count"
+        ],
+        "title": "AuthzRepositoryScopeGap",
+        "type": "object"
+      },
+      "AuthzRepositoryScopePolicyProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "revision",
+          "updated_at"
+        ],
+        "title": "AuthzRepositoryScopePolicyProvenance",
+        "type": "object"
+      },
+      "AuthzRepositoryScopeProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_chain": {
+            "$ref": "#/components/schemas/AuthzRepositoryScopePolicyProvenance"
+          },
+          "product": {
+            "$ref": "#/components/schemas/AuthzRepositoryScopeRecordProvenance"
+          },
+          "repository_record": {
+            "$ref": "#/components/schemas/AuthzRepositoryScopeRecordProvenance"
+          },
+          "work_graph": {
+            "$ref": "#/components/schemas/AuthzRepositoryScopeRecordProvenance"
+          }
+        },
+        "required": [
+          "authorization_chain",
+          "product",
+          "repository_record",
+          "work_graph"
+        ],
+        "title": "AuthzRepositoryScopeProvenance",
+        "type": "object"
+      },
+      "AuthzRepositoryScopeReadRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "candidates": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AuthzRepositoryScopeCandidate"
+            },
+            "maxItems": 100,
+            "title": "Candidates",
+            "type": "array"
+          }
+        },
+        "title": "AuthzRepositoryScopeReadRequest",
+        "type": "object"
+      },
+      "AuthzRepositoryScopeRecordProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "active_record_count": {
+            "minimum": 0.0,
+            "title": "Active Record Count",
+            "type": "integer"
+          },
+          "latest_recorded_at": {
+            "default": "",
+            "title": "Latest Recorded At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "active_record_count"
+        ],
+        "title": "AuthzRepositoryScopeRecordProvenance",
+        "type": "object"
+      },
+      "AuthzRepositoryScopeResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/AuthzRepositoryScopeCandidateResult"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/AuthzRepositoryScopeCoverage"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "handle_generation": {
+            "title": "Handle Generation",
+            "type": "string"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/AuthzRepositoryScopeProvenance"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "generated_at",
+          "handle_generation",
+          "coverage",
+          "provenance",
+          "candidates"
+        ],
+        "title": "AuthzRepositoryScopeResponse",
+        "type": "object"
+      },
+      "AuthzRepositoryScopeSourceCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_chain": {
+            "minimum": 0.0,
+            "title": "Authorization Chain",
+            "type": "integer"
+          },
+          "product": {
+            "minimum": 0.0,
+            "title": "Product",
+            "type": "integer"
+          },
+          "repository_record": {
+            "minimum": 0.0,
+            "title": "Repository Record",
+            "type": "integer"
+          },
+          "work_graph": {
+            "minimum": 0.0,
+            "title": "Work Graph",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "product",
+          "repository_record",
+          "work_graph",
+          "authorization_chain"
+        ],
+        "title": "AuthzRepositoryScopeSourceCounts",
+        "type": "object"
+      },
       "BackupGateEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -36845,6 +37172,106 @@
           }
         },
         "summary": "Evaluate the calling GitHub Actions identity against active authorization"
+      }
+    },
+    "/v1/authz-diagnostics/repository-scope/read": {
+      "post": {
+        "operationId": "read_authz_repository_scope",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthzRepositoryScopeReadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzRepositoryScopeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read bounded authorization repository scope"
       }
     },
     "/v1/authz-policies/active": {

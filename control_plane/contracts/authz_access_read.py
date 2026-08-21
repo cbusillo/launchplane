@@ -20,8 +20,11 @@ EFFECTIVE_ACCESS_READ_ACTION = "authz_policy_effective_access.read"
 AUTHZ_DENIAL_EXPLANATION_READ_ACTION = "authz_denial_explanation.read"
 AUTHZ_POLICY_HEALTH_READ_ACTION = "authz_policy_health.read"
 AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION = "authz_policy_candidate_preview.read"
+AUTHZ_REPOSITORY_SCOPE_READ_ACTION = "authz_repository_scope.read"
 AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_PROBES = 25
 AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_RULES = 500
+AUTHZ_REPOSITORY_SCOPE_MAX_CANDIDATES = 100
+AUTHZ_REPOSITORY_SCOPE_MAX_SOURCE_RECORDS = 1000
 AuthzPolicyPrincipalType: TypeAlias = Literal[
     "github_actions",
     "github_humans",
@@ -491,3 +494,175 @@ class AuthzPolicyCandidatePreviewSnapshot(BaseModel):
 class AuthzPolicyCandidatePreviewResponse(AuthzPolicyCandidatePreviewSnapshot):
     status: Literal["ok"] = "ok"
     trace_id: str
+
+
+AuthzRepositoryScopeMembership: TypeAlias = Literal[
+    "product",
+    "repository_record",
+    "work_graph",
+    "authorization_chain",
+]
+AuthzRepositoryScopeCoverageState: TypeAlias = Literal["complete", "partial"]
+AuthzRepositoryScopeGapSource: TypeAlias = Literal[
+    "product",
+    "repository_record",
+    "work_graph",
+    "authorization_chain",
+    "candidate",
+]
+AuthzRepositoryScopeGapReason: TypeAlias = Literal[
+    "active_record_ambiguous",
+    "candidate_coverage_incomplete",
+    "candidate_repository_ambiguous",
+    "candidate_repository_missing",
+    "immutable_identity_conflict",
+    "immutable_identity_missing",
+    "record_timestamp_malformed",
+    "repository_case_variant",
+    "repository_identity_conflict",
+    "source_truncated",
+    "stale_authorization_membership",
+    "stale_work_graph_record",
+]
+
+
+class AuthzRepositoryScopeCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    repository: str
+    repository_id: str = ""
+    repository_owner_id: str = ""
+
+    @model_validator(mode="after")
+    def _validate_candidate(self) -> "AuthzRepositoryScopeCandidate":
+        repository = self.repository.strip()
+        owner, separator, name = repository.partition("/")
+        if (
+            not separator
+            or not owner
+            or not name
+            or "/" in name
+            or len(repository) > 512
+            or any(character in repository for character in "*?[]")
+        ):
+            raise ValueError("Repository scope candidates require one exact owner/repository name.")
+        object.__setattr__(self, "repository", repository)
+        repository_id = self.repository_id.strip()
+        repository_owner_id = self.repository_owner_id.strip()
+        if bool(repository_id) != bool(repository_owner_id):
+            raise ValueError(
+                "Repository scope candidate immutable identity requires both numeric IDs."
+            )
+        if repository_id and (not repository_id.isdecimal() or not repository_owner_id.isdecimal()):
+            raise ValueError("Repository scope candidate immutable IDs must be numeric.")
+        object.__setattr__(self, "repository_id", repository_id)
+        object.__setattr__(self, "repository_owner_id", repository_owner_id)
+        return self
+
+
+class AuthzRepositoryScopeReadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidates: tuple[AuthzRepositoryScopeCandidate, ...] = Field(
+        default=(),
+        max_length=AUTHZ_REPOSITORY_SCOPE_MAX_CANDIDATES,
+    )
+
+    @model_validator(mode="after")
+    def _validate_candidates(self) -> "AuthzRepositoryScopeReadRequest":
+        identities = tuple(candidate.repository.casefold() for candidate in self.candidates)
+        if len(identities) != len(set(identities)):
+            raise ValueError("Repository scope candidates must be unique.")
+        return self
+
+
+class AuthzRepositoryScopeGap(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: AuthzRepositoryScopeGapSource
+    reason_code: AuthzRepositoryScopeGapReason
+    count: int = Field(ge=1)
+
+
+class AuthzRepositoryScopeSourceCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    product: int = Field(ge=0)
+    repository_record: int = Field(ge=0)
+    work_graph: int = Field(ge=0)
+    authorization_chain: int = Field(ge=0)
+
+
+class AuthzRepositoryScopeCoverage(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state: AuthzRepositoryScopeCoverageState
+    source_counts: AuthzRepositoryScopeSourceCounts
+    repository_count: int = Field(ge=0)
+    matched_repository_count: int = Field(ge=0)
+    unmatched_repository_count: int = Field(ge=0)
+    gaps: tuple[AuthzRepositoryScopeGap, ...]
+
+    @model_validator(mode="after")
+    def _validate_coverage(self) -> "AuthzRepositoryScopeCoverage":
+        if self.matched_repository_count + self.unmatched_repository_count != self.repository_count:
+            raise ValueError("Repository scope coverage counts must reconcile.")
+        if (self.state == "complete") != (not self.gaps):
+            raise ValueError("Complete repository scope coverage cannot include gaps.")
+        return self
+
+
+class AuthzRepositoryScopePolicyProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    record_id: str
+    revision: int = Field(ge=1)
+    updated_at: str
+
+
+class AuthzRepositoryScopeRecordProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    active_record_count: int = Field(ge=0)
+    latest_recorded_at: str = ""
+
+
+class AuthzRepositoryScopeProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    authorization_chain: AuthzRepositoryScopePolicyProvenance
+    product: AuthzRepositoryScopeRecordProvenance
+    repository_record: AuthzRepositoryScopeRecordProvenance
+    work_graph: AuthzRepositoryScopeRecordProvenance
+
+
+AuthzRepositoryScopeCandidateState: TypeAlias = Literal["matched", "not_found", "ambiguous"]
+
+
+class AuthzRepositoryScopeCandidateResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    index: int = Field(ge=0)
+    state: AuthzRepositoryScopeCandidateState
+    handle: str = ""
+    memberships: tuple[AuthzRepositoryScopeMembership, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> "AuthzRepositoryScopeCandidateResult":
+        if self.state == "matched" and (not self.handle or not self.memberships):
+            raise ValueError("Matched repository scope candidates require bounded evidence.")
+        if self.state != "matched" and (self.handle or self.memberships):
+            raise ValueError("Unmatched repository scope candidates cannot expose evidence.")
+        return self
+
+
+class AuthzRepositoryScopeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    generated_at: str
+    handle_generation: str
+    coverage: AuthzRepositoryScopeCoverage
+    provenance: AuthzRepositoryScopeProvenance
+    candidates: tuple[AuthzRepositoryScopeCandidateResult, ...]
