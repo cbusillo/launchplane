@@ -246,7 +246,14 @@ def _load_authz_repository_scope_request(request_file: Path) -> AuthzRepositoryS
     try:
         payload = _load_json_file(request_file)
         return AuthzRepositoryScopeReadRequest.model_validate(payload)
-    except (click.ClickException, JSONDecodeError, OSError, UnicodeError, ValidationError) as error:
+    except (
+        click.ClickException,
+        JSONDecodeError,
+        OSError,
+        RecursionError,
+        UnicodeError,
+        ValidationError,
+    ) as error:
         raise click.ClickException(
             "Authorization repository-scope request JSON is invalid."
         ) from error

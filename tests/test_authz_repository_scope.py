@@ -212,6 +212,16 @@ class AuthzRepositoryScopeTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("request JSON is invalid", result.output)
 
+    def test_cli_rejects_deeply_nested_request_before_opening_store(self) -> None:
+        result = self._invoke_cli(
+            store=None,
+            request_bytes=(b'{"candidates":' + b'{"a":' * 100_000 + b"0" + b"}" * 100_000 + b"}"),
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("request JSON is invalid", result.output)
+        self.assertNotIn("Traceback", result.output)
+
     def test_cli_reports_unavailable_store_without_leaking_connection_details(self) -> None:
         result = self._invoke_cli(store=OSError("postgresql://secret@example.invalid/private"))
 
