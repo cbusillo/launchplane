@@ -1126,6 +1126,23 @@ rehearsal use. Direct authz policy list/import DB commands are not supported.
 Launchplane self-deploy authority remains separate and does not authorize authz
 policy administration.
 
+The narrow exception is the host-local, read-only authorization audit command:
+
+```bash
+uv run launchplane authz-policies repository-scope-evidence \
+  --database-url "$LAUNCHPLANE_DATABASE_URL" \
+  --request-file ./repository-scope-request.json
+```
+
+The request file uses the same bounded exact-candidate JSON contract as `POST
+/v1/authz-diagnostics/repository-scope/read`. Standard output is the same
+redacted response shape; standard error states that provenance is derived from
+the configured PostgreSQL credentials. This command does not evaluate whether
+the operator is authorized by the active policy and must not be represented as
+proof of policy-authorized HTTP access. It requires exactly one active policy
+record and performs no policy, secret, workflow, provider, runtime, deployment,
+session, denial, idempotency, outbox, or durable-operation write.
+
 Authz policy schema v1 remains the compatibility contract for an active v1
 policy and retains its existing product/context breadth. Managed desired sets
 must use schema v2; reconciling an active v1 policy requires the explicit
