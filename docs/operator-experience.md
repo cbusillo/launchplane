@@ -9,30 +9,34 @@ contract before rebuilding the browser UI. The current React UI is transitional;
 do not spend time refining its context picker or product-config layout except
 for secret-safety regressions.
 
-The rebuilt UI should be a product operations surface, not a raw record browser.
-The first screen should show products, their stable environments, current
-operational state, and the next safe action.
+The rebuilt UI should be a product-delivery and operations surface, not a raw
+record browser. The first screen should show products, their stable
+environments, release and exact-change state, current operational state, and the
+next safe action.
 
 ## Primary User And Job
 
 The primary user is an operator who may also be a developer, but who is acting
 in an operations context. Their job is:
 
-> Understand what is running for one product, whether it is healthy, why it is
-> unhealthy, and what action is safe to take next without understanding or
-> bypassing Launchplane's provider plumbing.
+> Understand what is running for one product, which exact change produced it,
+> whether the product and change are healthy and admissible, and what action is
+> safe to take next without understanding or bypassing Launchplane's forge or
+> provider plumbing.
 
-The same person may switch into engineering maintenance work, but Product Ops
-and Engineering Ops are separate jobs and must have separate navigation:
+The same person may switch between product operation and delivery governance,
+but those jobs must have separate navigation:
 
 - **Product Ops** owns product environments, previews, settings, secrets,
   promotions, maintenance, activity, and diagnosis.
-- **Engineering Ops** owns the work graph, GitHub issue reconciliation, Every
-  Code queues, merge-train controls, and platform maintenance.
+- **Delivery Governance** owns forge-neutral Owner acceptance,
+  engineering-review evidence, dependency health, admission, landing outcomes,
+  and only the exact-change/dependency state needed to decide whether a change
+  may enter an environment.
 
-Product Ops is the default surface. Engineering Ops may reuse the same session,
-theme, and API transport, but it must not dominate the product workspace or the
-first screen.
+Product Ops is the default surface. Delivery Governance may reuse the same
+session, theme, and API transport, but it must not become a general issue
+tracker, planning system, work graph, engineering queue, or replacement forge.
 
 ## Representative Operator Journeys
 
@@ -86,20 +90,20 @@ browser, response, logs, or activity record.
 
 The primary golden paths are:
 
-1. Select a product and understand testing, production, previews, warnings, and
-   the next safe action.
-2. Open an environment and diagnose placement, domain, ingress, TLS, runtime
-   identity, configuration, and health evidence.
-3. Review and execute a supported dry-run, apply, workflow dispatch, refresh,
-   destroy, or maintenance action.
-4. Follow activity and evidence until the action reaches a clear terminal or
-   reconciliation state.
+1. Understand product, environment, release, and exact-change state and the next
+   safe action.
+2. Diagnose why a product, environment, change, or operation is unhealthy,
+   blocked, or not ready for admission.
+3. Review, approve, or execute a supported delivery or lifecycle action and
+   follow it to truthful terminal or reconciliation evidence.
 
 The rebuilt product must not become:
 
 - a generic card dashboard
 - a raw context, route, provider-ID, or record browser
 - a fleet-wide engineering queue presented as Product Ops
+- a Git host, issue tracker, project-planning system, CI runner, package
+  registry, or general repository-administration console
 - a collection of buttons that only prepare requests or perform no operation
 - a source of inferred, fixture-backed, or reassuring placeholder state
 - a second authority for runtime configuration or provider topology
@@ -121,12 +125,12 @@ Launchplane
         Activity
         Maintenance
         Diagnostics
-  Engineering Ops
-    Work graph
-    Issue reconciliation
-    Every Code
-    Merge train
-    Platform maintenance
+  Delivery Governance
+    Changes
+    Owner acceptance
+    Engineering evidence
+    Dependency health
+    Admission and landing
 ```
 
 The product workspace is the primary object. Stable lanes and previews are
@@ -262,11 +266,13 @@ The first product/site read endpoints are:
 - `GET /v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}`
 - `GET /v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness?action={authz_action}&artifact_id={artifact_id}&expected_current_artifact_id={expected_current_artifact_id}`
 
-Engineering Ops also exposes `/ui/engineering/governance-projection`, backed by
+Delivery Governance currently exposes
+`/ui/engineering/governance-projection`, backed by
 `GET /v1/governance/projection`. The workbench keeps authoritative current Owner
 acceptance and its immutable history, current ephemeral readiness, immutable
 admission, landing outcome, and GitHub observations in separately named
-regions. It is read-only and does not add a browser mutation contract.
+regions. The route name is transitional; the evidence contract is forge-neutral.
+It is read-only and does not add a browser mutation contract.
 
 These endpoints are profile and driver driven. A standard `generic-web` site
 should appear in the read model from Launchplane records alone: product profile,
@@ -541,37 +547,30 @@ The clean-slate shell uses URL-owned product selection under the service-owned
 - `/ui/products/{product}/activity` is the operator timeline. It is labelled
   Recent activity because the current backend read model returns a bounded
   latest-event window rather than a paginated complete history.
-- `/ui/engineering` is a separate Engineering Ops boundary. Product routes do
-  not load work-graph, issue-reconciliation, Every Code, merge-train, or platform
-  maintenance data.
-- `/ui/engineering/work-graph` reads the Launchplane-assembled snapshot and uses
-  the generated browser-supported rank operation. Recommendation reasons,
-  compact source evidence, repository identities, and safe-to-start state remain
-  Engineering Ops evidence; the route does not load or select a product route.
-- `/ui/engineering/issue-inbox` reads the explicit repository inventory and
-  Code Plans membership. Browser reconciliation is visibly unsupported because
-  the reconcile POST requires the native GitHub Actions OIDC or trusted
-  owner-agent write identity boundary and is not in the generated browser write
-  contract. The page renders no dead Dry Run or Apply control.
-- `/ui/engineering/every-code` reads a bounded summary window and labels it as a
-  recent operator snapshot rather than complete history. Rerun and worker
-  transitions remain outside the browser surface.
-- `/ui/engineering/merge-train` selects only DB-backed policy targets and reads
-  controller status, policy digest, lease, reconciliation, latest run, and
-  durable record evidence. It does not infer targets from products or work graph
-  items and does not dynamically call worker routes.
+- Delivery Governance remains separate from product environment navigation. It
+  may show exact-change identity, Owner acceptance, independent engineering
+  evidence, dependency health, admission, and landing outcomes.
+- Existing `/ui/engineering/work-graph`, `/ui/engineering/issue-inbox`, and
+  `/ui/engineering/every-code` routes are transitional and receive no new
+  product investment. Remove them after any admission-relevant evidence moves
+  into forge-neutral delivery-governance read models.
+- Existing `/ui/engineering/merge-train` behavior remains in scope only where
+  it presents or executes guarded admission and truthful landing evidence from
+  DB-backed policy. It must not infer a planning queue or make forge projections
+  authoritative.
 
 Product list and product detail reads have independent loading, empty, denied,
 missing, and failure states. A failed read must not become an empty product list,
 and a direct product URL must use `GET /v1/products/{product}` rather than a
 driver/context fallback. Environment, settings, secrets, activity, promotion,
-maintenance, and Engineering Ops child routes are added only when their typed
+maintenance, and Delivery Governance child routes are added only when their typed
 views and supported controls exist. Environment diagnosis uses desired,
 provider-recorded, and observed topology as distinct evidence; a verified read
 is not presented as healthy when the recorded ingress, TLS, or runtime identity
 condition is failing.
 
-Each Engineering Ops child route owns an abortable request lifecycle. Initial
+Each Delivery Governance or transitional engineering child route owns an
+abortable request lifecycle. Initial
 loading, denied, empty, unavailable, and cancelled states are distinct. A failed
 or cancelled refresh may retain the last accepted response only when the page
 marks it as cached evidence and preserves the service trace where available.

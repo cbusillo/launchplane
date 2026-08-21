@@ -2,6 +2,16 @@
 title: Work Graph Read Model
 ---
 
+## Status
+
+This is a transitional compatibility surface, not part of Launchplane's
+permanent forge-neutral product boundary. Do not add ranking, planning,
+issue-reconciliation, queue, or live-forge ingestion capability. Preserve the
+existing read-only behavior only while admission-relevant exact-change and
+dependency evidence moves into Delivery Governance read models, then delete the
+work-graph CLI, service, UI, configuration, documentation, and tests rather than
+leaving a dormant planning subsystem.
+
 ## Purpose
 
 The work graph read model ranks operator work from caller-supplied GitHub and
