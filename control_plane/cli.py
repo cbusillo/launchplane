@@ -154,6 +154,7 @@ _RUNTIME_CONTRACT_ENV_KEYS = (
     "OPENUPGRADE_ADDON_REPOSITORY",
 )
 _MASTER_ENCRYPTION_KEY_ENV_KEYS = ("LAUNCHPLANE_MASTER_ENCRYPTION_KEY",)
+_SECRET_KEYS_JSON_ENV_KEY = control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR
 _LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS = (
     "LAUNCHPLANE_POLICY_TOML",
     "LAUNCHPLANE_POLICY_B64",
@@ -2056,6 +2057,10 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
         "control_plane_root": str(control_plane_root),
         "bootstrap": {
             "database_url_present": bool(database_url),
+            "secret_keys_json_present": _launchplane_service_env_key_present(
+                env_map=env_map,
+                env_key=_SECRET_KEYS_JSON_ENV_KEY,
+            ),
             "master_encryption_key_present": _launchplane_service_any_env_keys_present(
                 env_map=env_map,
                 env_keys=_MASTER_ENCRYPTION_KEY_ENV_KEYS,
@@ -2228,16 +2233,35 @@ def _build_launchplane_service_runtime_contract(
     runtime_environment_record_count = _int_from_json_value(
         managed_store_status.get("runtime_environment_record_count")
     )
+    secret_keys_json = env_map.get(_SECRET_KEYS_JSON_ENV_KEY, "")
+    master_encryption_key = _launchplane_service_env_alias_value(
+        env_map=env_map,
+        env_keys=_MASTER_ENCRYPTION_KEY_ENV_KEYS,
+    )
+    try:
+        control_plane_secrets.validate_secret_key_configuration_values(
+            keys_json=secret_keys_json,
+            legacy_master_key=master_encryption_key,
+        )
+    except click.ClickException as error:
+        secret_key_configuration_valid = False
+        secret_key_configuration_error = str(error)
+    else:
+        secret_key_configuration_valid = True
+        secret_key_configuration_error = ""
     return {
         "database_url_present": bool(database_url),
         "database_scheme": database_scheme,
         "database_host": database_host,
         "managed_store_inspectable": bool(managed_store_status.get("inspectable")),
         "managed_store_error": str(managed_store_status.get("error") or ""),
-        "master_encryption_key_present": _launchplane_service_env_alias_present(
+        "secret_keys_json_present": _launchplane_service_env_key_present(
             env_map=env_map,
-            env_keys=_MASTER_ENCRYPTION_KEY_ENV_KEYS,
+            env_key=_SECRET_KEYS_JSON_ENV_KEY,
         ),
+        "master_encryption_key_present": bool(master_encryption_key),
+        "secret_key_configuration_valid": secret_key_configuration_valid,
+        "secret_key_configuration_error": secret_key_configuration_error,
         "dokploy_host_present": _launchplane_service_env_key_present(
             env_map=env_map,
             env_key="DOKPLOY_HOST",
@@ -2296,8 +2320,11 @@ def _launchplane_service_preflight_blockers(
     elif not runtime_contract["database_host"]:
         blockers.append("Launchplane service target database URL is missing a database host.")
 
-    if not runtime_contract["master_encryption_key_present"]:
-        blockers.append("Launchplane service target is missing LAUNCHPLANE_MASTER_ENCRYPTION_KEY.")
+    if not runtime_contract["secret_key_configuration_valid"]:
+        blockers.append(
+            "Launchplane service target managed-secret root configuration is invalid: "
+            f"{runtime_contract['secret_key_configuration_error']}"
+        )
     if runtime_contract["managed_store_inspectable"]:
         if not runtime_contract["dokploy_managed_host_present"]:
             blockers.append(
@@ -2322,6 +2349,14 @@ def _launchplane_service_preflight_warnings(
     runtime_contract: Mapping[str, object],
 ) -> list[str]:
     warnings: list[str] = []
+    if (
+        runtime_contract["master_encryption_key_present"]
+        and not runtime_contract["secret_keys_json_present"]
+    ):
+        warnings.append(
+            "Launchplane service target still uses the migration-only legacy managed-secret root. "
+            "Add LAUNCHPLANE_SECRET_KEYS_JSON before retiring LAUNCHPLANE_MASTER_ENCRYPTION_KEY."
+        )
     if not runtime_contract["managed_store_inspectable"]:
         warnings.append(
             "Launchplane service managed-store inspection was unavailable. Confirm the shared store has configured Dokploy bindings for DOKPLOY_HOST and DOKPLOY_TOKEN."

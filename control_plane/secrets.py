@@ -176,8 +176,9 @@ def _canonical_fernet_key(raw_key: object, *, key_id: str) -> bytes:
     return encoded
 
 
-def _get_key_ring() -> KeyRing:
-    keys_json = os.environ.get(LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR, "").strip()
+def _key_ring_from_values(*, keys_json: str, legacy_master_key: str) -> KeyRing:
+    keys_json = keys_json.strip()
+    legacy_master_key = legacy_master_key.strip()
     if keys_json:
         try:
             parsed = json.loads(keys_json)
@@ -204,9 +205,8 @@ def _get_key_ring() -> KeyRing:
             raise click.ClickException(f"Active key id '{active_key_id}' not found in keys.")
 
         legacy_compatibility_key_loaded = False
-        legacy_value = os.environ.get(LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR, "").strip()
-        if legacy_value:
-            legacy_key = _master_fernet_key(legacy_value)
+        if legacy_master_key:
+            legacy_key = _master_fernet_key(legacy_master_key)
             configured_legacy_key = encoded_keys.get(LEGACY_SECRET_KEY_ID)
             if configured_legacy_key is not None and configured_legacy_key != legacy_key:
                 raise click.ClickException(
@@ -224,22 +224,33 @@ def _get_key_ring() -> KeyRing:
             legacy_compatibility_key_loaded=legacy_compatibility_key_loaded,
         )
 
-    for environment_key in LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS:
-        configured_value = os.environ.get(environment_key, "")
-        if configured_value.strip():
-            fernet = Fernet(_master_fernet_key(configured_value))
-            return KeyRing(
-                active_key_id=LEGACY_SECRET_KEY_ID,
-                keys={LEGACY_SECRET_KEY_ID: fernet},
-                active_hmac_key=_derived_hmac_key(_master_fernet_key(configured_value)),
-                legacy_compatibility_key_loaded=True,
-            )
+    if legacy_master_key:
+        encoded_legacy_key = _master_fernet_key(legacy_master_key)
+        return KeyRing(
+            active_key_id=LEGACY_SECRET_KEY_ID,
+            keys={LEGACY_SECRET_KEY_ID: Fernet(encoded_legacy_key)},
+            active_hmac_key=_derived_hmac_key(encoded_legacy_key),
+            legacy_compatibility_key_loaded=True,
+        )
 
     expected_keys = " or ".join(
         (LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR, *LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS)
     )
     raise click.ClickException(
         f"Launchplane managed secrets require {expected_keys} to read or write encrypted values."
+    )
+
+
+def _get_key_ring() -> KeyRing:
+    legacy_master_key = ""
+    for environment_key in LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS:
+        configured_value = os.environ.get(environment_key, "")
+        if configured_value.strip():
+            legacy_master_key = configured_value
+            break
+    return _key_ring_from_values(
+        keys_json=os.environ.get(LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR, ""),
+        legacy_master_key=legacy_master_key,
     )
 
 
@@ -285,6 +296,17 @@ def keyed_secret_payload_fingerprint(payload: str, *, purpose: str) -> str:
 
 def validate_secret_key_configuration() -> None:
     _get_key_ring()
+
+
+def validate_secret_key_configuration_values(
+    *,
+    keys_json: str,
+    legacy_master_key: str,
+) -> None:
+    _key_ring_from_values(
+        keys_json=keys_json,
+        legacy_master_key=legacy_master_key,
+    )
 
 
 def _encrypt_secret_value(plaintext_value: str) -> tuple[str, str]:

@@ -409,6 +409,22 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                     with self.assertRaises(click.ClickException):
                         control_plane_secrets.validate_secret_key_configuration()
 
+    def test_value_validation_accepts_explicit_matching_legacy_key(self) -> None:
+        legacy_key = _test_fernet_key(0)
+
+        control_plane_secrets.validate_secret_key_configuration_values(
+            keys_json=json.dumps(
+                {
+                    "active_key_id": "key-2",
+                    "keys": {
+                        "key-2": _test_fernet_key(32),
+                        control_plane_secrets.LEGACY_SECRET_KEY_ID: legacy_key,
+                    },
+                }
+            ),
+            legacy_master_key=legacy_key,
+        )
+
     def test_reencrypt_secrets_migrates_legacy_key_and_proves_retirement(self) -> None:
         key2 = _test_fernet_key(32)
         with TemporaryDirectory() as temporary_directory_name:
