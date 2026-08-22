@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
+import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.service_auth import parse_authz_policy_toml
@@ -19,6 +20,7 @@ from control_plane.dokploy import source as dokploy_source
 
 LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 _DATABASE_URL_ENV_KEY = "LAUNCHPLANE_DATABASE_URL"
+_SECRET_KEYS_JSON_ENV_KEY = "LAUNCHPLANE_SECRET_KEYS_JSON"
 _MASTER_ENCRYPTION_KEY_ENV_KEY = "LAUNCHPLANE_MASTER_ENCRYPTION_KEY"
 _MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET"
 _POLICY_ENV_KEYS = (
@@ -35,6 +37,8 @@ LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
         "LAUNCHPLANE_COOKIE_SECURE",
         "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS",
         "LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK",
+        _SECRET_KEYS_JSON_ENV_KEY,
+        _MASTER_ENCRYPTION_KEY_ENV_KEY,
         "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET",
         _MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET_ENV_KEY,
         "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN",
@@ -224,6 +228,8 @@ def execute_launchplane_self_deploy(
 
 
 def _validate_bootstrap_target_env(env_map: dict[str, str]) -> None:
+    from control_plane import secrets as control_plane_secrets
+
     blockers: list[str] = []
     database_url = env_map.get(_DATABASE_URL_ENV_KEY, "").strip()
     if not database_url:
@@ -236,10 +242,13 @@ def _validate_bootstrap_target_env(env_map: dict[str, str]) -> None:
             blockers.append("Launchplane self deploy target database URL is not PostgreSQL.")
         elif not parsed_url.hostname:
             blockers.append("Launchplane self deploy target database URL is missing a host.")
-    if not env_map.get(_MASTER_ENCRYPTION_KEY_ENV_KEY, "").strip():
-        blockers.append(
-            "Launchplane self deploy target is missing LAUNCHPLANE_MASTER_ENCRYPTION_KEY."
+    try:
+        control_plane_secrets.validate_secret_key_configuration_values(
+            keys_json=env_map.get(_SECRET_KEYS_JSON_ENV_KEY, ""),
+            legacy_master_key=env_map.get(_MASTER_ENCRYPTION_KEY_ENV_KEY, ""),
         )
+    except click.ClickException as error:
+        blockers.append(str(error))
     if not env_map.get(_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET_ENV_KEY, "").strip():
         blockers.append(
             "Launchplane self deploy target is missing "

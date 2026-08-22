@@ -195,6 +195,12 @@ printing the old root:
 5. Remove `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` and restart the service. A final
    dry-run must remain clean before the old bootstrap secret is destroyed.
 
+Launchplane self-deploy must carry `LAUNCHPLANE_SECRET_KEYS_JSON` through its
+reviewed bootstrap-secret path and validate the resulting target environment
+before provider mutation. It may remove the migration-only legacy root only
+when the remaining canonical configuration is valid; malformed, mismatched, or
+rootless target state fails closed before deployment.
+
 Old ciphertext versions and audit metadata retain the old/new key ids and
 version ids as rollback evidence. To roll back before destroying an old root,
 restore that root as an allowed active key and run the same audited dry-run/apply
