@@ -473,3 +473,16 @@ Bring up the service with bootstrap env such as `LAUNCHPLANE_DATABASE_URL` and
 `LAUNCHPLANE_SECRET_KEYS_JSON`, then write the durable DB-backed secret
 and runtime records through the normal Launchplane commands. Dokploy
 credentials belong in Launchplane-managed secrets before Dokploy operations run.
+
+## Re-Encryption Planning Evidence
+
+The `managed-secret-reencryption` privileged-operation descriptor is the
+routine human planning surface for root rotation. It calls the existing
+re-encryption computation with `apply=False` and stores only bounded evidence:
+digests, counts, key IDs required for human retirement review, compatibility
+state, actor/source metadata, and lifecycle timestamps.
+
+Managed-secret IDs, secret-version IDs, ciphertext, plaintext, and raw error
+strings are neither persisted nor returned in the agent projection. The agent
+projection also excludes key IDs and request/actor details. Phase 1 does not
+change `/v1/secrets/reencrypt` apply authority and cannot mutate a secret.

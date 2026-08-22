@@ -3796,3 +3796,20 @@ control-plane context, never a product instance. Phase one adds the reusable
 `workflow_call` worker and managed authz secret routing only; it intentionally
 adds no mutable dispatch wrapper, live managed rule/secret value, deployment,
 or provider mutation.
+
+## Privileged-Operation Planning API
+
+The Phase 1 privileged-operation API is a typed planning surface, not an
+execution proxy. Human create/read/cancel routes are under
+`/v1/privileged-operations/plans`; the counts-only agent read is under
+`/v1/agent/privileged-operations/plans/{operation_id}`.
+
+Human routes reject every non-GitHub-human identity before policy evaluation
+and use the browser origin/fetch-metadata/CSRF boundary for writes. Every route
+requires schema-v2 policy and exactly one matching managed rule carrying both
+managed IDs. Bare policy evaluation and unmanaged action-empty rules cannot
+authorize the surface. The first planner invokes managed-secret re-encryption
+with `apply=False`; no approval, execute, or apply endpoint exists in Phase 1.
+
+Responses and stored records follow the redaction contract in
+`docs/privileged-operations.md`.

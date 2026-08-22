@@ -127,6 +127,7 @@ from control_plane.http_routes import (
     PRODUCT_OWNER_ROUTING_APPLY_ROUTE,
     ProductOwnerWriteRouteDependencies,
     OwnerAcceptanceRouteDependencies,
+    PrivilegedOperationRouteDependencies,
     GovernanceProjectionRouteDependencies,
     ProductReadRouteDependencies,
     ReadRouteDependencies,
@@ -157,6 +158,7 @@ from control_plane.http_routes import (
     register_managed_secret_read_routes,
     register_merge_train_read_routes,
     register_owner_acceptance_routes,
+    register_privileged_operation_routes,
     register_operation_status_read_routes,
     register_preview_notification_attempt_read_routes,
     register_preview_readiness_read_routes,
@@ -4320,6 +4322,26 @@ def create_launchplane_fastapi_app(
         consume_browser_mutation_request(request=request, session=session)
         return identity
 
+    def require_github_human_identity(identity: LaunchplaneIdentity) -> GitHubHumanIdentity:
+        if not isinstance(identity, GitHubHumanIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=next_trace_id(),
+                code="authorization_denied",
+                message="This route requires an authenticated GitHub human session.",
+            )
+        return identity
+
+    def read_github_human_identity(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+    ) -> GitHubHumanIdentity:
+        return require_github_human_identity(identity)
+
+    def read_github_human_browser_mutation_identity(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+    ) -> GitHubHumanIdentity:
+        return require_github_human_identity(identity)
+
     def read_nonpersisting_sensitive_identity(
         request: Request,
         authorization: Annotated[str, Header(alias="Authorization")] = "",
@@ -4635,6 +4657,12 @@ def create_launchplane_fastapi_app(
         authorization_allows=resolved_authz_policy_runtime.allows,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
+    )
+    privileged_operation_route_dependencies = PrivilegedOperationRouteDependencies(
+        common=read_route_dependencies,
+        read_github_human_identity=read_github_human_identity,
+        read_github_human_mutation_identity=(read_github_human_browser_mutation_identity),
+        policy_reader=lambda: resolved_authz_policy_runtime.policy,
     )
     product_owner_write_route_dependencies = ProductOwnerWriteRouteDependencies(
         read_write_identity=read_write_identity,
@@ -21767,6 +21795,10 @@ def create_launchplane_fastapi_app(
             public_origin=(human_session_manager.public_origin if human_session_manager else None),
             projection_service=owner_acceptance_projection_service,
         ),
+    )
+    register_privileged_operation_routes(
+        app,
+        dependencies=privileged_operation_route_dependencies,
     )
     register_governance_projection_routes(
         app,

@@ -29,6 +29,10 @@ class DurableOperationAuthorizationCaptureError(ValueError):
     pass
 
 
+class ManagedRuleAuthorizationError(ValueError):
+    pass
+
+
 class DurableOperationAuthorizationDeniedError(click.ClickException):
     def __init__(self, *, code: str, message: str) -> None:
         super().__init__(message)
@@ -87,6 +91,12 @@ class DurableOperationAuthorizationGuard:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class ManagedRuleIdentity:
+    managed_set_id: str
+    managed_rule_id: str
+
+
 def read_active_authz_policy_record(record_store: object) -> LaunchplaneAuthzPolicyRecord:
     list_records = getattr(record_store, "list_authz_policy_records", None)
     if not callable(list_records):
@@ -115,26 +125,26 @@ def capture_durable_operation_authorization(
             "Durable operations require schema-v2 managed authz policy."
         )
     target = AuthorizationTarget(scope="instance", instances=instances)
-    matches = _matching_managed_rule_identities(
-        policy=policy_record.policy,
-        identity=identity,
-        action=action,
-        product=product,
-        context=context,
-        target=target,
-    )
-    if len(matches) != 1:
+    try:
+        managed_rule = require_single_managed_rule_identity(
+            policy=policy_record.policy,
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+            target=target,
+        )
+    except ManagedRuleAuthorizationError as error:
         raise DurableOperationAuthorizationCaptureError(
             "Durable operations require exactly one managed authz rule match."
-        )
-    managed_set_id, managed_rule_id = matches[0]
+        ) from error
     return DurableOperationAuthorization(
         action=action,
         product=product,
         context=context,
         instances=instances,
-        managed_set_id=managed_set_id,
-        managed_rule_id=managed_rule_id,
+        managed_set_id=managed_rule.managed_set_id,
+        managed_rule_id=managed_rule.managed_rule_id,
         policy_record_id=policy_record.record_id,
         policy_revision=policy_record.revision,
         policy_schema_version=2,
@@ -142,6 +152,38 @@ def capture_durable_operation_authorization(
         policy_source=policy_record.source,
         authorized_at=authorized_at,
         caller=durable_operation_caller_identity(identity),
+    )
+
+
+def require_single_managed_rule_identity(
+    *,
+    policy: LaunchplaneAuthzPolicy,
+    identity: LaunchplaneIdentity,
+    action: str,
+    product: str,
+    context: str,
+    target: AuthorizationTarget,
+) -> ManagedRuleIdentity:
+    if policy.schema_version != 2:
+        raise ManagedRuleAuthorizationError(
+            "Managed-rule authorization requires schema-v2 authz policy."
+        )
+    matches = _matching_managed_rule_identities(
+        policy=policy,
+        identity=identity,
+        action=action,
+        product=product,
+        context=context,
+        target=target,
+    )
+    if len(matches) != 1:
+        raise ManagedRuleAuthorizationError(
+            "Managed-rule authorization requires exactly one matching managed authz rule."
+        )
+    managed_set_id, managed_rule_id = matches[0]
+    return ManagedRuleIdentity(
+        managed_set_id=managed_set_id,
+        managed_rule_id=managed_rule_id,
     )
 
 

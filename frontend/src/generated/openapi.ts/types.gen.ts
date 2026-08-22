@@ -689,6 +689,26 @@ export type LaunchplaneProductProfileRecord = {
     updated_at: string;
 };
 
+export type ManagedSecretReencryptionHumanEvidence = {
+    active_key_id: string;
+    configured_secret_count: number;
+    legacy_compatibility_key_loaded: boolean;
+    plan_digest: string;
+    result_status: 'ok' | 'error';
+    retirement_blocked_key_ids: Array<string>;
+    retirement_ready_key_ids: Array<string>;
+    rotation_candidate_count: number;
+    schema_version: number;
+    unchanged_count: number;
+    unreadable_secret_count: number;
+};
+
+export type ManagedSecretReencryptionPlanInput = {
+    reason: string;
+    schema_version: number;
+    source_label: string;
+};
+
 export type ManagerPreviewApprovalDecision = {
     approval_id: string;
     current_binding_sha256: string;
@@ -1538,6 +1558,61 @@ export type PreviewSourceRecord = {
     git_sha: string;
     repo: string;
     selection: 'anchor' | 'companion' | 'baseline';
+};
+
+export type PrivilegedOperationActor = {
+    github_id: number;
+    identity_type: 'github_human' | 'system';
+    login: string;
+};
+
+export type PrivilegedOperationEventRecord = {
+    action: 'planned' | 'expired' | 'cancelled';
+    actor: PrivilegedOperationActor;
+    event_id: string;
+    occurred_at: string;
+    operation_id: string;
+    reason: string;
+    resulting_record_digest: string;
+    schema_version: number;
+    sequence: number;
+    source_event_id: string;
+    source_kind: 'browser_api' | 'system';
+};
+
+export type PrivilegedOperationHumanResponse = {
+    events: Array<PrivilegedOperationEventRecord>;
+    record: PrivilegedOperationRecord;
+    status: 'ok';
+    trace_id: string;
+    write_status: 'written' | 'replayed' | 'not_applicable';
+};
+
+export type PrivilegedOperationListResponse = {
+    records: Array<PrivilegedOperationRecord>;
+    status: 'ok';
+    total: number;
+    trace_id: string;
+};
+
+export type PrivilegedOperationRecord = {
+    created_at: string;
+    descriptor_id: 'managed-secret-reencryption';
+    descriptor_version: number;
+    evidence: ManagedSecretReencryptionHumanEvidence;
+    evidence_digest: string;
+    expires_at: string;
+    operation_id: string;
+    request: ManagedSecretReencryptionPlanInput;
+    request_digest: string;
+    requested_by: PrivilegedOperationActor;
+    safety_class: 'secret_backed';
+    schema_version: number;
+    source_event_id: string;
+    status: 'planned' | 'expired' | 'cancelled';
+    terminal_at: string;
+    terminal_reason: string;
+    updated_at: string;
 };
 
 export type ProductActionAvailability = {
@@ -3368,6 +3443,62 @@ export type ReadPreviewReadinessResponses = {
 };
 
 export type ReadPreviewReadinessResponse = ReadPreviewReadinessResponses[keyof ReadPreviewReadinessResponses];
+
+export type ListHumanPrivilegedOperationsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: {
+        status?: 'planned' | 'expired' | 'cancelled' | null;
+        limit?: number;
+    };
+    url: '/v1/privileged-operations/plans';
+};
+
+export type ListHumanPrivilegedOperationsErrors = {
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ListHumanPrivilegedOperationsError = ListHumanPrivilegedOperationsErrors[keyof ListHumanPrivilegedOperationsErrors];
+
+export type ListHumanPrivilegedOperationsResponses = {
+    200: PrivilegedOperationListResponse;
+};
+
+export type ListHumanPrivilegedOperationsResponse = ListHumanPrivilegedOperationsResponses[keyof ListHumanPrivilegedOperationsResponses];
+
+export type ReadHumanPrivilegedOperationData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/privileged-operations/plans/{operation_id}';
+};
+
+export type ReadHumanPrivilegedOperationErrors = {
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadHumanPrivilegedOperationError = ReadHumanPrivilegedOperationErrors[keyof ReadHumanPrivilegedOperationErrors];
+
+export type ReadHumanPrivilegedOperationResponses = {
+    200: PrivilegedOperationHumanResponse;
+};
+
+export type ReadHumanPrivilegedOperationResponse = ReadHumanPrivilegedOperationResponses[keyof ReadHumanPrivilegedOperationResponses];
 
 export type ListProductProfilesData = {
     body?: never;

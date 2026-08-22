@@ -2966,3 +2966,20 @@ authz workflow. After #2061 and #2182 provide the reviewed DB-native migration
 path, register the exact caller and worker there, then run the reviewed plan and
 apply sequence. Never substitute a mutable ref, a checked-in target value, or a
 local CLI live-target fallback.
+
+## Privileged-Operation Planning
+
+Use `/ui/engineering/privileged-operations` to inspect existing typed plans.
+The Phase 1 UI is read-only. Plan creation and cancellation are browser-human
+API writes protected by the same-origin/fetch-metadata/single-use-CSRF boundary;
+they write only the operation projection and append-only event ledger.
+
+Do not add a policy rule merely to exercise the new routes. Code ships with no
+matching production managed rule. A later activation requires separate owner
+approval and the existing DB-native managed-rule-set reconciliation path used
+by a GitHub human who already holds `authz_policy_grant.write`. If that authority
+does not exist, remain blocked under the authorization redesign; do not use a
+local-admin bearer, workflow, GitHub secret, or borrowed identity.
+
+Phase 1 never approves or executes a privileged effect. See
+`docs/privileged-operations.md`.

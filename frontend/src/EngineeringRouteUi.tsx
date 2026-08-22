@@ -26,6 +26,7 @@ const ENGINEERING_VIEWS: Exclude<EngineeringView, "hub">[] = [
   "tenant-admission",
   "governance-projection",
   "owner-acceptance",
+  "privileged-operations",
 ];
 
 export function EngineeringRouteFrame({

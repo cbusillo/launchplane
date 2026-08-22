@@ -90,6 +90,14 @@ from control_plane.http_routes.owner_acceptance import (
     OwnerAcceptanceRouteDependencies,
     register_owner_acceptance_routes,
 )
+from control_plane.http_routes.privileged_operations import (
+    PRIVILEGED_OPERATION_AGENT_SUMMARY_ROUTE,
+    PRIVILEGED_OPERATION_CANCEL_ROUTE,
+    PRIVILEGED_OPERATION_PLAN_ROUTE,
+    PRIVILEGED_OPERATION_PLANS_ROUTE,
+    PrivilegedOperationRouteDependencies,
+    register_privileged_operation_routes,
+)
 from control_plane.http_routes.runner_host_hygiene import (
     register_runner_host_hygiene_read_routes,
 )
@@ -146,6 +154,11 @@ __all__ = (
     "OWNER_ACCEPTANCE_EVENTS_ROUTE",
     "OWNER_ACCEPTANCE_PROJECT_ROUTE",
     "OwnerAcceptanceRouteDependencies",
+    "PRIVILEGED_OPERATION_AGENT_SUMMARY_ROUTE",
+    "PRIVILEGED_OPERATION_CANCEL_ROUTE",
+    "PRIVILEGED_OPERATION_PLAN_ROUTE",
+    "PRIVILEGED_OPERATION_PLANS_ROUTE",
+    "PrivilegedOperationRouteDependencies",
     "PromotionEvidenceRequest",
     "PRODUCT_OWNER_POLICY_APPLY_ROUTE",
     "PRODUCT_OWNER_POLICY_READ_ROUTE",
@@ -197,6 +210,7 @@ __all__ = (
     "register_product_owner_read_routes",
     "register_product_owner_write_routes",
     "register_owner_acceptance_routes",
+    "register_privileged_operation_routes",
     "register_preview_record_read_routes",
     "register_product_config_status_read_routes",
     "register_product_environment_read_routes",

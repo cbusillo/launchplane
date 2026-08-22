@@ -8422,6 +8422,8 @@ env_var = "GH_TOKEN"
                     "preview_generations": 1,
                     "manager_preview_approval_events": 0,
                     "owner_acceptance_events": 0,
+                    "privileged_operation_events": 0,
+                    "privileged_operations": 0,
                     "preview_desired_states": 1,
                     "preview_inventory_scans": 1,
                     "preview_lifecycle_cleanups": 1,

@@ -14,6 +14,7 @@ import type {
   EveryCodeSummaryResponse,
   EvaluateOwnerAcceptanceResponse,
   GovernanceProjectionResponse,
+  ListHumanPrivilegedOperationsResponse,
   ListOwnerAcceptanceCurrentItemsData,
   ListOwnerAcceptanceQueueData,
   MergeTrainControllerStatusResponse,
@@ -32,6 +33,8 @@ import type {
   ProductOverviewResponse,
   ProductPromotionStatusResponse,
   ProductPromotionWorkflowDeliveryStatusResponse,
+  PrivilegedOperationListResponse,
+  PrivilegedOperationRecord,
   RankWorkGraphSnapshotData,
   RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
@@ -583,4 +586,17 @@ export function writeOwnerAcceptanceEvent(
     ...response,
     replayed: response.write_status === "replayed",
   }));
+}
+
+export type { PrivilegedOperationListResponse, PrivilegedOperationRecord };
+
+export function readPrivilegedOperationPlans(
+  signal?: AbortSignal,
+): Promise<ListHumanPrivilegedOperationsResponse> {
+  return requestJson<ListHumanPrivilegedOperationsResponse>(
+    "/v1/privileged-operations/plans",
+    "GET",
+    undefined,
+    signal,
+  );
 }

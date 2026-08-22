@@ -2,6 +2,7 @@ import {
   ArrowRight,
   Boxes,
   GitPullRequestArrow,
+  KeyRound,
   Network,
   ShieldCheck,
   UserCheck,
@@ -13,6 +14,7 @@ import { EngineeringIssueInboxRoute } from "./EngineeringIssueInboxRoute";
 import { EngineeringMergeTrainRoute } from "./EngineeringMergeTrainRoute";
 import { EngineeringGovernanceProjectionRoute } from "./EngineeringGovernanceProjectionRoute";
 import { EngineeringOwnerAcceptanceRoute } from "./EngineeringOwnerAcceptanceRoute";
+import { EngineeringPrivilegedOperationsRoute } from "./EngineeringPrivilegedOperationsRoute";
 import { EngineeringTenantAdmissionRoute } from "./EngineeringTenantAdmissionRoute";
 import { EngineeringRouteFrame } from "./EngineeringRouteUi";
 import { EngineeringWorkGraphRoute } from "./EngineeringWorkGraphRoute";
@@ -81,6 +83,14 @@ const ENGINEERING_SURFACES = [
     title: "Owner product review",
     view: "owner-acceptance" as const,
   },
+  {
+    detail:
+      "Inspect typed, redacted privileged-operation plans without approval, execution, or credential custody.",
+    icon: KeyRound,
+    label: "Planning only",
+    title: "Privileged operation plans",
+    view: "privileged-operations" as const,
+  },
 ];
 
 export function EngineeringOpsRoute({
@@ -111,6 +121,9 @@ export function EngineeringOpsRoute({
   if (view === "owner-acceptance") {
     return <EngineeringOwnerAcceptanceRoute fixtureMode={fixtureMode} />;
   }
+  if (view === "privileged-operations") {
+    return <EngineeringPrivilegedOperationsRoute fixtureMode={fixtureMode} />;
+  }
   return <EngineeringOpsHub />;
 }
 
@@ -123,7 +136,7 @@ function EngineeringOpsHub() {
       view="hub"
     >
       <div className="engineering-hub-intro">
-        <strong>Seven independent evidence routes</strong>
+        <strong>Eight independent evidence routes</strong>
         <p>
           Each surface owns its own request lifecycle, direct link, stale-data
           disclosure, refresh failure, and cancellation state. Browser controls

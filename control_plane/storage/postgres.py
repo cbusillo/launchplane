@@ -171,6 +171,17 @@ from control_plane.contracts.product_owner import (
     ProductOwnerRequirementRecord,
     ProductOwnerRoutingRecord,
 )
+from control_plane.contracts.privileged_operation import (
+    PrivilegedOperationConflictError,
+    PrivilegedOperationEventRecord,
+    PrivilegedOperationEventWriteStatus,
+    PrivilegedOperationRecord,
+    PrivilegedOperationTransitionError,
+    privileged_operation_event_replay_digest,
+    privileged_operation_plan_replay_digest,
+    privileged_operation_record_digest,
+    validate_privileged_operation_transition,
+)
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -987,6 +998,54 @@ class LaunchplaneOwnerAcceptanceEventRow(Base):
         server_default="",
     )
     self_review: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePrivilegedOperationRow(Base):
+    __tablename__ = "launchplane_privileged_operations"
+    __table_args__ = (
+        Index(
+            "launchplane_privileged_operations_status_idx",
+            "status",
+            desc("created_at"),
+        ),
+        Index(
+            "launchplane_privileged_operations_descriptor_idx",
+            "descriptor_id",
+            desc("created_at"),
+        ),
+    )
+
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    descriptor_id: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    requester_github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePrivilegedOperationEventRow(Base):
+    __tablename__ = "launchplane_privileged_operation_events"
+    __table_args__ = (
+        Index(
+            "launchplane_privileged_operation_events_operation_sequence_uidx",
+            "operation_id",
+            "sequence",
+            unique=True,
+        ),
+        Index(
+            "launchplane_privileged_operation_events_occurred_idx",
+            desc("occurred_at"),
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    operation_id: Mapped[str] = mapped_column(String, nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
     occurred_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
@@ -8736,6 +8795,245 @@ class PostgresRecordStore(HumanSessionStore):
                             )
                     return
             time.sleep(0.05)
+
+    def _sync_privileged_operation_row(
+        self,
+        row: LaunchplanePrivilegedOperationRow,
+        record: PrivilegedOperationRecord,
+    ) -> None:
+        row.descriptor_id = record.descriptor_id
+        row.status = record.status
+        row.requester_github_id = record.requested_by.github_id
+        row.created_at = record.created_at
+        row.updated_at = record.updated_at
+        row.expires_at = record.expires_at
+        row.payload = self._payload_dict(record)
+
+    def write_privileged_operation_plan(
+        self,
+        record: PrivilegedOperationRecord,
+        event: PrivilegedOperationEventRecord,
+    ) -> PrivilegedOperationEventWriteStatus:
+        try:
+            with self._session_factory() as session:
+                self._begin_serialized_write(session)
+                existing_row = session.get(
+                    LaunchplanePrivilegedOperationRow,
+                    record.operation_id,
+                )
+                if existing_row is not None:
+                    existing_record = self._read_payload(
+                        model_type=PrivilegedOperationRecord,
+                        payload=existing_row.payload,
+                    )
+                    if privileged_operation_plan_replay_digest(
+                        existing_record
+                    ) != privileged_operation_plan_replay_digest(record):
+                        raise PrivilegedOperationConflictError(
+                            "Privileged-operation plan replay changed the persisted payload."
+                        )
+                    existing_event_row = session.get(
+                        LaunchplanePrivilegedOperationEventRow,
+                        event.event_id,
+                    )
+                    if existing_event_row is None:
+                        raise PrivilegedOperationConflictError(
+                            "Privileged-operation plan exists without its planned event."
+                        )
+                    existing_event = self._read_payload(
+                        model_type=PrivilegedOperationEventRecord,
+                        payload=existing_event_row.payload,
+                    )
+                    if privileged_operation_event_replay_digest(
+                        existing_event
+                    ) != privileged_operation_event_replay_digest(event):
+                        raise PrivilegedOperationConflictError(
+                            "Privileged-operation planned event replay changed the persisted payload."
+                        )
+                    return "replayed"
+                validate_privileged_operation_transition(
+                    previous=None,
+                    proposed=record,
+                    event=event,
+                )
+                session.add(
+                    LaunchplanePrivilegedOperationRow(
+                        operation_id=record.operation_id,
+                        descriptor_id=record.descriptor_id,
+                        status=record.status,
+                        requester_github_id=record.requested_by.github_id,
+                        created_at=record.created_at,
+                        updated_at=record.updated_at,
+                        expires_at=record.expires_at,
+                        payload=self._payload_dict(record),
+                    )
+                )
+                session.add(
+                    LaunchplanePrivilegedOperationEventRow(
+                        event_id=event.event_id,
+                        operation_id=event.operation_id,
+                        sequence=event.sequence,
+                        action=event.action,
+                        occurred_at=event.occurred_at,
+                        payload=self._payload_dict(event),
+                    )
+                )
+                session.commit()
+                return "written"
+        except IntegrityError as error:
+            try:
+                existing_record = self.read_privileged_operation_record(record.operation_id)
+                existing_event = next(
+                    stored_event
+                    for stored_event in self.list_privileged_operation_event_records(
+                        operation_id=record.operation_id,
+                        limit=2,
+                    )
+                    if stored_event.event_id == event.event_id
+                )
+            except (FileNotFoundError, StopIteration) as replay_error:
+                raise PrivilegedOperationConflictError(
+                    "Privileged-operation plan write conflicted with another request."
+                ) from replay_error
+            if privileged_operation_plan_replay_digest(
+                existing_record
+            ) == privileged_operation_plan_replay_digest(
+                record
+            ) and privileged_operation_event_replay_digest(
+                existing_event
+            ) == privileged_operation_event_replay_digest(event):
+                return "replayed"
+            raise PrivilegedOperationConflictError(
+                "Privileged-operation plan write conflicted with another payload."
+            ) from error
+
+    def transition_privileged_operation(
+        self,
+        record: PrivilegedOperationRecord,
+        event: PrivilegedOperationEventRecord,
+    ) -> PrivilegedOperationEventWriteStatus:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            statement = select(LaunchplanePrivilegedOperationRow).where(
+                LaunchplanePrivilegedOperationRow.operation_id == record.operation_id
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(record.operation_id)
+            previous = self._read_payload(
+                model_type=PrivilegedOperationRecord,
+                payload=row.payload,
+            )
+            existing_event_row = session.get(
+                LaunchplanePrivilegedOperationEventRow,
+                event.event_id,
+            )
+            if existing_event_row is not None:
+                existing_event = self._read_payload(
+                    model_type=PrivilegedOperationEventRecord,
+                    payload=existing_event_row.payload,
+                )
+                if privileged_operation_event_replay_digest(
+                    existing_event
+                ) != privileged_operation_event_replay_digest(event):
+                    raise PrivilegedOperationConflictError(
+                        "Privileged-operation event replay changed the persisted payload."
+                    )
+                if privileged_operation_record_digest(
+                    previous
+                ) != privileged_operation_record_digest(record):
+                    raise PrivilegedOperationConflictError(
+                        "Privileged-operation event replay does not match current state."
+                    )
+                return "replayed"
+            try:
+                validate_privileged_operation_transition(
+                    previous=previous,
+                    proposed=record,
+                    event=event,
+                )
+            except PrivilegedOperationTransitionError as error:
+                raise PrivilegedOperationConflictError(str(error)) from error
+            session.add(
+                LaunchplanePrivilegedOperationEventRow(
+                    event_id=event.event_id,
+                    operation_id=event.operation_id,
+                    sequence=event.sequence,
+                    action=event.action,
+                    occurred_at=event.occurred_at,
+                    payload=self._payload_dict(event),
+                )
+            )
+            self._sync_privileged_operation_row(row, record)
+            session.commit()
+            return "written"
+
+    def read_privileged_operation_record(
+        self,
+        operation_id: str,
+    ) -> PrivilegedOperationRecord:
+        with self._session_factory() as session:
+            row = session.get(LaunchplanePrivilegedOperationRow, operation_id)
+        if row is None:
+            raise FileNotFoundError(operation_id)
+        return self._read_payload(
+            model_type=PrivilegedOperationRecord,
+            payload=row.payload,
+        )
+
+    def list_privileged_operation_records(
+        self,
+        *,
+        status: str = "",
+        descriptor_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[PrivilegedOperationRecord, ...]:
+        statement = select(LaunchplanePrivilegedOperationRow)
+        if status:
+            statement = statement.where(LaunchplanePrivilegedOperationRow.status == status)
+        if descriptor_id:
+            statement = statement.where(
+                LaunchplanePrivilegedOperationRow.descriptor_id == descriptor_id
+            )
+        statement = statement.order_by(
+            LaunchplanePrivilegedOperationRow.created_at.desc(),
+            LaunchplanePrivilegedOperationRow.operation_id.desc(),
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        with self._session_factory() as session:
+            rows = session.scalars(statement).all()
+        return tuple(
+            self._read_payload(model_type=PrivilegedOperationRecord, payload=row.payload)
+            for row in rows
+        )
+
+    def list_privileged_operation_event_records(
+        self,
+        *,
+        operation_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[PrivilegedOperationEventRecord, ...]:
+        statement = select(LaunchplanePrivilegedOperationEventRow)
+        if operation_id:
+            statement = statement.where(
+                LaunchplanePrivilegedOperationEventRow.operation_id == operation_id
+            )
+        statement = statement.order_by(
+            LaunchplanePrivilegedOperationEventRow.occurred_at.desc(),
+            LaunchplanePrivilegedOperationEventRow.sequence.desc(),
+            LaunchplanePrivilegedOperationEventRow.event_id.desc(),
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        with self._session_factory() as session:
+            rows = session.scalars(statement).all()
+        return tuple(
+            self._read_payload(model_type=PrivilegedOperationEventRecord, payload=row.payload)
+            for row in rows
+        )
 
     def write_owner_acceptance_event_record(
         self, record: OwnerAcceptanceEventRecord
@@ -16970,6 +17268,8 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_generations": 0,
             "manager_preview_approval_events": 0,
             "owner_acceptance_events": 0,
+            "privileged_operation_events": 0,
+            "privileged_operations": 0,
             "preview_desired_states": 0,
             "preview_inventory_scans": 0,
             "preview_lifecycle_cleanups": 0,
@@ -17093,6 +17393,38 @@ class PostgresRecordStore(HumanSessionStore):
             for owner_acceptance_event in owner_acceptance_events:
                 self.write_owner_acceptance_event_record(owner_acceptance_event)
                 counts["owner_acceptance_events"] += 1
+        if hasattr(filesystem_store, "list_privileged_operation_records"):
+            for privileged_operation in filesystem_store.list_privileged_operation_records():
+                events = tuple(
+                    sorted(
+                        filesystem_store.list_privileged_operation_event_records(
+                            operation_id=privileged_operation.operation_id
+                        ),
+                        key=lambda event: event.sequence,
+                    )
+                )
+                if not events or events[0].action != "planned":
+                    raise PrivilegedOperationConflictError(
+                        "Filesystem privileged operation is missing its planned event."
+                    )
+                planned_record = privileged_operation.model_copy(
+                    update={
+                        "status": "planned",
+                        "updated_at": privileged_operation.created_at,
+                        "terminal_at": "",
+                        "terminal_reason": "",
+                    }
+                )
+                self.write_privileged_operation_plan(planned_record, events[0])
+                counts["privileged_operation_events"] += 1
+                if privileged_operation.status != "planned":
+                    if len(events) != 2:
+                        raise PrivilegedOperationConflictError(
+                            "Terminal filesystem privileged operation requires two events."
+                        )
+                    self.transition_privileged_operation(privileged_operation, events[1])
+                    counts["privileged_operation_events"] += 1
+                counts["privileged_operations"] += 1
         if hasattr(filesystem_store, "list_preview_inventory_scan_records"):
             for scan_record in filesystem_store.list_preview_inventory_scan_records():
                 self.write_preview_inventory_scan_record(scan_record)
