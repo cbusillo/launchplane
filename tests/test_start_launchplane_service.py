@@ -571,5 +571,110 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
         self.assertGreaterEqual(compose_text.count("- launchplane-external-network"), 3)
 
 
+class StartLaunchplanePrivilegedOperationWorkersScriptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        self.script_path = (
+            repo_root / "scripts" / "start-launchplane-privileged-operation-workers.sh"
+        )
+        self.compose_path = repo_root / "docker-compose.yml"
+
+    def _write_fake_uv(self, bin_dir: Path) -> None:
+        uv_path = bin_dir / "uv"
+        uv_path.write_text(
+            """#!/bin/sh
+printf '%s\\n' \"$@\" >>\"$UV_CAPTURE_FILE\"
+""",
+            encoding="utf-8",
+        )
+        uv_path.chmod(uv_path.stat().st_mode | stat.S_IXUSR)
+
+    def test_requires_database_url_for_worker_startup(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            app_root = temporary_directory / "app"
+            app_root.mkdir()
+
+            result = subprocess.run(
+                [str(self.script_path)],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "LAUNCHPLANE_APP_ROOT": str(app_root),
+                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
+                    "LAUNCHPLANE_DATABASE_URL": "",
+                },
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 1, msg=result.stderr)
+        self.assertIn("refuse startup without LAUNCHPLANE_DATABASE_URL", result.stderr)
+
+    def test_worker_startup_wires_only_process_settings(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            app_root = temporary_directory / "app"
+            bin_dir = temporary_directory / "bin"
+            capture_file = temporary_directory / "uv-args.txt"
+            app_root.mkdir()
+            bin_dir.mkdir()
+            self._write_fake_uv(bin_dir)
+
+            result = subprocess.run(
+                [str(self.script_path)],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "UV_CAPTURE_FILE": str(capture_file),
+                    "LAUNCHPLANE_APP_ROOT": str(app_root),
+                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
+                    "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
+                    "LAUNCHPLANE_PRIVILEGED_OPERATION_WORKER_POLL_SECONDS": "5",
+                    "LAUNCHPLANE_PRIVILEGED_OPERATION_WORKER_LIMIT": "4",
+                    "LAUNCHPLANE_PRIVILEGED_OPERATION_WORKER_ERROR_BACKOFF_SECONDS": "15",
+                    "LAUNCHPLANE_PRIVILEGED_OPERATION_WORKER_MAX_CONSECUTIVE_ERRORS": "3",
+                    "LAUNCHPLANE_PRIVILEGED_OPERATION_WORKER_OPERATION_ID": "must-not-forward",
+                    "LAUNCHPLANE_PRIVILEGED_OPERATION_WORKER_PLAN_DIGEST": "must-not-forward",
+                    "LAUNCHPLANE_PRIVILEGED_OPERATION_WORKER_EXECUTE_PAYLOAD": "must-not-forward",
+                },
+                check=False,
+            )
+
+            captured_args = capture_file.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(
+            captured_args[:5],
+            ["run", "launchplane", "service", "privileged-operation-workers", "run"],
+        )
+        self.assertIn("--state-dir", captured_args)
+        self.assertNotIn("--database-url", captured_args)
+        self.assertIn("--poll-seconds", captured_args)
+        self.assertIn("5", captured_args)
+        self.assertIn("--limit", captured_args)
+        self.assertIn("4", captured_args)
+        self.assertIn("--error-backoff-seconds", captured_args)
+        self.assertIn("15", captured_args)
+        self.assertIn("--max-consecutive-errors", captured_args)
+        self.assertIn("3", captured_args)
+        self.assertNotIn("must-not-forward", captured_args)
+
+    def test_compose_includes_supervised_privileged_operation_worker_service(self) -> None:
+        compose_text = self.compose_path.read_text(encoding="utf-8")
+
+        self.assertIn("  launchplane-privileged-operation-workers:\n", compose_text)
+        self.assertIn("image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}", compose_text)
+        self.assertIn("restart: unless-stopped", compose_text)
+        self.assertIn("condition: service_healthy", compose_text)
+        self.assertIn(
+            "- /app/scripts/start-launchplane-privileged-operation-workers.sh", compose_text
+        )
+        self.assertIn("- launchplane-runtime:/app/runtime", compose_text)
+        self.assertGreaterEqual(compose_text.count("- launchplane-external-network"), 4)
+
+
 if __name__ == "__main__":
     unittest.main()

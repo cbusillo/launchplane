@@ -418,8 +418,8 @@ decryption key state denies the reveal or resolution.
 - `uv run launchplane secrets reencrypt --allow-direct-db-mutation` is a
   bootstrap/recovery-only dry-run. A direct apply additionally requires
   `--expected-plan-digest`, `--reason`, and `--apply`. Routine shared and
-  production root rotation must use the deployed service endpoint rather than
-  an arbitrary checkout.
+  production root rotation must use the governed privileged-operation UI and
+  supervised worker rather than an arbitrary checkout or legacy service route.
 - `uv run launchplane product-config apply --input-file bundle.json --dry-run`
   previews an approved product runtime/secret bundle without printing plaintext
   values or writing records. `--apply` writes non-secret runtime keys and
@@ -484,5 +484,16 @@ state, actor/source metadata, and lifecycle timestamps.
 
 Managed-secret IDs, secret-version IDs, ciphertext, plaintext, and raw error
 strings are neither persisted nor returned in the agent projection. The agent
-projection also excludes key IDs and request/actor details. Phase 1 does not
-change `/v1/secrets/reencrypt` apply authority and cannot mutate a secret.
+projection also excludes key IDs and request/actor details.
+
+`POST /v1/secrets/reencrypt` is legacy-only: its `mode: "dry-run"` response
+refuses with `privileged_operation_planning_required`, and its `mode: "apply"`
+response refuses with `privileged_operation_approval_required`. The legacy
+`secret.reencrypt.dry-run` and `secret.reencrypt.apply` actions are not a
+current authority path. Use the typed browser-human plan and approval flow, then
+the supervised privileged-operation worker; approval may execute immediately,
+and revocation is possible only before worker claim. See
+`docs/privileged-operations.md` for canary activation and worker proof rules.
+
+**Preserved history:** Phase 1 described planning evidence before a deployed
+worker existed; it is not current root-rotation operating guidance.
