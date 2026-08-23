@@ -22,6 +22,7 @@ AUTHZ_POLICY_HEALTH_READ_ACTION = "authz_policy_health.read"
 AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION = "authz_policy_candidate_preview.read"
 AUTHZ_REPOSITORY_SCOPE_READ_ACTION = "authz_repository_scope.read"
 AUTHZ_ACTIVATION_PREFLIGHT_MAX_SESSIONS = 8
+AUTHZ_ACTIVATION_PREFLIGHT_GITHUB_ID_MAX = 2**63 - 1
 AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_PROBES = 25
 AUTHZ_POLICY_CANDIDATE_PREVIEW_MAX_RULES = 500
 AUTHZ_REPOSITORY_SCOPE_MAX_CANDIDATES = 100
@@ -672,7 +673,11 @@ class AuthzRepositoryScopeResponse(BaseModel):
 class AuthzActivationPreflightRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    github_id: int = Field(gt=0, strict=True)
+    github_id: int = Field(
+        gt=0,
+        le=AUTHZ_ACTIVATION_PREFLIGHT_GITHUB_ID_MAX,
+        strict=True,
+    )
 
 
 class AuthzActivationPreflightPolicySummary(BaseModel):

@@ -33,6 +33,7 @@ ACTIVATION_PREFLIGHT_PRODUCT = "launchplane"
 ACTIVATION_PREFLIGHT_CONTEXT = "launchplane"
 ACTIVATION_PREFLIGHT_STORAGE_SCAN_LIMIT = 256
 ACTIVATION_PREFLIGHT_STORAGE_SESSION_LIMIT = ACTIVATION_PREFLIGHT_STORAGE_SCAN_LIMIT + 1
+AUTHZ_ACTIVATION_PREFLIGHT_GITHUB_ID_MAX = 2**63 - 1
 _IDENTITY_FINGERPRINT_PURPOSE = "authz-activation-preflight-identity-v1"
 
 
@@ -153,12 +154,6 @@ def _resolve_session(
             "activation_session_not_found",
             "No unexpired Launchplane session matched the GitHub ID.",
         )
-    if len(unexpired_sessions) > AUTHZ_ACTIVATION_PREFLIGHT_MAX_SESSIONS:
-        raise ActivationPreflightFailure(
-            "activation_session_results_truncated",
-            "Activation preflight found too many matching sessions.",
-        )
-
     current_sessions = sorted(
         (
             candidate_session
@@ -175,6 +170,11 @@ def _resolve_session(
         raise ActivationPreflightFailure(
             "activation_session_claims_stale",
             "All matching Launchplane session authorization claims are stale.",
+        )
+    if len(current_sessions) > AUTHZ_ACTIVATION_PREFLIGHT_MAX_SESSIONS:
+        raise ActivationPreflightFailure(
+            "activation_session_results_truncated",
+            "Activation preflight found too many current sessions.",
         )
     canonical_claims = (
         current_sessions[0].identity.login,
@@ -279,10 +279,10 @@ def resolve_activation_preflight(
     now: datetime,
     trace_id: str,
 ) -> AuthzActivationPreflightResponse:
-    if github_id <= 0:
+    if github_id <= 0 or github_id > AUTHZ_ACTIVATION_PREFLIGHT_GITHUB_ID_MAX:
         raise ActivationPreflightFailure(
             "invalid_github_id",
-            "Activation preflight requires a positive GitHub ID.",
+            "Activation preflight requires a bounded positive GitHub ID.",
             status_code=400,
         )
     try:
@@ -308,7 +308,7 @@ def resolve_activation_preflight(
         )
     except ActivationPreflightFailure:
         raise
-    except (TypeError, ValueError) as error:
+    except Exception as error:
         raise ActivationPreflightFailure(
             "activation_preflight_unavailable",
             "Activation preflight evidence is unavailable.",

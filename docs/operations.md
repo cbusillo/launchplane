@@ -679,9 +679,10 @@ owner-local activation preflight. The operator helper command
 `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` (or the explicitly named environment variable)
 and has no browser-cookie, token-argv, or direct-DB mode. The service requires
 a local-admin bearer identity with both existing diagnostic read permissions,
-then scans at most 257 server-side session rows for the supplied GitHub ID and
-admits at most eight unexpired sessions. Timestamp parsing, expiry filtering,
-claims-freshness ordering, and ambiguity checks happen in application code. It
+then reads at most the 257 most recently created server-side session rows for
+the supplied GitHub ID and admits at most eight claims-current sessions.
+Timestamp parsing, expiry filtering, claims-freshness ordering, and ambiguity
+checks happen in application code. It
 re-derives role authority from the active DB policy and returns only bounded
 policy, session, fixed-scope, decision, fingerprint, and unmanaged action-empty
 evidence. Missing, stale, ambiguous, mismatched, or truncated sessions fail

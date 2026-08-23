@@ -16,11 +16,13 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    DateTime,
     JSON,
     Index,
     Integer,
     String,
     create_engine,
+    cast as sql_cast,
     delete,
     desc,
     false,
@@ -8321,9 +8323,21 @@ class PostgresRecordStore(HumanSessionStore):
         normalized_limit = max(limit, 0)
         if normalized_limit == 0:
             return ()
+        created_at_order = (
+            func.julianday(LaunchplaneHumanSessionRow.created_at)
+            if self._engine.dialect.name == "sqlite"
+            else sql_cast(
+                LaunchplaneHumanSessionRow.created_at,
+                DateTime(timezone=True),
+            )
+        )
         statement = (
             select(LaunchplaneHumanSessionRow)
             .where(LaunchplaneHumanSessionRow.github_id == github_id)
+            .order_by(
+                created_at_order.desc(),
+                LaunchplaneHumanSessionRow.session_id.desc(),
+            )
             .limit(normalized_limit)
         )
         with self._session_factory() as session:

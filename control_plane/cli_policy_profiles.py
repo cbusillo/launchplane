@@ -293,7 +293,7 @@ def product_profiles() -> None:
 )
 @click.option(
     "--github-id",
-    type=click.IntRange(min=1),
+    type=click.IntRange(min=1, max=2**63 - 1),
     required=True,
     help="Immutable numeric GitHub ID to resolve through server-side sessions.",
 )

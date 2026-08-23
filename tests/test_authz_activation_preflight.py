@@ -14,7 +14,7 @@ from click import Command
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
 
-from control_plane import secrets as control_plane_secrets
+from control_plane import authz_activation_preflight, secrets as control_plane_secrets
 from control_plane.authz_activation_preflight import (
     ACTIVATION_PREFLIGHT_STORAGE_SCAN_LIMIT,
     ActivationPreflightFailure,
@@ -268,6 +268,29 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
                     sessions=tuple(_session(now=now) for _ in range(9)),
                     now=now,
                 )
+        with self.subTest("stale unexpired sessions do not consume current-session bound"):
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: _key_ring()},
+                clear=True,
+            ):
+                response = build_activation_preflight_response(
+                    trace_id="trace",
+                    github_id=123,
+                    active_record=record,
+                    sessions=(
+                        _session(now=now),
+                        *(
+                            _session(
+                                now=now,
+                                created_offset=timedelta(hours=25),
+                            )
+                            for _ in range(8)
+                        ),
+                    ),
+                    now=now,
+                )
+            self.assertEqual(response.session.session_count, 1)
         with self.subTest("history truncated"):
             with self.assertRaisesRegex(ActivationPreflightFailure, "history"):
                 build_activation_preflight_response(
@@ -316,6 +339,7 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
                 {session.session_id for session in found},
                 {expired.session_id, offset_session.session_id},
             )
+            self.assertEqual(found[0].session_id, offset_session.session_id)
             self.assertIsNotNone(store.read_session_without_cleanup(expired.session_id))
             store.close()
 
@@ -386,6 +410,21 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
                             headers={"Authorization": "Bearer admin-token"},
                             json={},
                         )
+                        oversized_response = await client.post(
+                            "/v1/authz-diagnostics/activation-preflight/read",
+                            headers={"Authorization": "Bearer admin-token"},
+                            json={"github_id": 2**63},
+                        )
+                        with patch.object(
+                            authz_activation_preflight,
+                            "build_activation_preflight_response",
+                            side_effect=RuntimeError("unexpected"),
+                        ):
+                            unavailable_response = await client.post(
+                                "/v1/authz-diagnostics/activation-preflight/read",
+                                headers={"Authorization": "Bearer admin-token"},
+                                json={"github_id": 123},
+                            )
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers["cache-control"], "no-store")
             response_text = response.text
@@ -405,6 +444,10 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(operator_response.headers["cache-control"], "no-store")
             self.assertEqual(invalid_response.status_code, 400)
             self.assertEqual(invalid_response.headers["cache-control"], "no-store")
+            self.assertEqual(oversized_response.status_code, 400)
+            self.assertEqual(oversized_response.headers["cache-control"], "no-store")
+            self.assertEqual(unavailable_response.status_code, 503)
+            self.assertEqual(unavailable_response.headers["cache-control"], "no-store")
             self.assertEqual(
                 store.read_session_without_cleanup(stored_session.session_id), stored_session
             )
