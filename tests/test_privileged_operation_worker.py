@@ -321,6 +321,15 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                     reservation=reservation,
                     reconciliation_key=operation_id,
                 )
+                contender = store.reserve_mutation(
+                    scope="privileged-operation-execution",
+                    route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+                    idempotency_key="competing-operation",
+                    request_fingerprint="f" * 64,
+                    lease_owner="worker-2",
+                    reconciliation_key="competing-operation",
+                    provider_target_key=privileged_operation_provider_target_key(executing),
+                )
 
                 with (
                     patch.dict(os.environ, self._execution_environment(), clear=True),
@@ -346,6 +355,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 store.close()
 
         self.assertEqual(executing.status, "executing")
+        self.assertEqual(contender.status, "target_busy")
         self.assertEqual(tuple(record.status for record in recovered), ("executed",))
         self.assertEqual(current.status, "executed")
         self.assertEqual(version.key_id, "key-2")
