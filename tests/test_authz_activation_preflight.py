@@ -9,12 +9,15 @@ import unittest
 from unittest.mock import patch
 from typing import Literal, cast
 
-import click
 from click import Command
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
 
-from control_plane import authz_activation_preflight, secrets as control_plane_secrets
+from control_plane import (
+    authz_activation_preflight,
+    cli_policy_profiles,
+    secrets as control_plane_secrets,
+)
 from control_plane.authz_activation_preflight import (
     ACTIVATION_PREFLIGHT_STORAGE_SCAN_LIMIT,
     ACTIVATION_PREFLIGHT_STORAGE_SESSION_LIMIT,
@@ -24,7 +27,6 @@ from control_plane.authz_activation_preflight import (
 from control_plane.cli_policy_profiles import (
     PolicyProfileCliCallbacks,
     authz_policies,
-    register_policy_profile_commands,
 )
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -534,12 +536,17 @@ class AuthzActivationPreflightCliTests(unittest.TestCase):
             calls.append(kwargs)
             return {"status": "ok"}
 
-        register_policy_profile_commands(
-            click.Group("main"),
-            callbacks=PolicyProfileCliCallbacks(post_launchplane_service_json=post),
-        )
         runner = CliRunner()
-        with patch.dict(os.environ, {"LOCAL_ADMIN_TEST_TOKEN": "secret-token"}, clear=True):
+        with (
+            patch.object(
+                cli_policy_profiles,
+                "_callbacks",
+                PolicyProfileCliCallbacks(post_launchplane_service_json=post),
+            ),
+            patch.dict(
+                os.environ, {"LOCAL_ADMIN_TEST_TOKEN": "secret-token"}, clear=True
+            ),
+        ):
             result = runner.invoke(
                 cast(Command, authz_policies),
                 [
