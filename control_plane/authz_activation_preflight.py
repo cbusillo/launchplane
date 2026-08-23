@@ -138,16 +138,16 @@ def _resolve_session(
             "Activation preflight session history exceeded the bounded scan limit.",
         )
     unexpired_sessions: list[LaunchplaneHumanSession] = []
-    for session in sessions:
-        session_github_id = session.identity.github_id
+    for candidate_session in sessions:
+        session_github_id = candidate_session.identity.github_id
         if session_github_id != github_id:
             raise ActivationPreflightFailure(
                 "activation_session_payload_mismatch",
                 "Activation preflight session identity did not match its lookup key.",
             )
-        if _utc_timestamp(session.expires_at) <= now:
+        if _utc_timestamp(candidate_session.expires_at) <= now:
             continue
-        unexpired_sessions.append(session)
+        unexpired_sessions.append(candidate_session)
     if not unexpired_sessions:
         raise ActivationPreflightFailure(
             "activation_session_not_found",
@@ -161,14 +161,14 @@ def _resolve_session(
 
     current_sessions = sorted(
         (
-            session
-            for session in unexpired_sessions
-            if _utc_timestamp(session.created_at)
+            candidate_session
+            for candidate_session in unexpired_sessions
+            if _utc_timestamp(candidate_session.created_at)
             <= now
-            < _utc_timestamp(session.created_at)
+            < _utc_timestamp(candidate_session.created_at)
             + timedelta(seconds=SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS)
         ),
-        key=lambda session: _utc_timestamp(session.created_at),
+        key=lambda item: _utc_timestamp(item.created_at),
         reverse=True,
     )
     if not current_sessions:

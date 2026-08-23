@@ -23,6 +23,7 @@ def upgrade() -> None:
         "launchplane_human_sessions_github_id_idx",
         "launchplane_human_sessions",
         ["github_id"],
+        if_not_exists=True,
     )
 
 
@@ -30,4 +31,5 @@ def downgrade() -> None:
     op.drop_index(
         "launchplane_human_sessions_github_id_idx",
         table_name="launchplane_human_sessions",
+        if_exists=True,
     )

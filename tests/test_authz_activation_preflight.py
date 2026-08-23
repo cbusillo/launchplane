@@ -7,9 +7,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
-from typing import Literal
+from typing import Literal, cast
 
 import click
+from click import Command
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
 
@@ -151,7 +152,6 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
         now = datetime(2026, 8, 23, tzinfo=timezone.utc)
         newer_session = _session(
             now=now,
-            role="read_only",
             created_offset=timedelta(minutes=10),
             expires_offset=timedelta(minutes=15),
         )
@@ -205,7 +205,11 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
     def test_domain_supports_legacy_managed_secret_key_bootstrap(self) -> None:
         now = datetime(2026, 8, 23, tzinfo=timezone.utc)
         legacy_key_env = control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS[0]
-        with patch.dict(os.environ, {legacy_key_env: Fernet.generate_key().decode()}, clear=True):
+        with patch.dict(
+            os.environ,
+            {legacy_key_env: Fernet.generate_key().decode()},
+            clear=True,
+        ):
             response = build_activation_preflight_response(
                 trace_id="trace",
                 github_id=123,
@@ -233,7 +237,6 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
                     now=now,
                 )
         with self.subTest("ambiguous"):
-            divergent = _session(now=now)
             divergent = LaunchplaneHumanSession(
                 session_id="divergent",
                 identity=GitHubHumanIdentity(
@@ -324,7 +327,7 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
             store.ensure_schema()
             record = _record(_policy())
             store.seed_authz_policy_if_absent(record)
-            stored_session = _session(now=now, role="read_only")
+            stored_session = _session(now=now)
             store.write_session(stored_session)
             app = create_launchplane_fastapi_app(
                 verifier=_RejectingVerifier(),
@@ -457,7 +460,7 @@ class AuthzActivationPreflightCliTests(unittest.TestCase):
         runner = CliRunner()
         with patch.dict(os.environ, {"LOCAL_ADMIN_TEST_TOKEN": "secret-token"}, clear=True):
             result = runner.invoke(
-                authz_policies,
+                cast(Command, authz_policies),
                 [
                     "activation-preflight",
                     "--service-url",

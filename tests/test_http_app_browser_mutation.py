@@ -59,6 +59,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "read_browser_work_graph_rank_identity",
         }
         expected_bearer_only_routes = {
+            "/v1/authz-diagnostics/activation-preflight/read",
             "/v1/authz-diagnostics/github-actions/evaluate",
             "/v1/change-impact/evaluation",
             "/v1/secrets/reencrypt",
