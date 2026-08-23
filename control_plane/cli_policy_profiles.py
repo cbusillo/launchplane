@@ -279,6 +279,44 @@ def product_profiles() -> None:
     """DB-backed Launchplane product profile commands."""
 
 
+@authz_policies.command("activation-preflight")
+@click.option(
+    "--service-url",
+    required=True,
+    help="Deployed Launchplane service base URL.",
+)
+@click.option(
+    "--bearer-token-env",
+    default="LAUNCHPLANE_LOCAL_ADMIN_TOKEN",
+    show_default=True,
+    help="Environment variable containing the local-admin bearer token.",
+)
+@click.option(
+    "--github-id",
+    type=click.IntRange(min=1),
+    required=True,
+    help="Immutable numeric GitHub ID to resolve through server-side sessions.",
+)
+def authz_policies_activation_preflight(
+    service_url: str,
+    bearer_token_env: str,
+    github_id: int,
+) -> None:
+    token_env_key = bearer_token_env.strip() or "LAUNCHPLANE_LOCAL_ADMIN_TOKEN"
+    bearer_token = os.environ.get(token_env_key, "").strip()
+    if not bearer_token:
+        raise click.ClickException(f"{token_env_key} is required.")
+    response_payload = _post_launchplane_service_json(
+        service_url=service_url,
+        path="/v1/authz-diagnostics/activation-preflight/read",
+        payload={"github_id": github_id},
+        bearer_token=bearer_token,
+        session_cookie="",
+        idempotency_key="",
+    )
+    click.echo(json.dumps(response_payload, indent=2, sort_keys=True))
+
+
 @authz_policies.command("reconcile-managed")
 @click.option(
     "--service-url",

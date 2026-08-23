@@ -1104,6 +1104,195 @@
         "title": "AuthorizationTarget",
         "type": "object"
       },
+      "AuthzActivationPreflightDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "allowed",
+              "denied"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "reason_code": {
+            "enum": [
+              "allowed",
+              "authz_policy_schema_incompatible",
+              "instance_scope_required",
+              "principal_role_restricted",
+              "principal_binding_invalid",
+              "no_matching_grant"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision",
+          "reason_code"
+        ],
+        "title": "AuthzActivationPreflightDecision",
+        "type": "object"
+      },
+      "AuthzActivationPreflightPolicySummary": {
+        "additionalProperties": false,
+        "properties": {
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              1,
+              2
+            ],
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "record_id",
+          "revision",
+          "policy_sha256",
+          "schema_version"
+        ],
+        "title": "AuthzActivationPreflightPolicySummary",
+        "type": "object"
+      },
+      "AuthzActivationPreflightRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "github_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Github Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "github_id"
+        ],
+        "title": "AuthzActivationPreflightRequest",
+        "type": "object"
+      },
+      "AuthzActivationPreflightResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "evaluation": {
+            "$ref": "#/components/schemas/AuthzActivationPreflightDecision"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/AuthzActivationPreflightPolicySummary"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/AuthzActivationPreflightScope"
+          },
+          "session": {
+            "$ref": "#/components/schemas/AuthzActivationPreflightSessionSummary"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "unmanaged_action_empty_rules": {
+            "$ref": "#/components/schemas/AuthzUnmanagedActionEmptyRuleCounts"
+          }
+        },
+        "required": [
+          "trace_id",
+          "policy",
+          "session",
+          "scope",
+          "evaluation",
+          "unmanaged_action_empty_rules"
+        ],
+        "title": "AuthzActivationPreflightResponse",
+        "type": "object"
+      },
+      "AuthzActivationPreflightScope": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "authz_policy_grant.write",
+            "default": "authz_policy_grant.write",
+            "title": "Action",
+            "type": "string"
+          },
+          "context": {
+            "const": "launchplane",
+            "default": "launchplane",
+            "title": "Context",
+            "type": "string"
+          },
+          "product": {
+            "const": "launchplane",
+            "default": "launchplane",
+            "title": "Product",
+            "type": "string"
+          },
+          "target_scope": {
+            "const": "context",
+            "default": "context",
+            "title": "Target Scope",
+            "type": "string"
+          }
+        },
+        "title": "AuthzActivationPreflightScope",
+        "type": "object"
+      },
+      "AuthzActivationPreflightSessionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "claims_age_bucket_hours": {
+            "minimum": 0.0,
+            "title": "Claims Age Bucket Hours",
+            "type": "integer"
+          },
+          "claims_current": {
+            "title": "Claims Current",
+            "type": "boolean"
+          },
+          "expiry_bucket_hours": {
+            "minimum": 0.0,
+            "title": "Expiry Bucket Hours",
+            "type": "integer"
+          },
+          "identity_fingerprint": {
+            "title": "Identity Fingerprint",
+            "type": "string"
+          },
+          "session_count": {
+            "maximum": 8.0,
+            "minimum": 1.0,
+            "title": "Session Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_count",
+          "claims_current",
+          "claims_age_bucket_hours",
+          "expiry_bucket_hours",
+          "identity_fingerprint"
+        ],
+        "title": "AuthzActivationPreflightSessionSummary",
+        "type": "object"
+      },
       "AuthzDenialExplanationResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2299,6 +2488,51 @@
           "authorization_chain"
         ],
         "title": "AuthzRepositoryScopeSourceCounts",
+        "type": "object"
+      },
+      "AuthzUnmanagedActionEmptyRuleCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "github_actions": {
+            "minimum": 0.0,
+            "title": "Github Actions",
+            "type": "integer"
+          },
+          "github_humans": {
+            "minimum": 0.0,
+            "title": "Github Humans",
+            "type": "integer"
+          },
+          "local_admins": {
+            "minimum": 0.0,
+            "title": "Local Admins",
+            "type": "integer"
+          },
+          "local_operators": {
+            "minimum": 0.0,
+            "title": "Local Operators",
+            "type": "integer"
+          },
+          "terminal_agents": {
+            "minimum": 0.0,
+            "title": "Terminal Agents",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "github_actions",
+          "github_humans",
+          "terminal_agents",
+          "local_operators",
+          "local_admins"
+        ],
+        "title": "AuthzUnmanagedActionEmptyRuleCounts",
         "type": "object"
       },
       "BackupGateEvidence": {
@@ -37624,6 +37858,96 @@
           }
         },
         "summary": "Read human auth session"
+      }
+    },
+    "/v1/authz-diagnostics/activation-preflight/read": {
+      "post": {
+        "operationId": "read_authz_activation_preflight",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthzActivationPreflightRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzActivationPreflightResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read bounded authorization activation preflight evidence"
       }
     },
     "/v1/authz-diagnostics/active-policy/health": {

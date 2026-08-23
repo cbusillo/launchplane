@@ -3360,6 +3360,12 @@ class LaunchplaneVeriReelProdBackupGateOperationRow(Base):
 class LaunchplaneHumanSessionRow(Base):
     __tablename__ = "launchplane_human_sessions"
     __table_args__ = (
+        Index(
+            "launchplane_human_sessions_github_id_expires_created_idx",
+            "github_id",
+            desc("expires_at"),
+            desc("created_at"),
+        ),
         Index("launchplane_human_sessions_login_idx", "login", desc("created_at")),
         Index("launchplane_human_sessions_expires_idx", desc("expires_at")),
     )
@@ -8307,6 +8313,32 @@ class PostgresRecordStore(HumanSessionStore):
             if payload is None:
                 return None
             return _human_session_from_payload(payload)
+
+    def read_human_sessions_for_github_id_without_cleanup(
+        self,
+        github_id: int,
+        *,
+        limit: int,
+        now: datetime,
+    ) -> tuple[LaunchplaneHumanSession, ...]:
+        normalized_limit = max(limit, 0)
+        if normalized_limit == 0:
+            return ()
+        statement = (
+            select(LaunchplaneHumanSessionRow)
+            .where(
+                LaunchplaneHumanSessionRow.github_id == github_id,
+                LaunchplaneHumanSessionRow.expires_at > now.isoformat(),
+            )
+            .order_by(
+                LaunchplaneHumanSessionRow.expires_at.desc(),
+                LaunchplaneHumanSessionRow.created_at.desc(),
+            )
+            .limit(normalized_limit)
+        )
+        with self._session_factory() as session:
+            rows = session.scalars(statement).all()
+            return tuple(_human_session_from_payload(row.payload) for row in rows)
 
     def delete_session(self, session_id: str) -> None:
         with self._session_factory() as session:

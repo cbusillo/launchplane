@@ -109,6 +109,26 @@ and fails closed when active policy state is missing or ambiguous. It performs
 no policy, provider, runtime, bootstrap, secret, or deployment mutation. Landing
 the action and route does not grant production access to them.
 
+The activation preflight is a separate, read-only service-native proof at
+`POST /v1/authz-diagnostics/activation-preflight/read`. It accepts only one
+positive immutable GitHub numeric ID and requires a bearer-authenticated
+`LocalAdminIdentity` already authorized by both
+`authz_policy_health.read` and `authz_policy_effective_access.read`. It resolves
+the human only from unexpired server-side sessions, re-derives the role from
+the active DB policy, and evaluates the fixed
+`authz_policy_grant.write`/`launchplane`/`launchplane` context scope through the
+ordinary evaluator. A missing, stale, divergent, payload-mismatched, or
+bounded-truncated session result fails closed. No new authorization action or
+grant is introduced.
+
+The response contains only active-policy provenance, bounded session freshness,
+a keyed identity fingerprint, the fixed scope, the ordinary decision/reason,
+and unmanaged action-empty rule counts. It never returns session IDs, cookies,
+tokens, names, emails, logins, memberships, persisted roles, selectors, rule
+contents, managed IDs, hashes, or permission lists. The route and its errors
+are `Cache-Control: no-store`; its bearer-only path performs no session renewal,
+CSRF rotation, denial, audit, idempotency, outbox, policy, or operation write.
+
 The next read-only administration slice adds
 `authz_policy_candidate_preview.read` for an authenticated GitHub administrator
 or local administrator. It accepts one complete schema-v2 candidate policy and

@@ -61,6 +61,12 @@ Anything not explicitly selected by the generator is absent. The artifact must
 never contain real product, tenant, repository, branch, domain, lane,
 provider-target, credential, operator, or runtime-topology authority.
 
+The contract includes the read-only
+`POST /v1/authz-diagnostics/activation-preflight/read` operation for the
+supported owner-local helper. It is bearer/service-only, accepts one immutable
+GitHub numeric ID, and does not expose browser cookies, token values, direct-DB
+access, or any authorization mutation.
+
 ## Normalization Version 1
 
 The structural projection follows these rules:

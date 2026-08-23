@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "b4d6f8a0c2e5"
+EXPECTED_ALEMBIC_HEAD_REVISION = "c2221a0b1c2d"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -452,6 +452,11 @@ _ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
 )
 
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
+    CriticalIndex(
+        "launchplane_human_sessions",
+        "launchplane_human_sessions_github_id_expires_created_idx",
+        ("github_id", "expires_at", "created_at"),
+    ),
     CriticalIndex(
         "launchplane_merge_admissions",
         "launchplane_merge_admissions_attempt_uidx",

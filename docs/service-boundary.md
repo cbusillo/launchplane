@@ -735,6 +735,17 @@ workflows, or principal identifiers. Missing active state returns `503`, and
 multiple active records return `409`; the service never falls back to cached
 policy state for the response.
 
+`POST /v1/authz-diagnostics/activation-preflight/read` is the bearer-only
+service boundary for one owner-local activation proof. It accepts only a
+positive GitHub numeric ID, requires a `LocalAdminIdentity` with the existing
+`authz_policy_health.read` and `authz_policy_effective_access.read` permissions,
+and resolves the subject from unexpired DB-backed human sessions rather than
+caller-supplied claims or browser cookies. The server re-derives the human role
+from the active policy and evaluates the fixed context-scoped
+`authz_policy_grant.write` request. The route is read-only, fail-closed, and
+`Cache-Control: no-store` for both success and error responses; it does not add
+an authorization action or expose session, identity, selector, or rule data.
+
 `POST /v1/authz-diagnostics/candidate-policy/preview` is a separate
 administrator-read contract protected by `authz_policy_candidate_preview.read`.
 It accepts one exact schema-v2 candidate authorization policy and at most 25

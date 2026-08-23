@@ -74,6 +74,14 @@ class HumanSessionStore(Protocol):
         session_id: str,
     ) -> LaunchplaneHumanSession | None: ...
 
+    def read_human_sessions_for_github_id_without_cleanup(
+        self,
+        github_id: int,
+        *,
+        limit: int,
+        now: datetime,
+    ) -> tuple[LaunchplaneHumanSession, ...]: ...
+
     def delete_session(self, session_id: str) -> None: ...
 
     def write_session_if_csrf_generation(
@@ -121,6 +129,26 @@ class InMemoryHumanSessionStore:
     ) -> LaunchplaneHumanSession | None:
         with self._lock:
             return self._sessions.get(session_id)
+
+    def read_human_sessions_for_github_id_without_cleanup(
+        self,
+        github_id: int,
+        *,
+        limit: int,
+        now: datetime,
+    ) -> tuple[LaunchplaneHumanSession, ...]:
+        with self._lock:
+            return tuple(
+                sorted(
+                    (
+                        session
+                        for session in self._sessions.values()
+                        if session.identity.github_id == github_id and session.expires_at > now
+                    ),
+                    key=lambda session: (session.expires_at, session.created_at),
+                    reverse=True,
+                )[: max(limit, 0)]
+            )
 
     def delete_session(self, session_id: str) -> None:
         with self._lock:

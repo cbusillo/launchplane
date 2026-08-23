@@ -593,6 +593,7 @@ Current implementation scope:
 - `POST /v1/authz-policies/managed-rule-sets/reconcile`
 - `POST /v1/authz-diagnostics/github-actions/evaluate`
 - `GET /v1/authz-diagnostics/active-policy/health`
+- `POST /v1/authz-diagnostics/activation-preflight/read`
 - `POST /v1/authz-diagnostics/candidate-policy/preview`
 - `GET /v1/route-bindings/records/current`
 - `POST /v1/route-bindings/reconcile`
@@ -670,6 +671,20 @@ reason codes, managed-set rule counts, and reachable policy-administrator rule
 counts. It never returns managed rule IDs, rule hashes, selectors, actions, or
 principal identities. Missing or multiple active records fail closed, and the
 read does not authorize a policy write or production grant.
+
+`POST /v1/authz-diagnostics/activation-preflight/read` is the supported
+owner-local activation preflight. The operator helper command
+`uv run launchplane authz-policies activation-preflight --service-url ...
+--github-id ...` reads its bearer token only from
+`LAUNCHPLANE_LOCAL_ADMIN_TOKEN` (or the explicitly named environment variable)
+and has no browser-cookie, token-argv, or direct-DB mode. The service requires
+a local-admin bearer identity with both existing diagnostic read permissions,
+then resolves the supplied GitHub ID from at most eight current server-side
+sessions after a nine-row bounded read. It re-derives role authority from the
+active DB policy and returns only bounded policy, session, fixed-scope,
+decision, fingerprint, and unmanaged action-empty evidence. Missing, stale,
+ambiguous, mismatched, or truncated sessions fail closed; no grant is created
+by this route.
 
 `POST /v1/authz-diagnostics/candidate-policy/preview` is the non-persisting
 administrator preview for one exact schema-v2 candidate policy. The caller must
