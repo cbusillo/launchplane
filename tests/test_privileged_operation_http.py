@@ -143,6 +143,19 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         return app
 
+    async def test_openapi_exposes_approval_and_revocation_but_no_execute_or_cancel(self) -> None:
+        with TemporaryDirectory() as directory:
+            app = self._app(
+                store=FilesystemRecordStore(Path(directory)),
+                policy=_policy(),
+            )
+            paths = app.openapi()["paths"]
+
+        self.assertIn("/v1/privileged-operations/plans/{operation_id}/approve", paths)
+        self.assertIn("/v1/privileged-operations/plans/{operation_id}/revoke", paths)
+        self.assertNotIn("/v1/privileged-operations/plans/{operation_id}/execute", paths)
+        self.assertNotIn("/v1/privileged-operations/plans/{operation_id}/cancel", paths)
+
     async def test_human_plan_list_and_agent_summary_are_redacted(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory,
@@ -288,4 +301,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-        self.assertEqual(tuple(response.status_code for response in responses), (503,) * 5)
+        self.assertEqual(
+            tuple(response.status_code for response in responses),
+            (503, 503, 503, 404, 503),
+        )

@@ -12,12 +12,32 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 PRIVILEGED_SECRET_OPERATION_PLAN_ACTION = "privileged_secret_operation.plan"
 PRIVILEGED_SECRET_OPERATION_READ_ACTION = "privileged_secret_operation.read"
 PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION = "privileged_secret_operation.cancel"
+PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION = "privileged_secret_operation.approve"
+PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION = "privileged_secret_operation.revoke"
 PRIVILEGED_OPERATION_SUMMARY_READ_ACTION = "privileged_operation_summary.read"
 
 PrivilegedOperationDescriptorId = Literal["managed-secret-reencryption"]
 PrivilegedOperationSafetyClass = Literal["secret_backed"]
-PrivilegedOperationStatus = Literal["planned", "expired", "cancelled"]
-PrivilegedOperationEventAction = Literal["planned", "expired", "cancelled"]
+PrivilegedOperationStatus = Literal[
+    "planned",
+    "approved",
+    "revoked",
+    "executing",
+    "executed",
+    "execution_failed",
+    "expired",
+    "cancelled",
+]
+PrivilegedOperationEventAction = Literal[
+    "planned",
+    "approved",
+    "revoked",
+    "executing",
+    "executed",
+    "execution_failed",
+    "expired",
+    "cancelled",
+]
 PrivilegedOperationEventWriteStatus = Literal["written", "replayed"]
 PrivilegedOperationSourceKind = Literal["browser_api", "system"]
 
@@ -157,6 +177,92 @@ class ManagedSecretReencryptionHumanEvidence(BaseModel):
         return self
 
 
+class PrivilegedOperationApproval(BaseModel):
+    """Immutable browser-human authorization for a single planned operation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    approver: PrivilegedOperationActor
+    descriptor_id: PrivilegedOperationDescriptorId
+    descriptor_version: int = Field(ge=1)
+    request_digest: str
+    evidence_digest: str
+    plan_digest: str
+    pre_state_digest: str
+    policy_record_id: str
+    policy_revision: int = Field(ge=1)
+    policy_sha256: str
+    policy_source: str
+    managed_set_id: str
+    managed_rule_id: str
+    expires_at: str
+    reason: str = Field(min_length=1, max_length=4000)
+    rollback_class: Literal["reconciliation_required"] = "reconciliation_required"
+
+    @model_validator(mode="after")
+    def _validate_approval(self) -> "PrivilegedOperationApproval":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported privileged-operation approval schema version.")
+        if self.approver.identity_type != "github_human":
+            raise ValueError("Privileged-operation approvals require a GitHub-human approver")
+        if self.descriptor_version != 1:
+            raise ValueError("Unsupported privileged-operation approval descriptor version.")
+        for field_name in (
+            "request_digest",
+            "evidence_digest",
+            "plan_digest",
+            "pre_state_digest",
+            "policy_sha256",
+        ):
+            object.__setattr__(
+                self, field_name, _sha256(str(getattr(self, field_name)), field_name)
+            )
+        for field_name in (
+            "policy_record_id",
+            "policy_source",
+            "managed_set_id",
+            "managed_rule_id",
+            "reason",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _required_token(str(getattr(self, field_name)), field_name),
+            )
+        object.__setattr__(self, "expires_at", _timestamp(self.expires_at, "expires_at"))
+        return self
+
+
+class PrivilegedOperationExecutionEvidence(BaseModel):
+    """Redacted terminal evidence written by the service-internal worker."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(default=1, ge=1)
+    result_status: Literal["ok", "error"]
+    result_digest: str
+    configured_secret_count: int = Field(ge=0)
+    rotation_candidate_count: int = Field(ge=0)
+    unchanged_count: int = Field(ge=0)
+    unreadable_secret_count: int = Field(ge=0)
+    reconciliation_required: bool
+    failure_code: str = Field(default="", max_length=160)
+
+    @model_validator(mode="after")
+    def _validate_execution_evidence(self) -> "PrivilegedOperationExecutionEvidence":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported privileged-operation execution evidence schema version.")
+        object.__setattr__(self, "result_digest", _sha256(self.result_digest, "result_digest"))
+        failure_code = self.failure_code.strip()
+        object.__setattr__(self, "failure_code", failure_code)
+        if self.result_status == "ok" and (failure_code or self.reconciliation_required):
+            raise ValueError("Successful execution evidence cannot require reconciliation")
+        if self.result_status == "error" and not failure_code:
+            raise ValueError("Failed execution evidence requires a bounded failure code")
+        return self
+
+
 class PrivilegedOperationRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -175,6 +281,8 @@ class PrivilegedOperationRecord(BaseModel):
     created_at: str
     updated_at: str
     expires_at: str
+    approval: PrivilegedOperationApproval | None = None
+    execution: PrivilegedOperationExecutionEvidence | None = None
     terminal_at: str = ""
     terminal_reason: str = Field(default="", max_length=4000)
 
@@ -219,6 +327,47 @@ class PrivilegedOperationRecord(BaseModel):
         if self.status == "planned":
             if self.terminal_at or terminal_reason:
                 raise ValueError("Planned privileged operations cannot contain terminal evidence")
+            if self.approval is not None or self.execution is not None:
+                raise ValueError(
+                    "Planned privileged operations cannot contain approval or execution evidence"
+                )
+        elif self.status in {"approved", "executing"}:
+            if self.terminal_at or terminal_reason:
+                raise ValueError("Active privileged operations cannot contain terminal evidence")
+            if self.approval is None:
+                raise ValueError("Approved privileged operations require approval evidence")
+            if self.approval.descriptor_id != self.descriptor_id:
+                raise ValueError(
+                    "Privileged-operation approval descriptor does not match the record"
+                )
+            if self.approval.descriptor_version != self.descriptor_version:
+                raise ValueError("Privileged-operation approval version does not match the record")
+            if self.approval.request_digest != self.request_digest:
+                raise ValueError(
+                    "Privileged-operation approval request digest does not match the record"
+                )
+            if self.approval.evidence_digest != self.evidence_digest:
+                raise ValueError(
+                    "Privileged-operation approval evidence digest does not match the record"
+                )
+            if self.approval.plan_digest != self.evidence.plan_digest:
+                raise ValueError(
+                    "Privileged-operation approval plan digest does not match the record"
+                )
+            if self.approval.pre_state_digest != privileged_operation_pre_state_digest(
+                self.evidence
+            ):
+                raise ValueError(
+                    "Privileged-operation approval pre-state digest does not match the record"
+                )
+            if self.approval.expires_at != self.expires_at:
+                raise ValueError("Privileged-operation approval expiry does not match the record")
+            if self.status == "approved" and self.execution is not None:
+                raise ValueError("Approved privileged operations cannot contain execution evidence")
+            if self.status == "executing" and self.execution is not None:
+                raise ValueError(
+                    "Executing privileged operations cannot contain terminal execution evidence"
+                )
         else:
             terminal_at = _timestamp(self.terminal_at, "terminal_at")
             object.__setattr__(self, "terminal_at", terminal_at)
@@ -226,6 +375,22 @@ class PrivilegedOperationRecord(BaseModel):
                 raise ValueError("Privileged-operation terminal_at cannot precede created_at")
             if not terminal_reason:
                 raise ValueError("Terminal privileged operations require terminal_reason")
+            if self.status in {"revoked", "executed", "execution_failed"} and self.approval is None:
+                raise ValueError(
+                    "Approved privileged-operation terminals require approval evidence"
+                )
+            if self.status in {"executed", "execution_failed"} and self.execution is None:
+                raise ValueError("Execution terminals require execution evidence")
+            if self.status == "executed" and self.execution is not None:
+                if self.execution.result_status != "ok":
+                    raise ValueError(
+                        "Executed privileged operations require successful execution evidence"
+                    )
+            if self.status == "execution_failed" and self.execution is not None:
+                if self.execution.result_status != "error":
+                    raise ValueError(
+                        "Failed privileged operations require failed execution evidence"
+                    )
         return self
 
 
@@ -235,7 +400,7 @@ class PrivilegedOperationEventRecord(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     event_id: str = ""
     operation_id: str
-    sequence: int = Field(ge=1, le=2)
+    sequence: int = Field(ge=1, le=4)
     action: PrivilegedOperationEventAction
     occurred_at: str
     source_kind: PrivilegedOperationSourceKind
@@ -267,16 +432,20 @@ class PrivilegedOperationEventRecord(BaseModel):
                 raise ValueError("Planned events must be the first browser-authored event")
             if self.actor.identity_type != "github_human" or reason:
                 raise ValueError("Planned events require a GitHub human and no event reason")
-        elif self.action == "cancelled":
-            if self.sequence != 2 or self.source_kind != "browser_api":
-                raise ValueError("Cancelled events must be the second browser-authored event")
+        elif self.action in {"approved", "revoked", "cancelled"}:
+            if self.sequence not in {2, 3} or self.source_kind != "browser_api":
+                raise ValueError("Human privileged-operation events must be browser-authored")
             if self.actor.identity_type != "github_human" or not reason:
-                raise ValueError("Cancelled events require a GitHub human and reason")
+                raise ValueError(
+                    "Human privileged-operation events require a GitHub human and reason"
+                )
         else:
-            if self.sequence != 2 or self.source_kind != "system":
-                raise ValueError("Expired events must be the second system-authored event")
+            if self.sequence not in {2, 3, 4} or self.source_kind != "system":
+                raise ValueError("System privileged-operation events must be system-authored")
             if self.actor.identity_type != "system" or not reason:
-                raise ValueError("Expired events require the system actor and reason")
+                raise ValueError(
+                    "System privileged-operation events require the system actor and reason"
+                )
         computed_event_id = build_privileged_operation_event_id(
             operation_id=self.operation_id,
             action=self.action,
@@ -321,6 +490,14 @@ def privileged_operation_evidence_digest(
     evidence: ManagedSecretReencryptionHumanEvidence,
 ) -> str:
     return _digest_payload(evidence.model_dump(mode="json"))
+
+
+def privileged_operation_pre_state_digest(
+    evidence: ManagedSecretReencryptionHumanEvidence,
+) -> str:
+    payload = evidence.model_dump(mode="json")
+    payload.pop("plan_digest")
+    return _digest_payload(payload)
 
 
 def privileged_operation_record_digest(record: PrivilegedOperationRecord) -> str:
@@ -390,10 +567,6 @@ def validate_privileged_operation_transition(
                 "Privileged-operation creation requires a planned record and first planned event"
             )
         return
-    if previous.status != "planned":
-        raise PrivilegedOperationTransitionError(
-            "Terminal privileged operations cannot transition again"
-        )
     if proposed.operation_id != previous.operation_id:
         raise PrivilegedOperationTransitionError("Privileged-operation ID cannot change")
     for field_name in (
@@ -413,17 +586,32 @@ def validate_privileged_operation_transition(
             raise PrivilegedOperationTransitionError(
                 f"Privileged-operation transition cannot change {field_name}"
             )
-    if proposed.status not in {"expired", "cancelled"} or event.action != proposed.status:
+    transitions: dict[str, tuple[str, int]] = {
+        "approved": ("planned", 2),
+        "revoked": ("approved", 3),
+        "executing": ("approved", 3),
+        "executed": ("executing", 4),
+        "execution_failed": ("executing", 4),
+        "expired": ("planned", 2),
+        "cancelled": ("planned", 2),
+    }
+    expected = transitions.get(proposed.status)
+    if expected is None or previous.status != expected[0] or event.action != proposed.status:
+        raise PrivilegedOperationTransitionError("Privileged-operation transition is not allowed")
+    if event.sequence != expected[1] or event.occurred_at != proposed.updated_at:
         raise PrivilegedOperationTransitionError(
-            "Planned privileged operations can only expire or be cancelled"
+            "Privileged-operation event must bind the transition timestamp"
         )
-    if event.sequence != 2 or event.occurred_at != proposed.terminal_at:
+    if proposed.status in {"revoked", "executed", "execution_failed", "expired", "cancelled"}:
+        if event.occurred_at != proposed.terminal_at or event.reason != proposed.terminal_reason:
+            raise PrivilegedOperationTransitionError(
+                "Terminal privileged-operation event must bind terminal evidence"
+            )
+    elif proposed.status == "approved" and (
+        proposed.approval is None or event.reason != proposed.approval.reason
+    ):
         raise PrivilegedOperationTransitionError(
-            "Terminal privileged-operation event must bind the terminal timestamp"
-        )
-    if event.reason != proposed.terminal_reason:
-        raise PrivilegedOperationTransitionError(
-            "Terminal privileged-operation event must bind the terminal reason"
+            "Approved privileged-operation event must bind approval evidence"
         )
 
 

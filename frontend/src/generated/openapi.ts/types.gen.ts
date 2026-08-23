@@ -1566,8 +1566,28 @@ export type PrivilegedOperationActor = {
     login: string;
 };
 
+export type PrivilegedOperationApproval = {
+    approver: PrivilegedOperationActor;
+    descriptor_id: 'managed-secret-reencryption';
+    descriptor_version: number;
+    evidence_digest: string;
+    expires_at: string;
+    managed_rule_id: string;
+    managed_set_id: string;
+    plan_digest: string;
+    policy_record_id: string;
+    policy_revision: number;
+    policy_sha256: string;
+    policy_source: string;
+    pre_state_digest: string;
+    reason: string;
+    request_digest: string;
+    rollback_class: 'reconciliation_required';
+    schema_version: number;
+};
+
 export type PrivilegedOperationEventRecord = {
-    action: 'planned' | 'expired' | 'cancelled';
+    action: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
     actor: PrivilegedOperationActor;
     event_id: string;
     occurred_at: string;
@@ -1578,6 +1598,18 @@ export type PrivilegedOperationEventRecord = {
     sequence: number;
     source_event_id: string;
     source_kind: 'browser_api' | 'system';
+};
+
+export type PrivilegedOperationExecutionEvidence = {
+    configured_secret_count: number;
+    failure_code: string;
+    reconciliation_required: boolean;
+    result_digest: string;
+    result_status: 'ok' | 'error';
+    rotation_candidate_count: number;
+    schema_version: number;
+    unchanged_count: number;
+    unreadable_secret_count: number;
 };
 
 export type PrivilegedOperationHumanResponse = {
@@ -1596,11 +1628,13 @@ export type PrivilegedOperationListResponse = {
 };
 
 export type PrivilegedOperationRecord = {
+    approval: PrivilegedOperationApproval | null;
     created_at: string;
     descriptor_id: 'managed-secret-reencryption';
     descriptor_version: number;
     evidence: ManagedSecretReencryptionHumanEvidence;
     evidence_digest: string;
+    execution: PrivilegedOperationExecutionEvidence | null;
     expires_at: string;
     operation_id: string;
     request: ManagedSecretReencryptionPlanInput;
@@ -1609,7 +1643,7 @@ export type PrivilegedOperationRecord = {
     safety_class: 'secret_backed';
     schema_version: number;
     source_event_id: string;
-    status: 'planned' | 'expired' | 'cancelled';
+    status: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
     terminal_at: string;
     terminal_reason: string;
     updated_at: string;
@@ -3452,7 +3486,7 @@ export type ListHumanPrivilegedOperationsData = {
     };
     path?: never;
     query?: {
-        status?: 'planned' | 'expired' | 'cancelled' | null;
+        status?: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled' | null;
         limit?: number;
     };
     url: '/v1/privileged-operations/plans';

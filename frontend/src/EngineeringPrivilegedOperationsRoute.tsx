@@ -1,9 +1,11 @@
 import { KeyRound, ShieldAlert } from "lucide-react";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 
 import {
   LaunchplaneApiError,
+  approvePrivilegedOperation,
   readPrivilegedOperationPlans,
+  revokePrivilegedOperation,
   type PrivilegedOperationListResponse,
   type PrivilegedOperationRecord,
 } from "./api";
@@ -20,7 +22,6 @@ import {
   EngineeringRouteFrame,
 } from "./EngineeringRouteUi";
 import { formatTime } from "./format";
-
 
 export function EngineeringPrivilegedOperationsRoute({
   fixtureMode,
@@ -61,9 +62,10 @@ export function EngineeringPrivilegedOperationsRoute({
       view="privileged-operations"
     >
       <EngineeringBoundaryNote title="Planning evidence only — no privileged effect">
-        These records are typed dry-run evidence for human review. Phase 1 has no approval or
-        execution path, agents receive counts only, and the new actions ship with no production
-        grants. Managed-secret identifiers and version identifiers are never persisted here.
+        These records are typed dry-run evidence for human review. Phase 1 has
+        no approval or execution path, agents receive counts only, and the new
+        actions ship with no production grants. Managed-secret identifiers and
+        version identifiers are never persisted here.
       </EngineeringBoundaryNote>
 
       <EngineeringResourceGate
@@ -77,7 +79,11 @@ export function EngineeringPrivilegedOperationsRoute({
   );
 }
 
-function PrivilegedOperationPlanList({ data }: { data: PrivilegedOperationListResponse }) {
+function PrivilegedOperationPlanList({
+  data,
+}: {
+  data: PrivilegedOperationListResponse;
+}) {
   if (!data.records.length) {
     return (
       <EngineeringEmpty
@@ -88,28 +94,71 @@ function PrivilegedOperationPlanList({ data }: { data: PrivilegedOperationListRe
     );
   }
   return (
-    <div className="privileged-operation-list" aria-label="Privileged-operation plans">
+    <div
+      className="privileged-operation-list"
+      aria-label="Privileged-operation plans"
+    >
       {data.records.map((record) => (
-        <PrivilegedOperationPlanCard key={record.operation_id} record={record} />
+        <PrivilegedOperationPlanCard
+          key={record.operation_id}
+          record={record}
+        />
       ))}
     </div>
   );
 }
 
-function PrivilegedOperationPlanCard({ record }: { record: PrivilegedOperationRecord }) {
+function PrivilegedOperationPlanCard({
+  record,
+}: {
+  record: PrivilegedOperationRecord;
+}) {
   const evidence = record.evidence;
+  const [mutationMessage, setMutationMessage] = useState("");
+  const canApprove = record.status === "planned";
+  const canRevoke = record.status === "approved";
+
+  async function mutate(action: "approve" | "revoke") {
+    const reason = window
+      .prompt(action === "approve" ? "Approval reason" : "Revocation reason")
+      ?.trim();
+    if (!reason) return;
+    setMutationMessage("");
+    try {
+      if (action === "approve") {
+        await approvePrivilegedOperation(record.operation_id, reason);
+      } else {
+        await revokePrivilegedOperation(record.operation_id, reason);
+      }
+      setMutationMessage(
+        action === "approve"
+          ? "Approval recorded. The service worker will revalidate before execution."
+          : "Approval revoked.",
+      );
+    } catch (error) {
+      setMutationMessage(
+        error instanceof LaunchplaneApiError
+          ? error.message
+          : "The operation could not be updated.",
+      );
+    }
+  }
   return (
     <article className="privileged-operation-card">
       <header>
         <div>
-          <span className="engineering-kicker">Managed-secret re-encryption</span>
+          <span className="engineering-kicker">
+            Managed-secret re-encryption
+          </span>
           <h2>{record.request.reason}</h2>
           <p>
             Requested by <strong>{record.requested_by.login}</strong> · created{" "}
             {formatTime(record.created_at)}
           </p>
         </div>
-        <span className={`privileged-operation-status ${record.status}`}>{record.status}</span>
+        <span className={`privileged-operation-status ${record.status}`}>
+          {record.status}
+        </span>
       </header>
 
       {evidence.unreadable_secret_count ? (
@@ -117,8 +166,8 @@ function PrivilegedOperationPlanCard({ record }: { record: PrivilegedOperationRe
           <ShieldAlert size={18} aria-hidden="true" />
           <span>
             {evidence.unreadable_secret_count} configured secret
-            {evidence.unreadable_secret_count === 1 ? " is" : "s are"} unreadable. Raw errors and
-            identifiers are intentionally excluded.
+            {evidence.unreadable_secret_count === 1 ? " is" : "s are"}{" "}
+            unreadable. Raw errors and identifiers are intentionally excluded.
           </span>
         </div>
       ) : null}
@@ -145,11 +194,15 @@ function PrivilegedOperationPlanCard({ record }: { record: PrivilegedOperationRe
       <dl className="privileged-operation-details">
         <div>
           <dt>Active key</dt>
-          <dd><code>{evidence.active_key_id}</code></dd>
+          <dd>
+            <code>{evidence.active_key_id}</code>
+          </dd>
         </div>
         <div>
           <dt>Legacy compatibility</dt>
-          <dd>{evidence.legacy_compatibility_key_loaded ? "Loaded" : "Not loaded"}</dd>
+          <dd>
+            {evidence.legacy_compatibility_key_loaded ? "Loaded" : "Not loaded"}
+          </dd>
         </div>
         <div>
           <dt>Retirement blocked</dt>
@@ -165,12 +218,38 @@ function PrivilegedOperationPlanCard({ record }: { record: PrivilegedOperationRe
         </div>
         <div>
           <dt>Plan digest</dt>
-          <dd><code className="privileged-operation-digest">{evidence.plan_digest}</code></dd>
+          <dd>
+            <code className="privileged-operation-digest">
+              {evidence.plan_digest}
+            </code>
+          </dd>
         </div>
       </dl>
 
+      {canApprove || canRevoke ? (
+        <div className="privileged-operation-actions">
+          {canApprove ? (
+            <button type="button" onClick={() => void mutate("approve")}>
+              Approve plan
+            </button>
+          ) : null}
+          {canRevoke ? (
+            <button type="button" onClick={() => void mutate("revoke")}>
+              Revoke approval
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {mutationMessage ? (
+        <p className="privileged-operation-terminal-reason">
+          {mutationMessage}
+        </p>
+      ) : null}
+
       {record.terminal_reason ? (
-        <p className="privileged-operation-terminal-reason">{record.terminal_reason}</p>
+        <p className="privileged-operation-terminal-reason">
+          {record.terminal_reason}
+        </p>
       ) : null}
     </article>
   );
@@ -198,7 +277,10 @@ function privilegedOperationFixture(
   fixtureMode: Exclude<DevFixtureMode, "">,
 ): PrivilegedOperationListResponse {
   if (fixtureMode === "error") {
-    throw new LaunchplaneApiError("Privileged-operation evidence is unavailable.", 503);
+    throw new LaunchplaneApiError(
+      "Privileged-operation evidence is unavailable.",
+      503,
+    );
   }
   if (fixtureMode === "denied") {
     throw new LaunchplaneApiError(
@@ -257,6 +339,8 @@ function privilegedOperationFixture(
         created_at: "2026-08-22T20:00:00+00:00",
         updated_at: "2026-08-22T20:00:00+00:00",
         expires_at: "2026-08-22T20:30:00+00:00",
+        approval: null,
+        execution: null,
         terminal_at: "",
         terminal_reason: "",
       },

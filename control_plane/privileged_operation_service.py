@@ -8,6 +8,7 @@ from typing import Protocol, cast
 from control_plane.contracts.privileged_operation import (
     ManagedSecretReencryptionPlanInput,
     PrivilegedOperationActor,
+    PrivilegedOperationApproval,
     PrivilegedOperationConflictError,
     PrivilegedOperationEventRecord,
     PrivilegedOperationEventWriteStatus,
@@ -68,6 +69,14 @@ class PrivilegedOperationStoreUnavailableError(TypeError):
 
 
 class PrivilegedOperationNotCancellableError(ValueError):
+    pass
+
+
+class PrivilegedOperationNotApprovableError(ValueError):
+    pass
+
+
+class PrivilegedOperationNotRevocableError(ValueError):
     pass
 
 
@@ -276,14 +285,15 @@ def expire_privileged_operation_if_due(
     record: PrivilegedOperationRecord,
     now: Callable[[], datetime] = _utc_now,
 ) -> PrivilegedOperationRecord:
-    if record.status != "planned":
+    if record.status not in {"planned", "approved"}:
         return record
     current_time = now().astimezone(timezone.utc)
     if current_time < datetime.fromisoformat(record.expires_at):
         return record
     store = require_privileged_operation_store(record_store)
     occurred_at = _timestamp(current_time)
-    reason = "Privileged-operation plan expired before approval or execution existed."
+    reason = "Privileged-operation approval expired before execution began."
+    sequence = 2 if record.status == "planned" else 3
     expired_record = record.model_copy(
         update={
             "status": "expired",
@@ -301,7 +311,7 @@ def expire_privileged_operation_if_due(
             source_event_id=source_event_id,
         ),
         operation_id=record.operation_id,
-        sequence=2,
+        sequence=sequence,
         action="expired",
         occurred_at=occurred_at,
         source_kind="system",
@@ -340,12 +350,13 @@ def list_privileged_operations(
     now: Callable[[], datetime] = _utc_now,
 ) -> tuple[PrivilegedOperationRecord, ...]:
     store = require_privileged_operation_store(record_store)
-    if status != "cancelled":
+    if status not in {"cancelled", "revoked", "executed", "execution_failed"}:
         for record in store.list_privileged_operation_records(
-            status="planned",
+            status="",
             descriptor_id=MANAGED_SECRET_REENCRYPTION_DESCRIPTOR.descriptor_id,
         ):
-            expire_privileged_operation_if_due(record_store=store, record=record, now=now)
+            if record.status in {"planned", "approved"}:
+                expire_privileged_operation_if_due(record_store=store, record=record, now=now)
     return store.list_privileged_operation_records(
         status=status,
         descriptor_id=MANAGED_SECRET_REENCRYPTION_DESCRIPTOR.descriptor_id,
@@ -456,4 +467,127 @@ def cancel_privileged_operation(
         write_status=write_status,
         record=store.read_privileged_operation_record(operation_id),
         event=event,
+    )
+
+
+def approve_privileged_operation(
+    *,
+    record_store: object,
+    operation_id: str,
+    approval: PrivilegedOperationApproval,
+    source_event_id: str,
+    now: Callable[[], datetime] = _utc_now,
+) -> PrivilegedOperationWriteResult:
+    store = require_privileged_operation_store(record_store)
+    record = read_privileged_operation(record_store=store, operation_id=operation_id, now=now)
+    event_id = build_privileged_operation_event_id(
+        operation_id=operation_id,
+        action="approved",
+        source_kind="browser_api",
+        source_event_id=source_event_id,
+    )
+    existing_event = _read_privileged_operation_event(
+        store=store,
+        operation_id=operation_id,
+        event_id=event_id,
+    )
+    if existing_event is not None:
+        if record.status == "approved" and record.approval == approval:
+            return PrivilegedOperationWriteResult("replayed", record, existing_event)
+        raise PrivilegedOperationConflictError(
+            "Privileged-operation approval replay changed the original request."
+        )
+    if record.status != "planned":
+        raise PrivilegedOperationNotApprovableError(
+            f"Privileged-operation plan is already {record.status}."
+        )
+    occurred_at = _timestamp(now().astimezone(timezone.utc))
+    approved = record.model_copy(
+        update={"status": "approved", "approval": approval, "updated_at": occurred_at}
+    )
+    event = PrivilegedOperationEventRecord(
+        event_id=event_id,
+        operation_id=operation_id,
+        sequence=2,
+        action="approved",
+        occurred_at=occurred_at,
+        source_kind="browser_api",
+        source_event_id=source_event_id,
+        actor=approval.approver,
+        reason=approval.reason,
+        resulting_record_digest=privileged_operation_record_digest(approved),
+    )
+    write_status = store.transition_privileged_operation(approved, event)
+    return PrivilegedOperationWriteResult(
+        write_status, store.read_privileged_operation_record(operation_id), event
+    )
+
+
+def revoke_privileged_operation(
+    *,
+    record_store: object,
+    operation_id: str,
+    actor_github_id: int,
+    actor_login: str,
+    source_event_id: str,
+    reason: str,
+    now: Callable[[], datetime] = _utc_now,
+) -> PrivilegedOperationWriteResult:
+    store = require_privileged_operation_store(record_store)
+    normalized_reason = reason.strip()
+    if not normalized_reason:
+        raise ValueError("Privileged-operation revocation requires a reason.")
+    actor = PrivilegedOperationActor(
+        identity_type="github_human", github_id=actor_github_id, login=actor_login
+    )
+    record = read_privileged_operation(record_store=store, operation_id=operation_id, now=now)
+    event_id = build_privileged_operation_event_id(
+        operation_id=operation_id,
+        action="revoked",
+        source_kind="browser_api",
+        source_event_id=source_event_id,
+    )
+    existing_event = _read_privileged_operation_event(
+        store=store,
+        operation_id=operation_id,
+        event_id=event_id,
+    )
+    if existing_event is not None:
+        if (
+            record.status == "revoked"
+            and existing_event.actor == actor
+            and existing_event.reason == normalized_reason
+        ):
+            return PrivilegedOperationWriteResult("replayed", record, existing_event)
+        raise PrivilegedOperationConflictError(
+            "Privileged-operation revocation replay changed the original request."
+        )
+    if record.status != "approved":
+        raise PrivilegedOperationNotRevocableError(
+            f"Privileged-operation plan is already {record.status}."
+        )
+    occurred_at = _timestamp(now().astimezone(timezone.utc))
+    revoked = record.model_copy(
+        update={
+            "status": "revoked",
+            "updated_at": occurred_at,
+            "terminal_at": occurred_at,
+            "terminal_reason": normalized_reason,
+        }
+    )
+    event = PrivilegedOperationEventRecord(
+        event_id=event_id,
+        operation_id=operation_id,
+        sequence=3,
+        action="revoked",
+        occurred_at=occurred_at,
+        source_kind="browser_api",
+        source_event_id=source_event_id,
+        actor=actor,
+        reason=normalized_reason,
+        resulting_record_digest=privileged_operation_record_digest(revoked),
+    )
+    write_status = store.transition_privileged_operation(revoked, event)
+    return PrivilegedOperationWriteResult(
+        write_status, store.read_privileged_operation_record(operation_id), event
     )

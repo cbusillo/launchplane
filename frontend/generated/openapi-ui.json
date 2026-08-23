@@ -1283,6 +1283,11 @@
                 {
                   "enum": [
                     "planned",
+                    "approved",
+                    "revoked",
+                    "executing",
+                    "executed",
+                    "execution_failed",
                     "expired",
                     "cancelled"
                   ],
@@ -13513,12 +13518,120 @@
         "title": "PrivilegedOperationActor",
         "type": "object"
       },
+      "PrivilegedOperationApproval": {
+        "additionalProperties": false,
+        "description": "Immutable browser-human authorization for a single planned operation.",
+        "properties": {
+          "approver": {
+            "$ref": "#/components/schemas/PrivilegedOperationActor"
+          },
+          "descriptor_id": {
+            "const": "managed-secret-reencryption",
+            "title": "Descriptor Id",
+            "type": "string"
+          },
+          "descriptor_version": {
+            "minimum": 1,
+            "title": "Descriptor Version",
+            "type": "integer"
+          },
+          "evidence_digest": {
+            "title": "Evidence Digest",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "managed_rule_id": {
+            "title": "Managed Rule Id",
+            "type": "string"
+          },
+          "managed_set_id": {
+            "title": "Managed Set Id",
+            "type": "string"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "policy_record_id": {
+            "title": "Policy Record Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "minimum": 1,
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "policy_source": {
+            "title": "Policy Source",
+            "type": "string"
+          },
+          "pre_state_digest": {
+            "title": "Pre State Digest",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "request_digest": {
+            "title": "Request Digest",
+            "type": "string"
+          },
+          "rollback_class": {
+            "const": "reconciliation_required",
+            "default": "reconciliation_required",
+            "title": "Rollback Class",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "approver",
+          "descriptor_id",
+          "descriptor_version",
+          "evidence_digest",
+          "expires_at",
+          "managed_rule_id",
+          "managed_set_id",
+          "plan_digest",
+          "policy_record_id",
+          "policy_revision",
+          "policy_sha256",
+          "policy_source",
+          "pre_state_digest",
+          "reason",
+          "request_digest",
+          "rollback_class",
+          "schema_version"
+        ],
+        "title": "PrivilegedOperationApproval",
+        "type": "object"
+      },
       "PrivilegedOperationEventRecord": {
         "additionalProperties": false,
         "properties": {
           "action": {
             "enum": [
               "planned",
+              "approved",
+              "revoked",
+              "executing",
+              "executed",
+              "execution_failed",
               "expired",
               "cancelled"
             ],
@@ -13558,7 +13671,7 @@
             "type": "integer"
           },
           "sequence": {
-            "maximum": 2,
+            "maximum": 4,
             "minimum": 1,
             "title": "Sequence",
             "type": "integer"
@@ -13592,6 +13705,73 @@
           "source_kind"
         ],
         "title": "PrivilegedOperationEventRecord",
+        "type": "object"
+      },
+      "PrivilegedOperationExecutionEvidence": {
+        "additionalProperties": false,
+        "description": "Redacted terminal evidence written by the service-internal worker.",
+        "properties": {
+          "configured_secret_count": {
+            "minimum": 0,
+            "title": "Configured Secret Count",
+            "type": "integer"
+          },
+          "failure_code": {
+            "default": "",
+            "maxLength": 160,
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "reconciliation_required": {
+            "title": "Reconciliation Required",
+            "type": "boolean"
+          },
+          "result_digest": {
+            "title": "Result Digest",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          },
+          "rotation_candidate_count": {
+            "minimum": 0,
+            "title": "Rotation Candidate Count",
+            "type": "integer"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "unchanged_count": {
+            "minimum": 0,
+            "title": "Unchanged Count",
+            "type": "integer"
+          },
+          "unreadable_secret_count": {
+            "minimum": 0,
+            "title": "Unreadable Secret Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "configured_secret_count",
+          "failure_code",
+          "reconciliation_required",
+          "result_digest",
+          "result_status",
+          "rotation_candidate_count",
+          "schema_version",
+          "unchanged_count",
+          "unreadable_secret_count"
+        ],
+        "title": "PrivilegedOperationExecutionEvidence",
         "type": "object"
       },
       "PrivilegedOperationHumanResponse": {
@@ -13676,6 +13856,16 @@
       "PrivilegedOperationRecord": {
         "additionalProperties": false,
         "properties": {
+          "approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "created_at": {
             "title": "Created At",
             "type": "string"
@@ -13697,6 +13887,16 @@
           "evidence_digest": {
             "title": "Evidence Digest",
             "type": "string"
+          },
+          "execution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationExecutionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "expires_at": {
             "title": "Expires At",
@@ -13736,6 +13936,11 @@
           "status": {
             "enum": [
               "planned",
+              "approved",
+              "revoked",
+              "executing",
+              "executed",
+              "execution_failed",
               "expired",
               "cancelled"
             ],
@@ -13759,11 +13964,13 @@
           }
         },
         "required": [
+          "approval",
           "created_at",
           "descriptor_id",
           "descriptor_version",
           "evidence",
           "evidence_digest",
+          "execution",
           "expires_at",
           "operation_id",
           "request",
