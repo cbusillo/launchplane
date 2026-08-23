@@ -454,8 +454,8 @@ _ODOO_STABLE_ACTIVE_OPERATION_PREDICATE_TOKENS = (
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     CriticalIndex(
         "launchplane_human_sessions",
-        "launchplane_human_sessions_github_id_expires_created_idx",
-        ("github_id", "expires_at", "created_at"),
+        "launchplane_human_sessions_github_id_idx",
+        ("github_id",),
     ),
     CriticalIndex(
         "launchplane_merge_admissions",

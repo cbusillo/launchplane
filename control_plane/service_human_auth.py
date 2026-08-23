@@ -79,7 +79,6 @@ class HumanSessionStore(Protocol):
         github_id: int,
         *,
         limit: int,
-        now: datetime,
     ) -> tuple[LaunchplaneHumanSession, ...]: ...
 
     def delete_session(self, session_id: str) -> None: ...
@@ -135,20 +134,13 @@ class InMemoryHumanSessionStore:
         github_id: int,
         *,
         limit: int,
-        now: datetime,
     ) -> tuple[LaunchplaneHumanSession, ...]:
         with self._lock:
             return tuple(
-                sorted(
-                    (
-                        session
-                        for session in self._sessions.values()
-                        if session.identity.github_id == github_id and session.expires_at > now
-                    ),
-                    key=lambda session: (session.expires_at, session.created_at),
-                    reverse=True,
-                )[: max(limit, 0)]
-            )
+                session
+                for session in self._sessions.values()
+                if session.identity.github_id == github_id
+            )[: max(limit, 0)]
 
     def delete_session(self, session_id: str) -> None:
         with self._lock:

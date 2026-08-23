@@ -1496,10 +1496,10 @@ class SchemaMigrationTests(unittest.TestCase):
             indexes[
                 (
                     "launchplane_human_sessions",
-                    "launchplane_human_sessions_github_id_expires_created_idx",
+                    "launchplane_human_sessions_github_id_idx",
                 )
             ].column_names,
-            ("github_id", "expires_at", "created_at"),
+            ("github_id",),
         )
         self.assertEqual(
             column_types[("launchplane_privileged_operations", "payload")],

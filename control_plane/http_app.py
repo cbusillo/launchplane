@@ -3983,16 +3983,6 @@ def create_launchplane_fastapi_app(
         finally:
             clear_authz_evaluation()
 
-    @app.middleware("http")
-    async def prevent_activation_preflight_caching(
-        request: Request,
-        call_next: Callable[[Request], Any],
-    ) -> Response:
-        response = cast(Response, await call_next(request))
-        if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE:
-            response.headers["Cache-Control"] = "no-store"
-        return response
-
     resolved_oauth_login_state_store = (
         oauth_login_state_store if oauth_login_state_store is not None else OAuthLoginStateStore()
     )
@@ -14578,11 +14568,13 @@ def create_launchplane_fastapi_app(
 
     async def read_authz_activation_preflight(
         preflight_request: AuthzActivationPreflightRequest,
+        response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(read_bearer_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> AuthzActivationPreflightResponse:
         trace_id = next_trace_id()
         no_store_headers = {"Cache-Control": "no-store"}
+        response.headers.update(no_store_headers)
         if not isinstance(identity, LocalAdminIdentity):
             raise _launchplane_http_error(
                 status_code=403,

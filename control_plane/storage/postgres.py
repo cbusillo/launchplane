@@ -3361,10 +3361,8 @@ class LaunchplaneHumanSessionRow(Base):
     __tablename__ = "launchplane_human_sessions"
     __table_args__ = (
         Index(
-            "launchplane_human_sessions_github_id_expires_created_idx",
+            "launchplane_human_sessions_github_id_idx",
             "github_id",
-            desc("expires_at"),
-            desc("created_at"),
         ),
         Index("launchplane_human_sessions_login_idx", "login", desc("created_at")),
         Index("launchplane_human_sessions_expires_idx", desc("expires_at")),
@@ -8319,21 +8317,13 @@ class PostgresRecordStore(HumanSessionStore):
         github_id: int,
         *,
         limit: int,
-        now: datetime,
     ) -> tuple[LaunchplaneHumanSession, ...]:
         normalized_limit = max(limit, 0)
         if normalized_limit == 0:
             return ()
         statement = (
             select(LaunchplaneHumanSessionRow)
-            .where(
-                LaunchplaneHumanSessionRow.github_id == github_id,
-                LaunchplaneHumanSessionRow.expires_at > now.isoformat(),
-            )
-            .order_by(
-                LaunchplaneHumanSessionRow.expires_at.desc(),
-                LaunchplaneHumanSessionRow.created_at.desc(),
-            )
+            .where(LaunchplaneHumanSessionRow.github_id == github_id)
             .limit(normalized_limit)
         )
         with self._session_factory() as session:

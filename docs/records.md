@@ -100,13 +100,14 @@ columns/tables and migrated explicitly while keeping the payload copy as
 historical evidence.
 
 Human sessions are DB-backed authentication records with indexed lookup by
-immutable `github_id`, descending expiry, and descending creation time. The
-activation-preflight read may inspect at most nine unexpired rows for one GitHub
-ID and treats nine results as bounded truncation; it never cleans up expired
-rows, renews sessions, rotates CSRF state, commits, or writes any session or
-authorization evidence. The indexed row identity and payload identity must
-agree; session role, name, email, session ID, and cookie values are not
-authorization authority.
+immutable `github_id`. The activation-preflight read scans at most 257 matching
+rows and fails closed at that bound, then admits at most eight unexpired
+sessions. Timestamp parsing, expiry filtering, claims-freshness ordering, and
+ambiguity checks happen in application code rather than through lexicographic
+database comparisons. The read never cleans up expired rows, renews sessions,
+rotates CSRF state, commits, or writes session or authorization evidence. The
+indexed row identity and payload identity must agree; session role, name, email,
+session ID, and cookie values are not authorization authority.
 
 The production schema proof runs against real PostgreSQL, not SQLite:
 
