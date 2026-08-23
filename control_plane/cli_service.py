@@ -535,10 +535,6 @@ def service_privileged_operation_workers_run(
     previous_sigint = signal.signal(signal.SIGINT, request_stop)
     stopped_cleanly = False
     try:
-        store = cast(
-            PrivilegedOperationExecutionStore,
-            _store(state_dir=state_dir, database_url=database_url),
-        )
         click.echo(
             json.dumps(
                 {
@@ -549,9 +545,15 @@ def service_privileged_operation_workers_run(
                 sort_keys=True,
             )
         )
+        store: PrivilegedOperationExecutionStore | None = None
         consecutive_errors = 0
         while not stop_event.is_set():
             try:
+                if store is None:
+                    store = cast(
+                        PrivilegedOperationExecutionStore,
+                        _store(state_dir=state_dir, database_url=database_url),
+                    )
                 records = execute_approved_privileged_operations_once(
                     record_store=store,
                     lease_owner=generated_lease_owner,

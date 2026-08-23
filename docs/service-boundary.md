@@ -1976,10 +1976,12 @@ after a transactional write conflict and returning the winner as a replay.
 `secret.reencrypt.dry-run` nor `secret.reencrypt.apply` is current effect
 authority. Shared and production root rotation instead uses the typed
 browser-human privileged-operation plan/approval routes and the supervised
-DB-backed worker. The worker is the only execute path, reauthorizes the
+DB-backed worker. The worker is the only service execute path, reauthorizes the
 immutable approver before terminal work, and emits redacted counts/statuses
 only. Approval may be claimed immediately, so revocation is possible only
-before worker claim.
+before worker claim. Direct CLI apply remains an explicit
+bootstrap/recovery-only path guarded by `--allow-direct-db-mutation`, not routine
+shared or production authority.
 
 #### Product-config secret source contract
 

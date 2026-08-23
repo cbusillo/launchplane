@@ -1949,8 +1949,11 @@ return a typed blocked result rather than guessing a domain.
   a GitHub-human creates and reviews a typed plan in
   `/ui/engineering/privileged-operations`, then approval makes that plan
   immediately claimable by the supervised service worker. The UI has no execute
-  control, and the worker is the only execution path. Revocation is possible
-  only before the worker claims the approved record.
+  control, and the worker is the only service execution path. Revocation is
+  possible only before the worker claims the approved record. Direct
+  `launchplane secrets reencrypt --apply --allow-direct-db-mutation` remains an
+  explicit bootstrap/recovery-only path, not routine shared or production
+  authority.
 - `environments unset` removes named keys from a DB-backed runtime-environment
   record without reading or printing plaintext values. It requires
   `--allow-direct-db-mutation` and is intended only for explicit local/bootstrap

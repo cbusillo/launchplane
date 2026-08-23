@@ -1582,6 +1582,11 @@ run` is the foreground loop intended for an external process supervisor, and
   VeriReel backup-gate operation execution follows the same deployment model via
   `launchplane-verireel-workers` and
   `/app/scripts/start-launchplane-verireel-workers.sh`.
+  Privileged-operation execution follows the same deployment model via
+  `launchplane-privileged-operation-workers` and
+  `/app/scripts/start-launchplane-privileged-operation-workers.sh`; it accepts
+  process timing settings only, while approved operation selection remains in
+  DB-backed Launchplane records.
   Production operation remains observable through the `launchplane service
   verireel-workers status` and `launchplane service verireel-workers reconcile`
   operator commands, and through

@@ -225,11 +225,13 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         records = [SimpleNamespace(operation_id="operation-secret-id", status="executed")]
         with (
             patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
-            patch("control_plane.cli_service._store", return_value=object()),
+            patch(
+                "control_plane.cli_service._store",
+                side_effect=[RuntimeError("database-url-secret must not be emitted"), object()],
+            ),
             patch(
                 "control_plane.cli_service.execute_approved_privileged_operations_once",
                 side_effect=[
-                    RuntimeError("operation-secret-id must not be emitted"),
                     records,
                     RuntimeError("plan-digest must not be emitted"),
                     RuntimeError("execute-payload must not be emitted"),
@@ -258,6 +260,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertEqual(wait_durations, [3, 7, 3])
+        self.assertNotIn("database-url-secret", result.output)
         self.assertNotIn("operation-secret-id", result.output)
         self.assertNotIn("plan-digest", result.output)
         self.assertNotIn("execute-payload", result.output)
@@ -289,6 +292,11 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
 
     def test_worker_loop_stops_cleanly_after_sigterm(self) -> None:
         signal_handlers: dict[int, object] = {}
+        signal_calls: list[tuple[int, object]] = []
+        previous_handlers: dict[int, object] = {
+            signal.SIGTERM: object(),
+            signal.SIGINT: object(),
+        }
 
         class TestStopEvent:
             stopped = False
@@ -306,8 +314,10 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 return True
 
         def record_signal(signum: int, handler: object) -> object:
+            signal_calls.append((signum, handler))
             if callable(handler):
                 signal_handlers[signum] = handler
+                return previous_handlers[signum]
             return object()
 
         runner = CliRunner()
@@ -346,6 +356,57 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 "privileged_operation_worker_stopped",
             ],
         )
+        self.assertEqual(signal_calls[-2:], list(previous_handlers.items()))
+
+    def test_worker_loop_preserves_base_exception_and_restores_signal_handlers(self) -> None:
+        class FatalWorkerError(BaseException):
+            pass
+
+        class TestStopEvent:
+            def is_set(self) -> bool:
+                return False
+
+        signal_calls: list[tuple[int, object]] = []
+        previous_handlers: dict[int, object] = {
+            signal.SIGTERM: object(),
+            signal.SIGINT: object(),
+        }
+
+        def record_signal(signum: int, handler: object) -> object:
+            signal_calls.append((signum, handler))
+            if callable(handler):
+                return previous_handlers[signum]
+            return object()
+
+        runner = CliRunner()
+        with (
+            patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
+            patch("control_plane.cli_service._store", return_value=object()),
+            patch(
+                "control_plane.cli_service.execute_approved_privileged_operations_once",
+                side_effect=FatalWorkerError("operation-secret-id must not be emitted"),
+            ),
+            patch("control_plane.cli_service.signal.signal", side_effect=record_signal),
+            patch("control_plane.cli_service.click.echo") as echo,
+        ):
+            with self.assertRaises(FatalWorkerError):
+                runner.invoke(
+                    main,
+                    [
+                        "service",
+                        "privileged-operation-workers",
+                        "run",
+                        "--database-url",
+                        "sqlite+pysqlite:///:memory:",
+                    ],
+                )
+
+        telemetry = [json.loads(call.args[0]) for call in echo.call_args_list]
+        self.assertEqual(
+            telemetry,
+            [{"event": "privileged_operation_worker_started", "limit": 20, "poll_seconds": 15}],
+        )
+        self.assertEqual(signal_calls[-2:], list(previous_handlers.items()))
 
     def test_worker_reauthorizes_by_github_id_and_executes_only_once(self) -> None:
         approval_policy = _policy_record(revision=3)
