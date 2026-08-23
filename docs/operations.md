@@ -1939,19 +1939,21 @@ return a typed blocked result rather than guessing a domain.
   product-config apply as a record mutation only until that next action has
   been dry-run and applied through `/v1/live-target-runtime/apply`; redeploying
   the same app image does not sync the live Dokploy target environment.
-- `POST /v1/secrets/reencrypt` is the normal shared/production root-rotation
-  path. Run `mode: "dry-run"` with `secret.reencrypt.dry-run`, then submit
-  `mode: "apply"` with the returned plan digest, a reason, an
-  `Idempotency-Key`, and `secret.reencrypt.apply`. Launchplane atomically writes
-  the new versions, current-version pointers, audit events, and idempotency
-  completion evidence in one storage transaction. A failure before commit leaves
-  current pointers and replay evidence unchanged; a committed apply is replayable
-  by the same idempotency key. Direct `launchplane secrets reencrypt --apply`
-  remains bootstrap/recovery-only and requires explicit direct-DB
-  acknowledgement.
-- The operator UI uses the same service route. It requires a successful dry-run
-  result before enabling apply, clears rendered secret input values after each
-  submit, and shows only key/action/count metadata from Launchplane responses.
+- `POST /v1/secrets/reencrypt` is a legacy migration boundary, not a shared or
+  production root-rotation path. It always refuses `mode: "dry-run"` with
+  `privileged_operation_planning_required` and `mode: "apply"` with
+  `privileged_operation_approval_required`; the legacy
+  `secret.reencrypt.dry-run` and `secret.reencrypt.apply` actions no longer
+  grant an effect.
+- Use the governed privileged-operation flow for managed-secret re-encryption:
+  a GitHub-human creates and reviews a typed plan in
+  `/ui/engineering/privileged-operations`, then approval makes that plan
+  immediately claimable by the supervised service worker. The UI has no execute
+  control, and the worker is the only service execution path. Revocation is
+  possible only before the worker claims the approved record. Direct
+  `launchplane secrets reencrypt --apply --allow-direct-db-mutation` remains an
+  explicit bootstrap/recovery-only path, not routine shared or production
+  authority.
 - `environments unset` removes named keys from a DB-backed runtime-environment
   record without reading or printing plaintext values. It requires
   `--allow-direct-db-mutation` and is intended only for explicit local/bootstrap
@@ -2967,19 +2969,41 @@ path, register the exact caller and worker there, then run the reviewed plan and
 apply sequence. Never substitute a mutable ref, a checked-in target value, or a
 local CLI live-target fallback.
 
-## Privileged-Operation Planning
+## Privileged-Operation Canary
 
-Use `/ui/engineering/privileged-operations` to inspect existing typed plans.
-The Phase 1 UI is read-only. Plan creation and cancellation are browser-human
-API writes protected by the same-origin/fetch-metadata/single-use-CSRF boundary;
-they write only the operation projection and append-only event ledger.
+Use `/ui/engineering/privileged-operations` for the governed browser-human
+plan, read, cancel, approve, and revoke flow. Planning and cancellation remain
+same-origin/fetch-metadata/single-use-CSRF browser writes; approval may execute
+immediately because the supervised worker can claim the record as soon as it is
+approved. Revocation works only before that claim. The UI never exposes execute;
+the DB-backed worker reauthorizes the immutable approver against the exact rule
+before terminal work.
 
-Do not add a policy rule merely to exercise the new routes. Code ships with no
-matching production managed rule. A later activation requires separate owner
-approval and the existing DB-native managed-rule-set reconciliation path used
-by a GitHub human who already holds `authz_policy_grant.write`. If that authority
-does not exist, remain blocked under the authorization redesign; do not use a
-local-admin bearer, workflow, GitHub secret, or borrowed identity.
+Compose runs that loop as `launchplane-privileged-operation-workers` using the
+same image as the API service. Its startup surface accepts only process settings
+for polling, batch limit, error backoff, and consecutive-error threshold; it
+does not accept operation IDs, plan digests, targets, or execution payloads.
 
-Phase 1 never approves or executes a privileged effect. See
+Before any canary-rule activation, prove the privileged-operation worker
+container is running the expected image and record one successful DB-backed poll
+from its structured redacted telemetry. Activate only
+`privileged_secret_operation.plan`, `privileged_secret_operation.read`, and
+`privileged_secret_operation.cancel` first. Add
+`privileged_secret_operation.approve` and `privileged_secret_operation.revoke`
+only after exact plan review. Keep `privileged_operation_summary.read`
+ungranted. Approval authority must remain active through the worker's terminal
+reauthorization. After terminal verification, or after any post-activation
+worker stop, revoke every canary rule and read the active policy back before
+continuing.
+
+Do not add a policy rule merely to exercise the routes. Any activation remains
+a separately owner-approved DB-native administration event by a GitHub human
+that already holds `authz_policy_grant.write`. If that authority does not exist,
+remain blocked under the authorization redesign; do not use a local-admin
+bearer, workflow, GitHub secret, or borrowed identity. Keep #2204 open until
+the actual migration, rollback, read-back, and soak are complete, and keep #2177
+open until its handoff criteria are complete.
+
+**Preserved history:** the Phase 1 read-only UI description applied before the
+Phase 2 worker deployment and is not current operating guidance. See
 `docs/privileged-operations.md`.

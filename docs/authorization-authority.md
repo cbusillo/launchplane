@@ -215,20 +215,37 @@ Immutable-image rollback is service-code recovery; it is not authorization-data
 recovery. Do not claim that rolling back the Launchplane image repairs an active
 DB policy.
 
-## Privileged-Operation Planning Actions
+## Privileged-Operation Canary Actions
 
-Phase 1 introduces explicit actions for privileged-operation planning, human
-reads, cancellation, and counts-only agent reads. It introduces no policy rule
-or grant. Authorization uses only schema-v2 managed rules and requires exactly
-one match with both managed IDs, so legacy unmanaged action-empty rules cannot
-inherit the new actions.
+The governed privileged-operation surface uses schema-v2 managed rules and
+requires exactly one match with both managed IDs. Legacy unmanaged action-empty
+rules cannot inherit any action. Code deployment introduces no policy rule or
+grant.
 
 The browser-human identity dependency is separate from the existing browser
 mutation dependency that permits bearer identities to pass through. Bearer,
 workflow, terminal-agent, local-operator, and local-admin identities are
 rejected before human-route policy evaluation. The agent summary route is a
-separate action and projection and never authorizes approval or execution.
+separate action and projection and never authorizes approval or execution; keep
+`privileged_operation_summary.read` ungranted during the canary.
 
-Before any later production activation, inspect active action-empty rules and
-record policy-schema evidence. Activation remains a separate owner-approved
-DB-native administration event; it is not authorized by landing Phase 1 code.
+Before activation, inspect active action-empty rules, record policy-schema
+evidence, prove the expected-image worker container is running, and retain one
+successful DB-backed worker poll. Use staged DB-native activation: first grant
+only `privileged_secret_operation.plan`,
+`privileged_secret_operation.read`, and
+`privileged_secret_operation.cancel`; after exact plan review, add only
+`privileged_secret_operation.approve` and
+`privileged_secret_operation.revoke`. Approval can be claimed immediately, so
+revocation is only possible before worker claim. Keep approval authority active
+until the worker's terminal reauthorization, then revoke every canary rule and
+read the active policy back after terminal verification or any post-activation
+worker stop.
+
+Activation remains a separately owner-approved DB-native administration event;
+it is not authorized by landing code. Keep #2204 open until actual migration,
+rollback, read-back, and soak evidence exists, and keep #2177 open until its
+handoff criteria are complete.
+
+**Preserved history:** Phase 1 introduced planning-only actions without grants.
+That history does not describe the deployed Phase 2 worker flow.

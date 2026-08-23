@@ -479,7 +479,6 @@ def service_privileged_operation_workers_run_once(
         json.dumps(
             {
                 "processed": len(records),
-                "operation_ids": [record.operation_id for record in records],
                 "statuses": [record.status for record in records],
             },
             indent=2,
@@ -505,12 +504,20 @@ def service_privileged_operation_workers_run_once(
 )
 @click.option("--poll-seconds", type=click.IntRange(min=1, max=300), default=15, show_default=True)
 @click.option("--limit", type=click.IntRange(min=1, max=100), default=20, show_default=True)
+@click.option(
+    "--error-backoff-seconds", type=click.IntRange(min=1, max=300), default=15, show_default=True
+)
+@click.option(
+    "--max-consecutive-errors", type=click.IntRange(min=1, max=100), default=3, show_default=True
+)
 def service_privileged_operation_workers_run(
     state_dir: Path,
     database_url: str,
     lease_owner: str,
     poll_seconds: int,
     limit: int,
+    error_backoff_seconds: int,
+    max_consecutive_errors: int,
 ) -> None:
     if not database_url.strip():
         raise click.ClickException(
@@ -526,22 +533,78 @@ def service_privileged_operation_workers_run(
 
     previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
     previous_sigint = signal.signal(signal.SIGINT, request_stop)
+    stopped_cleanly = False
     try:
-        store = cast(
-            PrivilegedOperationExecutionStore,
-            _store(state_dir=state_dir, database_url=database_url),
+        click.echo(
+            json.dumps(
+                {
+                    "event": "privileged_operation_worker_started",
+                    "limit": limit,
+                    "poll_seconds": poll_seconds,
+                },
+                sort_keys=True,
+            )
         )
+        store: PrivilegedOperationExecutionStore | None = None
+        consecutive_errors = 0
         while not stop_event.is_set():
-            execute_approved_privileged_operations_once(
-                record_store=store,
-                lease_owner=generated_lease_owner,
-                limit=limit,
+            try:
+                if store is None:
+                    store = cast(
+                        PrivilegedOperationExecutionStore,
+                        _store(state_dir=state_dir, database_url=database_url),
+                    )
+                records = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    lease_owner=generated_lease_owner,
+                    limit=limit,
+                )
+            except Exception as error:  # noqa: BLE001 - bounded worker retry loop.
+                consecutive_errors += 1
+                telemetry = {
+                    "consecutive_errors": consecutive_errors,
+                    "error_type": type(error).__name__,
+                }
+                if consecutive_errors >= max_consecutive_errors:
+                    click.echo(
+                        json.dumps(
+                            {
+                                "event": "privileged_operation_worker_threshold_exit",
+                                **telemetry,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                    raise click.ClickException(
+                        "Privileged-operation workers exited after "
+                        f"{consecutive_errors} consecutive polling errors."
+                    ) from error
+                click.echo(
+                    json.dumps(
+                        {"event": "privileged_operation_worker_retry", **telemetry},
+                        sort_keys=True,
+                    )
+                )
+                stop_event.wait(error_backoff_seconds)
+                continue
+            consecutive_errors = 0
+            click.echo(
+                json.dumps(
+                    {
+                        "event": "privileged_operation_worker_poll_succeeded",
+                        "processed": len(records),
+                        "statuses": [record.status for record in records],
+                    },
+                    sort_keys=True,
+                )
             )
             stop_event.wait(poll_seconds)
+        stopped_cleanly = True
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
         signal.signal(signal.SIGINT, previous_sigint)
-    click.echo(json.dumps({"status": "stopped"}, indent=2, sort_keys=True))
+    if stopped_cleanly:
+        click.echo(json.dumps({"event": "privileged_operation_worker_stopped"}, sort_keys=True))
 
 
 @service_odoo_workers.command("run-once")

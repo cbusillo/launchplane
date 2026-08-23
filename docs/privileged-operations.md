@@ -12,8 +12,8 @@ Intents, workflow authorization, and ordinary operator mutations.
 ## Approval And Execution Boundary
 
 Planning remains typed and dry-run-only. Phase 2 adds a separate finite human
-approval and a service-internal worker; it adds no HTTP execute route, execute
-action, static execution credential, or agent execution path.
+approval and a supervised service-internal worker; it adds no HTTP execute
+route, execute action, static execution credential, or agent execution path.
 
 - Descriptor IDs, versions, safety classes, request schemas, evidence schemas,
   and planners are compiled into the service registry.
@@ -61,6 +61,18 @@ policy rule or grant. The routes fail closed until a later, separately approved
 DB-native managed-rule activation. GitHub secrets,
 workflows, borrowed identities, and local-admin bearer credentials are not
 bootstrap paths.
+
+Canary activation is staged and DB-native: first activate exactly
+`privileged_secret_operation.plan`, `privileged_secret_operation.read`, and
+`privileged_secret_operation.cancel`. After exact plan review, activate exactly
+`privileged_secret_operation.approve` and
+`privileged_secret_operation.revoke`. Keep
+`privileged_operation_summary.read` ungranted. Before activation, prove the
+worker container is running the expected image and retain telemetry for one
+successful DB-backed poll. After terminal verification, or any
+post-activation worker stop, revoke every canary rule and read the active policy
+back. Approval rules must remain active through the worker's terminal
+reauthorization.
 
 ## Records And Lifecycle
 
@@ -124,6 +136,10 @@ The UI is at `/ui/engineering/privileged-operations`. It exposes bounded
 browser-human approve/revoke controls and clearly states that the service worker
 executes approved work internally; it has no execute control.
 
+Approval may make an operation immediately claimable by the worker. A browser
+human can revoke only before that claim; after claim, the worker owns terminal
+execution and performs its required fresh authorization check.
+
 `launchplane service privileged-operation-workers run` is the service-internal worker loop.
 It claims approved records, re-plans with `apply=False`, rejects plan/pre-state
 drift, reads the fresh active policy, reauthorizes only the immutable approver
@@ -141,5 +157,15 @@ reconciliation state.
 ## Legacy Re-encryption Route
 
 `POST /v1/secrets/reencrypt` is retained only as an explicit migration boundary:
-`mode="apply"` always refuses, and `mode="dry-run"` directs callers to the
-privileged-operation planner. It cannot approve or execute an operation.
+`mode="dry-run"` refuses with `privileged_operation_planning_required`, and
+`mode="apply"` refuses with `privileged_operation_approval_required`. The
+legacy `secret.reencrypt.dry-run` and `secret.reencrypt.apply` actions cannot
+approve or execute an operation.
+
+## Completion Holds
+
+Keep #2204 open until actual migration, rollback, policy read-back, and soak
+evidence are complete. Keep #2177 open until its handoff criteria are complete.
+
+**Preserved history:** Phase 1 planning-only descriptions remain historical
+context only; the supervised Phase 2 worker flow above is current guidance.

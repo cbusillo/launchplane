@@ -1970,15 +1970,18 @@ the active managed-secret root. Concurrent same-key applies that race after the
 initial replay lookup converge by re-reading the completed idempotency record
 after a transactional write conflict and returning the winner as a replay.
 
-`POST /v1/secrets/reencrypt` owns shared and production managed-secret root
-rotation. The route requires JSON with a bounded body, exact
-`secret.reencrypt.dry-run` or `secret.reencrypt.apply` authority, a reason, and
-DB-backed storage. Apply additionally requires the matching dry-run digest and
-an `Idempotency-Key`. Version, current-pointer, and audit writes commit in one
-transaction; the audit operation token provides retry recovery if idempotency
-evidence cannot be persisted after that transaction. Terminal-agent read
-credentials cannot call the route, and responses expose key IDs and counts but
-never plaintext or ciphertext.
+`POST /v1/secrets/reencrypt` is a legacy migration boundary. It refuses
+`mode: "dry-run"` with `privileged_operation_planning_required` and
+`mode: "apply"` with `privileged_operation_approval_required`; neither
+`secret.reencrypt.dry-run` nor `secret.reencrypt.apply` is current effect
+authority. Shared and production root rotation instead uses the typed
+browser-human privileged-operation plan/approval routes and the supervised
+DB-backed worker. The worker is the only service execute path, reauthorizes the
+immutable approver before terminal work, and emits redacted counts/statuses
+only. Approval may be claimed immediately, so revocation is possible only
+before worker claim. Direct CLI apply remains an explicit
+bootstrap/recovery-only path guarded by `--allow-direct-db-mutation`, not routine
+shared or production authority.
 
 #### Product-config secret source contract
 
@@ -3799,10 +3802,10 @@ control-plane context, never a product instance. Phase one adds the reusable
 adds no mutable dispatch wrapper, live managed rule/secret value, deployment,
 or provider mutation.
 
-## Privileged-Operation Planning API
+## Privileged-Operation API
 
-The Phase 1 privileged-operation API is a typed planning surface, not an
-execution proxy. Human create/read/cancel routes are under
+The privileged-operation API is a typed governed surface, not an execution
+proxy. Human create/read/cancel routes are under
 `/v1/privileged-operations/plans`; the counts-only agent read is under
 `/v1/agent/privileged-operations/plans/{operation_id}`.
 
@@ -3811,7 +3814,12 @@ and use the browser origin/fetch-metadata/CSRF boundary for writes. Every route
 requires schema-v2 policy and exactly one matching managed rule carrying both
 managed IDs. Bare policy evaluation and unmanaged action-empty rules cannot
 authorize the surface. The first planner invokes managed-secret re-encryption
-with `apply=False`; no approval, execute, or apply endpoint exists in Phase 1.
+with `apply=False`. Browser-human approval/revocation routes remain governed;
+there is no HTTP execute or apply endpoint. Approval can be claimed immediately
+by the supervised worker, so revocation is possible only before claim.
 
 Responses and stored records follow the redaction contract in
 `docs/privileged-operations.md`.
+
+**Preserved history:** the Phase 1 planning-only API description predates the
+supervised Phase 2 worker and is not current operating guidance.

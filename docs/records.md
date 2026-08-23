@@ -1582,6 +1582,11 @@ run` is the foreground loop intended for an external process supervisor, and
   VeriReel backup-gate operation execution follows the same deployment model via
   `launchplane-verireel-workers` and
   `/app/scripts/start-launchplane-verireel-workers.sh`.
+  Privileged-operation execution follows the same deployment model via
+  `launchplane-privileged-operation-workers` and
+  `/app/scripts/start-launchplane-privileged-operation-workers.sh`; it accepts
+  process timing settings only, while approved operation selection remains in
+  DB-backed Launchplane records.
   Production operation remains observable through the `launchplane service
   verireel-workers status` and `launchplane service verireel-workers reconcile`
   operator commands, and through
@@ -2562,9 +2567,9 @@ historical facts independently visible. Owner events and admission/outcome
 records are marked current or historical relative to the resolved PR head/tree;
 historical records never grant current effect authority.
 
-## Privileged-Operation Planning Records
+## Privileged-Operation Records
 
-Phase 1 privileged-operation planning uses a distinct current projection and
+The governed privileged-operation flow uses a distinct current projection and
 append-only lifecycle ledger. PostgreSQL stores them in
 `launchplane_privileged_operations` and
 `launchplane_privileged_operation_events`; filesystem storage mirrors those
@@ -2572,11 +2577,15 @@ names for local/test/rehearsal use only.
 
 `PrivilegedOperationRecord` stores the typed descriptor/version, safety class,
 GitHub-human requester, normalized request and digests, bounded redacted human
-evidence, current `planned`/`expired`/`cancelled` status, and lifecycle
-timestamps. `PrivilegedOperationEventRecord` binds each transition to the exact
-resulting record digest. Creation is replay-safe; changed replay payloads and
-all transitions from terminal state fail closed.
+evidence, current lifecycle status, and timestamps.
+`PrivilegedOperationEventRecord` binds each transition to the exact resulting
+record digest. Creation is replay-safe; changed replay payloads and all
+transitions from terminal state fail closed. Approved records can be claimed by
+the supervised worker immediately; a revocation is possible only before claim.
 
 The payload excludes managed-secret IDs, secret-version IDs, ciphertext,
 plaintext, and raw planner errors. See `docs/privileged-operations.md` for the
 full evidence and authorization boundary.
+
+**Preserved history:** references to Phase 1 planning records describe the
+pre-worker lifecycle and do not constrain the current Phase 2 statuses.
