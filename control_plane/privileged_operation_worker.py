@@ -89,6 +89,15 @@ class PrivilegedOperationExecutionStore(PrivilegedOperationStore, Protocol):
         request_fingerprint: str,
     ) -> Any: ...
 
+    def adopt_reconciled_mutation(
+        self,
+        *,
+        reservation: LaunchplaneIdempotencyRecord,
+        response_status_code: int,
+        response_trace_id: str,
+        response_payload: dict[str, Any],
+    ) -> Any: ...
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -123,6 +132,10 @@ def privileged_operation_execution_fingerprint(record: PrivilegedOperationRecord
     )
 
 
+def privileged_operation_provider_target_key(record: PrivilegedOperationRecord) -> str:
+    return f"privileged-operation-target:{record.descriptor_id}:global"
+
+
 def require_privileged_operation_execution_store(
     record_store: object,
 ) -> PrivilegedOperationExecutionStore:
@@ -133,6 +146,7 @@ def require_privileged_operation_execution_store(
         "mark_mutation_reconcile_required",
         "lookup_existing_mutation_reservation",
         "prepare_db_only_mutation",
+        "adopt_reconciled_mutation",
     )
     if any(not callable(getattr(record_store, name, None)) for name in required_methods):
         raise TypeError("Privileged-operation execution requires PostgreSQL mutation storage.")
@@ -296,6 +310,7 @@ def _failure_code(error: Exception) -> str:
         "approval_provenance_missing",
         "approval_managed_rule_drift",
         "approved_plan_drift",
+        "execution_recovery_failed",
         "executor_result_error",
         "mutation_reservation_completion_failed",
     }
@@ -328,24 +343,85 @@ def reconcile_stale_privileged_operations(
         )
         if preflight.status != "reconcile_required":
             continue
-        execution = _execution_evidence(
-            result_status="error",
-            payload={"failure_code": "privileged_operation_execution_abandoned"},
-            reconciliation_required=True,
-            failure_code="privileged_operation_execution_abandoned",
-        )
-        reconciled.append(
-            _transition(
+        reservation = preflight.record
+        if reservation is None:
+            continue
+        try:
+            approval = record.approval
+            if approval is None:
+                raise ValueError("approval_provenance_missing")
+            policy_record = read_active_authz_policy_record(record_store)
+            authorization = _construct_approver_authorization(record, policy_record)
+            if not _approver_is_still_authorized(
+                authorization=authorization,
+                policy_record=policy_record,
+            ):
+                raise ValueError("approval_managed_rule_drift")
+            result = control_plane_secrets.reencrypt_secrets(
+                record_store=cast(control_plane_secrets.SecretRotationStore, record_store),
+                apply=True,
+                expected_plan_digest=approval.plan_digest,
+                operation_token=privileged_operation_execution_token(record.operation_id),
+                actor=f"github-human:{approval.approver.github_id}",
+                source_label="privileged-operation-worker-recovery",
+                reason=record.request.reason,
+            )
+            if result.get("status") != "ok":
+                raise ValueError("execution_recovery_failed")
+            execution = _execution_evidence(
+                result_status="ok",
+                payload={
+                    **result,
+                    "authorization_policy_sha256": authorization.policy_sha256,
+                },
+                reconciliation_required=False,
+            )
+            executed = _transition(
                 store=store,
                 record=record,
-                status="execution_failed",
+                status="executed",
                 sequence=4,
                 source_event_id=f"worker-reconcile:{record.operation_id}",
-                reason="Privileged operation requires reconciliation after worker lease loss.",
+                reason="Privileged operation execution was recovered by deterministic token.",
                 execution=execution,
                 now=now,
             )
-        )
+            if executed.status != "executed":
+                reconciled.append(executed)
+                continue
+            adoption = store.adopt_reconciled_mutation(
+                reservation=reservation,
+                response_status_code=200,
+                response_trace_id=f"privileged-operation:{record.operation_id}",
+                response_payload={
+                    "status": executed.status,
+                    "operation_id": executed.operation_id,
+                    "result_digest": execution.result_digest,
+                },
+            )
+            reconciled.append(executed)
+            if adoption.status not in {"adopted", "replayed"}:
+                continue
+        except Exception as error:
+            failure_code = _failure_code(error)
+            execution = _execution_evidence(
+                result_status="error",
+                payload={"failure_code": failure_code},
+                reconciliation_required=True,
+                failure_code=failure_code,
+            )
+            reconciled.append(
+                _transition(
+                    store=store,
+                    record=record,
+                    status="execution_failed",
+                    sequence=4,
+                    source_event_id=f"worker-reconcile-failure:{record.operation_id}",
+                    reason="Privileged operation recovery failed; reconciliation is required.",
+                    execution=execution,
+                    now=now,
+                )
+            )
     return tuple(reconciled)
 
 
@@ -374,7 +450,7 @@ def execute_approved_privileged_operations_once(
             lease_owner=lease_owner,
             lease_seconds=PRIVILEGED_OPERATION_EXECUTION_LEASE_SECONDS,
             reconciliation_key=record.operation_id,
-            provider_target_key=record.operation_id,
+            provider_target_key=privileged_operation_provider_target_key(record),
         )
         if reservation_result.status == "replayed":
             completed.append(store.read_privileged_operation_record(record.operation_id))

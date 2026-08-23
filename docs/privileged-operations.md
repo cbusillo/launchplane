@@ -130,8 +130,13 @@ drift, reads the fresh active policy, reauthorizes only the immutable approver
 GitHub ID against the exact managed rule, constructs approver-bound durable
 authorization provenance, then invokes the typed executor with `apply=True`.
 The operation-record ID derives the deterministic token passed to the existing
-managed-secret reservation/single-flight path. Results and failures write only
-redacted counts, digests, bounded failure codes, and reconciliation state.
+managed-secret reservation/single-flight path. All managed-secret re-encryption
+operations share one global provider-target fence even when their operation IDs
+differ. If a worker lease is lost after an ambiguous effect, reconciliation
+replays the typed executor with the same deterministic token so it can adopt a
+completed rotation or fail closed with reconciliation still required. Results
+and failures write only redacted counts, digests, bounded failure codes, and
+reconciliation state.
 
 ## Legacy Re-encryption Route
 

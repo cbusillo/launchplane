@@ -38,6 +38,7 @@ from control_plane.privileged_operation_worker import (
     execute_approved_privileged_operations_once,
     privileged_operation_execution_fingerprint,
     privileged_operation_execution_token,
+    privileged_operation_provider_target_key,
     require_privileged_operation_execution_store,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -188,9 +189,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
     def test_execution_requires_postgres_mutation_reservations(self) -> None:
         with TemporaryDirectory() as directory:
             with self.assertRaisesRegex(TypeError, "PostgreSQL mutation storage"):
-                require_privileged_operation_execution_store(
-                    FilesystemRecordStore(Path(directory))
-                )
+                require_privileged_operation_execution_store(FilesystemRecordStore(Path(directory)))
 
     def test_worker_commands_are_service_internal(self) -> None:
         runner = CliRunner()
@@ -266,6 +265,98 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         reservation = lookup.record
         assert reservation is not None
         self.assertEqual(reservation.state, "completed")
+        self.assertEqual(
+            reservation.provider_target_key,
+            privileged_operation_provider_target_key(current),
+        )
+
+    def test_stale_execution_recovers_completed_effect_by_operation_token(self) -> None:
+        approval_policy = _policy_record(revision=3)
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                operation_id, secret_id = _prepare_approved_operation(
+                    store,
+                    approval_policy=approval_policy,
+                )
+                original_transition = store.transition_privileged_operation
+
+                def crash_after_effect(
+                    record: PrivilegedOperationRecord,
+                    event: PrivilegedOperationEventRecord,
+                ) -> PrivilegedOperationEventWriteStatus:
+                    if record.status == "executed":
+                        raise KeyboardInterrupt("simulated worker crash")
+                    return original_transition(record, event)
+
+                with (
+                    patch.dict(os.environ, self._execution_environment(), clear=True),
+                    patch(
+                        "control_plane.privileged_operation_worker.read_active_authz_policy_record",
+                        return_value=approval_policy,
+                    ),
+                    patch.object(
+                        store,
+                        "transition_privileged_operation",
+                        side_effect=crash_after_effect,
+                    ),
+                    self.assertRaises(KeyboardInterrupt),
+                ):
+                    execute_approved_privileged_operations_once(
+                        record_store=store,
+                        now=lambda: FIXED_NOW,
+                    )
+
+                executing = store.read_privileged_operation_record(operation_id)
+                fingerprint = privileged_operation_execution_fingerprint(executing)
+                lookup = store.lookup_existing_mutation_reservation(
+                    route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+                    idempotency_key=operation_id,
+                    request_fingerprint=fingerprint,
+                )
+                self.assertIsNotNone(lookup.record)
+                reservation = lookup.record
+                assert reservation is not None
+                store.mark_mutation_reconcile_required(
+                    reservation=reservation,
+                    reconciliation_key=operation_id,
+                )
+
+                with (
+                    patch.dict(os.environ, self._execution_environment(), clear=True),
+                    patch(
+                        "control_plane.privileged_operation_worker.read_active_authz_policy_record",
+                        return_value=approval_policy,
+                    ),
+                ):
+                    recovered = execute_approved_privileged_operations_once(
+                        record_store=store,
+                        now=lambda: FIXED_NOW,
+                    )
+
+                current = store.read_privileged_operation_record(operation_id)
+                secret = store.read_secret_record(secret_id)
+                version = store.read_secret_version(secret.current_version_id)
+                completed_lookup = store.lookup_existing_mutation_reservation(
+                    route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+                    idempotency_key=operation_id,
+                    request_fingerprint=privileged_operation_execution_fingerprint(current),
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(executing.status, "executing")
+        self.assertEqual(tuple(record.status for record in recovered), ("executed",))
+        self.assertEqual(current.status, "executed")
+        self.assertEqual(version.key_id, "key-2")
+        self.assertIsNotNone(current.execution)
+        execution = current.execution
+        assert execution is not None
+        self.assertFalse(execution.reconciliation_required)
+        self.assertIsNotNone(completed_lookup.record)
+        completed_reservation = completed_lookup.record
+        assert completed_reservation is not None
+        self.assertEqual(completed_reservation.state, "completed")
 
     def test_removed_github_id_rule_fails_before_effect_without_reconciliation(self) -> None:
         approval_policy = _policy_record(revision=3)
