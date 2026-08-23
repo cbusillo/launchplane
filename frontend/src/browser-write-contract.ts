@@ -1,8 +1,10 @@
 import type {
   ApplyProductEnvironmentConfigData,
+  ApproveHumanPrivilegedOperationData,
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
   RankWorkGraphSnapshotData,
+  RevokeHumanPrivilegedOperationData,
   WriteOwnerAcceptanceEventData,
 } from "./generated/openapi.ts";
 
@@ -17,6 +19,10 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/work-graph/rank" satisfies RankWorkGraphSnapshotData["url"],
   ownerAcceptanceEvent:
     "/v1/owner-acceptance/events" satisfies WriteOwnerAcceptanceEventData["url"],
+  privilegedOperationApprove:
+    "/v1/privileged-operations/plans/{operation_id}/approve" satisfies ApproveHumanPrivilegedOperationData["url"],
+  privilegedOperationRevoke:
+    "/v1/privileged-operations/plans/{operation_id}/revoke" satisfies RevokeHumanPrivilegedOperationData["url"],
 } as const;
 
 export type BrowserWriteRoute =

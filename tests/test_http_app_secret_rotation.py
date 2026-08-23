@@ -41,7 +41,7 @@ def _secret_rotation_policy(*actions: str) -> LaunchplaneAuthzPolicy:
 
 
 class FastApiSecretRotationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_secret_reencryption_requires_dry_run_and_replays_apply(self) -> None:
+    async def test_legacy_secret_reencryption_route_refuses_dry_run_and_apply(self) -> None:
         key1 = _fernet_key(0)
         key2 = _fernet_key(32)
         with TemporaryDirectory() as temporary_directory_name:
@@ -98,12 +98,10 @@ class FastApiSecretRotationTests(unittest.IsolatedAsyncioTestCase):
                             "source_label": "service-test",
                         },
                     )
-                    dry_run_payload = dry_run_response.json()
-                    plan_digest = dry_run_payload["result"]["plan_digest"]
                     apply_payload = {
                         "schema_version": 1,
                         "mode": "apply",
-                        "expected_plan_digest": plan_digest,
+                        "expected_plan_digest": "0" * 64,
                         "reason": "Rotate the managed-secret root.",
                         "source_label": "service-test",
                     }
@@ -118,14 +116,6 @@ class FastApiSecretRotationTests(unittest.IsolatedAsyncioTestCase):
                         headers=apply_headers,
                         payload=apply_payload,
                     )
-                    replay_response = await _asgi_request(
-                        app,
-                        "POST",
-                        "/v1/secrets/reencrypt",
-                        headers=apply_headers,
-                        payload=apply_payload,
-                    )
-
                 secret_id = str(write_result["secret_id"])
                 current_record = store.read_secret_record(secret_id)
                 current_version = store.read_secret_version(current_record.current_version_id)
@@ -133,18 +123,21 @@ class FastApiSecretRotationTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
-        self.assertEqual(dry_run_response.status_code, 202)
-        self.assertEqual(dry_run_payload["result"]["status"], "ok")
-        self.assertEqual(dry_run_payload["result"]["rotated_count"], 1)
-        self.assertEqual(dry_run_payload["result"]["retirement_blocked_key_ids"], ["key-1"])
-        self.assertEqual(apply_response.status_code, 202)
-        self.assertEqual(replay_response.status_code, 202)
-        self.assertEqual(replay_response.json()["result"], apply_response.json()["result"])
+        self.assertEqual(dry_run_response.status_code, 409)
+        self.assertEqual(
+            dry_run_response.json()["error"]["code"],
+            "privileged_operation_planning_required",
+        )
+        self.assertEqual(apply_response.status_code, 409)
+        self.assertEqual(
+            apply_response.json()["error"]["code"],
+            "privileged_operation_approval_required",
+        )
         self.assertNotIn("https://provider.example", json.dumps(apply_response.json()))
-        self.assertEqual(current_version.key_id, "key-2")
-        self.assertEqual(len(versions), 2)
+        self.assertEqual(current_version.key_id, "key-1")
+        self.assertEqual(len(versions), 1)
 
-    async def test_secret_reencryption_apply_requires_idempotency_and_matching_digest(self) -> None:
+    async def test_legacy_apply_refusal_precedes_old_apply_guards(self) -> None:
         key = _fernet_key(0)
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -194,7 +187,13 @@ class FastApiSecretRotationTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
-        self.assertEqual(missing_idempotency.status_code, 400)
-        self.assertEqual(missing_idempotency.json()["error"]["code"], "idempotency_key_required")
+        self.assertEqual(missing_idempotency.status_code, 409)
+        self.assertEqual(
+            missing_idempotency.json()["error"]["code"],
+            "privileged_operation_approval_required",
+        )
         self.assertEqual(stale_plan.status_code, 409)
-        self.assertEqual(stale_plan.json()["error"]["code"], "secret_reencryption_conflict")
+        self.assertEqual(
+            stale_plan.json()["error"]["code"],
+            "privileged_operation_approval_required",
+        )

@@ -1182,7 +1182,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("privileged-operation planning remains read-only and redacted", async ({
+  test("privileged-operation approval remains human-governed and redacted", async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -1195,13 +1195,16 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByRole("link", { name: "Privileged operation plans", exact: true }),
     ).toHaveAttribute("aria-current", "page");
-    await expect(page.getByText("Planning evidence only — no privileged effect")).toBeVisible();
+    await expect(
+      page.getByText("Human-governed approval — internal execution only"),
+    ).toBeVisible();
     await expect(page.getByText("Would rotate")).toBeVisible();
     await expect(page.getByText("18", { exact: true }).first()).toBeVisible();
-    await expect(page.getByRole("button", { name: /approve|execute/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Approve plan" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /execute/i })).toHaveCount(0);
     await expect(page.getByText(/secret-version/i)).toHaveCount(0);
     await assertDocumentBasics(page);
-    await captureScreenshot(page, testInfo, "privileged-operation-plans-read-only");
+    await captureScreenshot(page, testInfo, "privileged-operation-plans-human-governed");
     diagnostics.assertClean();
   });
 });

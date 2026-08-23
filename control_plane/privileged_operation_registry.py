@@ -12,9 +12,11 @@ from control_plane.contracts.privileged_operation import (
     ManagedSecretReencryptionHumanEvidence,
     ManagedSecretReencryptionPlanInput,
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
+    PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
     PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION,
     PRIVILEGED_SECRET_OPERATION_PLAN_ACTION,
     PRIVILEGED_SECRET_OPERATION_READ_ACTION,
+    PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
     PrivilegedOperationDescriptorId,
     PrivilegedOperationSafetyClass,
 )
@@ -30,6 +32,8 @@ class PrivilegedOperationDescriptor(BaseModel):
     plan_action: str
     human_read_action: str
     cancel_action: str
+    approve_action: str
+    revoke_action: str
     agent_summary_read_action: str
 
     @model_validator(mode="after")
@@ -40,6 +44,8 @@ class PrivilegedOperationDescriptor(BaseModel):
             self.plan_action,
             self.human_read_action,
             self.cancel_action,
+            self.approve_action,
+            self.revoke_action,
             self.agent_summary_read_action,
         )
         if any(not action.strip() for action in actions):
@@ -47,6 +53,8 @@ class PrivilegedOperationDescriptor(BaseModel):
         if len(set(actions)) != len(actions):
             raise ValueError("Privileged-operation descriptor actions must be unique")
         expected_safety: tuple[AgentConsumerActionSafety, ...] = (
+            "secret_backed",
+            "secret_backed",
             "secret_backed",
             "secret_backed",
             "secret_backed",
@@ -88,6 +96,8 @@ MANAGED_SECRET_REENCRYPTION_DESCRIPTOR = PrivilegedOperationDescriptor(
     plan_action=PRIVILEGED_SECRET_OPERATION_PLAN_ACTION,
     human_read_action=PRIVILEGED_SECRET_OPERATION_READ_ACTION,
     cancel_action=PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION,
+    approve_action=PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
+    revoke_action=PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
     agent_summary_read_action=PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
 )
 

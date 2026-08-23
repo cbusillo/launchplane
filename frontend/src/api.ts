@@ -7,6 +7,8 @@ import type {
 import type {
   ApplyProductEnvironmentConfigData,
   ApplyProductEnvironmentConfigResponse,
+  ApproveHumanPrivilegedOperationData,
+  ApproveHumanPrivilegedOperationResponse,
   DispatchProductPromotionWorkflowData,
   DispatchProductPromotionWorkflowResponse,
   DryRunProductPromotionData,
@@ -33,12 +35,15 @@ import type {
   ProductOverviewResponse,
   ProductPromotionStatusResponse,
   ProductPromotionWorkflowDeliveryStatusResponse,
+  PrivilegedOperationHumanResponse,
   PrivilegedOperationListResponse,
   PrivilegedOperationRecord,
   RankWorkGraphSnapshotData,
   RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
   ReadTenantAdmissionEvaluationData,
+  RevokeHumanPrivilegedOperationData,
+  RevokeHumanPrivilegedOperationResponse,
   TenantAdmissionEvaluationReadResponse,
   WorkGraphIssueInboxResponse,
   WorkGraphSnapshot,
@@ -134,7 +139,8 @@ async function performJsonRequest<T>(
     const errorPayload = payload as ApiErrorPayload;
     const errorMessage =
       "error" in errorPayload && errorPayload.error
-        ? errorPayload.error.message ?? `Launchplane API returned ${response.status}.`
+        ? (errorPayload.error.message ??
+          `Launchplane API returned ${response.status}.`)
         : `Launchplane API returned ${response.status}.`;
     const traceId =
       "trace_id" in errorPayload && typeof errorPayload.trace_id === "string"
@@ -142,7 +148,7 @@ async function performJsonRequest<T>(
         : "";
     const errorCode =
       "error" in errorPayload && errorPayload.error
-        ? errorPayload.error.code ?? ""
+        ? (errorPayload.error.code ?? "")
         : "";
     throw new LaunchplaneApiError(
       errorMessage,
@@ -188,7 +194,9 @@ function generatedIdempotencyKey(headers?: object): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-export function readAuthSession(signal?: AbortSignal): Promise<AuthSessionPayload> {
+export function readAuthSession(
+  signal?: AbortSignal,
+): Promise<AuthSessionPayload> {
   return requestJson<AuthSessionPayload>(
     "/v1/auth/session",
     "GET",
@@ -201,8 +209,15 @@ export function logout(): Promise<LogoutPayload> {
   return requestJson<LogoutPayload>("/auth/logout", "POST");
 }
 
-export function listProducts(signal?: AbortSignal): Promise<ProductListPayload> {
-  return requestJson<ProductListPayload>("/v1/products", "GET", undefined, signal);
+export function listProducts(
+  signal?: AbortSignal,
+): Promise<ProductListPayload> {
+  return requestJson<ProductListPayload>(
+    "/v1/products",
+    "GET",
+    undefined,
+    signal,
+  );
 }
 
 export function readGovernanceProjection(
@@ -548,9 +563,10 @@ export function readOwnerAcceptanceCurrentItems(
 }
 
 export type { OwnerAcceptanceDecision, OwnerAcceptanceProductDecision };
-export type OwnerAcceptanceEventMutationResponse = OwnerAcceptanceEventResponse & {
-  replayed: boolean;
-};
+export type OwnerAcceptanceEventMutationResponse =
+  OwnerAcceptanceEventResponse & {
+    replayed: boolean;
+  };
 
 export function evaluateOwnerAcceptance(
   repository: string,
@@ -597,6 +613,42 @@ export function readPrivilegedOperationPlans(
     "/v1/privileged-operations/plans",
     "GET",
     undefined,
+    signal,
+  );
+}
+
+export function approvePrivilegedOperation(
+  operationId: string,
+  reason: string,
+  signal?: AbortSignal,
+): Promise<PrivilegedOperationHumanResponse> {
+  const request: ApproveHumanPrivilegedOperationData = {
+    url: BROWSER_WRITE_ROUTES.privilegedOperationApprove,
+    path: { operation_id: operationId },
+    body: { source_event_id: `ui:approve:${operationId}:${Date.now()}`, reason },
+  };
+  return requestJson<ApproveHumanPrivilegedOperationResponse>(
+    `/v1/privileged-operations/plans/${encodeURIComponent(request.path.operation_id)}/approve`,
+    "POST",
+    request.body,
+    signal,
+  );
+}
+
+export function revokePrivilegedOperation(
+  operationId: string,
+  reason: string,
+  signal?: AbortSignal,
+): Promise<PrivilegedOperationHumanResponse> {
+  const request: RevokeHumanPrivilegedOperationData = {
+    url: BROWSER_WRITE_ROUTES.privilegedOperationRevoke,
+    path: { operation_id: operationId },
+    body: { source_event_id: `ui:revoke:${operationId}:${Date.now()}`, reason },
+  };
+  return requestJson<RevokeHumanPrivilegedOperationResponse>(
+    `/v1/privileged-operations/plans/${encodeURIComponent(request.path.operation_id)}/revoke`,
+    "POST",
+    request.body,
     signal,
   );
 }

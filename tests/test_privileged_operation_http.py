@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,10 +14,13 @@ from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.privileged_operation import (
     PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
+    PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
     PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION,
     PRIVILEGED_SECRET_OPERATION_PLAN_ACTION,
     PRIVILEGED_SECRET_OPERATION_READ_ACTION,
+    PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
 )
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.http_routes.privileged_operations import (
     PrivilegedOperationRouteDependencies,
     register_privileged_operation_routes,
@@ -52,7 +56,10 @@ def _agent() -> TerminalAgentIdentity:
 
 
 def _policy(
-    *, duplicate_human_rule: bool = False, unmanaged_only: bool = False
+    *,
+    duplicate_human_rule: bool = False,
+    unmanaged_only: bool = False,
+    github_id_pinned: bool = True,
 ) -> LaunchplaneAuthzPolicy:
     human_rule: dict[str, object] = {
         "managed_set_id": "privileged-operations.secret-planning",
@@ -65,8 +72,12 @@ def _policy(
             PRIVILEGED_SECRET_OPERATION_PLAN_ACTION,
             PRIVILEGED_SECRET_OPERATION_READ_ACTION,
             PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION,
+            PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
+            PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
         ],
     }
+    if not github_id_pinned:
+        human_rule.pop("github_ids")
     if unmanaged_only:
         human_rule.pop("managed_set_id")
         human_rule.pop("managed_rule_id")
@@ -98,6 +109,16 @@ def _policy(
     )
 
 
+def _policy_record(policy: LaunchplaneAuthzPolicy) -> LaunchplaneAuthzPolicyRecord:
+    return LaunchplaneAuthzPolicyRecord(
+        record_id="launchplane-authz-policy-test",
+        revision=3,
+        source="test",
+        updated_at="2026-08-22T19:55:00+00:00",
+        policy=policy,
+    )
+
+
 class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
     def _app(
         self,
@@ -105,6 +126,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         store: FilesystemRecordStore,
         policy: LaunchplaneAuthzPolicy,
         human_reader: Mock | None = None,
+        policy_record_reader: Callable[[], object] | None = None,
     ) -> FastAPI:
         app = FastAPI()
         reader = human_reader or Mock(return_value=_human())
@@ -139,9 +161,23 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 read_github_human_identity=read_human,
                 read_github_human_mutation_identity=read_human,
                 policy_reader=lambda: policy,
+                policy_record_reader=policy_record_reader or (lambda: _policy_record(policy)),
             ),
         )
         return app
+
+    async def test_openapi_exposes_human_transitions_but_no_execute(self) -> None:
+        with TemporaryDirectory() as directory:
+            app = self._app(
+                store=FilesystemRecordStore(Path(directory)),
+                policy=_policy(),
+            )
+            paths = app.openapi()["paths"]
+
+        self.assertIn("/v1/privileged-operations/plans/{operation_id}/approve", paths)
+        self.assertIn("/v1/privileged-operations/plans/{operation_id}/revoke", paths)
+        self.assertIn("/v1/privileged-operations/plans/{operation_id}/cancel", paths)
+        self.assertNotIn("/v1/privileged-operations/plans/{operation_id}/execute", paths)
 
     async def test_human_plan_list_and_agent_summary_are_redacted(self) -> None:
         with (
@@ -183,6 +219,113 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("retirement_blocked_key_ids", summary_payload)
         self.assertNotIn("request", summary_payload)
         self.assertIn("configured_secret_count", summary_payload)
+
+    async def test_human_approval_and_revocation_are_replay_safe(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": base64.urlsafe_b64encode(b"x" * 32).decode()},
+                clear=False,
+            ),
+        ):
+            app = self._app(
+                store=FilesystemRecordStore(Path(temporary_directory)),
+                policy=_policy(),
+            )
+            async with lifespan_client(app) as client:
+                planned = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json={
+                        "source_event_id": "approval-plan-1",
+                        "request": {"reason": "Inspect canonical root migration"},
+                    },
+                )
+                operation_id = planned.json()["record"]["operation_id"]
+                approval_payload = {
+                    "source_event_id": "approval-event-1",
+                    "reason": "Reviewed the redacted plan evidence",
+                }
+                approved = await client.post(
+                    f"/v1/privileged-operations/plans/{operation_id}/approve",
+                    json=approval_payload,
+                )
+                approval_replay = await client.post(
+                    f"/v1/privileged-operations/plans/{operation_id}/approve",
+                    json=approval_payload,
+                )
+                revocation_payload = {
+                    "source_event_id": "revocation-event-1",
+                    "reason": "Withdraw approval before worker execution",
+                }
+                revoked = await client.post(
+                    f"/v1/privileged-operations/plans/{operation_id}/revoke",
+                    json=revocation_payload,
+                )
+                revocation_replay = await client.post(
+                    f"/v1/privileged-operations/plans/{operation_id}/revoke",
+                    json=revocation_payload,
+                )
+
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(approved.json()["record"]["status"], "approved")
+        self.assertEqual(approved.json()["record"]["approval"]["approver"]["github_id"], 123)
+        self.assertEqual(approval_replay.json()["write_status"], "replayed")
+        self.assertEqual(revoked.status_code, 200)
+        self.assertEqual(revoked.json()["record"]["status"], "revoked")
+        self.assertEqual(revocation_replay.json()["write_status"], "replayed")
+
+    async def test_approval_requires_an_explicit_github_id_selector(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": base64.urlsafe_b64encode(b"x" * 32).decode()},
+                clear=False,
+            ),
+        ):
+            app = self._app(
+                store=FilesystemRecordStore(Path(temporary_directory)),
+                policy=_policy(github_id_pinned=False),
+            )
+            async with lifespan_client(app) as client:
+                planned = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json={
+                        "source_event_id": "unpinned-plan-1",
+                        "request": {"reason": "Inspect canonical root migration"},
+                    },
+                )
+                operation_id = planned.json()["record"]["operation_id"]
+                response = await client.post(
+                    f"/v1/privileged-operations/plans/{operation_id}/approve",
+                    json={
+                        "source_event_id": "unpinned-approval-1",
+                        "reason": "Attempt approval without immutable identity pinning",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"]["code"], "authorization_denied")
+
+    async def test_approval_maps_active_policy_read_failure_to_service_unavailable(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            app = self._app(
+                store=FilesystemRecordStore(Path(temporary_directory)),
+                policy=_policy(),
+                policy_record_reader=Mock(side_effect=LookupError("active policy unavailable")),
+            )
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/privileged-operations/plans/privileged-operation-" + "a" * 32 + "/approve",
+                    json={
+                        "source_event_id": "policy-read-failure-1",
+                        "reason": "Attempt approval while policy storage is unavailable",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["code"], "authz_policy_unavailable")
 
     async def test_unmanaged_action_empty_rule_cannot_authorize_route(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -283,9 +426,26 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                         "reason": "Cancel stale plan",
                     },
                 ),
+                await client.post(
+                    "/v1/privileged-operations/plans/privileged-operation-" + "a" * 32 + "/approve",
+                    json={
+                        "source_event_id": "browser-approve-1",
+                        "reason": "Approve reviewed plan",
+                    },
+                ),
+                await client.post(
+                    "/v1/privileged-operations/plans/privileged-operation-" + "a" * 32 + "/revoke",
+                    json={
+                        "source_event_id": "browser-revoke-1",
+                        "reason": "Revoke reviewed plan",
+                    },
+                ),
                 await client.get(
                     "/v1/agent/privileged-operations/plans/privileged-operation-" + "a" * 32
                 ),
             )
 
-        self.assertEqual(tuple(response.status_code for response in responses), (503,) * 5)
+        self.assertEqual(
+            tuple(response.status_code for response in responses),
+            (503, 503, 503, 503, 503, 503, 503),
+        )

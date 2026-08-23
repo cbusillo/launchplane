@@ -19426,6 +19426,11 @@
           "status": {
             "enum": [
               "planned",
+              "approved",
+              "revoked",
+              "executing",
+              "executed",
+              "execution_failed",
               "expired",
               "cancelled"
             ],
@@ -19486,6 +19491,136 @@
         "title": "PrivilegedOperationAgentSummaryResponse",
         "type": "object"
       },
+      "PrivilegedOperationApproval": {
+        "additionalProperties": false,
+        "description": "Immutable browser-human authorization for a single planned operation.",
+        "properties": {
+          "approver": {
+            "$ref": "#/components/schemas/PrivilegedOperationActor"
+          },
+          "descriptor_id": {
+            "const": "managed-secret-reencryption",
+            "title": "Descriptor Id",
+            "type": "string"
+          },
+          "descriptor_version": {
+            "minimum": 1.0,
+            "title": "Descriptor Version",
+            "type": "integer"
+          },
+          "evidence_digest": {
+            "title": "Evidence Digest",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "managed_rule_id": {
+            "title": "Managed Rule Id",
+            "type": "string"
+          },
+          "managed_set_id": {
+            "title": "Managed Set Id",
+            "type": "string"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "policy_record_id": {
+            "title": "Policy Record Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "minimum": 1.0,
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "policy_source": {
+            "title": "Policy Source",
+            "type": "string"
+          },
+          "pre_state_digest": {
+            "title": "Pre State Digest",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "request_digest": {
+            "title": "Request Digest",
+            "type": "string"
+          },
+          "rollback_class": {
+            "const": "key_retained",
+            "default": "key_retained",
+            "title": "Rollback Class",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "approver",
+          "descriptor_id",
+          "descriptor_version",
+          "request_digest",
+          "evidence_digest",
+          "plan_digest",
+          "pre_state_digest",
+          "policy_record_id",
+          "policy_revision",
+          "policy_sha256",
+          "policy_source",
+          "managed_set_id",
+          "managed_rule_id",
+          "expires_at",
+          "reason"
+        ],
+        "title": "PrivilegedOperationApproval",
+        "type": "object"
+      },
+      "PrivilegedOperationApprovalEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_event_id",
+          "reason"
+        ],
+        "title": "PrivilegedOperationApprovalEnvelope",
+        "type": "object"
+      },
       "PrivilegedOperationCancelEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -19521,6 +19656,11 @@
           "action": {
             "enum": [
               "planned",
+              "approved",
+              "revoked",
+              "executing",
+              "executed",
+              "execution_failed",
               "expired",
               "cancelled"
             ],
@@ -19560,7 +19700,7 @@
             "type": "integer"
           },
           "sequence": {
-            "maximum": 2.0,
+            "maximum": 4.0,
             "minimum": 1.0,
             "title": "Sequence",
             "type": "integer"
@@ -19591,6 +19731,71 @@
           "resulting_record_digest"
         ],
         "title": "PrivilegedOperationEventRecord",
+        "type": "object"
+      },
+      "PrivilegedOperationExecutionEvidence": {
+        "additionalProperties": false,
+        "description": "Redacted terminal evidence written by the service-internal worker.",
+        "properties": {
+          "configured_secret_count": {
+            "minimum": 0.0,
+            "title": "Configured Secret Count",
+            "type": "integer"
+          },
+          "failure_code": {
+            "default": "",
+            "maxLength": 160,
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "reconciliation_required": {
+            "title": "Reconciliation Required",
+            "type": "boolean"
+          },
+          "result_digest": {
+            "title": "Result Digest",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          },
+          "rotation_candidate_count": {
+            "minimum": 0.0,
+            "title": "Rotation Candidate Count",
+            "type": "integer"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "unchanged_count": {
+            "minimum": 0.0,
+            "title": "Unchanged Count",
+            "type": "integer"
+          },
+          "unreadable_secret_count": {
+            "minimum": 0.0,
+            "title": "Unreadable Secret Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "result_status",
+          "result_digest",
+          "configured_secret_count",
+          "rotation_candidate_count",
+          "unchanged_count",
+          "unreadable_secret_count",
+          "reconciliation_required"
+        ],
+        "title": "PrivilegedOperationExecutionEvidence",
         "type": "object"
       },
       "PrivilegedOperationHumanResponse": {
@@ -19711,6 +19916,16 @@
       "PrivilegedOperationRecord": {
         "additionalProperties": false,
         "properties": {
+          "approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "created_at": {
             "title": "Created At",
             "type": "string"
@@ -19732,6 +19947,16 @@
           "evidence_digest": {
             "title": "Evidence Digest",
             "type": "string"
+          },
+          "execution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationExecutionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "expires_at": {
             "title": "Expires At",
@@ -19771,6 +19996,11 @@
           "status": {
             "enum": [
               "planned",
+              "approved",
+              "revoked",
+              "executing",
+              "executed",
+              "execution_failed",
               "expired",
               "cancelled"
             ],
@@ -19809,6 +20039,35 @@
           "expires_at"
         ],
         "title": "PrivilegedOperationRecord",
+        "type": "object"
+      },
+      "PrivilegedOperationRevocationEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_event_id",
+          "reason"
+        ],
+        "title": "PrivilegedOperationRevocationEnvelope",
         "type": "object"
       },
       "ProductActionAvailability": {
@@ -61442,6 +61701,11 @@
                 {
                   "enum": [
                     "planned",
+                    "approved",
+                    "revoked",
+                    "executing",
+                    "executed",
+                    "execution_failed",
                     "expired",
                     "cancelled"
                   ],
@@ -61710,6 +61974,110 @@
         ]
       }
     },
+    "/v1/privileged-operations/plans/{operation_id}/approve": {
+      "post": {
+        "operationId": "approve_human_privileged_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrivilegedOperationApprovalEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivilegedOperationHumanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Approve a privileged-operation plan",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
     "/v1/privileged-operations/plans/{operation_id}/cancel": {
       "post": {
         "operationId": "cancel_human_privileged_operation",
@@ -61809,6 +62177,110 @@
           }
         },
         "summary": "Cancel a privileged-operation plan",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
+    "/v1/privileged-operations/plans/{operation_id}/revoke": {
+      "post": {
+        "operationId": "revoke_human_privileged_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrivilegedOperationRevocationEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivilegedOperationHumanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Revoke a privileged-operation approval",
         "tags": [
           "privileged-operations"
         ]
@@ -72145,6 +72617,8 @@
   },
   "x-launchplane-ui-write-operations": {
     "/v1/owner-acceptance/events": "write_owner_acceptance_event",
+    "/v1/privileged-operations/plans/{operation_id}/approve": "approve_human_privileged_operation",
+    "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",

@@ -191,9 +191,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/owner-acceptance/current-items": "list_owner_acceptance_current_items",
     "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",
     "/v1/privileged-operations/plans": "list_human_privileged_operations",
-    "/v1/privileged-operations/plans/{operation_id}": (
-        "read_human_privileged_operation"
-    ),
+    "/v1/privileged-operations/plans/{operation_id}": ("read_human_privileged_operation"),
 }
 
 
@@ -209,4 +207,8 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
         "dispatch_product_promotion_workflow"
     ),
     "/v1/owner-acceptance/events": "write_owner_acceptance_event",
+    "/v1/privileged-operations/plans/{operation_id}/approve": (
+        "approve_human_privileged_operation"
+    ),
+    "/v1/privileged-operations/plans/{operation_id}/revoke": ("revoke_human_privileged_operation"),
 }

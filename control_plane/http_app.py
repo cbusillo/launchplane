@@ -206,6 +206,7 @@ from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationCaptureError,
     build_durable_operation_cancellation,
     capture_durable_operation_authorization,
+    read_active_authz_policy_record,
 )
 from control_plane.contracts.agent_write_intent import (
     AgentWriteIntentRecord,
@@ -4663,6 +4664,7 @@ def create_launchplane_fastapi_app(
         read_github_human_identity=read_github_human_identity,
         read_github_human_mutation_identity=(read_github_human_browser_mutation_identity),
         policy_reader=lambda: resolved_authz_policy_runtime.policy,
+        policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
     )
     product_owner_write_route_dependencies = ProductOwnerWriteRouteDependencies(
         read_write_identity=read_write_identity,
@@ -12395,18 +12397,6 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
-    def require_secret_reencryption_database_store(
-        *, record_store: object, trace_id: str
-    ) -> PostgresRecordStore:
-        if not isinstance(record_store, PostgresRecordStore):
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_required",
-                message="Managed-secret re-encryption requires DB-backed Launchplane storage.",
-            )
-        return record_store
-
     def require_product_onboarding_database_store(
         *, record_store: object, trace_id: str
     ) -> PostgresRecordStore:
@@ -13758,99 +13748,19 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Managed-secret re-encryption request failed validation.",
             ) from error
-        action = f"secret.reencrypt.{reencryption_request.mode}"
-        if not resolved_authz_policy_runtime.policy.allows(
-            identity=identity,
-            action=action,
-            product="launchplane",
-            context="launchplane",
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot re-encrypt Launchplane managed secrets.",
-            )
-        if reencryption_request.mode == "apply" and not idempotency_key.strip():
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="idempotency_key_required",
-                message="Managed-secret re-encryption apply requires Idempotency-Key.",
-            )
-        (
-            normalized_idempotency_key,
-            payload_fingerprint,
-            replay_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
-            route_path=_SECRET_REENCRYPT_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=reencryption_request.mode == "apply",
-        )
-        if replay_response is not None:
-            return replay_response
-        database_store = require_secret_reencryption_database_store(
-            record_store=record_store,
-            trace_id=trace_id,
-        )
-        actor = launchplane_identity_actor(identity)
-        operation_token = ""
         if reencryption_request.mode == "apply":
-            operation_token = hashlib.sha256(
-                "\x1f".join((actor, normalized_idempotency_key, payload_fingerprint)).encode()
-            ).hexdigest()
-
-        def reencryption_idempotency_record(
-            result_payload: dict[str, object],
-        ) -> LaunchplaneIdempotencyRecord:
-            return build_apply_idempotency_record(
-                identity=identity,
-                route_path=_SECRET_REENCRYPT_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=accepted_evidence_response(
-                    trace_id=trace_id,
-                    records={},
-                    result=result_payload,
-                ),
-            )
-
-        try:
-            result = control_plane_secrets.reencrypt_secrets(
-                record_store=database_store,
-                apply=reencryption_request.mode == "apply",
-                expected_plan_digest=reencryption_request.expected_plan_digest,
-                operation_token=operation_token,
-                idempotency_record_factory=(
-                    reencryption_idempotency_record
-                    if reencryption_request.mode == "apply"
-                    else None
-                ),
-                actor=actor,
-                source_label=reencryption_request.source_label,
-                reason=reencryption_request.reason,
-            )
-        except click.ClickException as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="secret_key_configuration_invalid",
-                message="Managed-secret key configuration is unavailable or invalid.",
-            ) from error
-        if reencryption_request.mode == "apply" and result["status"] != "ok":
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
-                code="secret_reencryption_conflict",
-                message="Managed-secret state no longer matches the approved dry-run.",
+                code="privileged_operation_approval_required",
+                message="Legacy apply is permanently refused; approved privileged operations execute internally.",
             )
-        response = accepted_evidence_response(trace_id=trace_id, records={}, result=result)
-        return response
+        raise _launchplane_http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code="privileged_operation_planning_required",
+            message="Use POST /v1/privileged-operations/plans for managed-secret re-encryption planning.",
+        )
 
     async def apply_product_onboarding(
         request: Request,
