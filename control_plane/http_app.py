@@ -14583,49 +14583,49 @@ def create_launchplane_fastapi_app(
                 message="Activation preflight requires a local administrator identity.",
                 headers=no_store_headers,
             )
-        for action in (AUTHZ_POLICY_HEALTH_READ_ACTION, EFFECTIVE_ACCESS_READ_ACTION):
-            preflight_evaluation = resolved_authz_policy_runtime.policy.evaluate(
-                identity=identity,
-                action=action,
-                product=_LAUNCHPLANE_SERVICE_CONTEXT,
-                context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                record_context=False,
-            )
-            if preflight_evaluation.decision != "allowed":
-                raise _launchplane_http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message="Identity cannot read Launchplane activation preflight evidence.",
-                    headers=no_store_headers,
-                )
-        database_store = require_authz_policy_database_store(
-            record_store=record_store,
-            trace_id=trace_id,
-            message="Activation preflight reads require Launchplane database storage.",
-        )
-        active_record = read_single_active_authz_policy_record(
-            database_store=database_store,
-            trace_id=trace_id,
-        )
-        for action in (AUTHZ_POLICY_HEALTH_READ_ACTION, EFFECTIVE_ACCESS_READ_ACTION):
-            active_evaluation = active_record.policy.evaluate(
-                identity=identity,
-                action=action,
-                product=_LAUNCHPLANE_SERVICE_CONTEXT,
-                context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                record_context=False,
-            )
-            if active_evaluation.decision != "allowed":
-                raise _launchplane_http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message="Identity cannot read Launchplane activation preflight evidence.",
-                    headers=no_store_headers,
-                    authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
-                )
         try:
+            for action in (AUTHZ_POLICY_HEALTH_READ_ACTION, EFFECTIVE_ACCESS_READ_ACTION):
+                preflight_evaluation = resolved_authz_policy_runtime.policy.evaluate(
+                    identity=identity,
+                    action=action,
+                    product=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    record_context=False,
+                )
+                if preflight_evaluation.decision != "allowed":
+                    raise _launchplane_http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="authorization_denied",
+                        message="Identity cannot read Launchplane activation preflight evidence.",
+                        headers=no_store_headers,
+                    )
+            database_store = require_authz_policy_database_store(
+                record_store=record_store,
+                trace_id=trace_id,
+                message="Activation preflight reads require Launchplane database storage.",
+            )
+            active_record = read_single_active_authz_policy_record(
+                database_store=database_store,
+                trace_id=trace_id,
+            )
+            for action in (AUTHZ_POLICY_HEALTH_READ_ACTION, EFFECTIVE_ACCESS_READ_ACTION):
+                active_evaluation = active_record.policy.evaluate(
+                    identity=identity,
+                    action=action,
+                    product=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    record_context=False,
+                )
+                if active_evaluation.decision != "allowed":
+                    raise _launchplane_http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="authorization_denied",
+                        message="Identity cannot read Launchplane activation preflight evidence.",
+                        headers=no_store_headers,
+                        authz_policy_provenance=AuthzPolicyProvenance.from_record(active_record),
+                    )
             return control_plane_authz_activation_preflight.resolve_activation_preflight(
                 store=database_store,
                 active_record=active_record,
@@ -14639,6 +14639,17 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code=error.code,
                 message=str(error),
+                headers=no_store_headers,
+            ) from error
+        except LaunchplaneHTTPException as error:
+            error.headers = {**(error.headers or {}), **no_store_headers}
+            raise
+        except Exception as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="activation_preflight_unavailable",
+                message="Activation preflight evidence is unavailable.",
                 headers=no_store_headers,
             ) from error
 

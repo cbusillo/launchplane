@@ -79,6 +79,7 @@ class HumanSessionStore(Protocol):
         github_id: int,
         *,
         limit: int,
+        created_at_not_after: datetime,
     ) -> tuple[LaunchplaneHumanSession, ...]: ...
 
     def delete_session(self, session_id: str) -> None: ...
@@ -134,13 +135,24 @@ class InMemoryHumanSessionStore:
         github_id: int,
         *,
         limit: int,
+        created_at_not_after: datetime,
     ) -> tuple[LaunchplaneHumanSession, ...]:
+        cutoff = created_at_not_after.astimezone(timezone.utc)
         with self._lock:
-            return tuple(
-                session
-                for session in self._sessions.values()
-                if session.identity.github_id == github_id
-            )[: max(limit, 0)]
+            matching_sessions = sorted(
+                (
+                    session
+                    for session in self._sessions.values()
+                    if session.identity.github_id == github_id
+                    and session.created_at.astimezone(timezone.utc) <= cutoff
+                ),
+                key=lambda session: (
+                    session.created_at.astimezone(timezone.utc),
+                    session.session_id,
+                ),
+                reverse=True,
+            )
+            return tuple(matching_sessions[: max(limit, 0)])
 
     def delete_session(self, session_id: str) -> None:
         with self._lock:

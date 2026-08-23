@@ -17,6 +17,7 @@ from cryptography.fernet import Fernet
 from control_plane import authz_activation_preflight, secrets as control_plane_secrets
 from control_plane.authz_activation_preflight import (
     ACTIVATION_PREFLIGHT_STORAGE_SCAN_LIMIT,
+    ACTIVATION_PREFLIGHT_STORAGE_SESSION_LIMIT,
     ActivationPreflightFailure,
     build_activation_preflight_response,
 )
@@ -291,7 +292,7 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
                     now=now,
                 )
             self.assertEqual(response.session.session_count, 1)
-        with self.subTest("history truncated"):
+        with self.subTest("history contract violation"):
             with self.assertRaisesRegex(ActivationPreflightFailure, "history"):
                 build_activation_preflight_response(
                     trace_id="trace",
@@ -299,10 +300,34 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
                     active_record=record,
                     sessions=tuple(
                         _session(now=now, expires_offset=timedelta(hours=-1))
-                        for _ in range(ACTIVATION_PREFLIGHT_STORAGE_SCAN_LIMIT + 1)
+                        for _ in range(ACTIVATION_PREFLIGHT_STORAGE_SESSION_LIMIT + 1)
                     ),
                     now=now,
                 )
+        with self.subTest("bounded stale history does not hide current session"):
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: _key_ring()},
+                clear=True,
+            ):
+                response = build_activation_preflight_response(
+                    trace_id="trace",
+                    github_id=123,
+                    active_record=record,
+                    sessions=(
+                        _session(now=now),
+                        *(
+                            _session(
+                                now=now,
+                                created_offset=timedelta(hours=25),
+                                expires_offset=timedelta(hours=-1),
+                            )
+                            for _ in range(ACTIVATION_PREFLIGHT_STORAGE_SCAN_LIMIT)
+                        ),
+                    ),
+                    now=now,
+                )
+            self.assertEqual(response.session.session_count, 1)
         with self.subTest("payload mismatch"):
             with self.assertRaisesRegex(ActivationPreflightFailure, "lookup key"):
                 build_activation_preflight_response(
@@ -334,6 +359,7 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
             found = store.read_human_sessions_for_github_id_without_cleanup(
                 123,
                 limit=10,
+                created_at_not_after=now + timedelta(days=1),
             )
             self.assertEqual(
                 {session.session_id for session in found},
@@ -425,6 +451,16 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
                                 headers={"Authorization": "Bearer admin-token"},
                                 json={"github_id": 123},
                             )
+                        with patch.object(
+                            store,
+                            "list_authz_policy_records",
+                            side_effect=RuntimeError("database unavailable"),
+                        ):
+                            database_unavailable_response = await client.post(
+                                "/v1/authz-diagnostics/activation-preflight/read",
+                                headers={"Authorization": "Bearer admin-token"},
+                                json={"github_id": 123},
+                            )
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers["cache-control"], "no-store")
             response_text = response.text
@@ -448,6 +484,8 @@ class AuthzActivationPreflightTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(oversized_response.headers["cache-control"], "no-store")
             self.assertEqual(unavailable_response.status_code, 503)
             self.assertEqual(unavailable_response.headers["cache-control"], "no-store")
+            self.assertEqual(database_unavailable_response.status_code, 503)
+            self.assertEqual(database_unavailable_response.headers["cache-control"], "no-store")
             self.assertEqual(
                 store.read_session_without_cleanup(stored_session.session_id), stored_session
             )

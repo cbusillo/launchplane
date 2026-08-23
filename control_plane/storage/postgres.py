@@ -8319,21 +8319,29 @@ class PostgresRecordStore(HumanSessionStore):
         github_id: int,
         *,
         limit: int,
+        created_at_not_after: datetime,
     ) -> tuple[LaunchplaneHumanSession, ...]:
         normalized_limit = max(limit, 0)
         if normalized_limit == 0:
             return ()
+        sqlite = self._engine.dialect.name == "sqlite"
         created_at_order = (
             func.julianday(LaunchplaneHumanSessionRow.created_at)
-            if self._engine.dialect.name == "sqlite"
+            if sqlite
             else sql_cast(
                 LaunchplaneHumanSessionRow.created_at,
                 DateTime(timezone=True),
             )
         )
+        created_at_upper_bound = (
+            func.julianday(created_at_not_after.isoformat()) if sqlite else created_at_not_after
+        )
         statement = (
             select(LaunchplaneHumanSessionRow)
-            .where(LaunchplaneHumanSessionRow.github_id == github_id)
+            .where(
+                LaunchplaneHumanSessionRow.github_id == github_id,
+                created_at_order <= created_at_upper_bound,
+            )
             .order_by(
                 created_at_order.desc(),
                 LaunchplaneHumanSessionRow.session_id.desc(),

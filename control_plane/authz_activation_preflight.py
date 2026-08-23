@@ -43,6 +43,7 @@ class ActivationPreflightStore(Protocol):
         github_id: int,
         *,
         limit: int,
+        created_at_not_after: datetime,
     ) -> tuple[LaunchplaneHumanSession, ...]: ...
 
 
@@ -133,7 +134,7 @@ def _resolve_session(
     github_id: int,
     now: datetime,
 ) -> tuple[LaunchplaneHumanSession, GitHubHumanIdentity, int, datetime]:
-    if len(sessions) > ACTIVATION_PREFLIGHT_STORAGE_SCAN_LIMIT:
+    if len(sessions) > ACTIVATION_PREFLIGHT_STORAGE_SESSION_LIMIT:
         raise ActivationPreflightFailure(
             "activation_session_history_truncated",
             "Activation preflight session history exceeded the bounded scan limit.",
@@ -289,6 +290,7 @@ def resolve_activation_preflight(
         sessions = store.read_human_sessions_for_github_id_without_cleanup(
             github_id,
             limit=ACTIVATION_PREFLIGHT_STORAGE_SESSION_LIMIT,
+            created_at_not_after=now,
         )
     except ActivationPreflightFailure:
         raise
