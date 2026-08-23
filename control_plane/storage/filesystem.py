@@ -105,6 +105,17 @@ from control_plane.contracts.product_owner import (
     ProductOwnerRequirementRecord,
     ProductOwnerRoutingRecord,
 )
+from control_plane.contracts.privileged_operation import (
+    PrivilegedOperationConflictError,
+    PrivilegedOperationEventRecord,
+    PrivilegedOperationEventWriteStatus,
+    PrivilegedOperationRecord,
+    PrivilegedOperationTransitionError,
+    privileged_operation_event_replay_digest,
+    privileged_operation_plan_replay_digest,
+    privileged_operation_record_digest,
+    validate_privileged_operation_transition,
+)
 from control_plane.odoo_stable_lane import (
     ODOO_STABLE_LANE_BLOCKING_STATUSES,
     OdooStableLaneOperationConflictError,
@@ -2843,6 +2854,184 @@ class FilesystemRecordStore:
             ]
         records.sort(
             key=lambda record: (record.occurred_at, record.event_id),
+            reverse=True,
+        )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_privileged_operation_plan(
+        self,
+        record: PrivilegedOperationRecord,
+        event: PrivilegedOperationEventRecord,
+    ) -> PrivilegedOperationEventWriteStatus:
+        record_type = "launchplane_privileged_operations"
+        event_type = "launchplane_privileged_operation_events"
+        with self._exclusive_record_lock(record_type, record.operation_id):
+            record_path = self._record_path(record_type, record.operation_id)
+            event_path = self._record_path(event_type, event.event_id)
+            if record_path.exists():
+                existing_record = self._read_model_locked(
+                    PrivilegedOperationRecord,
+                    record_type,
+                    record.operation_id,
+                )
+                if privileged_operation_plan_replay_digest(
+                    existing_record
+                ) != privileged_operation_plan_replay_digest(record):
+                    raise PrivilegedOperationConflictError(
+                        "Privileged-operation plan replay changed the persisted payload."
+                    )
+                if not event_path.exists():
+                    raise PrivilegedOperationConflictError(
+                        "Privileged-operation plan exists without its planned event."
+                    )
+                existing_event = self._read_model_locked(
+                    PrivilegedOperationEventRecord,
+                    event_type,
+                    event.event_id,
+                )
+                if privileged_operation_event_replay_digest(
+                    existing_event
+                ) != privileged_operation_event_replay_digest(event):
+                    raise PrivilegedOperationConflictError(
+                        "Privileged-operation planned event replay changed the persisted payload."
+                    )
+                return "replayed"
+            if event_path.exists():
+                existing_event = self._read_model_locked(
+                    PrivilegedOperationEventRecord,
+                    event_type,
+                    event.event_id,
+                )
+                if privileged_operation_event_replay_digest(
+                    existing_event
+                ) != privileged_operation_event_replay_digest(event):
+                    raise PrivilegedOperationConflictError(
+                        "Privileged-operation planned event exists with another payload."
+                    )
+                validate_privileged_operation_transition(
+                    previous=None,
+                    proposed=record,
+                    event=event,
+                )
+                self._write_model_locked(record_type, record.operation_id, record)
+                return "replayed"
+            validate_privileged_operation_transition(
+                previous=None,
+                proposed=record,
+                event=event,
+            )
+            self._write_model_locked(event_type, event.event_id, event)
+            try:
+                self._write_model_locked(record_type, record.operation_id, record)
+            except Exception:
+                event_path.unlink(missing_ok=True)
+                raise
+            return "written"
+
+    def transition_privileged_operation(
+        self,
+        record: PrivilegedOperationRecord,
+        event: PrivilegedOperationEventRecord,
+    ) -> PrivilegedOperationEventWriteStatus:
+        record_type = "launchplane_privileged_operations"
+        event_type = "launchplane_privileged_operation_events"
+        with self._exclusive_record_lock(record_type, record.operation_id):
+            previous = self._read_model_locked(
+                PrivilegedOperationRecord,
+                record_type,
+                record.operation_id,
+            )
+            event_path = self._record_path(event_type, event.event_id)
+            if event_path.exists():
+                existing_event = self._read_model_locked(
+                    PrivilegedOperationEventRecord,
+                    event_type,
+                    event.event_id,
+                )
+                if privileged_operation_event_replay_digest(
+                    existing_event
+                ) != privileged_operation_event_replay_digest(event):
+                    raise PrivilegedOperationConflictError(
+                        "Privileged-operation event replay changed the persisted payload."
+                    )
+                if privileged_operation_record_digest(
+                    previous
+                ) != privileged_operation_record_digest(record):
+                    try:
+                        validate_privileged_operation_transition(
+                            previous=previous,
+                            proposed=record,
+                            event=event,
+                        )
+                    except PrivilegedOperationTransitionError as error:
+                        raise PrivilegedOperationConflictError(str(error)) from error
+                    self._write_model_locked(record_type, record.operation_id, record)
+                return "replayed"
+            try:
+                validate_privileged_operation_transition(
+                    previous=previous,
+                    proposed=record,
+                    event=event,
+                )
+            except PrivilegedOperationTransitionError as error:
+                raise PrivilegedOperationConflictError(str(error)) from error
+            self._write_model_locked(event_type, event.event_id, event)
+            try:
+                self._write_model_locked(record_type, record.operation_id, record)
+            except Exception:
+                event_path.unlink(missing_ok=True)
+                raise
+            return "written"
+
+    def read_privileged_operation_record(
+        self,
+        operation_id: str,
+    ) -> PrivilegedOperationRecord:
+        return self._read_model(
+            PrivilegedOperationRecord,
+            "launchplane_privileged_operations",
+            operation_id,
+        )
+
+    def list_privileged_operation_records(
+        self,
+        *,
+        status: str = "",
+        descriptor_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[PrivilegedOperationRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PrivilegedOperationRecord,
+                "launchplane_privileged_operations",
+            )
+            if (not status or record.status == status)
+            and (not descriptor_id or record.descriptor_id == descriptor_id)
+        ]
+        records.sort(key=lambda record: (record.created_at, record.operation_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def list_privileged_operation_event_records(
+        self,
+        *,
+        operation_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[PrivilegedOperationEventRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PrivilegedOperationEventRecord,
+                "launchplane_privileged_operation_events",
+            )
+            if not operation_id or record.operation_id == operation_id
+        ]
+        records.sort(
+            key=lambda record: (record.occurred_at, record.sequence, record.event_id),
             reverse=True,
         )
         if limit is not None:

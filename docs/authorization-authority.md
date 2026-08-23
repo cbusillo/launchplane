@@ -214,3 +214,21 @@ audit evidence, and require normalization through the ordinary DB-native path.
 Immutable-image rollback is service-code recovery; it is not authorization-data
 recovery. Do not claim that rolling back the Launchplane image repairs an active
 DB policy.
+
+## Privileged-Operation Planning Actions
+
+Phase 1 introduces explicit actions for privileged-operation planning, human
+reads, cancellation, and counts-only agent reads. It introduces no policy rule
+or grant. Authorization uses only schema-v2 managed rules and requires exactly
+one match with both managed IDs, so legacy unmanaged action-empty rules cannot
+inherit the new actions.
+
+The browser-human identity dependency is separate from the existing browser
+mutation dependency that permits bearer identities to pass through. Bearer,
+workflow, terminal-agent, local-operator, and local-admin identities are
+rejected before human-route policy evaluation. The agent summary route is a
+separate action and projection and never authorizes approval or execution.
+
+Before any later production activation, inspect active action-empty rules and
+record policy-schema evidence. Activation remains a separate owner-approved
+DB-native administration event; it is not authorized by landing Phase 1 code.

@@ -1181,6 +1181,29 @@ test.describe("operator journeys", () => {
 
     diagnostics.assertClean();
   });
+
+  test("privileged-operation planning remains read-only and redacted", async ({
+    page,
+  }, testInfo) => {
+    const diagnostics = monitorBrowser(page);
+
+    await page.goto("/ui/engineering/privileged-operations?fixture=products");
+
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Privileged operation plans" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Privileged operation plans", exact: true }),
+    ).toHaveAttribute("aria-current", "page");
+    await expect(page.getByText("Planning evidence only — no privileged effect")).toBeVisible();
+    await expect(page.getByText("Would rotate")).toBeVisible();
+    await expect(page.getByText("18", { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole("button", { name: /approve|execute/i })).toHaveCount(0);
+    await expect(page.getByText(/secret-version/i)).toHaveCount(0);
+    await assertDocumentBasics(page);
+    await captureScreenshot(page, testInfo, "privileged-operation-plans-read-only");
+    diagnostics.assertClean();
+  });
 });
 
 function monitorBrowser(

@@ -1,0 +1,329 @@
+from __future__ import annotations
+
+import base64
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import patch
+
+from control_plane.contracts.privileged_operation import (
+    ManagedSecretReencryptionHumanEvidence,
+    ManagedSecretReencryptionPlanInput,
+    PRIVILEGED_OPERATION_SUMMARY_READ_ACTION,
+    PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION,
+    PRIVILEGED_SECRET_OPERATION_PLAN_ACTION,
+    PRIVILEGED_SECRET_OPERATION_READ_ACTION,
+    PrivilegedOperationActor,
+    PrivilegedOperationConflictError,
+    PrivilegedOperationEventRecord,
+    PrivilegedOperationRecord,
+    build_privileged_operation_id,
+    privileged_operation_agent_summary,
+    privileged_operation_evidence_digest,
+    privileged_operation_record_digest,
+    privileged_operation_request_digest,
+)
+from control_plane.privileged_operation_registry import (
+    MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
+    RegisteredPrivilegedOperationDescriptor,
+    plan_managed_secret_reencryption,
+)
+from control_plane.privileged_operation_service import (
+    cancel_privileged_operation,
+    create_privileged_operation_plan,
+    expire_privileged_operation_if_due,
+    list_privileged_operations,
+)
+from control_plane.service_auth import action_safety
+from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
+
+
+def _test_key(offset: int) -> str:
+    return base64.urlsafe_b64encode(bytes((offset + index) % 256 for index in range(32))).decode()
+
+
+def _record(*, created_at: str = "2026-08-22T20:00:00+00:00") -> PrivilegedOperationRecord:
+    request = ManagedSecretReencryptionPlanInput(
+        reason="Review canonical root migration",
+        source_label="test-plan",
+    )
+    evidence = ManagedSecretReencryptionHumanEvidence(
+        result_status="ok",
+        plan_digest="a" * 64,
+        configured_secret_count=3,
+        rotation_candidate_count=2,
+        unchanged_count=1,
+        unreadable_secret_count=0,
+        active_key_id="root-2026",
+        retirement_blocked_key_ids=("legacy-root",),
+        retirement_ready_key_ids=(),
+        legacy_compatibility_key_loaded=True,
+    )
+    actor = PrivilegedOperationActor(
+        identity_type="github_human",
+        github_id=123,
+        login="operator",
+    )
+    return PrivilegedOperationRecord(
+        operation_id=build_privileged_operation_id(
+            github_id=actor.github_id,
+            source_event_id="request-1",
+        ),
+        descriptor_id="managed-secret-reencryption",
+        descriptor_version=1,
+        safety_class="secret_backed",
+        status="planned",
+        source_event_id="request-1",
+        requested_by=actor,
+        request=request,
+        request_digest=privileged_operation_request_digest(request),
+        evidence=evidence,
+        evidence_digest=privileged_operation_evidence_digest(evidence),
+        created_at=created_at,
+        updated_at=created_at,
+        expires_at="2026-08-22T20:30:00+00:00",
+    )
+
+
+def _planned_event(record: PrivilegedOperationRecord) -> PrivilegedOperationEventRecord:
+    return PrivilegedOperationEventRecord(
+        operation_id=record.operation_id,
+        sequence=1,
+        action="planned",
+        occurred_at=record.created_at,
+        source_kind="browser_api",
+        source_event_id=record.source_event_id,
+        actor=record.requested_by,
+        resulting_record_digest=privileged_operation_record_digest(record),
+    )
+
+
+class PrivilegedOperationContractTests(unittest.TestCase):
+    def test_action_safety_is_intentional(self) -> None:
+        self.assertEqual(action_safety(PRIVILEGED_SECRET_OPERATION_PLAN_ACTION), "secret_backed")
+        self.assertEqual(action_safety(PRIVILEGED_SECRET_OPERATION_READ_ACTION), "secret_backed")
+        self.assertEqual(action_safety(PRIVILEGED_SECRET_OPERATION_CANCEL_ACTION), "secret_backed")
+        self.assertEqual(action_safety(PRIVILEGED_OPERATION_SUMMARY_READ_ACTION), "read")
+
+    def test_agent_summary_is_counts_only(self) -> None:
+        rendered = privileged_operation_agent_summary(_record()).model_dump_json()
+        self.assertNotIn("active_key_id", rendered)
+        self.assertNotIn("legacy-root", rendered)
+        self.assertNotIn("request", rendered)
+        self.assertIn('"rotation_candidate_count":2', rendered)
+
+    def test_secret_planner_calls_only_dry_run_and_discards_raw_errors(self) -> None:
+        raw_result = {
+            "status": "error",
+            "dry_run": True,
+            "plan_digest": "b" * 64,
+            "rotated_count": 2,
+            "unchanged_count": 1,
+            "error_count": 1,
+            "errors": ["Managed secret secret-private-id is not decryptable"],
+            "active_key_id": "root-2026",
+            "retirement_blocked_key_ids": ["legacy-root"],
+            "retirement_ready_key_ids": [],
+            "legacy_compatibility_key_loaded": True,
+        }
+        store = unittest.mock.Mock()
+        store.list_secret_records = unittest.mock.Mock()
+        store.read_secret_version = unittest.mock.Mock()
+        with patch(
+            "control_plane.privileged_operation_registry.control_plane_secrets.reencrypt_secrets",
+            return_value=raw_result,
+        ) as reencrypt:
+            evidence = plan_managed_secret_reencryption(
+                store,
+                ManagedSecretReencryptionPlanInput(reason="Inspect root migration"),
+            )
+        self.assertFalse(reencrypt.call_args.kwargs["apply"])
+        self.assertEqual(evidence.unreadable_secret_count, 1)
+        self.assertNotIn("secret-private-id", evidence.model_dump_json())
+
+
+class PrivilegedOperationStorageTests(unittest.TestCase):
+    def _stores(self, root: Path) -> tuple[FilesystemRecordStore, PostgresRecordStore]:
+        postgres = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{root / 'records.sqlite'}")
+        postgres.ensure_schema()
+        return FilesystemRecordStore(root / "state"), postgres
+
+    def test_plan_replay_cancel_and_expiry_are_consistent_across_stores(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            stores = self._stores(Path(temporary_directory))
+            try:
+                for store in stores:
+                    record = _record()
+                    event = _planned_event(record)
+                    self.assertEqual(
+                        store.write_privileged_operation_plan(record, event), "written"
+                    )
+                    self.assertEqual(
+                        store.write_privileged_operation_plan(record, event), "replayed"
+                    )
+                    cancelled = cancel_privileged_operation(
+                        record_store=store,
+                        operation_id=record.operation_id,
+                        actor_github_id=456,
+                        actor_login="reviewer",
+                        source_event_id="cancel-1",
+                        reason="Superseded by a newer plan",
+                        now=lambda: datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc),
+                    )
+                    self.assertEqual(cancelled.record.status, "cancelled")
+                    self.assertEqual(
+                        tuple(
+                            item.action
+                            for item in store.list_privileged_operation_event_records(
+                                operation_id=record.operation_id
+                            )
+                        ),
+                        ("cancelled", "planned"),
+                    )
+
+                    expiring = _record(created_at="2026-08-22T19:00:00+00:00").model_copy(
+                        update={
+                            "operation_id": build_privileged_operation_id(
+                                github_id=123,
+                                source_event_id="request-expiry",
+                            ),
+                            "source_event_id": "request-expiry",
+                            "expires_at": "2026-08-22T19:30:00+00:00",
+                        }
+                    )
+                    expiring_event = _planned_event(expiring).model_copy(
+                        update={
+                            "source_event_id": "request-expiry",
+                            "resulting_record_digest": privileged_operation_record_digest(expiring),
+                        }
+                    )
+                    store.write_privileged_operation_plan(expiring, expiring_event)
+                    expired = expire_privileged_operation_if_due(
+                        record_store=store,
+                        record=expiring,
+                        now=lambda: datetime(2026, 8, 22, 20, 0, tzinfo=timezone.utc),
+                    )
+                    self.assertEqual(expired.status, "expired")
+            finally:
+                stores[1].close()
+
+    def test_plan_replay_rejects_changed_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FilesystemRecordStore(Path(temporary_directory))
+            record = _record()
+            event = _planned_event(record)
+            store.write_privileged_operation_plan(record, event)
+            changed = record.model_copy(
+                update={
+                    "expires_at": (
+                        datetime.fromisoformat(record.expires_at) + timedelta(minutes=5)
+                    ).isoformat()
+                }
+            )
+            with self.assertRaises(PrivilegedOperationConflictError):
+                store.write_privileged_operation_plan(changed, event)
+
+    def test_service_replays_plan_without_rerunning_planner(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FilesystemRecordStore(Path(temporary_directory))
+            planner = unittest.mock.Mock(return_value=_record().evidence)
+            registration = RegisteredPrivilegedOperationDescriptor(
+                descriptor=MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
+                planner=planner,
+            )
+            request = ManagedSecretReencryptionPlanInput(reason="Inspect root migration")
+            with patch(
+                "control_plane.privileged_operation_service.read_privileged_operation_descriptor",
+                return_value=registration,
+            ):
+                first = create_privileged_operation_plan(
+                    record_store=store,
+                    requester_github_id=123,
+                    requester_login="operator",
+                    source_event_id="request-replay",
+                    request=request,
+                    now=lambda: datetime(2026, 8, 22, 20, 0, tzinfo=timezone.utc),
+                )
+                replay = create_privileged_operation_plan(
+                    record_store=store,
+                    requester_github_id=123,
+                    requester_login="operator",
+                    source_event_id="request-replay",
+                    request=request,
+                    now=lambda: datetime(2026, 8, 22, 20, 5, tzinfo=timezone.utc),
+                )
+
+            self.assertEqual(first.write_status, "written")
+            self.assertEqual(replay.write_status, "replayed")
+            self.assertEqual(replay.record, first.record)
+            planner.assert_called_once()
+
+    def test_service_replays_cancellation_with_same_source_event(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FilesystemRecordStore(Path(temporary_directory))
+            record = _record()
+            store.write_privileged_operation_plan(record, _planned_event(record))
+            first = cancel_privileged_operation(
+                record_store=store,
+                operation_id=record.operation_id,
+                actor_github_id=456,
+                actor_login="reviewer",
+                source_event_id="cancel-replay",
+                reason="Superseded by a newer plan",
+                now=lambda: datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc),
+            )
+            replay = cancel_privileged_operation(
+                record_store=store,
+                operation_id=record.operation_id,
+                actor_github_id=456,
+                actor_login="reviewer",
+                source_event_id="cancel-replay",
+                reason="Superseded by a newer plan",
+                now=lambda: datetime(2026, 8, 22, 20, 20, tzinfo=timezone.utc),
+            )
+
+            self.assertEqual(first.write_status, "written")
+            self.assertEqual(replay.write_status, "replayed")
+            self.assertEqual(replay.record, first.record)
+
+    def test_status_filter_applies_before_limit(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FilesystemRecordStore(Path(temporary_directory))
+            cancelled_record = _record(created_at="2026-08-22T19:00:00+00:00").model_copy(
+                update={"expires_at": "2026-08-22T19:30:00+00:00"}
+            )
+            store.write_privileged_operation_plan(
+                cancelled_record,
+                _planned_event(cancelled_record),
+            )
+            cancel_privileged_operation(
+                record_store=store,
+                operation_id=cancelled_record.operation_id,
+                actor_github_id=456,
+                actor_login="reviewer",
+                source_event_id="cancel-filter",
+                reason="Use the newer plan",
+                now=lambda: datetime(2026, 8, 22, 19, 10, tzinfo=timezone.utc),
+            )
+            newer_record = _record(created_at="2026-08-22T20:00:00+00:00").model_copy(
+                update={
+                    "operation_id": build_privileged_operation_id(
+                        github_id=123,
+                        source_event_id="request-newer",
+                    ),
+                    "source_event_id": "request-newer",
+                }
+            )
+            store.write_privileged_operation_plan(newer_record, _planned_event(newer_record))
+
+            records = list_privileged_operations(
+                record_store=store,
+                status="cancelled",
+                limit=1,
+            )
+
+            self.assertEqual(
+                records, (store.read_privileged_operation_record(cancelled_record.operation_id),)
+            )

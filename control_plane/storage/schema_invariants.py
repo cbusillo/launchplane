@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "a2c4e6f8b0d3"
+EXPECTED_ALEMBIC_HEAD_REVISION = "b4d6f8a0c2e5"
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 _AUTHZ_POLICY_TABLE = "launchplane_authz_policies"
 _AUTHZ_POLICY_WRITE_FENCE_TRIGGER = "launchplane_authz_policy_write_fence"
@@ -292,6 +292,26 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         ("jsonb",),
     ),
     CriticalColumnType(
+        "launchplane_privileged_operations",
+        "requester_github_id",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_privileged_operations",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
+        "launchplane_privileged_operation_events",
+        "sequence",
+        ("bigint", "int8"),
+    ),
+    CriticalColumnType(
+        "launchplane_privileged_operation_events",
+        "payload",
+        ("jsonb",),
+    ),
+    CriticalColumnType(
         "launchplane_tenant_repository_classifications",
         "payload",
         ("jsonb",),
@@ -485,6 +505,27 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_authz_denials",
         "launchplane_authz_denials_expires_idx",
         ("expires_at",),
+    ),
+    CriticalIndex(
+        "launchplane_privileged_operations",
+        "launchplane_privileged_operations_status_idx",
+        ("status", "created_at"),
+    ),
+    CriticalIndex(
+        "launchplane_privileged_operations",
+        "launchplane_privileged_operations_descriptor_idx",
+        ("descriptor_id", "created_at"),
+    ),
+    CriticalIndex(
+        "launchplane_privileged_operation_events",
+        "launchplane_privileged_operation_events_operation_sequence_uidx",
+        ("operation_id", "sequence"),
+        unique=True,
+    ),
+    CriticalIndex(
+        "launchplane_privileged_operation_events",
+        "launchplane_privileged_operation_events_occurred_idx",
+        ("occurred_at",),
     ),
     CriticalIndex(
         "launchplane_idempotency_records",
@@ -924,6 +965,14 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     ),
     CriticalPrimaryKey(
         "launchplane_owner_acceptance_events",
+        ("event_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_privileged_operations",
+        ("operation_id",),
+    ),
+    CriticalPrimaryKey(
+        "launchplane_privileged_operation_events",
         ("event_id",),
     ),
     CriticalPrimaryKey(

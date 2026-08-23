@@ -30,6 +30,7 @@
     "runnerHostHygiene": "docs/runner-host-hygiene.md",
     "productOwnerPolicy": "docs/product-owner-policy.md",
     "ownerAcceptance": "docs/owner-acceptance.md",
+    "privilegedOperations": "docs/privileged-operations.md",
     "changeImpactPolicy": "docs/change-impact-policy.md",
     "agentContextBoundary": "docs/agent-context-boundary.md",
     "agentOperatorContract": "docs/agent-operator-contract.md",

@@ -11975,6 +11975,114 @@
         "title": "LocalOperatorPolicyRule",
         "type": "object"
       },
+      "ManagedSecretReencryptionHumanEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "active_key_id": {
+            "title": "Active Key Id",
+            "type": "string"
+          },
+          "configured_secret_count": {
+            "minimum": 0.0,
+            "title": "Configured Secret Count",
+            "type": "integer"
+          },
+          "legacy_compatibility_key_loaded": {
+            "title": "Legacy Compatibility Key Loaded",
+            "type": "boolean"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          },
+          "retirement_blocked_key_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retirement Blocked Key Ids",
+            "type": "array"
+          },
+          "retirement_ready_key_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retirement Ready Key Ids",
+            "type": "array"
+          },
+          "rotation_candidate_count": {
+            "minimum": 0.0,
+            "title": "Rotation Candidate Count",
+            "type": "integer"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "unchanged_count": {
+            "minimum": 0.0,
+            "title": "Unchanged Count",
+            "type": "integer"
+          },
+          "unreadable_secret_count": {
+            "minimum": 0.0,
+            "title": "Unreadable Secret Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "result_status",
+          "plan_digest",
+          "configured_secret_count",
+          "rotation_candidate_count",
+          "unchanged_count",
+          "unreadable_secret_count",
+          "active_key_id",
+          "legacy_compatibility_key_loaded"
+        ],
+        "title": "ManagedSecretReencryptionHumanEvidence",
+        "type": "object"
+      },
+      "ManagedSecretReencryptionPlanInput": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_label": {
+            "default": "privileged-operation-plan",
+            "maxLength": 96,
+            "minLength": 1,
+            "title": "Source Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "ManagedSecretReencryptionPlanInput",
+        "type": "object"
+      },
       "ManagerPreviewApprovalDecision": {
         "additionalProperties": false,
         "properties": {
@@ -19222,6 +19330,485 @@
           "records"
         ],
         "title": "PrivateHealthEndpointRecordsResponse",
+        "type": "object"
+      },
+      "PrivilegedOperationActor": {
+        "additionalProperties": false,
+        "properties": {
+          "github_id": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Github Id",
+            "type": "integer"
+          },
+          "identity_type": {
+            "enum": [
+              "github_human",
+              "system"
+            ],
+            "title": "Identity Type",
+            "type": "string"
+          },
+          "login": {
+            "title": "Login",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity_type",
+          "login"
+        ],
+        "title": "PrivilegedOperationActor",
+        "type": "object"
+      },
+      "PrivilegedOperationAgentSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "configured_secret_count": {
+            "minimum": 0.0,
+            "title": "Configured Secret Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "descriptor_id": {
+            "const": "managed-secret-reencryption",
+            "title": "Descriptor Id",
+            "type": "string"
+          },
+          "descriptor_version": {
+            "title": "Descriptor Version",
+            "type": "integer"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "legacy_compatibility_key_loaded": {
+            "title": "Legacy Compatibility Key Loaded",
+            "type": "boolean"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          },
+          "retirement_blocked_key_count": {
+            "minimum": 0.0,
+            "title": "Retirement Blocked Key Count",
+            "type": "integer"
+          },
+          "retirement_ready_key_count": {
+            "minimum": 0.0,
+            "title": "Retirement Ready Key Count",
+            "type": "integer"
+          },
+          "rotation_candidate_count": {
+            "minimum": 0.0,
+            "title": "Rotation Candidate Count",
+            "type": "integer"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "planned",
+              "expired",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "unchanged_count": {
+            "minimum": 0.0,
+            "title": "Unchanged Count",
+            "type": "integer"
+          },
+          "unreadable_secret_count": {
+            "minimum": 0.0,
+            "title": "Unreadable Secret Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "operation_id",
+          "descriptor_id",
+          "descriptor_version",
+          "status",
+          "result_status",
+          "configured_secret_count",
+          "rotation_candidate_count",
+          "unchanged_count",
+          "unreadable_secret_count",
+          "retirement_blocked_key_count",
+          "retirement_ready_key_count",
+          "legacy_compatibility_key_loaded",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "PrivilegedOperationAgentSummary",
+        "type": "object"
+      },
+      "PrivilegedOperationAgentSummaryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/PrivilegedOperationAgentSummary"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "summary"
+        ],
+        "title": "PrivilegedOperationAgentSummaryResponse",
+        "type": "object"
+      },
+      "PrivilegedOperationCancelEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_event_id",
+          "reason"
+        ],
+        "title": "PrivilegedOperationCancelEnvelope",
+        "type": "object"
+      },
+      "PrivilegedOperationEventRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "planned",
+              "expired",
+              "cancelled"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/PrivilegedOperationActor"
+          },
+          "event_id": {
+            "default": "",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Reason",
+            "type": "string"
+          },
+          "resulting_record_digest": {
+            "title": "Resulting Record Digest",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "sequence": {
+            "maximum": 2.0,
+            "minimum": 1.0,
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          },
+          "source_kind": {
+            "enum": [
+              "browser_api",
+              "system"
+            ],
+            "title": "Source Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "sequence",
+          "action",
+          "occurred_at",
+          "source_kind",
+          "source_event_id",
+          "actor",
+          "resulting_record_digest"
+        ],
+        "title": "PrivilegedOperationEventRecord",
+        "type": "object"
+      },
+      "PrivilegedOperationHumanResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/PrivilegedOperationEventRecord"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "record": {
+            "$ref": "#/components/schemas/PrivilegedOperationRecord"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "write_status": {
+            "default": "not_applicable",
+            "enum": [
+              "written",
+              "replayed",
+              "not_applicable"
+            ],
+            "title": "Write Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "record",
+          "events"
+        ],
+        "title": "PrivilegedOperationHumanResponse",
+        "type": "object"
+      },
+      "PrivilegedOperationListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/PrivilegedOperationRecord"
+            },
+            "title": "Records",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "total",
+          "records"
+        ],
+        "title": "PrivilegedOperationListResponse",
+        "type": "object"
+      },
+      "PrivilegedOperationPlanEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "descriptor_id": {
+            "const": "managed-secret-reencryption",
+            "default": "managed-secret-reencryption",
+            "title": "Descriptor Id",
+            "type": "string"
+          },
+          "expires_in_seconds": {
+            "default": 1800,
+            "maximum": 86400.0,
+            "minimum": 300.0,
+            "title": "Expires In Seconds",
+            "type": "integer"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ManagedSecretReencryptionPlanInput"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_event_id",
+          "request"
+        ],
+        "title": "PrivilegedOperationPlanEnvelope",
+        "type": "object"
+      },
+      "PrivilegedOperationRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "descriptor_id": {
+            "const": "managed-secret-reencryption",
+            "title": "Descriptor Id",
+            "type": "string"
+          },
+          "descriptor_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Descriptor Version",
+            "type": "integer"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/ManagedSecretReencryptionHumanEvidence"
+          },
+          "evidence_digest": {
+            "title": "Evidence Digest",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ManagedSecretReencryptionPlanInput"
+          },
+          "request_digest": {
+            "title": "Request Digest",
+            "type": "string"
+          },
+          "requested_by": {
+            "$ref": "#/components/schemas/PrivilegedOperationActor"
+          },
+          "safety_class": {
+            "const": "secret_backed",
+            "title": "Safety Class",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "planned",
+              "expired",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "terminal_at": {
+            "default": "",
+            "title": "Terminal At",
+            "type": "string"
+          },
+          "terminal_reason": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Terminal Reason",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "descriptor_id",
+          "safety_class",
+          "status",
+          "source_event_id",
+          "requested_by",
+          "request",
+          "request_digest",
+          "evidence",
+          "evidence_digest",
+          "created_at",
+          "updated_at",
+          "expires_at"
+        ],
+        "title": "PrivilegedOperationRecord",
         "type": "object"
       },
       "ProductActionAvailability": {
@@ -36413,6 +37000,101 @@
           }
         },
         "summary": "Read Launchplane agent context"
+      }
+    },
+    "/v1/agent/privileged-operations/plans/{operation_id}": {
+      "get": {
+        "operationId": "read_agent_privileged_operation_summary",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivilegedOperationAgentSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read a counts-only privileged-operation summary",
+        "tags": [
+          "agent",
+          "privileged-operations"
+        ]
       }
     },
     "/v1/agent/write-intents/evaluate": {
@@ -60747,6 +61429,391 @@
         "summary": "Read one private health endpoint record"
       }
     },
+    "/v1/privileged-operations/plans": {
+      "get": {
+        "operationId": "list_human_privileged_operations",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "planned",
+                    "expired",
+                    "cancelled"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivilegedOperationListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List privileged-operation plans",
+        "tags": [
+          "privileged-operations"
+        ]
+      },
+      "post": {
+        "operationId": "plan_privileged_operation",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrivilegedOperationPlanEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivilegedOperationHumanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan a typed privileged operation",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
+    "/v1/privileged-operations/plans/{operation_id}": {
+      "get": {
+        "operationId": "read_human_privileged_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivilegedOperationHumanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read a privileged-operation plan",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
+    "/v1/privileged-operations/plans/{operation_id}/cancel": {
+      "post": {
+        "operationId": "cancel_human_privileged_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrivilegedOperationCancelEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivilegedOperationHumanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Cancel a privileged-operation plan",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
     "/v1/product-config/apply": {
       "post": {
         "operationId": "apply_product_config",
@@ -71055,6 +72122,8 @@
     "/v1/owner-acceptance/evaluation": "evaluate_owner_acceptance",
     "/v1/owner-acceptance/queue": "list_owner_acceptance_queue",
     "/v1/previews/readiness": "read_preview_readiness",
+    "/v1/privileged-operations/plans": "list_human_privileged_operations",
+    "/v1/privileged-operations/plans/{operation_id}": "read_human_privileged_operation",
     "/v1/product-profiles": "list_product_profiles",
     "/v1/products": "list_products",
     "/v1/products/{product}": "read_product",

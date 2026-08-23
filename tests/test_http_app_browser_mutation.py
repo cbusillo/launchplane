@@ -42,6 +42,8 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "/v1/manager-preview-approval/reconcile",
             "/v1/owner-acceptance/events",
             "/v1/product-config/apply",
+            "/v1/privileged-operations/plans",
+            "/v1/privileged-operations/plans/{operation_id}/cancel",
             "/v1/products/{product}/environments/{environment}/config/apply",
             "/v1/products/{product}/environments/{environment}/promotion/dry-run",
             "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch",
@@ -51,6 +53,7 @@ class FastApiBrowserMutationBoundaryTests(unittest.IsolatedAsyncioTestCase):
         }
         browser_dependency_names = {
             "read_browser_mutation_identity",
+            "read_github_human_browser_mutation_identity",
             "read_browser_work_graph_rank_identity",
         }
         expected_bearer_only_routes = {
