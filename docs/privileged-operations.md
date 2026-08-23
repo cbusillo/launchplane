@@ -54,9 +54,11 @@ The planning and approval actions are:
 | `privileged_operation_summary.read` | `read` | Counts-only agent projection |
 
 Approval requires exactly one managed GitHub-human rule that is pinned to
-non-empty immutable `github_ids` and has no login, organization, team, or role
-selector. Code landing adds no policy rule or grant. The routes fail closed until a later,
-separately approved DB-native managed-rule activation. GitHub secrets,
+non-empty immutable `github_ids`. Login, organization, team, or role selectors
+may additionally narrow approval at approval time; execution reauthorization
+uses only the immutable GitHub ID and exact rule scope. Code landing adds no
+policy rule or grant. The routes fail closed until a later, separately approved
+DB-native managed-rule activation. GitHub secrets,
 workflows, borrowed identities, and local-admin bearer credentials are not
 bootstrap paths.
 
@@ -112,6 +114,7 @@ Human routes:
 - `GET /v1/privileged-operations/plans/{operation_id}`
 - `POST /v1/privileged-operations/plans/{operation_id}/approve`
 - `POST /v1/privileged-operations/plans/{operation_id}/revoke`
+- `POST /v1/privileged-operations/plans/{operation_id}/cancel`
 
 Agent route:
 
@@ -121,7 +124,7 @@ The UI is at `/ui/engineering/privileged-operations`. It exposes bounded
 browser-human approve/revoke controls and clearly states that the service worker
 executes approved work internally; it has no execute control.
 
-`launchplane privileged-operations worker` is the service-internal worker loop.
+`launchplane service privileged-operation-workers run` is the service-internal worker loop.
 It claims approved records, re-plans with `apply=False`, rejects plan/pre-state
 drift, reads the fresh active policy, reauthorizes only the immutable approver
 GitHub ID against the exact managed rule, constructs approver-bound durable

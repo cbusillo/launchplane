@@ -22,6 +22,10 @@ from control_plane.outbox_worker import (
     run_outbox_worker_once,
 )
 from control_plane.openapi_export import write_canonical_openapi
+from control_plane.privileged_operation_worker import (
+    PrivilegedOperationExecutionStore,
+    execute_approved_privileged_operations_once,
+)
 from control_plane.contracts.driver_descriptor import DriverContextView
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.service import serve_launchplane_service
@@ -427,6 +431,117 @@ def service_outbox_workers_run(
 @service.group("odoo-workers")
 def service_odoo_workers() -> None:
     """Run Launchplane-owned Odoo operation workers."""
+
+
+@service.group("privileged-operation-workers")
+def service_privileged_operation_workers() -> None:
+    """Run Launchplane-owned privileged-operation workers."""
+
+
+@service_privileged_operation_workers.command("run-once")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--lease-owner",
+    default="",
+    help="Worker lease owner id. Defaults to a generated process-local id.",
+)
+@click.option("--limit", type=click.IntRange(min=1, max=100), default=20, show_default=True)
+def service_privileged_operation_workers_run_once(
+    state_dir: Path,
+    database_url: str,
+    lease_owner: str,
+    limit: int,
+) -> None:
+    if not database_url.strip():
+        raise click.ClickException(
+            "Privileged-operation workers require --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    generated_lease_owner = (
+        f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
+    )
+    records = execute_approved_privileged_operations_once(
+        record_store=cast(
+            PrivilegedOperationExecutionStore,
+            _store(state_dir=state_dir, database_url=database_url),
+        ),
+        lease_owner=generated_lease_owner,
+        limit=limit,
+    )
+    click.echo(
+        json.dumps(
+            {
+                "processed": len(records),
+                "operation_ids": [record.operation_id for record in records],
+                "statuses": [record.status for record in records],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@service_privileged_operation_workers.command("run")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--lease-owner",
+    default="",
+    help="Worker lease owner id. Defaults to a generated process-local id.",
+)
+@click.option("--poll-seconds", type=click.IntRange(min=1, max=300), default=15, show_default=True)
+@click.option("--limit", type=click.IntRange(min=1, max=100), default=20, show_default=True)
+def service_privileged_operation_workers_run(
+    state_dir: Path,
+    database_url: str,
+    lease_owner: str,
+    poll_seconds: int,
+    limit: int,
+) -> None:
+    if not database_url.strip():
+        raise click.ClickException(
+            "Privileged-operation workers require --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    generated_lease_owner = (
+        f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
+    )
+    stop_event = Event()
+
+    def request_stop(_signal_number: int, _frame: object) -> None:
+        stop_event.set()
+
+    previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
+    previous_sigint = signal.signal(signal.SIGINT, request_stop)
+    try:
+        store = cast(
+            PrivilegedOperationExecutionStore,
+            _store(state_dir=state_dir, database_url=database_url),
+        )
+        while not stop_event.is_set():
+            execute_approved_privileged_operations_once(
+                record_store=store,
+                lease_owner=generated_lease_owner,
+                limit=limit,
+            )
+            stop_event.wait(poll_seconds)
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
+    click.echo(json.dumps({"status": "stopped"}, indent=2, sort_keys=True))
 
 
 @service_odoo_workers.command("run-once")

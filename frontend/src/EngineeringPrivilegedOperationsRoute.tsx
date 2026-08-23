@@ -56,14 +56,15 @@ export function EngineeringPrivilegedOperationsRoute({
           state={resource.state}
         />
       }
-      description="Inspect typed, redacted privileged-operation plans without exposing credentials or enabling approval and execution."
+      description="Review typed, redacted privileged-operation plans and record human approvals or revocations without exposing credentials."
       icon={KeyRound}
       title="Privileged operation plans"
       view="privileged-operations"
     >
-      <EngineeringBoundaryNote title="Planning evidence only — no privileged effect">
-        These records are typed dry-run evidence for human review. Phase 1 has
-        no approval or execution path, agents receive counts only, and the new
+      <EngineeringBoundaryNote title="Human-governed approval — internal execution only">
+        GitHub humans may approve or revoke a current plan. Execution remains a
+        service-internal worker action with fresh policy and plan revalidation;
+        this UI has no execute control. Agents receive counts only, and the new
         actions ship with no production grants. Managed-secret identifiers and
         version identifiers are never persisted here.
       </EngineeringBoundaryNote>
@@ -73,7 +74,9 @@ export function EngineeringPrivilegedOperationsRoute({
         refresh={resource.refresh}
         state={resource.state}
       >
-        {(data) => <PrivilegedOperationPlanList data={data} />}
+        {(data) => (
+          <PrivilegedOperationPlanList data={data} refresh={resource.refresh} />
+        )}
       </EngineeringResourceGate>
     </EngineeringRouteFrame>
   );
@@ -81,8 +84,10 @@ export function EngineeringPrivilegedOperationsRoute({
 
 function PrivilegedOperationPlanList({
   data,
+  refresh,
 }: {
   data: PrivilegedOperationListResponse;
+  refresh: () => void;
 }) {
   if (!data.records.length) {
     return (
@@ -102,6 +107,7 @@ function PrivilegedOperationPlanList({
         <PrivilegedOperationPlanCard
           key={record.operation_id}
           record={record}
+          refresh={refresh}
         />
       ))}
     </div>
@@ -110,8 +116,10 @@ function PrivilegedOperationPlanList({
 
 function PrivilegedOperationPlanCard({
   record,
+  refresh,
 }: {
   record: PrivilegedOperationRecord;
+  refresh: () => void;
 }) {
   const evidence = record.evidence;
   const [mutationMessage, setMutationMessage] = useState("");
@@ -135,6 +143,7 @@ function PrivilegedOperationPlanCard({
           ? "Approval recorded. The service worker will revalidate before execution."
           : "Approval revoked.",
       );
+      refresh();
     } catch (error) {
       setMutationMessage(
         error instanceof LaunchplaneApiError

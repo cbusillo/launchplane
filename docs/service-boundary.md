@@ -522,6 +522,8 @@ browser-safe POST path and stable operation id; slicing fails closed when a
 route, method, operation id, success response, or referenced schema drifts. The
 write slice currently covers work-graph ranking, product-config dry-run/apply,
 generic-web promotion dry-runs, and generic-web promotion workflow dispatches.
+It also covers browser-human privileged-operation approval and revocation; the
+service-internal execution path is intentionally absent.
 Issue reconciliation remains a bearer-only service operation rather than a
 browser client binding. Generated request, success, validation, and error
 bindings are the API boundary consumed by the UI. Handwritten frontend types
@@ -537,7 +539,7 @@ artifact carries a semantic digest and non-gating source revision. The existing
 path and compares only its normalization version and semantic digest, so
 unrelated OpenAPI or provenance-only changes do not create consumer drift.
 
-The browser client keeps those four write paths in one generated-type-checked
+The browser client keeps every accepted browser write path in one generated-type-checked
 allowlist. The shared mutation transport serializes cookie-backed writes,
 refreshes the single-use CSRF token immediately before every attempt, and copies
 only the generated `Idempotency-Key` field into the request. Descriptor

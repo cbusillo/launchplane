@@ -198,7 +198,7 @@ class PrivilegedOperationApproval(BaseModel):
     managed_rule_id: str
     expires_at: str
     reason: str = Field(min_length=1, max_length=4000)
-    rollback_class: Literal["reconciliation_required"] = "reconciliation_required"
+    rollback_class: Literal["key_retained"] = "key_retained"
 
     @model_validator(mode="after")
     def _validate_approval(self) -> "PrivilegedOperationApproval":
@@ -359,6 +359,11 @@ class PrivilegedOperationRecord(BaseModel):
             ):
                 raise ValueError(
                     "Privileged-operation approval pre-state digest does not match the record"
+                )
+            approval_expires_at = datetime.fromisoformat(self.approval.expires_at)
+            if approval_expires_at > expires_at or approval_expires_at <= created_at:
+                raise ValueError(
+                    "Privileged-operation approval expiry must remain within the plan lifetime"
                 )
             if self.approval.expires_at != self.expires_at:
                 raise ValueError("Privileged-operation approval expiry does not match the record")
@@ -586,17 +591,21 @@ def validate_privileged_operation_transition(
             raise PrivilegedOperationTransitionError(
                 f"Privileged-operation transition cannot change {field_name}"
             )
-    transitions: dict[str, tuple[str, int]] = {
-        "approved": ("planned", 2),
-        "revoked": ("approved", 3),
-        "executing": ("approved", 3),
-        "executed": ("executing", 4),
-        "execution_failed": ("executing", 4),
-        "expired": ("planned", 2),
-        "cancelled": ("planned", 2),
+    if proposed.status != "approved" and proposed.approval != previous.approval:
+        raise PrivilegedOperationTransitionError(
+            "Privileged-operation transition cannot change approval"
+        )
+    transitions: dict[str, tuple[tuple[str, ...], int]] = {
+        "approved": (("planned",), 2),
+        "revoked": (("approved",), 3),
+        "executing": (("approved",), 3),
+        "executed": (("executing",), 4),
+        "execution_failed": (("executing",), 4),
+        "expired": (("planned", "approved"), 2 if previous.status == "planned" else 3),
+        "cancelled": (("planned",), 2),
     }
     expected = transitions.get(proposed.status)
-    if expected is None or previous.status != expected[0] or event.action != proposed.status:
+    if expected is None or previous.status not in expected[0] or event.action != proposed.status:
         raise PrivilegedOperationTransitionError("Privileged-operation transition is not allowed")
     if event.sequence != expected[1] or event.occurred_at != proposed.updated_at:
         raise PrivilegedOperationTransitionError(

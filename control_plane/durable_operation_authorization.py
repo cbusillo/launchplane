@@ -187,6 +187,75 @@ def require_single_managed_rule_identity(
     )
 
 
+def require_single_managed_github_id_rule_identity(
+    *,
+    policy: LaunchplaneAuthzPolicy,
+    identity: GitHubHumanIdentity,
+    action: str,
+    product: str,
+    context: str,
+    target: AuthorizationTarget,
+) -> ManagedRuleIdentity:
+    managed_identity = require_single_managed_rule_identity(
+        policy=policy,
+        identity=identity,
+        action=action,
+        product=product,
+        context=context,
+        target=target,
+    )
+    matching_rules = tuple(
+        rule
+        for rule in policy.github_humans
+        if rule.managed_set_id == managed_identity.managed_set_id
+        and rule.managed_rule_id == managed_identity.managed_rule_id
+    )
+    if len(matching_rules) != 1:
+        raise ManagedRuleAuthorizationError(
+            "GitHub-ID authorization requires exactly one matching managed rule."
+        )
+    rule = matching_rules[0]
+    if not rule.github_ids or identity.github_id not in rule.github_ids:
+        raise ManagedRuleAuthorizationError(
+            "GitHub-ID authorization requires an explicit immutable GitHub-ID selector."
+        )
+    return managed_identity
+
+
+def managed_github_id_rule_allows(
+    *,
+    policy: LaunchplaneAuthzPolicy,
+    github_id: int,
+    managed_set_id: str,
+    managed_rule_id: str,
+    action: str,
+    product: str,
+    context: str,
+    target: AuthorizationTarget,
+) -> bool:
+    if policy.schema_version != 2 or github_id < 1:
+        return False
+    matching_rules = tuple(
+        rule
+        for rule in policy.github_humans
+        if rule.managed_set_id == managed_set_id and rule.managed_rule_id == managed_rule_id
+    )
+    if len(matching_rules) != 1:
+        return False
+    rule = matching_rules[0]
+    if not rule.github_ids or github_id not in rule.github_ids:
+        return False
+    return bool(
+        rule.allows_scope(
+            action=action,
+            product=product,
+            context=context,
+            target=target,
+            schema_version=policy.schema_version,
+        )
+    )
+
+
 def durable_operation_authorization_allows(
     *,
     authorization: DurableOperationAuthorization,

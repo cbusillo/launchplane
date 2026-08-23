@@ -14,6 +14,7 @@ from control_plane.contracts.privileged_operation import (
     PRIVILEGED_SECRET_OPERATION_READ_ACTION,
     PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
     PrivilegedOperationApproval,
+    PrivilegedOperationActor,
     PrivilegedOperationAgentSummary,
     PrivilegedOperationConflictError,
     PrivilegedOperationEventRecord,
@@ -26,6 +27,7 @@ from control_plane.contracts.privileged_operation import (
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.durable_operation_authorization import (
     ManagedRuleAuthorizationError,
+    require_single_managed_github_id_rule_identity,
     require_single_managed_rule_identity,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
@@ -193,14 +195,31 @@ def register_privileged_operation_routes(
             ) from error
 
     def require_immutable_approval_rule(
-        *, identity: GitHubHumanIdentity, trace_id: str
-    ) -> tuple[str, str]:
-        policy = dependencies.policy_reader()
+        *, identity: GitHubHumanIdentity, action: str, trace_id: str
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, str, str]:
+        if dependencies.policy_record_reader is None:
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_policy_unavailable",
+                message="The active authorization policy record is unavailable.",
+            )
         try:
-            managed_identity = require_single_managed_rule_identity(
-                policy=policy,
+            policy_record = LaunchplaneAuthzPolicyRecord.model_validate(
+                dependencies.policy_record_reader()
+            )
+        except (LookupError, TypeError, ValueError) as error:
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_policy_unavailable",
+                message="The active authorization policy record is unavailable.",
+            ) from error
+        try:
+            managed_identity = require_single_managed_github_id_rule_identity(
+                policy=policy_record.policy,
                 identity=identity,
-                action=PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
+                action=action,
                 product="launchplane",
                 context="launchplane",
                 target=AuthorizationTarget(scope="global"),
@@ -210,37 +229,13 @@ def register_privileged_operation_routes(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Identity cannot approve privileged operations.",
+                message="Identity cannot authorize this privileged-operation transition.",
             ) from error
-        matching_rules = tuple(
-            rule
-            for rule in policy.github_humans
-            if rule.managed_set_id == managed_identity.managed_set_id
-            and rule.managed_rule_id == managed_identity.managed_rule_id
+        return (
+            policy_record,
+            managed_identity.managed_set_id,
+            managed_identity.managed_rule_id,
         )
-        if len(matching_rules) != 1:
-            raise dependencies.common.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Privileged-operation approval requires one immutable managed rule.",
-            )
-        rule = matching_rules[0]
-        if (
-            identity.github_id not in rule.github_ids
-            or not rule.github_ids
-            or rule.logins
-            or rule.organizations
-            or rule.teams
-            or rule.roles
-        ):
-            raise dependencies.common.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Privileged-operation approval requires an immutable GitHub-ID-only rule.",
-            )
-        return managed_identity.managed_set_id, managed_identity.managed_rule_id
 
     def operation_events(
         record_store: object, operation_id: str
@@ -400,27 +395,19 @@ def register_privileged_operation_routes(
         operation_id: Annotated[str, Path(min_length=1, max_length=96)],
     ) -> PrivilegedOperationHumanResponse:
         trace_id = dependencies.common.next_trace_id()
-        managed_set_id, managed_rule_id = require_immutable_approval_rule(
-            identity=identity, trace_id=trace_id
+        policy_record, managed_set_id, managed_rule_id = require_immutable_approval_rule(
+            identity=identity,
+            action=PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
+            trace_id=trace_id,
         )
-        if dependencies.policy_record_reader is None:
-            raise dependencies.common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="authz_policy_unavailable",
-                message="The active authorization policy record is unavailable.",
-            )
         try:
-            policy_record = LaunchplaneAuthzPolicyRecord.model_validate(
-                dependencies.policy_record_reader()
-            )
             record = read_privileged_operation(record_store=record_store, operation_id=operation_id)
             approval = PrivilegedOperationApproval(
-                approver={
-                    "identity_type": "github_human",
-                    "github_id": identity.github_id,
-                    "login": identity.login,
-                },
+                approver=PrivilegedOperationActor(
+                    identity_type="github_human",
+                    github_id=identity.github_id,
+                    login=identity.login,
+                ),
                 descriptor_id=record.descriptor_id,
                 descriptor_version=record.descriptor_version,
                 request_digest=record.request_digest,
@@ -457,6 +444,13 @@ def register_privileged_operation_routes(
                 code="privileged_operation_approval_conflict",
                 message="Privileged-operation approval conflicts with current state.",
             ) from error
+        except PrivilegedOperationStoreUnavailableError as error:
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="privileged_operation_storage_unavailable",
+                message="Privileged-operation planning storage is unavailable.",
+            ) from error
         return PrivilegedOperationHumanResponse(
             trace_id=trace_id,
             write_status=result.write_status,
@@ -474,7 +468,7 @@ def register_privileged_operation_routes(
         operation_id: Annotated[str, Path(min_length=1, max_length=96)],
     ) -> PrivilegedOperationHumanResponse:
         trace_id = dependencies.common.next_trace_id()
-        require_managed_rule(
+        require_immutable_approval_rule(
             identity=identity,
             action=PRIVILEGED_SECRET_OPERATION_REVOKE_ACTION,
             trace_id=trace_id,
@@ -502,6 +496,13 @@ def register_privileged_operation_routes(
                 trace_id=trace_id,
                 code="privileged_operation_revocation_conflict",
                 message="Privileged-operation revocation conflicts with current state.",
+            ) from error
+        except PrivilegedOperationStoreUnavailableError as error:
+            raise dependencies.common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="privileged_operation_storage_unavailable",
+                message="Privileged-operation planning storage is unavailable.",
             ) from error
         return PrivilegedOperationHumanResponse(
             trace_id=trace_id,
@@ -652,6 +653,21 @@ def register_privileged_operation_routes(
         },
         summary="Read a privileged-operation plan",
         operation_id="read_human_privileged_operation",
+        tags=["privileged-operations"],
+    )
+    app.add_api_route(
+        PRIVILEGED_OPERATION_CANCEL_ROUTE,
+        cancel_human_privileged_operation,
+        methods=["POST"],
+        response_model=PrivilegedOperationHumanResponse,
+        responses={
+            403: {"model": dependencies.common.error_response_model},
+            404: {"model": dependencies.common.error_response_model},
+            409: {"model": dependencies.common.error_response_model},
+            503: {"model": dependencies.common.error_response_model},
+        },
+        summary="Cancel a privileged-operation plan",
+        operation_id="cancel_human_privileged_operation",
         tags=["privileged-operations"],
     )
     app.add_api_route(

@@ -3688,6 +3688,214 @@
         ]
       }
     },
+    "/v1/privileged-operations/plans/{operation_id}/approve": {
+      "post": {
+        "operationId": "approve_human_privileged_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrivilegedOperationApprovalEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivilegedOperationHumanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Approve a privileged-operation plan",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
+    "/v1/privileged-operations/plans/{operation_id}/revoke": {
+      "post": {
+        "operationId": "revoke_human_privileged_operation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrivilegedOperationRevocationEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivilegedOperationHumanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Revoke a privileged-operation approval",
+        "tags": [
+          "privileged-operations"
+        ]
+      }
+    },
     "/v1/products/{product}/environments/{environment}/config/apply": {
       "post": {
         "operationId": "apply_product_environment_config",
@@ -13587,8 +13795,8 @@
             "type": "string"
           },
           "rollback_class": {
-            "const": "reconciliation_required",
-            "default": "reconciliation_required",
+            "const": "key_retained",
+            "default": "key_retained",
             "title": "Rollback Class",
             "type": "string"
           },
@@ -13619,6 +13827,35 @@
           "schema_version"
         ],
         "title": "PrivilegedOperationApproval",
+        "type": "object"
+      },
+      "PrivilegedOperationApprovalEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_event_id",
+          "reason"
+        ],
+        "title": "PrivilegedOperationApprovalEnvelope",
         "type": "object"
       },
       "PrivilegedOperationEventRecord": {
@@ -13985,6 +14222,35 @@
           "updated_at"
         ],
         "title": "PrivilegedOperationRecord",
+        "type": "object"
+      },
+      "PrivilegedOperationRevocationEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_event_id",
+          "reason"
+        ],
+        "title": "PrivilegedOperationRevocationEnvelope",
         "type": "object"
       },
       "ProductActionAvailability": {

@@ -113,7 +113,6 @@ from control_plane.storage.factory import (
     resolve_database_url,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.cli_privileged_operations import register_privileged_operation_commands
 from control_plane.service_auth import load_authz_policy
 from control_plane.service_human_auth import (
     browser_origin_from_url,
@@ -3627,7 +3626,6 @@ register_ingress_commands(
     ),
 )
 register_storage_secret_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
-register_privileged_operation_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_product_config_commands(
     cast(click.Group, main),  # type: ignore[redundant-cast]
     summarize_product_profile_record=summarize_product_profile_record,

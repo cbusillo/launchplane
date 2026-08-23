@@ -1582,8 +1582,14 @@ export type PrivilegedOperationApproval = {
     pre_state_digest: string;
     reason: string;
     request_digest: string;
-    rollback_class: 'reconciliation_required';
+    rollback_class: 'key_retained';
     schema_version: number;
+};
+
+export type PrivilegedOperationApprovalEnvelope = {
+    reason: string;
+    schema_version?: number;
+    source_event_id: string;
 };
 
 export type PrivilegedOperationEventRecord = {
@@ -1647,6 +1653,12 @@ export type PrivilegedOperationRecord = {
     terminal_at: string;
     terminal_reason: string;
     updated_at: string;
+};
+
+export type PrivilegedOperationRevocationEnvelope = {
+    reason: string;
+    schema_version?: number;
+    source_event_id: string;
 };
 
 export type ProductActionAvailability = {
@@ -4108,6 +4120,62 @@ export type WriteOwnerAcceptanceEventResponses = {
 };
 
 export type WriteOwnerAcceptanceEventResponse = WriteOwnerAcceptanceEventResponses[keyof WriteOwnerAcceptanceEventResponses];
+
+export type ApproveHumanPrivilegedOperationData = {
+    body: PrivilegedOperationApprovalEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/privileged-operations/plans/{operation_id}/approve';
+};
+
+export type ApproveHumanPrivilegedOperationErrors = {
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApproveHumanPrivilegedOperationError = ApproveHumanPrivilegedOperationErrors[keyof ApproveHumanPrivilegedOperationErrors];
+
+export type ApproveHumanPrivilegedOperationResponses = {
+    200: PrivilegedOperationHumanResponse;
+};
+
+export type ApproveHumanPrivilegedOperationResponse = ApproveHumanPrivilegedOperationResponses[keyof ApproveHumanPrivilegedOperationResponses];
+
+export type RevokeHumanPrivilegedOperationData = {
+    body: PrivilegedOperationRevocationEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/privileged-operations/plans/{operation_id}/revoke';
+};
+
+export type RevokeHumanPrivilegedOperationErrors = {
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type RevokeHumanPrivilegedOperationError = RevokeHumanPrivilegedOperationErrors[keyof RevokeHumanPrivilegedOperationErrors];
+
+export type RevokeHumanPrivilegedOperationResponses = {
+    200: PrivilegedOperationHumanResponse;
+};
+
+export type RevokeHumanPrivilegedOperationResponse = RevokeHumanPrivilegedOperationResponses[keyof RevokeHumanPrivilegedOperationResponses];
 
 export type ApplyProductEnvironmentConfigData = {
     body: {

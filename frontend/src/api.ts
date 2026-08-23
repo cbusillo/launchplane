@@ -7,6 +7,8 @@ import type {
 import type {
   ApplyProductEnvironmentConfigData,
   ApplyProductEnvironmentConfigResponse,
+  ApproveHumanPrivilegedOperationData,
+  ApproveHumanPrivilegedOperationResponse,
   DispatchProductPromotionWorkflowData,
   DispatchProductPromotionWorkflowResponse,
   DryRunProductPromotionData,
@@ -40,6 +42,8 @@ import type {
   RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
   ReadTenantAdmissionEvaluationData,
+  RevokeHumanPrivilegedOperationData,
+  RevokeHumanPrivilegedOperationResponse,
   TenantAdmissionEvaluationReadResponse,
   WorkGraphIssueInboxResponse,
   WorkGraphSnapshot,
@@ -618,10 +622,15 @@ export function approvePrivilegedOperation(
   reason: string,
   signal?: AbortSignal,
 ): Promise<PrivilegedOperationHumanResponse> {
-  return requestJson<PrivilegedOperationHumanResponse>(
-    `/v1/privileged-operations/plans/${encodeURIComponent(operationId)}/approve`,
+  const request: ApproveHumanPrivilegedOperationData = {
+    url: BROWSER_WRITE_ROUTES.privilegedOperationApprove,
+    path: { operation_id: operationId },
+    body: { source_event_id: `ui:approve:${operationId}:${Date.now()}`, reason },
+  };
+  return requestJson<ApproveHumanPrivilegedOperationResponse>(
+    `/v1/privileged-operations/plans/${encodeURIComponent(request.path.operation_id)}/approve`,
     "POST",
-    { source_event_id: `ui:approve:${operationId}:${Date.now()}`, reason },
+    request.body,
     signal,
   );
 }
@@ -631,10 +640,15 @@ export function revokePrivilegedOperation(
   reason: string,
   signal?: AbortSignal,
 ): Promise<PrivilegedOperationHumanResponse> {
-  return requestJson<PrivilegedOperationHumanResponse>(
-    `/v1/privileged-operations/plans/${encodeURIComponent(operationId)}/revoke`,
+  const request: RevokeHumanPrivilegedOperationData = {
+    url: BROWSER_WRITE_ROUTES.privilegedOperationRevoke,
+    path: { operation_id: operationId },
+    body: { source_event_id: `ui:revoke:${operationId}:${Date.now()}`, reason },
+  };
+  return requestJson<RevokeHumanPrivilegedOperationResponse>(
+    `/v1/privileged-operations/plans/${encodeURIComponent(request.path.operation_id)}/revoke`,
     "POST",
-    { source_event_id: `ui:revoke:${operationId}:${Date.now()}`, reason },
+    request.body,
     signal,
   );
 }

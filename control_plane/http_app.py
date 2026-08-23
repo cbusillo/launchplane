@@ -12397,18 +12397,6 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
-    def require_secret_reencryption_database_store(
-        *, record_store: object, trace_id: str
-    ) -> PostgresRecordStore:
-        if not isinstance(record_store, PostgresRecordStore):
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_required",
-                message="Managed-secret re-encryption requires DB-backed Launchplane storage.",
-            )
-        return record_store
-
     def require_product_onboarding_database_store(
         *, record_store: object, trace_id: str
     ) -> PostgresRecordStore:
@@ -13764,13 +13752,13 @@ def create_launchplane_fastapi_app(
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
-                code="legacy_secret_reencryption_apply_refused",
+                code="privileged_operation_approval_required",
                 message="Legacy apply is permanently refused; approved privileged operations execute internally.",
             )
         raise _launchplane_http_error(
-            status_code=410,
+            status_code=409,
             trace_id=trace_id,
-            code="legacy_secret_reencryption_dry_run_retired",
+            code="privileged_operation_planning_required",
             message="Use POST /v1/privileged-operations/plans for managed-secret re-encryption planning.",
         )
 

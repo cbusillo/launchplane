@@ -292,7 +292,11 @@ def expire_privileged_operation_if_due(
         return record
     store = require_privileged_operation_store(record_store)
     occurred_at = _timestamp(current_time)
-    reason = "Privileged-operation approval expired before execution began."
+    reason = (
+        "Privileged-operation plan expired before approval."
+        if record.status == "planned"
+        else "Privileged-operation approval expired before execution began."
+    )
     sequence = 2 if record.status == "planned" else 3
     expired_record = record.model_copy(
         update={
@@ -351,11 +355,14 @@ def list_privileged_operations(
 ) -> tuple[PrivilegedOperationRecord, ...]:
     store = require_privileged_operation_store(record_store)
     if status not in {"cancelled", "revoked", "executed", "execution_failed"}:
-        for record in store.list_privileged_operation_records(
-            status="",
-            descriptor_id=MANAGED_SECRET_REENCRYPTION_DESCRIPTOR.descriptor_id,
-        ):
-            if record.status in {"planned", "approved"}:
+        expiry_statuses = (
+            (status,) if status in {"planned", "approved"} else ("planned", "approved")
+        )
+        for expiry_status in expiry_statuses:
+            for record in store.list_privileged_operation_records(
+                status=expiry_status,
+                descriptor_id=MANAGED_SECRET_REENCRYPTION_DESCRIPTOR.descriptor_id,
+            ):
                 expire_privileged_operation_if_due(record_store=store, record=record, now=now)
     return store.list_privileged_operation_records(
         status=status,
