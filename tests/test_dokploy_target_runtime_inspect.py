@@ -57,8 +57,14 @@ def _fetch_logs(
     compose_id: str,
     container_id: str,
     line_count: int,
+    search_text: str,
 ) -> tuple[str, ...]:
     del host, token, compose_id, container_id, line_count
+    if search_text:
+        assert search_text == "privileged_operation_worker_poll_succeeded"
+        return (
+            '{"event":"privileged_operation_worker_poll_succeeded","processed":0,"statuses":[]}',
+        )
     return (
         '{"event":"privileged_operation_worker_poll_succeeded","processed":0,"statuses":[]}',
         "LAUNCHPLANE_DATABASE_URL=secret",
@@ -138,7 +144,7 @@ class DokployTargetRuntimeInspectTests(unittest.TestCase):
         self.assertTrue(runtime_evidence["image_matches_expected"])
         self.assertTrue(runtime_evidence["proof_ready"])
         self.assertEqual(structured_event["matching_line_count"], 1)
-        self.assertEqual(structured_event["candidate_line_count"], 2)
+        self.assertEqual(structured_event["candidate_line_count"], 1)
         self.assertEqual(
             structured_event["log_classification"],
             {
@@ -210,6 +216,15 @@ class DokployTargetRuntimeInspectTests(unittest.TestCase):
         self.assertFalse(runtime_evidence["proof_ready"])
 
     def test_provider_error_line_invalidates_matching_activation_event(self) -> None:
+        def fetch_provider_error_and_event(
+            *, search_text: str, **_kwargs: object
+        ) -> tuple[str, ...]:
+            if search_text:
+                return ('{"event":"privileged_operation_worker_poll_succeeded"}',)
+            return (
+                "Error response from daemon: configured logging driver does not support reading",
+            )
+
         result = inspect_dokploy_target(
             record_store=_UNUSED_STORE,
             host="https://dokploy.example.invalid",
@@ -223,10 +238,7 @@ class DokployTargetRuntimeInspectTests(unittest.TestCase):
             ),
             fetch_target_payload=_fetch_target_payload,
             fetch_compose_service_runtime=_fetch_service_runtime,
-            fetch_compose_logs=lambda **_kwargs: (
-                "Error response from daemon: configured logging driver does not support reading",
-                '{"event":"privileged_operation_worker_poll_succeeded"}',
-            ),
+            fetch_compose_logs=fetch_provider_error_and_event,
         )
 
         runtime_evidence = result["runtime_evidence"]

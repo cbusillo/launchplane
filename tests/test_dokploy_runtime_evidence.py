@@ -336,6 +336,38 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
             ),
         )
 
+    def test_fetch_compose_container_logs_uses_allowlisted_event_search(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def capture_request(**kwargs: object) -> object:
+            requests.append(kwargs)
+            return '{"event":"privileged_operation_worker_poll_succeeded"}'
+
+        with patch(
+            "control_plane.dokploy.runtime_evidence.dokploy_api.dokploy_request",
+            side_effect=capture_request,
+        ):
+            lines = runtime_evidence.fetch_compose_container_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                container_id="worker-container",
+                line_count=200,
+                search_text="privileged_operation_worker_poll_succeeded",
+            )
+
+        self.assertEqual(
+            requests[0]["query"],
+            {
+                "composeId": "compose-123",
+                "containerId": "worker-container",
+                "tail": 200,
+                "since": "1d",
+                "search": "privileged_operation_worker_poll_succeeded",
+            },
+        )
+        self.assertEqual(lines, ('{"event":"privileged_operation_worker_poll_succeeded"}',))
+
 
 if __name__ == "__main__":
     unittest.main()

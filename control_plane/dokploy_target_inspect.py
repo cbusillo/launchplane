@@ -44,6 +44,7 @@ class FetchDokployComposeLogs(Protocol):
         compose_id: str,
         container_id: str,
         line_count: int,
+        search_text: str,
     ) -> tuple[str, ...]: ...
 
 
@@ -198,32 +199,43 @@ def inspect_dokploy_target(
             raise dokploy_runtime_evidence.DokployEvidenceProviderError("service-select")
         logs_fetcher = fetch_compose_logs or dokploy_runtime_evidence.fetch_compose_container_logs
         try:
-            logs = logs_fetcher(
+            classification_logs = logs_fetcher(
                 host=host,
                 token=token,
                 compose_id=target_id,
                 container_id=container_id,
                 line_count=_RUNTIME_EVIDENCE_LOG_LINE_COUNT,
+                search_text="",
+            )
+            event_logs = logs_fetcher(
+                host=host,
+                token=token,
+                compose_id=target_id,
+                container_id=container_id,
+                line_count=_RUNTIME_EVIDENCE_LOG_LINE_COUNT,
+                search_text=request.event,
             )
         except click.ClickException as error:
             raise dokploy_runtime_evidence.DokployEvidenceProviderError(
                 "runtime-log-read"
             ) from error
         matching_event_count = dokploy_runtime_evidence.count_structured_log_events(
-            logs,
+            event_logs,
             event_name=request.event,
         )
         event_observed = matching_event_count > 0
         activation_proof_eligible = dokploy_runtime_evidence.structured_event_is_activation_proof(
             request.event
         )
-        log_classification = dokploy_runtime_evidence.summarize_runtime_log_lines(logs)
+        log_classification = dokploy_runtime_evidence.summarize_runtime_log_lines(
+            classification_logs
+        )
         event_evidence: dict[str, object] = {
             "name": request.event,
             "observed": event_observed,
             "activation_proof_eligible": activation_proof_eligible,
             "matching_line_count": matching_event_count,
-            "candidate_line_count": len(logs),
+            "candidate_line_count": len(event_logs),
             "log_classification": log_classification,
         }
         running = runtime_payload.get("running") is True
