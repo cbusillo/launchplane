@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
@@ -218,7 +218,13 @@ from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationConflictError,
     TenantRepositoryClassificationSequenceError,
 )
-from control_plane.storage.factory import build_shared_record_store
+from control_plane.storage.factory import (
+    PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS,
+    PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_MILLISECONDS,
+    PrivilegedOperationWorkerSchemaError,
+    build_privileged_operation_worker_store,
+    build_shared_record_store,
+)
 from control_plane.storage.postgres import (
     Base,
     DbOnlyMutationRequest,
@@ -230,6 +236,7 @@ from control_plane.storage.postgres import (
     MutationReservationResult,
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
+    _build_engine,
 )
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
@@ -3680,6 +3687,135 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.close()
 
         self.assertEqual(loaded.artifact_id, manifest.artifact_id)
+
+    def test_privileged_operation_worker_store_uses_bounded_runtime_check(self) -> None:
+        startup_probe = Mock()
+        runtime_store = Mock()
+        database_url = "postgresql+psycopg://launchplane.invalid/launchplane"
+
+        with patch(
+            "control_plane.storage.factory.PostgresRecordStore",
+            side_effect=[startup_probe, runtime_store],
+        ) as store_type:
+            result = build_privileged_operation_worker_store(database_url=database_url)
+
+        self.assertIs(result, runtime_store)
+        self.assertEqual(
+            store_type.call_args_list,
+            [
+                call(
+                    database_url=database_url,
+                    postgres_connect_timeout_seconds=(
+                        PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS
+                    ),
+                    postgres_statement_timeout_milliseconds=(
+                        PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_MILLISECONDS
+                    ),
+                ),
+                call(
+                    database_url=database_url,
+                    postgres_connect_timeout_seconds=(
+                        PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS
+                    ),
+                ),
+            ],
+        )
+        startup_probe.verify_runtime_schema_invariants.assert_called_once_with()
+        startup_probe.verify_schema.assert_not_called()
+        startup_probe.close.assert_called_once_with()
+
+    def test_privileged_operation_worker_store_closes_incompatible_schema(self) -> None:
+        startup_probe = Mock()
+        startup_probe.verify_runtime_schema_invariants.side_effect = RuntimeError(
+            "schema detail must remain internal"
+        )
+
+        with (
+            patch(
+                "control_plane.storage.factory.PostgresRecordStore",
+                return_value=startup_probe,
+            ),
+            self.assertRaisesRegex(PrivilegedOperationWorkerSchemaError, "not runtime-compatible"),
+        ):
+            build_privileged_operation_worker_store(
+                database_url="postgresql+psycopg://launchplane.invalid/launchplane"
+            )
+
+        startup_probe.close.assert_called_once_with()
+
+    def test_postgres_engine_applies_bounded_connection_options(self) -> None:
+        database_url = (
+            "postgresql+psycopg://launchplane.invalid/launchplane"
+            "?options=-c%20search_path%3Dlaunchplane"
+        )
+
+        with patch("control_plane.storage.postgres.create_engine") as create_engine_mock:
+            _build_engine(
+                database_url,
+                postgres_connect_timeout_seconds=10,
+                postgres_statement_timeout_milliseconds=30_000,
+            )
+
+        create_engine_mock.assert_called_once_with(
+            database_url,
+            connect_args={
+                "connect_timeout": 10,
+                "options": "-c search_path=launchplane -c statement_timeout=30000",
+            },
+        )
+
+    def test_postgres_store_applies_bounded_options_to_lock_engine(self) -> None:
+        database_url = "postgresql+psycopg://launchplane.invalid/launchplane"
+        primary_engine = Mock()
+        primary_engine.url.get_backend_name.return_value = "postgresql"
+
+        with (
+            patch("control_plane.storage.postgres._build_engine", return_value=primary_engine),
+            patch("control_plane.storage.postgres.create_engine") as create_engine_mock,
+        ):
+            store = PostgresRecordStore(
+                database_url=database_url,
+                postgres_connect_timeout_seconds=10,
+                postgres_statement_timeout_milliseconds=30_000,
+            )
+
+        create_engine_mock.assert_called_once_with(
+            database_url,
+            poolclass=NullPool,
+            connect_args={
+                "connect_timeout": 10,
+                "options": "-c statement_timeout=30000",
+            },
+        )
+        store.close()
+
+    def test_runtime_schema_invariants_require_postgres(self) -> None:
+        store = object.__new__(PostgresRecordStore)
+        store._engine = Mock()
+        store._engine.url.get_backend_name.return_value = "sqlite"
+
+        with self.assertRaisesRegex(RuntimeError, "requires PostgreSQL"):
+            store.verify_runtime_schema_invariants()
+
+    def test_runtime_schema_invariants_delegate_to_bounded_invariant_set(self) -> None:
+        store = object.__new__(PostgresRecordStore)
+        store._engine = Mock()
+        store._engine.url.get_backend_name.return_value = "postgresql"
+
+        with patch(
+            "control_plane.storage.postgres.verify_postgres_schema_invariants"
+        ) as verify_invariants:
+            store.verify_runtime_schema_invariants()
+
+        verify_invariants.assert_called_once_with(store._engine)
+
+    def test_postgres_engine_rejects_nonpositive_timeouts(self) -> None:
+        database_url = "postgresql+psycopg://launchplane.invalid/launchplane"
+
+        with self.assertRaisesRegex(ValueError, "connect timeout must be positive"):
+            _build_engine(database_url, postgres_connect_timeout_seconds=0)
+        with self.assertRaisesRegex(ValueError, "statement timeout must be positive"):
+            _build_engine(database_url, postgres_statement_timeout_milliseconds=0)
 
     def test_alembic_head_repairs_stamped_schema_missing_odoo_replacement_scope(
         self,

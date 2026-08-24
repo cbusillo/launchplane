@@ -29,6 +29,7 @@ from control_plane.privileged_operation_worker import (
 from control_plane.contracts.driver_descriptor import DriverContextView
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.service import serve_launchplane_service
+from control_plane.storage.factory import build_privileged_operation_worker_store
 from control_plane.workflows.odoo_stable_operation_worker import (
     DEFAULT_ODOO_STABLE_WORKER_ERROR_BACKOFF_SECONDS,
     DEFAULT_ODOO_STABLE_WORKER_HEARTBEAT_SECONDS,
@@ -552,7 +553,7 @@ def service_privileged_operation_workers_run(
                 if store is None:
                     store = cast(
                         PrivilegedOperationExecutionStore,
-                        _store(state_dir=state_dir, database_url=database_url),
+                        build_privileged_operation_worker_store(database_url=database_url),
                     )
                 records = execute_approved_privileged_operations_once(
                     record_store=store,

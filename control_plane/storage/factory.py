@@ -4,6 +4,12 @@ import os
 from control_plane.storage.postgres import PostgresRecordStore
 
 DATABASE_URL_ENV_VARS = ("LAUNCHPLANE_DATABASE_URL",)
+PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS = 10
+PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_MILLISECONDS = 30_000
+
+
+class PrivilegedOperationWorkerSchemaError(RuntimeError):
+    pass
 
 
 def resolve_database_url(database_url: str | None = None) -> str | None:
@@ -26,6 +32,36 @@ def build_shared_record_store(*, database_url: str | None = None) -> PostgresRec
     store = PostgresRecordStore(database_url=resolved_database_url)
     store.verify_schema()
     return store
+
+
+def build_privileged_operation_worker_store(
+    *, database_url: str | None = None
+) -> PostgresRecordStore:
+    resolved_database_url = resolve_database_url(database_url)
+    if resolved_database_url is None:
+        raise ValueError(
+            "Launchplane privileged-operation workers require --database-url or "
+            "LAUNCHPLANE_DATABASE_URL."
+        )
+    startup_probe = PostgresRecordStore(
+        database_url=resolved_database_url,
+        postgres_connect_timeout_seconds=PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS,
+        postgres_statement_timeout_milliseconds=(
+            PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_MILLISECONDS
+        ),
+    )
+    try:
+        startup_probe.verify_runtime_schema_invariants()
+    except RuntimeError as error:
+        raise PrivilegedOperationWorkerSchemaError(
+            "Launchplane privileged-operation worker schema is not runtime-compatible."
+        ) from error
+    finally:
+        startup_probe.close()
+    return PostgresRecordStore(
+        database_url=resolved_database_url,
+        postgres_connect_timeout_seconds=PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS,
+    )
 
 
 def storage_backend_name(record_store: object) -> str:

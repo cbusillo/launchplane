@@ -34,7 +34,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -3530,14 +3530,56 @@ def _human_session_from_payload(payload: PayloadDict) -> LaunchplaneHumanSession
 
 
 def _build_engine(
-    database_url: str, *, connection_factory: ConnectionFactory | None = None
+    database_url: str,
+    *,
+    connection_factory: ConnectionFactory | None = None,
+    postgres_connect_timeout_seconds: int | None = None,
+    postgres_statement_timeout_milliseconds: int | None = None,
 ) -> Engine:
     engine_kwargs: dict[str, Any] = {}
     if connection_factory is not None:
         engine_kwargs["creator"] = connection_factory
-    if database_url.startswith("sqlite"):
-        engine_kwargs["connect_args"] = {"check_same_thread": False}
+    connect_args = _engine_connect_args(
+        database_url,
+        postgres_connect_timeout_seconds=postgres_connect_timeout_seconds,
+        postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds,
+    )
+    if connect_args:
+        engine_kwargs["connect_args"] = connect_args
     return create_engine(database_url, **engine_kwargs)
+
+
+def _engine_connect_args(
+    database_url: str,
+    *,
+    postgres_connect_timeout_seconds: int | None = None,
+    postgres_statement_timeout_milliseconds: int | None = None,
+) -> dict[str, object]:
+    database_url_value = make_url(database_url)
+    backend_name = database_url_value.get_backend_name()
+    connect_args: dict[str, object] = {}
+    if backend_name == "sqlite":
+        connect_args["check_same_thread"] = False
+    elif backend_name == "postgresql":
+        if postgres_connect_timeout_seconds is not None:
+            if postgres_connect_timeout_seconds < 1:
+                raise ValueError("PostgreSQL connect timeout must be positive.")
+            connect_args["connect_timeout"] = postgres_connect_timeout_seconds
+        if postgres_statement_timeout_milliseconds is not None:
+            if postgres_statement_timeout_milliseconds < 1:
+                raise ValueError("PostgreSQL statement timeout must be positive.")
+            existing_options = database_url_value.query.get("options", "")
+            if isinstance(existing_options, tuple):
+                existing_options = " ".join(existing_options)
+            statement_timeout_option = (
+                f"-c statement_timeout={postgres_statement_timeout_milliseconds}"
+            )
+            connect_args["options"] = " ".join(
+                value
+                for value in (str(existing_options).strip(), statement_timeout_option)
+                if value
+            )
+    return connect_args
 
 
 class PostgresRecordStore(HumanSessionStore):
@@ -3546,13 +3588,28 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         database_url: str,
         connection_factory: ConnectionFactory | None = None,
+        postgres_connect_timeout_seconds: int | None = None,
+        postgres_statement_timeout_milliseconds: int | None = None,
     ) -> None:
         self.database_url = database_url
-        self._engine = _build_engine(database_url, connection_factory=connection_factory)
+        self._engine = _build_engine(
+            database_url,
+            connection_factory=connection_factory,
+            postgres_connect_timeout_seconds=postgres_connect_timeout_seconds,
+            postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds,
+        )
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
         lock_engine_kwargs: dict[str, Any] = {"poolclass": NullPool}
         if connection_factory is not None:
             lock_engine_kwargs["creator"] = connection_factory
+        elif self._engine.url.get_backend_name() == "postgresql":
+            connect_args = _engine_connect_args(
+                database_url,
+                postgres_connect_timeout_seconds=postgres_connect_timeout_seconds,
+                postgres_statement_timeout_milliseconds=(postgres_statement_timeout_milliseconds),
+            )
+            if connect_args:
+                lock_engine_kwargs["connect_args"] = connect_args
         self._owner_acceptance_projection_lock_engine = (
             create_engine(database_url, **lock_engine_kwargs)
             if self._engine.url.get_backend_name() == "postgresql"
@@ -3606,6 +3663,11 @@ class PostgresRecordStore(HumanSessionStore):
             )
         if backend_name == "postgresql":
             verify_postgres_schema_invariants(self._engine)
+
+    def verify_runtime_schema_invariants(self) -> None:
+        if self._engine.url.get_backend_name() != "postgresql":
+            raise RuntimeError("Launchplane runtime schema verification requires PostgreSQL.")
+        verify_postgres_schema_invariants(self._engine)
 
     def schema_revision(self) -> str:
         if self._engine.url.get_backend_name() != "postgresql":
