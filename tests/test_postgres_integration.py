@@ -999,6 +999,26 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     required_relations=("launchplane_missing_worker_relation",)
                 )
 
+    def test_privileged_operation_worker_runtime_store_times_out_blocked_statement(
+        self,
+    ) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            with patch(
+                "control_plane.storage.factory."
+                "PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS",
+                100,
+            ):
+                store = build_privileged_operation_worker_store(database_url=database_url)
+            try:
+                with (
+                    self.assertRaises(OperationalError),
+                    store._engine.connect() as connection,
+                ):
+                    connection.execute(text("select pg_sleep(1)"))
+            finally:
+                store.close()
+
     def test_repository_human_admission_schema_has_postgres_types_and_partial_index(
         self,
     ) -> None:

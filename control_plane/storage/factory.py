@@ -5,7 +5,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 
 DATABASE_URL_ENV_VARS = ("LAUNCHPLANE_DATABASE_URL",)
 PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS = 10
-PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_MILLISECONDS = 30_000
+PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS = 30_000
 PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS = (
     "launchplane_privileged_operations",
     "launchplane_privileged_operations_status_idx",
@@ -71,7 +71,7 @@ def build_privileged_operation_worker_store(
         database_url=resolved_database_url,
         postgres_connect_timeout_seconds=PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS,
         postgres_statement_timeout_milliseconds=(
-            PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_MILLISECONDS
+            PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS
         ),
     )
     try:
@@ -87,6 +87,9 @@ def build_privileged_operation_worker_store(
     return PostgresRecordStore(
         database_url=resolved_database_url,
         postgres_connect_timeout_seconds=PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS,
+        postgres_statement_timeout_milliseconds=(
+            PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS
+        ),
     )
 
 
