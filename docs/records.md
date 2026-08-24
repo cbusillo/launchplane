@@ -1596,7 +1596,14 @@ run` is the foreground loop intended for an external process supervisor, and
   `launchplane-privileged-operation-workers` and
   `/app/scripts/start-launchplane-privileged-operation-workers.sh`; it accepts
   process timing settings only, while approved operation selection remains in
-  DB-backed Launchplane records.
+  DB-backed Launchplane records. After the API service has passed its full
+  schema verification and health gate, this worker performs bounded runtime
+  invariant verification without repeating the API's all-mapped-table and
+  all-mapped-column checks. The short statement timeout applies only to that
+  startup check; the runtime store retains normal privileged-execution
+  statement semantics and a bounded PostgreSQL connection wait. An unavailable
+  or blocked startup enters the existing redacted retry/threshold-exit path
+  instead of hanging silently.
   Production operation remains observable through the `launchplane service
   verireel-workers status` and `launchplane service verireel-workers reconcile`
   operator commands, and through

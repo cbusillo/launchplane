@@ -226,7 +226,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         with (
             patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
             patch(
-                "control_plane.cli_service._store",
+                "control_plane.cli_service.build_privileged_operation_worker_store",
                 side_effect=[RuntimeError("database-url-secret must not be emitted"), object()],
             ),
             patch(
@@ -323,7 +323,10 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         runner = CliRunner()
         with (
             patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
-            patch("control_plane.cli_service._store", return_value=object()),
+            patch(
+                "control_plane.cli_service.build_privileged_operation_worker_store",
+                return_value=object(),
+            ),
             patch(
                 "control_plane.cli_service.execute_approved_privileged_operations_once",
                 return_value=[
@@ -381,7 +384,10 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         runner = CliRunner()
         with (
             patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
-            patch("control_plane.cli_service._store", return_value=object()),
+            patch(
+                "control_plane.cli_service.build_privileged_operation_worker_store",
+                return_value=object(),
+            ),
             patch(
                 "control_plane.cli_service.execute_approved_privileged_operations_once",
                 side_effect=FatalWorkerError("operation-secret-id must not be emitted"),
