@@ -12,7 +12,13 @@ _STRUCTURED_EVENT_PATTERN = re.compile(r"^$|^[a-z][a-z0-9_]{0,127}$")
 _IMAGE_ID_PATTERN = re.compile(r"^sha256:[a-f0-9]{64}$")
 _IMMUTABLE_IMAGE_REFERENCE_PATTERN = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64}$")
 _MAX_RUNTIME_TEXT_LENGTH = 500
-_ALLOWED_STRUCTURED_EVENTS = frozenset({"privileged_operation_worker_poll_succeeded"})
+_ALLOWED_STRUCTURED_EVENTS = frozenset(
+    {
+        "privileged_operation_worker_store_initialized",
+        "privileged_operation_worker_first_poll_attempted",
+        "privileged_operation_worker_poll_succeeded",
+    }
+)
 type DokployEvidenceProviderOperation = Literal[
     "provider-config",
     "target-inspect",

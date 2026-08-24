@@ -17,6 +17,18 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(click.ClickException, "allow-listed"):
             runtime_evidence.normalize_structured_event_name("arbitrary_event")
 
+    def test_structured_event_accepts_bounded_worker_lifecycle_markers(self) -> None:
+        for event_name in (
+            "privileged_operation_worker_store_initialized",
+            "privileged_operation_worker_first_poll_attempted",
+            "privileged_operation_worker_poll_succeeded",
+        ):
+            with self.subTest(event_name=event_name):
+                self.assertEqual(
+                    runtime_evidence.normalize_structured_event_name(event_name),
+                    event_name,
+                )
+
     def test_fetch_compose_service_runtime_returns_bounded_image_and_state(self) -> None:
         requests: list[dict[str, object]] = []
         image_digest = "a" * 64

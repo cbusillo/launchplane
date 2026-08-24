@@ -1606,6 +1606,11 @@ run` is the foreground loop intended for an external process supervisor, and
   through the existing reservation, transaction, retry, and reconciliation
   boundaries. An unavailable or blocked poll therefore enters the redacted
   retry/threshold-exit path instead of hanging silently.
+  The one-time structured events
+  `privileged_operation_worker_store_initialized` and
+  `privileged_operation_worker_first_poll_attempted` provide bounded lifecycle
+  localization only; activation evidence still requires
+  `privileged_operation_worker_poll_succeeded`.
   Production operation remains observable through the `launchplane service
   verireel-workers status` and `launchplane service verireel-workers reconcile`
   operator commands, and through
