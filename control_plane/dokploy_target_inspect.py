@@ -217,12 +217,14 @@ def inspect_dokploy_target(
         activation_proof_eligible = dokploy_runtime_evidence.structured_event_is_activation_proof(
             request.event
         )
+        log_classification = dokploy_runtime_evidence.summarize_runtime_log_lines(logs)
         event_evidence: dict[str, object] = {
             "name": request.event,
             "observed": event_observed,
             "activation_proof_eligible": activation_proof_eligible,
             "matching_line_count": matching_event_count,
             "candidate_line_count": len(logs),
+            "log_classification": log_classification,
         }
         running = runtime_payload.get("running") is True
         image_reference_immutable = runtime_payload.get("image_reference_immutable") is True
@@ -247,6 +249,7 @@ def inspect_dokploy_target(
                 and image_matches_expected
                 and event_observed
                 and activation_proof_eligible
+                and log_classification["provider_error_line_count"] == 0
             ),
         }
     if target_record is not None and target_id_record is not None:

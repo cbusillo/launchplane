@@ -139,6 +139,16 @@ class DokployTargetRuntimeInspectTests(unittest.TestCase):
         self.assertTrue(runtime_evidence["proof_ready"])
         self.assertEqual(structured_event["matching_line_count"], 1)
         self.assertEqual(structured_event["candidate_line_count"], 2)
+        self.assertEqual(
+            structured_event["log_classification"],
+            {
+                "structured_event_line_count": 1,
+                "json_line_count": 1,
+                "non_json_line_count": 1,
+                "provider_error_line_count": 0,
+                "provider_error_kind": "",
+            },
+        )
         self.assertTrue(structured_event["observed"])
         self.assertTrue(structured_event["activation_proof_eligible"])
         self.assertNotIn("LAUNCHPLANE_DATABASE_URL", str(runtime_evidence))
@@ -197,6 +207,37 @@ class DokployTargetRuntimeInspectTests(unittest.TestCase):
         runtime_evidence = result["runtime_evidence"]
         assert isinstance(runtime_evidence, dict)
         self.assertFalse(runtime_evidence["image_matches_expected"])
+        self.assertFalse(runtime_evidence["proof_ready"])
+
+    def test_provider_error_line_invalidates_matching_activation_event(self) -> None:
+        result = inspect_dokploy_target(
+            record_store=_UNUSED_STORE,
+            host="https://dokploy.example.invalid",
+            token="token",
+            request=DokployTargetInspectRequest(
+                target_type="compose",
+                target_id="compose-123",
+                service="launchplane-privileged-operation-workers",
+                event="privileged_operation_worker_poll_succeeded",
+                expected_image=f"ghcr.io/example/launchplane@sha256:{'a' * 64}",
+            ),
+            fetch_target_payload=_fetch_target_payload,
+            fetch_compose_service_runtime=_fetch_service_runtime,
+            fetch_compose_logs=lambda **_kwargs: (
+                "Error response from daemon: configured logging driver does not support reading",
+                '{"event":"privileged_operation_worker_poll_succeeded"}',
+            ),
+        )
+
+        runtime_evidence = result["runtime_evidence"]
+        assert isinstance(runtime_evidence, dict)
+        structured_event = runtime_evidence["structured_event"]
+        assert isinstance(structured_event, dict)
+        classification = structured_event["log_classification"]
+        assert isinstance(classification, dict)
+        self.assertTrue(structured_event["observed"])
+        self.assertEqual(classification["provider_error_line_count"], 1)
+        self.assertEqual(classification["provider_error_kind"], "unsupported_logging_driver")
         self.assertFalse(runtime_evidence["proof_ready"])
 
     def test_non_running_service_is_not_proof_ready(self) -> None:

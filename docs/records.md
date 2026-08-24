@@ -1620,7 +1620,11 @@ run` is the foreground loop intended for an external process supervisor, and
   `privileged_operation_worker_store_initialized`, and
   `privileged_operation_worker_first_poll_attempted` provide bounded lifecycle
   localization only; activation evidence still requires
-  `privileged_operation_worker_poll_succeeded`.
+  `privileged_operation_worker_poll_succeeded`. Runtime evidence may classify
+  candidate lines by JSON/non-JSON structure and fixed provider-error kind,
+  but it does not persist or return line content. A recognized provider error
+  invalidates activation proof even if another retained line contains the
+  successful-poll event.
   Production operation remains observable through the `launchplane service
   verireel-workers status` and `launchplane service verireel-workers reconcile`
   operator commands, and through

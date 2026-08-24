@@ -270,6 +270,28 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
 
         self.assertEqual(matching_event_count, 1)
 
+    def test_runtime_log_summary_returns_only_structural_counts_and_fixed_error_kind(self) -> None:
+        summary = runtime_evidence.summarize_runtime_log_lines(
+            (
+                '2026-08-24T00:00:00Z {"event":"privileged_operation_worker_started"}',
+                '2026-08-24T00:00:01Z {"status":"remote command failed"}',
+                "Error response from daemon: configured logging driver does not support reading",
+                "not-json {broken secret-value",
+            )
+        )
+
+        self.assertEqual(
+            summary,
+            {
+                "structured_event_line_count": 1,
+                "json_line_count": 2,
+                "non_json_line_count": 2,
+                "provider_error_line_count": 1,
+                "provider_error_kind": "unsupported_logging_driver",
+            },
+        )
+        self.assertNotIn("secret-value", str(summary))
+
     def test_fetch_compose_container_logs_uses_selected_container_without_search(self) -> None:
         requests: list[dict[str, object]] = []
 

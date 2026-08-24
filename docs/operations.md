@@ -3014,7 +3014,10 @@ image/state identity, exact image-match state, and a structured-event count, not
 raw logs or container config.
 The allow-listed `privileged_operation_worker_started` and
 `privileged_operation_worker_store_build_started` events may be queried for
-diagnostic localization, but they are not activation-proof eligible.
+diagnostic localization, but they are not activation-proof eligible. Runtime
+evidence includes bounded JSON/non-JSON counts and a fixed provider-error code
+for diagnosis, never line content. Provider errors are classified only from
+non-JSON provider text and always prevent activation proof.
 Activate only
 `privileged_secret_operation.plan`, `privileged_secret_operation.read`, and
 `privileged_secret_operation.cancel` first. Add
