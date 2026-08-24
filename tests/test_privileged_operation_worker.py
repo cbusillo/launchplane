@@ -272,6 +272,8 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             [
                 "privileged_operation_worker_started",
                 "privileged_operation_worker_retry",
+                "privileged_operation_worker_store_initialized",
+                "privileged_operation_worker_first_poll_attempted",
                 "privileged_operation_worker_poll_succeeded",
                 "privileged_operation_worker_retry",
                 "privileged_operation_worker_threshold_exit",
@@ -280,15 +282,15 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertEqual(telemetry[1]["consecutive_errors"], 1)
         self.assertEqual(telemetry[1]["error_type"], "RuntimeError")
         self.assertEqual(
-            telemetry[2],
+            telemetry[4],
             {
                 "event": "privileged_operation_worker_poll_succeeded",
                 "processed": 1,
                 "statuses": ["executed"],
             },
         )
-        self.assertEqual(telemetry[3]["consecutive_errors"], 1)
-        self.assertEqual(telemetry[4]["consecutive_errors"], 2)
+        self.assertEqual(telemetry[5]["consecutive_errors"], 1)
+        self.assertEqual(telemetry[6]["consecutive_errors"], 2)
 
     def test_worker_loop_stops_cleanly_after_sigterm(self) -> None:
         signal_handlers: dict[int, object] = {}
@@ -355,6 +357,8 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             [entry["event"] for entry in telemetry],
             [
                 "privileged_operation_worker_started",
+                "privileged_operation_worker_store_initialized",
+                "privileged_operation_worker_first_poll_attempted",
                 "privileged_operation_worker_poll_succeeded",
                 "privileged_operation_worker_stopped",
             ],
@@ -410,9 +414,72 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         telemetry = [json.loads(call.args[0]) for call in echo.call_args_list]
         self.assertEqual(
             telemetry,
-            [{"event": "privileged_operation_worker_started", "limit": 20, "poll_seconds": 15}],
+            [
+                {
+                    "event": "privileged_operation_worker_started",
+                    "limit": 20,
+                    "poll_seconds": 15,
+                },
+                {"event": "privileged_operation_worker_store_initialized"},
+                {"event": "privileged_operation_worker_first_poll_attempted"},
+            ],
         )
         self.assertEqual(signal_calls[-2:], list(previous_handlers.items()))
+
+    def test_worker_lifecycle_markers_are_not_repeated_across_successful_polls(self) -> None:
+        class TestStopEvent:
+            stopped = False
+            waits = 0
+
+            def is_set(self) -> bool:
+                return self.stopped
+
+            def wait(self, _timeout: int) -> bool:
+                self.waits += 1
+                if self.waits == 2:
+                    self.stopped = True
+                return self.stopped
+
+        runner = CliRunner()
+        with (
+            patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
+            patch(
+                "control_plane.cli_service.build_privileged_operation_worker_store",
+                return_value=object(),
+            ),
+            patch(
+                "control_plane.cli_service.execute_approved_privileged_operations_once",
+                return_value=[],
+            ) as execute_once,
+            patch("control_plane.cli_service.signal.signal", return_value=object()),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "service",
+                    "privileged-operation-workers",
+                    "run",
+                    "--database-url",
+                    "sqlite+pysqlite:///:memory:",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        telemetry = [
+            json.loads(line) for line in result.output.splitlines() if line.startswith("{")
+        ]
+        self.assertEqual(
+            [entry["event"] for entry in telemetry],
+            [
+                "privileged_operation_worker_started",
+                "privileged_operation_worker_store_initialized",
+                "privileged_operation_worker_first_poll_attempted",
+                "privileged_operation_worker_poll_succeeded",
+                "privileged_operation_worker_poll_succeeded",
+                "privileged_operation_worker_stopped",
+            ],
+        )
+        self.assertEqual(execute_once.call_count, 2)
 
     def test_worker_reauthorizes_by_github_id_and_executes_only_once(self) -> None:
         approval_policy = _policy_record(revision=3)

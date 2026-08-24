@@ -547,6 +547,8 @@ def service_privileged_operation_workers_run(
             )
         )
         store: PrivilegedOperationExecutionStore | None = None
+        store_initialized = False
+        first_poll_attempted = False
         consecutive_errors = 0
         while not stop_event.is_set():
             try:
@@ -555,6 +557,22 @@ def service_privileged_operation_workers_run(
                         PrivilegedOperationExecutionStore,
                         build_privileged_operation_worker_store(database_url=database_url),
                     )
+                if not store_initialized:
+                    click.echo(
+                        json.dumps(
+                            {"event": "privileged_operation_worker_store_initialized"},
+                            sort_keys=True,
+                        )
+                    )
+                    store_initialized = True
+                if not first_poll_attempted:
+                    click.echo(
+                        json.dumps(
+                            {"event": "privileged_operation_worker_first_poll_attempted"},
+                            sort_keys=True,
+                        )
+                    )
+                    first_poll_attempted = True
                 records = execute_approved_privileged_operations_once(
                     record_store=store,
                     lease_owner=generated_lease_owner,
