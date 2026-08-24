@@ -19,6 +19,8 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
 
     def test_structured_event_accepts_bounded_worker_lifecycle_markers(self) -> None:
         for event_name in (
+            "privileged_operation_worker_entrypoint_started",
+            "privileged_operation_worker_entrypoint_probe_succeeded",
             "privileged_operation_worker_started",
             "privileged_operation_worker_store_build_started",
             "privileged_operation_worker_schema_probe_succeeded",
@@ -34,6 +36,8 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
 
     def test_only_successful_poll_is_activation_proof(self) -> None:
         for event_name in (
+            "privileged_operation_worker_entrypoint_started",
+            "privileged_operation_worker_entrypoint_probe_succeeded",
             "privileged_operation_worker_started",
             "privileged_operation_worker_store_build_started",
             "privileged_operation_worker_schema_probe_succeeded",

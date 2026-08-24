@@ -692,6 +692,13 @@ exit {exit_code}
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                '{"event":"privileged_operation_worker_entrypoint_started"}',
+                '{"event":"privileged_operation_worker_entrypoint_probe_succeeded"}',
+            ],
+        )
+        self.assertEqual(
             captured_args[:5],
             ["run", "launchplane", "service", "privileged-operation-workers", "run"],
         )
@@ -750,6 +757,8 @@ exit {exit_code}
             )
 
         self.assertEqual(result.returncode, 1, msg=result.stderr)
+        self.assertIn("privileged_operation_worker_entrypoint_started", result.stdout)
+        self.assertNotIn("privileged_operation_worker_entrypoint_probe_succeeded", result.stdout)
         self.assertIn("privileged_operation_worker_startup_probe_failed", result.stdout)
         self.assertIn('"error_type":"timeout"', result.stdout)
         self.assertFalse(capture_file.exists())

@@ -93,6 +93,9 @@ also contain a matching activation event. The protected reader passes only the
 code-owned allow-listed event name to Dokploy's fixed-string search and still
 requires an exact JSON event field match. A separate bounded unfiltered read
 preserves provider-error classification so search cannot hide a failure.
+The shell-level `privileged_operation_worker_entrypoint_started` and
+`privileged_operation_worker_entrypoint_probe_succeeded` markers localize the
+boundary before the continuous Python worker starts and remain diagnostic-only.
 
 ## Records And Lifecycle
 
