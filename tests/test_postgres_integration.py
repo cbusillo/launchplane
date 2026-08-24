@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import threading
@@ -67,6 +68,9 @@ from control_plane.contracts.outbox_delivery import (
     OutboxDeliveryRecord,
     build_outbox_delivery_id,
     build_outbox_dedupe_key,
+)
+from control_plane.contracts.privileged_operation_worker_heartbeat import (
+    PrivilegedOperationWorkerHeartbeatRecord,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -988,6 +992,35 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 store.close()
 
         self.assertEqual(records, ())
+
+    def test_privileged_operation_worker_heartbeat_round_trip_and_index(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            recorded_at = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+            record = PrivilegedOperationWorkerHeartbeatRecord(
+                worker_identity_sha256="a" * 64,
+                image_reference=f"example@sha256:{'c' * 64}",
+                poll_interval_seconds=15,
+                last_poll_succeeded_at=recorded_at.isoformat(),
+            )
+            store.write_privileged_operation_worker_heartbeat_record(
+                record,
+                prune_before=(recorded_at - timedelta(days=7)).isoformat(),
+                prune_after=(recorded_at + timedelta(seconds=60)).isoformat(),
+            )
+            records = store.list_privileged_operation_worker_heartbeat_records()
+            engine = create_engine(store.database_url)
+            try:
+                index_names = {
+                    index["name"]
+                    for index in inspect(engine).get_indexes(
+                        "launchplane_privileged_operation_worker_heartbeats"
+                    )
+                }
+            finally:
+                engine.dispose()
+
+        self.assertEqual(records, (record,))
+        self.assertIn("launchplane_privop_worker_heartbeats_freshness_idx", index_names)
 
     def test_runtime_schema_compatibility_reports_missing_relation(self) -> None:
         with _store_for_fresh_head_database() as store:

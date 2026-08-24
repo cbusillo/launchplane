@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from typing import Literal, Protocol
 
 import click
@@ -9,11 +10,18 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.privileged_operation_worker_heartbeat import (
+    PRIVILEGED_OPERATION_WORKER_HEARTBEAT_FUTURE_SKEW_SECONDS,
+    PRIVILEGED_OPERATION_WORKER_KIND,
+    PrivilegedOperationWorkerHeartbeatRecord,
+    privileged_operation_worker_heartbeat_freshness_seconds,
+)
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 
 DokployTargetType = Literal["application", "compose"]
 _RUNTIME_EVIDENCE_LOG_LINE_COUNT = dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT
+_MAX_WORKER_HEARTBEAT_RECORDS = 100
 
 
 class FetchDokployTargetPayload(Protocol):
@@ -82,8 +90,6 @@ class DokployTargetInspectRequest(BaseModel):
             raise ValueError("Dokploy runtime event evidence requires a compose service.")
         if self.expected_image and not self.service:
             raise ValueError("Dokploy expected image evidence requires a compose service.")
-        if self.service and not self.event:
-            raise ValueError("Dokploy runtime service evidence requires a structured event.")
         if self.service and not self.expected_image:
             raise ValueError("Dokploy runtime service evidence requires an expected image.")
         has_route = bool(self.context or self.instance)
@@ -116,6 +122,90 @@ class DokployTargetInspectStore(Protocol):
         self, *, context_name: str, instance_name: str
     ) -> ProviderTargetRecord: ...
 
+    def list_privileged_operation_worker_heartbeat_records(
+        self,
+        *,
+        worker_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[PrivilegedOperationWorkerHeartbeatRecord, ...]: ...
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _worker_heartbeat_evidence(
+    *,
+    records: tuple[PrivilegedOperationWorkerHeartbeatRecord, ...],
+    container_identity_sha256: str,
+    immutable_image_reference: str,
+    now: datetime,
+) -> dict[str, object]:
+    bounded_records = records[:_MAX_WORKER_HEARTBEAT_RECORDS]
+    fresh_records: list[PrivilegedOperationWorkerHeartbeatRecord] = []
+    matching_record: PrivilegedOperationWorkerHeartbeatRecord | None = None
+    matching_age_seconds = 0
+    matching_freshness_limit_seconds = 0
+    matching_last_poll_succeeded_at = ""
+    matching_future_skew_detected = False
+
+    for record in bounded_records:
+        recorded_at = datetime.fromisoformat(record.last_poll_succeeded_at).astimezone(timezone.utc)
+        age_seconds = (now - recorded_at).total_seconds()
+        freshness_limit_seconds = privileged_operation_worker_heartbeat_freshness_seconds(
+            record.poll_interval_seconds
+        )
+        future_skew_detected = (
+            age_seconds < -PRIVILEGED_OPERATION_WORKER_HEARTBEAT_FUTURE_SKEW_SECONDS
+        )
+        if not future_skew_detected and age_seconds <= freshness_limit_seconds:
+            fresh_records.append(record)
+        if record.worker_identity_sha256 != container_identity_sha256:
+            continue
+        if matching_record is not None:
+            continue
+        matching_record = record
+        matching_age_seconds = max(-86_400, min(86_400, int(age_seconds)))
+        matching_freshness_limit_seconds = freshness_limit_seconds
+        matching_last_poll_succeeded_at = record.last_poll_succeeded_at
+        matching_future_skew_detected = future_skew_detected
+
+    matching_fresh = bool(matching_record is not None and matching_record in fresh_records)
+    image_matches = bool(
+        matching_record is not None
+        and matching_record.image_reference
+        and matching_record.image_reference == immutable_image_reference
+    )
+    identity_consistent = matching_record is not None
+
+    if not bounded_records:
+        status = "missing"
+    elif matching_record is None:
+        status = "identity_mismatch"
+    elif matching_future_skew_detected:
+        status = "future_timestamp"
+    elif not matching_fresh:
+        status = "stale"
+    elif not image_matches:
+        status = "image_mismatch"
+    else:
+        status = "ready"
+
+    return {
+        "source": "launchplane_records",
+        "status": status,
+        "observed": bool(bounded_records),
+        "matching_identity_observed": matching_record is not None,
+        "fresh": matching_fresh,
+        "identity_consistent": identity_consistent,
+        "image_matches": image_matches,
+        "fresh_worker_count": min(len(fresh_records), _MAX_WORKER_HEARTBEAT_RECORDS),
+        "age_seconds": matching_age_seconds,
+        "freshness_limit_seconds": matching_freshness_limit_seconds,
+        "last_poll_succeeded_at": matching_last_poll_succeeded_at,
+        "future_skew_detected": matching_future_skew_detected,
+    }
+
 
 def inspect_dokploy_target(
     *,
@@ -126,6 +216,7 @@ def inspect_dokploy_target(
     fetch_target_payload: FetchDokployTargetPayload | None = None,
     fetch_compose_service_runtime: FetchDokployComposeServiceRuntime | None = None,
     fetch_compose_logs: FetchDokployComposeLogs | None = None,
+    now: Callable[[], datetime] = _utc_now,
 ) -> dict[str, object]:
     target_record: DokployTargetRecord | None = None
     target_id_record: DokployTargetIdRecord | None = None
@@ -197,7 +288,13 @@ def inspect_dokploy_target(
         container_id = str(runtime_payload.get("container_id") or "").strip()
         if not container_id:
             raise dokploy_runtime_evidence.DokployEvidenceProviderError("service-select")
+        container_identity_sha256 = str(
+            runtime_payload.get("container_identity_sha256") or ""
+        ).strip()
+        if not container_identity_sha256:
+            raise dokploy_runtime_evidence.DokployEvidenceProviderError("container-identity")
         logs_fetcher = fetch_compose_logs or dokploy_runtime_evidence.fetch_compose_container_logs
+        log_read_status = "available"
         try:
             classification_logs = logs_fetcher(
                 host=host,
@@ -207,18 +304,24 @@ def inspect_dokploy_target(
                 line_count=_RUNTIME_EVIDENCE_LOG_LINE_COUNT,
                 search_text="",
             )
-            event_logs = logs_fetcher(
-                host=host,
-                token=token,
-                compose_id=target_id,
-                container_id=container_id,
-                line_count=_RUNTIME_EVIDENCE_LOG_LINE_COUNT,
-                search_text=request.event,
+            event_logs = (
+                logs_fetcher(
+                    host=host,
+                    token=token,
+                    compose_id=target_id,
+                    container_id=container_id,
+                    line_count=_RUNTIME_EVIDENCE_LOG_LINE_COUNT,
+                    search_text=request.event,
+                )
+                if request.event
+                else ()
             )
-        except click.ClickException as error:
-            raise dokploy_runtime_evidence.DokployEvidenceProviderError(
-                "runtime-log-read"
-            ) from error
+        except dokploy_runtime_evidence.DokployEvidenceProviderError as error:
+            if error.operation != "runtime-log-read":
+                raise
+            classification_logs = ()
+            event_logs = ()
+            log_read_status = "unavailable"
         matching_event_count = dokploy_runtime_evidence.count_structured_log_events(
             event_logs,
             event_name=request.event,
@@ -236,6 +339,7 @@ def inspect_dokploy_target(
             "activation_proof_eligible": activation_proof_eligible,
             "matching_line_count": matching_event_count,
             "candidate_line_count": len(event_logs),
+            "log_read_status": log_read_status,
             "log_classification": log_classification,
         }
         running = runtime_payload.get("running") is True
@@ -243,6 +347,16 @@ def inspect_dokploy_target(
         immutable_image_reference = str(runtime_payload.get("immutable_image_reference") or "")
         image_matches_expected = (
             not request.expected_image or immutable_image_reference == request.expected_image
+        )
+        heartbeat_records = record_store.list_privileged_operation_worker_heartbeat_records(
+            worker_kind=PRIVILEGED_OPERATION_WORKER_KIND,
+            limit=_MAX_WORKER_HEARTBEAT_RECORDS,
+        )
+        worker_heartbeat = _worker_heartbeat_evidence(
+            records=heartbeat_records,
+            container_identity_sha256=container_identity_sha256,
+            immutable_image_reference=immutable_image_reference,
+            now=now().astimezone(timezone.utc),
         )
         result["runtime_evidence"] = {
             "service": request.service,
@@ -255,13 +369,13 @@ def inspect_dokploy_target(
             "expected_image": request.expected_image,
             "image_matches_expected": image_matches_expected,
             "structured_event": event_evidence,
+            "worker_heartbeat": worker_heartbeat,
+            "proof_source": "worker_heartbeat_record",
             "proof_ready": (
                 running
                 and image_reference_immutable
                 and image_matches_expected
-                and event_observed
-                and activation_proof_eligible
-                and log_classification["provider_error_line_count"] == 0
+                and worker_heartbeat["status"] == "ready"
             ),
         }
     if target_record is not None and target_id_record is not None:

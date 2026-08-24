@@ -1613,6 +1613,18 @@ run` is the foreground loop intended for an external process supervisor, and
   existing reservation, transaction, retry, and reconciliation boundaries. An
   unavailable or blocked startup probe or poll therefore cannot hang the worker
   loop silently.
+  `PrivilegedOperationWorkerHeartbeatRecord` is the bounded current projection
+  for successful continuous-worker polls. It stores only domain-separated
+  SHA-256 worker identity, an immutable image reference when one is available,
+  the code-bounded poll interval, and the latest successful-poll timestamp. It
+  never stores a raw hostname, container ID, lease owner, operation ID, payload,
+  credential, or log line. One row is upserted per worker identity. Each write
+  prunes rows older than seven days and rows more than the allowed 60-second
+  future-skew window in the same transaction. The heartbeat write occurs after
+  each successful DB-backed poll; a failed heartbeat write follows the worker's
+  ordinary retry and threshold-exit path and is not reported as poll success.
+  The heartbeat table and freshness index are required by the supervised
+  worker schema probe.
   The one-time structured events
   `privileged_operation_worker_entrypoint_started`,
   `privileged_operation_worker_entrypoint_probe_succeeded`,
@@ -1621,12 +1633,13 @@ run` is the foreground loop intended for an external process supervisor, and
   `privileged_operation_worker_schema_probe_succeeded`,
   `privileged_operation_worker_store_initialized`, and
   `privileged_operation_worker_first_poll_attempted` provide bounded lifecycle
-  localization only; activation evidence still requires
-  `privileged_operation_worker_poll_succeeded`. Runtime evidence may classify
-  candidate lines by JSON/non-JSON structure and fixed provider-error kind,
-  but it does not persist or return line content. A recognized provider error
-  invalidates activation proof even if another retained line contains the
-  successful-poll event.
+  localization only. The `privileged_operation_worker_poll_succeeded` event is
+  also diagnostic; canonical activation evidence comes from the matching fresh
+  DB heartbeat. Runtime evidence may classify candidate lines by JSON/non-JSON
+  structure and fixed provider-error kind, but it does not persist or return
+  line content. Log-read unavailability or provider log errors do not override a
+  valid heartbeat, while missing provider container/image identity or invalid
+  heartbeat freshness, image, or identity remains fail-closed.
   Production operation remains observable through the `launchplane service
   verireel-workers status` and `launchplane service verireel-workers reconcile`
   operator commands, and through

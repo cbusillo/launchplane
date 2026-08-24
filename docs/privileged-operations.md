@@ -76,23 +76,35 @@ reauthorization.
 
 Use the protected `Dokploy Target Inspect` workflow for that pre-activation
 proof. Its optional runtime-evidence mode requires an exact compose service,
-expected immutable image, and allow-listed structured event, and returns only
-bounded image/state identity and a structured-event match count. For the worker,
+expected immutable image, and optionally an allow-listed structured event for
+diagnostics. It returns only bounded image/state identity, successful-poll
+heartbeat status, and diagnostic structured-event counts. For the worker,
 request service `launchplane-privileged-operation-workers` and event
 `privileged_operation_worker_poll_succeeded`, supply the exact immutable
 deployment reference as `expected_image`, and proceed only when
 `runtime_evidence.proof_ready` is true. Do not retain or expose raw runtime logs,
 container configuration, or environment values as canary evidence. The
-allow-listed `privileged_operation_worker_started` and
-`privileged_operation_worker_store_build_started` events are diagnostic-only
-localization markers and can never make the response proof-ready. Failed proof
-responses also include only structural JSON/non-JSON counts and a fixed
-provider-error classification; they never include a runtime log line. Any
-recognized provider error keeps the response fail-closed even if retained logs
-also contain a matching activation event. The protected reader passes only the
-code-owned allow-listed event name to Dokploy's fixed-string search and still
-requires an exact JSON event field match. A separate bounded unfiltered read
-preserves provider-error classification so search cannot hide a failure.
+canonical poll proof is a DB-backed current heartbeat written only after a
+successful poll transaction. The proof reader requires a fresh heartbeat whose
+internal worker identity matches the selected container. Dokploy first proves
+that its observed hostname is a Docker-assigned prefix of the selected
+container ID, then hashes it for comparison; operator-chosen hostnames fail
+closed. The heartbeat image must also match both provider observation and
+`expected_image`. Missing, stale, future-dated, identity-mismatched, or
+image-mismatched heartbeats fail closed. Heartbeat persistence failure is a
+worker polling error, so the worker never emits successful-poll telemetry for
+evidence it could not persist. Raw hostnames and identity digests never leave
+the service.
+
+Allow-listed worker events remain diagnostic-only localization markers and do
+not make the response proof-ready. Failed log reads and recognized provider log
+errors are reported only through bounded availability and classification fields;
+they do not block a valid DB-backed heartbeat proof and never include a runtime
+log line. Provider failures in target lookup, service selection, container
+configuration, container identity, or image identity remain hard failures.
+When an event is supplied, the protected reader passes only the code-owned
+allow-listed name to Dokploy's fixed-string search and requires an exact JSON
+event field match when logs are available.
 The shell-level `privileged_operation_worker_entrypoint_started` and
 `privileged_operation_worker_entrypoint_probe_succeeded` markers localize the
 boundary before the continuous Python worker starts and remain diagnostic-only.

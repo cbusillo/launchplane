@@ -5,6 +5,9 @@ from unittest.mock import patch
 
 import click
 
+from control_plane.contracts.privileged_operation_worker_heartbeat import (
+    privileged_operation_worker_identity_sha256,
+)
 from control_plane.dokploy import runtime_evidence
 
 
@@ -62,7 +65,7 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
             if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
                 return [
                     {
-                        "containerId": "worker-container",
+                        "containerId": "a" * 64,
                         "serviceName": "launchplane-privileged-operation-workers",
                         "state": "running",
                         "status": "Up 5 minutes",
@@ -72,6 +75,7 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
                 "Image": f"sha256:{image_id}",
                 "Config": {
                     "Image": f"ghcr.io/example/launchplane@sha256:{image_digest}",
+                    "Hostname": "a" * 12,
                     "Env": ["LAUNCHPLANE_DATABASE_URL=secret"],
                 },
             }
@@ -98,7 +102,7 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(
             requests[1]["query"],
-            {"containerId": "worker-container", "serverId": "server-1"},
+            {"containerId": "a" * 64, "serverId": "server-1"},
         )
         self.assertTrue(runtime["running"])
         self.assertTrue(runtime["image_reference_immutable"])
@@ -107,6 +111,10 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
             f"ghcr.io/example/launchplane@sha256:{image_digest}",
         )
         self.assertEqual(runtime["image_id"], f"sha256:{image_id}")
+        self.assertEqual(
+            runtime["container_identity_sha256"],
+            privileged_operation_worker_identity_sha256("a" * 12),
+        )
         self.assertNotIn("Env", runtime)
         self.assertNotIn("secret", str(runtime))
 
@@ -116,12 +124,15 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
             side_effect=[
                 [
                     {
-                        "containerId": "worker-container",
+                        "containerId": "a" * 64,
                         "serviceName": "worker",
                         "state": "running",
                     }
                 ],
-                {"Image": f"sha256:{'b' * 64}", "Config": {"Image": "example:latest"}},
+                {
+                    "Image": f"sha256:{'b' * 64}",
+                    "Config": {"Image": "example:latest", "Hostname": "a" * 12},
+                },
             ],
         ):
             runtime = runtime_evidence.fetch_compose_service_runtime(
@@ -140,13 +151,16 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
             "control_plane.dokploy.runtime_evidence.dokploy_api.dokploy_request",
             side_effect=[
                 [
-                    {"containerId": "database", "name": "launchplane_database_1"},
-                    {"containerId": "worker", "name": "launchplane_worker_1"},
+                    {"containerId": "c" * 64, "name": "launchplane_database_1"},
+                    {"containerId": "b" * 64, "name": "launchplane_worker_1"},
                 ],
                 [
                     {
                         "Image": f"sha256:{'b' * 64}",
-                        "Config": {"Image": f"example@sha256:{'a' * 64}"},
+                        "Config": {
+                            "Image": f"example@sha256:{'a' * 64}",
+                            "Hostname": "b" * 12,
+                        },
                     }
                 ],
             ],
@@ -188,7 +202,7 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
             patch(
                 "control_plane.dokploy.runtime_evidence.dokploy_api.dokploy_request",
                 side_effect=[
-                    [{"containerId": "worker", "serviceName": "worker"}],
+                    [{"containerId": "d" * 64, "serviceName": "worker"}],
                     click.ClickException("provider secret detail"),
                 ],
             ),
@@ -229,13 +243,47 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
             patch(
                 "control_plane.dokploy.runtime_evidence.dokploy_api.dokploy_request",
                 side_effect=[
-                    [{"containerId": "worker", "serviceName": "worker"}],
-                    {"Image": "", "Config": {"Image": "example:latest"}},
+                    [{"containerId": "d" * 64, "serviceName": "worker"}],
+                    {
+                        "Image": "",
+                        "Config": {
+                            "Image": "example:latest",
+                            "Hostname": "d" * 12,
+                        },
+                    },
                 ],
             ),
             self.assertRaisesRegex(
                 runtime_evidence.DokployEvidenceProviderError,
                 "image-identity",
+            ),
+        ):
+            runtime_evidence.fetch_compose_service_runtime(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="launchplane",
+                service_name="worker",
+            )
+
+    def test_fetch_compose_service_runtime_rejects_custom_hostname_identity(self) -> None:
+        with (
+            patch(
+                "control_plane.dokploy.runtime_evidence.dokploy_api.dokploy_request",
+                side_effect=[
+                    [{"containerId": "e" * 64, "serviceName": "worker"}],
+                    {
+                        "Image": f"sha256:{'b' * 64}",
+                        "Config": {
+                            "Image": f"example@sha256:{'a' * 64}",
+                            "Hostname": "custom-worker",
+                        },
+                    },
+                ],
+            ),
+            self.assertRaisesRegex(
+                runtime_evidence.DokployEvidenceProviderError,
+                "container-identity",
             ),
         ):
             runtime_evidence.fetch_compose_service_runtime(

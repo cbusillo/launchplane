@@ -306,6 +306,7 @@ def require_dokploy_target_inspect_store(record_store: object) -> DokployTargetI
         "read_dokploy_target_record",
         "read_dokploy_target_id_record",
         "read_provider_target_record",
+        "list_privileged_operation_worker_heartbeat_records",
     )
     missing_methods = [
         method_name

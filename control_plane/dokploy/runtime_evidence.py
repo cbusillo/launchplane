@@ -6,11 +6,15 @@ from typing import Literal, TypedDict
 
 import click
 
+from control_plane.contracts.privileged_operation_worker_heartbeat import (
+    normalize_privileged_operation_worker_image_reference,
+    privileged_operation_worker_identity_sha256,
+)
 from control_plane.dokploy import api as dokploy_api
 
 _STRUCTURED_EVENT_PATTERN = re.compile(r"^$|^[a-z][a-z0-9_]{0,127}$")
 _IMAGE_ID_PATTERN = re.compile(r"^sha256:[a-f0-9]{64}$")
-_IMMUTABLE_IMAGE_REFERENCE_PATTERN = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64}$")
+_CONTAINER_RUNTIME_ID_PATTERN = re.compile(r"^[a-f0-9]{12,64}$")
 _MAX_RUNTIME_TEXT_LENGTH = 500
 _ALLOWED_STRUCTURED_EVENTS = frozenset(
     {
@@ -38,6 +42,7 @@ type DokployEvidenceProviderOperation = Literal[
     "container-list",
     "service-select",
     "container-config",
+    "container-identity",
     "image-identity",
     "runtime-log-read",
 ]
@@ -78,13 +83,12 @@ def normalize_expected_image_reference(raw_image_reference: str) -> str:
     image_reference = raw_image_reference.strip()
     if not image_reference:
         return ""
-    if len(image_reference) > _MAX_RUNTIME_TEXT_LENGTH or not (
-        _IMMUTABLE_IMAGE_REFERENCE_PATTERN.fullmatch(image_reference)
-    ):
+    normalized_reference = normalize_privileged_operation_worker_image_reference(image_reference)
+    if len(image_reference) > _MAX_RUNTIME_TEXT_LENGTH or not normalized_reference:
         raise click.ClickException(
             "Expected Dokploy runtime image must be an immutable repository@sha256 reference."
         )
-    return image_reference
+    return normalized_reference
 
 
 def fetch_compose_service_runtime(
@@ -158,6 +162,20 @@ def fetch_compose_service_runtime(
     configured_image = (
         str(raw_config.get("Image") or "").strip() if isinstance(raw_config, dict) else ""
     )
+    configured_hostname = (
+        str(raw_config.get("Hostname") or "").strip() if isinstance(raw_config, dict) else ""
+    )
+    normalized_container_id = container_id.lower()
+    normalized_hostname = configured_hostname.lower()
+    if not (
+        _CONTAINER_RUNTIME_ID_PATTERN.fullmatch(normalized_container_id)
+        and _CONTAINER_RUNTIME_ID_PATTERN.fullmatch(normalized_hostname)
+        and (
+            normalized_container_id.startswith(normalized_hostname)
+            or normalized_hostname.startswith(normalized_container_id)
+        )
+    ):
+        raise DokployEvidenceProviderError("container-identity")
     if not configured_image:
         raise DokployEvidenceProviderError("image-identity")
     image_id = str(container_config.get("Image") or "").strip().lower()
@@ -169,15 +187,15 @@ def fetch_compose_service_runtime(
     status = dokploy_api.redact_dokploy_log_line(
         str(selected_container.get("status") or selected_container.get("Status") or "")
     )
-    immutable_image_reference = (
+    immutable_image_reference = normalize_privileged_operation_worker_image_reference(
         configured_image
-        if len(configured_image) <= _MAX_RUNTIME_TEXT_LENGTH
-        and _IMMUTABLE_IMAGE_REFERENCE_PATTERN.fullmatch(configured_image)
-        else ""
     )
     return {
         "compose_id": normalized_compose_id,
         "container_id": container_id,
+        "container_identity_sha256": privileged_operation_worker_identity_sha256(
+            normalized_hostname
+        ),
         "service": normalized_service_name,
         "state": state.strip()[:_MAX_RUNTIME_TEXT_LENGTH],
         "status": status.strip()[:_MAX_RUNTIME_TEXT_LENGTH],

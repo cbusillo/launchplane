@@ -1491,7 +1491,7 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "c2221a0b1c2d")
+        self.assertEqual(EXPECTED_ALEMBIC_HEAD_REVISION, "d2219a0b1c2d")
         self.assertEqual(
             indexes[
                 (

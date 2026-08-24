@@ -3000,24 +3000,41 @@ Compose runs that loop as `launchplane-privileged-operation-workers` using the
 same image as the API service. Its startup surface accepts only process settings
 for polling, batch limit, error backoff, and consecutive-error threshold; it
 does not accept operation IDs, plan digests, targets, or execution payloads.
+Production compose must pass the exact immutable deployed
+`DOCKER_IMAGE_REFERENCE` into the worker. A mutable local tag is normalized to
+an empty heartbeat image and can never satisfy runtime proof.
 
 Before any canary-rule activation, prove the privileged-operation worker
-container is running the expected image and record one successful DB-backed poll
-from its structured redacted telemetry. Dispatch the protected `Dokploy Target
+container is running the expected image and has persisted one fresh successful
+DB-backed poll heartbeat. Dispatch the protected `Dokploy Target
 Inspect` workflow with the deployed target identity, exact service
 `launchplane-privileged-operation-workers`, and event
 `privileged_operation_worker_poll_succeeded`, plus the exact immutable image
 reference retained from the deployment as `expected_image`. Retain its redacted
 artifact for both success and failure diagnosis, but treat it as activation
 evidence only when `runtime_evidence.proof_ready` is true. The artifact contains
-image/state identity, exact image-match state, and a structured-event count, not
-raw logs or container config.
+image/state identity, exact image-match state, bounded heartbeat freshness and
+identity status, and diagnostic structured-event counts, not raw logs, worker
+identity digests, hostnames, or container config. Proof requires a fresh
+matching heartbeat whose internally hashed runtime hostname matches Dokploy's
+provider-observed Docker-assigned hostname and whose immutable image equals the
+provider-observed and operator-supplied image. The provider hostname must be a
+hexadecimal prefix of the selected container ID; a custom hostname blocks proof.
+Missing, stale, future-dated, identity-mismatched, or image-mismatched
+heartbeats block activation. Other fresh worker rows are diagnostic and cannot
+substitute for the selected container identity.
 The allow-listed `privileged_operation_worker_started` and
 `privileged_operation_worker_store_build_started` events may be queried for
-diagnostic localization, but they are not activation-proof eligible. Runtime
+diagnostic localization, but they are not activation-proof authority. Runtime
 evidence includes bounded JSON/non-JSON counts and a fixed provider-error code
-for diagnosis, never line content. Provider errors are classified only from
-non-JSON provider text and always prevent activation proof.
+for diagnosis, never line content. Provider log errors and unavailable log reads
+remain diagnostic and do not block a valid DB heartbeat. Target lookup, service
+selection, container configuration/identity, and image identity failures remain
+hard failures.
+Because runtime compatibility accepts only the checked-in Alembic head, a code
+rollback across this migration also requires the matching schema downgrade;
+deploying the previous image alone fails closed instead of running against an
+unknown heartbeat schema.
 Activate only
 `privileged_secret_operation.plan`, `privileged_secret_operation.read`, and
 `privileged_secret_operation.cancel` first. Add

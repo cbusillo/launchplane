@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from typing import Any, Literal, Protocol, cast
@@ -26,6 +26,13 @@ from control_plane.contracts.privileged_operation import (
     build_privileged_operation_event_id,
     privileged_operation_pre_state_digest,
     privileged_operation_record_digest,
+)
+from control_plane.contracts.privileged_operation_worker_heartbeat import (
+    PRIVILEGED_OPERATION_WORKER_HEARTBEAT_FUTURE_SKEW_SECONDS,
+    PRIVILEGED_OPERATION_WORKER_HEARTBEAT_RETENTION_SECONDS,
+    PrivilegedOperationWorkerHeartbeatRecord,
+    normalize_privileged_operation_worker_image_reference,
+    privileged_operation_worker_identity_sha256,
 )
 from control_plane.durable_operation_authorization import (
     managed_github_id_rule_allows,
@@ -99,6 +106,16 @@ class PrivilegedOperationExecutionStore(PrivilegedOperationStore, Protocol):
     ) -> Any: ...
 
 
+class PrivilegedOperationWorkerHeartbeatStore(Protocol):
+    def write_privileged_operation_worker_heartbeat_record(
+        self,
+        record: PrivilegedOperationWorkerHeartbeatRecord,
+        *,
+        prune_before: str,
+        prune_after: str,
+    ) -> None: ...
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -151,6 +168,47 @@ def require_privileged_operation_execution_store(
     if any(not callable(getattr(record_store, name, None)) for name in required_methods):
         raise TypeError("Privileged-operation execution requires PostgreSQL mutation storage.")
     return cast(PrivilegedOperationExecutionStore, planning_store)
+
+
+def require_privileged_operation_worker_heartbeat_store(
+    record_store: object,
+) -> PrivilegedOperationWorkerHeartbeatStore:
+    if not callable(
+        getattr(record_store, "write_privileged_operation_worker_heartbeat_record", None)
+    ):
+        raise TypeError(
+            "Privileged-operation worker heartbeat requires PostgreSQL heartbeat storage."
+        )
+    return cast(PrivilegedOperationWorkerHeartbeatStore, record_store)
+
+
+def record_privileged_operation_worker_poll_heartbeat(
+    *,
+    record_store: object,
+    runtime_identity: str,
+    image_reference: str,
+    poll_interval_seconds: int,
+    now: Callable[[], datetime] = _utc_now,
+) -> PrivilegedOperationWorkerHeartbeatRecord:
+    store = require_privileged_operation_worker_heartbeat_store(record_store)
+    recorded_at = now().astimezone(timezone.utc)
+    record = PrivilegedOperationWorkerHeartbeatRecord(
+        worker_identity_sha256=privileged_operation_worker_identity_sha256(runtime_identity),
+        image_reference=normalize_privileged_operation_worker_image_reference(image_reference),
+        poll_interval_seconds=poll_interval_seconds,
+        last_poll_succeeded_at=recorded_at.isoformat(),
+    )
+    store.write_privileged_operation_worker_heartbeat_record(
+        record,
+        prune_before=(
+            recorded_at - timedelta(seconds=PRIVILEGED_OPERATION_WORKER_HEARTBEAT_RETENTION_SECONDS)
+        ).isoformat(),
+        prune_after=(
+            recorded_at
+            + timedelta(seconds=PRIVILEGED_OPERATION_WORKER_HEARTBEAT_FUTURE_SKEW_SECONDS)
+        ).isoformat(),
+    )
+    return record
 
 
 def _construct_approver_authorization(

@@ -31,6 +31,8 @@ PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS = (
     "launchplane_secret_bindings_lookup_idx",
     "launchplane_secret_audit_events",
     "launchplane_secret_audit_events_secret_idx",
+    "launchplane_privileged_operation_worker_heartbeats",
+    "launchplane_privop_worker_heartbeats_freshness_idx",
 )
 
 

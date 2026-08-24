@@ -26,6 +26,7 @@ from control_plane.openapi_export import write_canonical_openapi
 from control_plane.privileged_operation_worker import (
     PrivilegedOperationExecutionStore,
     execute_approved_privileged_operations_once,
+    record_privileged_operation_worker_poll_heartbeat,
 )
 from control_plane.contracts.driver_descriptor import DriverContextView
 from control_plane.drivers.registry import build_driver_context_view
@@ -555,6 +556,8 @@ def service_privileged_operation_workers_run(
     generated_lease_owner = (
         f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
     )
+    runtime_identity = socket.gethostname()
+    image_reference = os.environ.get("DOCKER_IMAGE_REFERENCE", "")
     stop_event = Event()
 
     def request_stop(_signal_number: int, _frame: object) -> None:
@@ -629,6 +632,12 @@ def service_privileged_operation_workers_run(
                     record_store=store,
                     lease_owner=generated_lease_owner,
                     limit=limit,
+                )
+                record_privileged_operation_worker_poll_heartbeat(
+                    record_store=store,
+                    runtime_identity=runtime_identity,
+                    image_reference=image_reference,
+                    poll_interval_seconds=poll_seconds,
                 )
             except Exception as error:  # noqa: BLE001 - bounded worker retry loop.
                 consecutive_errors += 1

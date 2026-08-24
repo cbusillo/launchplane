@@ -184,6 +184,9 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_record_digest,
     validate_privileged_operation_transition,
 )
+from control_plane.contracts.privileged_operation_worker_heartbeat import (
+    PrivilegedOperationWorkerHeartbeatRecord,
+)
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -1052,6 +1055,23 @@ class LaunchplanePrivilegedOperationEventRow(Base):
     sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     action: Mapped[str] = mapped_column(String, nullable=False)
     occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePrivilegedOperationWorkerHeartbeatRow(Base):
+    __tablename__ = "launchplane_privileged_operation_worker_heartbeats"
+    __table_args__ = (
+        Index(
+            "launchplane_privop_worker_heartbeats_freshness_idx",
+            "worker_kind",
+            "last_poll_succeeded_at",
+        ),
+    )
+
+    worker_identity_sha256: Mapped[str] = mapped_column(String, primary_key=True)
+    worker_kind: Mapped[str] = mapped_column(String, nullable=False)
+    image_reference: Mapped[str] = mapped_column(String, nullable=False)
+    last_poll_succeeded_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -9170,6 +9190,59 @@ class PostgresRecordStore(HumanSessionStore):
         return tuple(
             self._read_payload(model_type=PrivilegedOperationEventRecord, payload=row.payload)
             for row in rows
+        )
+
+    def write_privileged_operation_worker_heartbeat_record(
+        self,
+        record: PrivilegedOperationWorkerHeartbeatRecord,
+        *,
+        prune_before: str,
+        prune_after: str,
+    ) -> None:
+        with self._session_factory() as session:
+            session.execute(
+                delete(LaunchplanePrivilegedOperationWorkerHeartbeatRow).where(
+                    LaunchplanePrivilegedOperationWorkerHeartbeatRow.worker_kind
+                    == record.worker_kind,
+                    or_(
+                        LaunchplanePrivilegedOperationWorkerHeartbeatRow.last_poll_succeeded_at
+                        < prune_before,
+                        LaunchplanePrivilegedOperationWorkerHeartbeatRow.last_poll_succeeded_at
+                        > prune_after,
+                    ),
+                )
+            )
+            session.merge(
+                LaunchplanePrivilegedOperationWorkerHeartbeatRow(
+                    worker_identity_sha256=record.worker_identity_sha256,
+                    worker_kind=record.worker_kind,
+                    image_reference=record.image_reference,
+                    last_poll_succeeded_at=record.last_poll_succeeded_at,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
+
+    def list_privileged_operation_worker_heartbeat_records(
+        self,
+        *,
+        worker_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[PrivilegedOperationWorkerHeartbeatRecord, ...]:
+        filters: list[object] = []
+        if worker_kind:
+            filters.append(
+                LaunchplanePrivilegedOperationWorkerHeartbeatRow.worker_kind == worker_kind
+            )
+        return self._list_models(
+            model_type=PrivilegedOperationWorkerHeartbeatRecord,
+            orm_model=LaunchplanePrivilegedOperationWorkerHeartbeatRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePrivilegedOperationWorkerHeartbeatRow.last_poll_succeeded_at.desc(),
+                LaunchplanePrivilegedOperationWorkerHeartbeatRow.worker_identity_sha256.asc(),
+            ),
+            limit=limit,
         )
 
     def write_owner_acceptance_event_record(

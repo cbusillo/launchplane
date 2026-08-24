@@ -30,7 +30,7 @@ name: Dokploy Target Inspect
         default: ""
         type: string
       event:
-        description: Optional structured event name that must be observed for runtime proof.
+        description: Optional allow-listed runtime diagnostic event.
         required: false
         default: ""
         type: string
@@ -102,12 +102,6 @@ jobs:
             echo "runtime proof requires the expected immutable image." >&2
             exit 1
           fi
-          if [ -n "$(printf '%s' "$SERVICE" | xargs)" ] \
-            && [ -z "$(printf '%s' "$EVENT" | xargs)" ]; then
-            echo "runtime proof requires the structured event name." >&2
-            exit 1
-          fi
-
       - name: Build inspect request
         id: request
         shell: bash
