@@ -239,6 +239,50 @@ class DokployRuntimeEvidenceTests(unittest.TestCase):
 
         self.assertEqual(matching_event_count, 1)
 
+    def test_fetch_compose_container_logs_uses_selected_container_without_search(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def capture_request(**kwargs: object) -> object:
+            requests.append(kwargs)
+            return {
+                "logs": (
+                    '{"event":"privileged_operation_worker_poll_succeeded"}\nSERVICE_TOKEN=secret'
+                )
+            }
+
+        with patch(
+            "control_plane.dokploy.runtime_evidence.dokploy_api.dokploy_request",
+            side_effect=capture_request,
+        ):
+            lines = runtime_evidence.fetch_compose_container_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                container_id="worker-container",
+                line_count=200,
+            )
+
+        self.assertEqual(requests[0]["path"], "/api/compose.readLogs")
+        self.assertEqual(
+            requests[0]["query"],
+            {
+                "composeId": "compose-123",
+                "containerId": "worker-container",
+                "tail": 200,
+                "since": "1d",
+            },
+        )
+        query = requests[0]["query"]
+        assert isinstance(query, dict)
+        self.assertNotIn("search", query)
+        self.assertEqual(
+            lines,
+            (
+                '{"event":"privileged_operation_worker_poll_succeeded"}',
+                "SERVICE_TOKEN=[redacted]",
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

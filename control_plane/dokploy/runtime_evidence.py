@@ -146,6 +146,7 @@ def fetch_compose_service_runtime(
     )
     return {
         "compose_id": normalized_compose_id,
+        "container_id": container_id,
         "service": normalized_service_name,
         "state": state.strip()[:_MAX_RUNTIME_TEXT_LENGTH],
         "status": status.strip()[:_MAX_RUNTIME_TEXT_LENGTH],
@@ -155,6 +156,37 @@ def fetch_compose_service_runtime(
         "immutable_image_reference": immutable_image_reference,
         "image_reference_immutable": bool(immutable_image_reference),
     }
+
+
+def fetch_compose_container_logs(
+    *,
+    host: str,
+    token: str,
+    compose_id: str,
+    container_id: str,
+    line_count: int,
+) -> tuple[str, ...]:
+    normalized_compose_id = compose_id.strip()
+    normalized_container_id = container_id.strip()
+    if not normalized_compose_id or not normalized_container_id:
+        raise DokployEvidenceProviderError("runtime-log-read")
+    normalized_line_count = dokploy_api.normalize_dokploy_log_line_count(line_count)
+    try:
+        payload = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/compose.readLogs",
+            query={
+                "composeId": normalized_compose_id,
+                "containerId": normalized_container_id,
+                "tail": normalized_line_count,
+                "since": "1d",
+            },
+        )
+    except click.ClickException as error:
+        raise DokployEvidenceProviderError("runtime-log-read") from error
+    lines = dokploy_api.normalize_dokploy_log_payload(payload)
+    return lines[-normalized_line_count:]
 
 
 def count_structured_log_events(lines: tuple[str, ...], *, event_name: str) -> int:
