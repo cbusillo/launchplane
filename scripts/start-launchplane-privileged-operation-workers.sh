@@ -21,6 +21,8 @@ if ! command -v timeout >/dev/null 2>&1; then
 	exit 1
 fi
 
+printf '{"event":"privileged_operation_worker_entrypoint_started"}\n'
+
 set +e
 set -- env -i \
 	"PATH=$PATH" \
@@ -57,6 +59,8 @@ if [ "$startup_probe_status" -ne 0 ]; then
 		"$startup_probe_error_type"
 	exit 1
 fi
+
+printf '{"event":"privileged_operation_worker_entrypoint_probe_succeeded"}\n'
 
 schema_probe_evidence_path="$state_dir/.privileged-operation-worker-schema-probe.$$"
 umask 077

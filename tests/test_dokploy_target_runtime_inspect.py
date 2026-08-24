@@ -162,6 +162,8 @@ class DokployTargetRuntimeInspectTests(unittest.TestCase):
 
     def test_diagnostic_worker_event_is_observed_but_not_proof_ready(self) -> None:
         for event_name in (
+            "privileged_operation_worker_entrypoint_started",
+            "privileged_operation_worker_entrypoint_probe_succeeded",
             "privileged_operation_worker_started",
             "privileged_operation_worker_store_build_started",
             "privileged_operation_worker_schema_probe_succeeded",
