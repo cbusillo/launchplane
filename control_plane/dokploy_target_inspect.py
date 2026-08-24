@@ -3,20 +3,53 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Literal, Protocol
 
+import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 
 DokployTargetType = Literal["application", "compose"]
+_RUNTIME_EVIDENCE_LOG_LINE_COUNT = dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT
+_RUNTIME_EVIDENCE_LOG_SINCE = "1d"
 
 
 class FetchDokployTargetPayload(Protocol):
     def __call__(
         self, *, host: str, token: str, target_type: str, target_id: str
     ) -> dokploy_api.JsonObject: ...
+
+
+class FetchDokployComposeServiceRuntime(Protocol):
+    def __call__(
+        self,
+        *,
+        host: str,
+        token: str,
+        compose_id: str,
+        app_name: str,
+        server_id: str,
+        service_name: str,
+    ) -> dokploy_api.JsonObject: ...
+
+
+class FetchDokployComposeLogs(Protocol):
+    def __call__(
+        self,
+        *,
+        host: str,
+        token: str,
+        compose_id: str,
+        app_name: str,
+        server_id: str,
+        service_name: str,
+        line_count: int,
+        since: str,
+        search: str,
+    ) -> tuple[str, ...]: ...
 
 
 class DokployTargetInspectRequest(BaseModel):
@@ -28,6 +61,9 @@ class DokployTargetInspectRequest(BaseModel):
     instance: str = ""
     target_type: DokployTargetType | str = ""
     target_id: str = ""
+    service: str = ""
+    event: str = ""
+    expected_image: str = ""
 
     @model_validator(mode="after")
     def _validate_request(self) -> "DokployTargetInspectRequest":
@@ -36,8 +72,24 @@ class DokployTargetInspectRequest(BaseModel):
         self.instance = self.instance.strip()
         self.target_type = self.target_type.strip().lower()
         self.target_id = self.target_id.strip()
+        try:
+            self.service = dokploy_api.normalize_dokploy_compose_service_name(self.service)
+            self.event = dokploy_runtime_evidence.normalize_structured_event_name(self.event)
+            self.expected_image = dokploy_runtime_evidence.normalize_expected_image_reference(
+                self.expected_image
+            )
+        except click.ClickException as error:
+            raise ValueError(str(error)) from error
         if self.product != "launchplane":
             raise ValueError("Dokploy target inspect requires product 'launchplane'.")
+        if self.event and not self.service:
+            raise ValueError("Dokploy runtime event evidence requires a compose service.")
+        if self.expected_image and not self.service:
+            raise ValueError("Dokploy expected image evidence requires a compose service.")
+        if self.service and not self.event:
+            raise ValueError("Dokploy runtime service evidence requires a structured event.")
+        if self.service and not self.expected_image:
+            raise ValueError("Dokploy runtime service evidence requires an expected image.")
         has_route = bool(self.context or self.instance)
         has_explicit_target = bool(self.target_type or self.target_id)
         if has_route and has_explicit_target:
@@ -76,6 +128,8 @@ def inspect_dokploy_target(
     token: str,
     request: DokployTargetInspectRequest,
     fetch_target_payload: FetchDokployTargetPayload | None = None,
+    fetch_compose_service_runtime: FetchDokployComposeServiceRuntime | None = None,
+    fetch_compose_logs: FetchDokployComposeLogs | None = None,
 ) -> dict[str, object]:
     target_record: DokployTargetRecord | None = None
     target_id_record: DokployTargetIdRecord | None = None
@@ -125,6 +179,66 @@ def inspect_dokploy_target(
         "provider_payload_redacted": True,
         "provider": provider_summary,
     }
+    if request.service:
+        if target_type != "compose":
+            raise ValueError("Dokploy runtime service evidence supports compose targets only.")
+        app_name = str(provider_payload.get("appName") or "").strip()
+        server_id = str(provider_payload.get("serverId") or "").strip()
+        runtime_fetcher = (
+            fetch_compose_service_runtime or dokploy_runtime_evidence.fetch_compose_service_runtime
+        )
+        runtime_payload = runtime_fetcher(
+            host=host,
+            token=token,
+            compose_id=target_id,
+            app_name=app_name,
+            server_id=server_id,
+            service_name=request.service,
+        )
+        logs_fetcher = fetch_compose_logs or dokploy_api.fetch_dokploy_compose_logs
+        logs = logs_fetcher(
+            host=host,
+            token=token,
+            compose_id=target_id,
+            app_name=app_name,
+            server_id=server_id,
+            service_name=request.service,
+            line_count=_RUNTIME_EVIDENCE_LOG_LINE_COUNT,
+            since=_RUNTIME_EVIDENCE_LOG_SINCE,
+            search=request.event,
+        )
+        matching_event_count = dokploy_runtime_evidence.count_structured_log_events(
+            logs,
+            event_name=request.event,
+        )
+        event_observed = matching_event_count > 0
+        event_evidence: dict[str, object] = {
+            "name": request.event,
+            "observed": event_observed,
+            "matching_line_count": matching_event_count,
+            "candidate_line_count": len(logs),
+        }
+        running = runtime_payload.get("running") is True
+        image_reference_immutable = runtime_payload.get("image_reference_immutable") is True
+        immutable_image_reference = str(runtime_payload.get("immutable_image_reference") or "")
+        image_matches_expected = (
+            not request.expected_image or immutable_image_reference == request.expected_image
+        )
+        result["runtime_evidence"] = {
+            "service": request.service,
+            "state": str(runtime_payload.get("state") or ""),
+            "status": str(runtime_payload.get("status") or ""),
+            "running": running,
+            "image_id": str(runtime_payload.get("image_id") or ""),
+            "immutable_image_reference": immutable_image_reference,
+            "image_reference_immutable": image_reference_immutable,
+            "expected_image": request.expected_image,
+            "image_matches_expected": image_matches_expected,
+            "structured_event": event_evidence,
+            "proof_ready": (
+                running and image_reference_immutable and image_matches_expected and event_observed
+            ),
+        }
     if target_record is not None and target_id_record is not None:
         result["tracked_target"] = {
             "context": target_record.context,

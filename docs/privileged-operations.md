@@ -74,6 +74,16 @@ post-activation worker stop, revoke every canary rule and read the active policy
 back. Approval rules must remain active through the worker's terminal
 reauthorization.
 
+Use the protected `Dokploy Target Inspect` workflow for that pre-activation
+proof. Its optional runtime-evidence mode requires an exact compose service,
+expected immutable image, and allow-listed structured event, and returns only
+bounded image/state identity and a structured-event match count. For the worker,
+request service `launchplane-privileged-operation-workers` and event
+`privileged_operation_worker_poll_succeeded`, supply the exact immutable
+deployment reference as `expected_image`, and proceed only when
+`runtime_evidence.proof_ready` is true. Do not retain or expose raw runtime logs,
+container configuration, or environment values as canary evidence.
+
 ## Records And Lifecycle
 
 `PrivilegedOperationRecord` is the current operation projection and

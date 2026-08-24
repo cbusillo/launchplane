@@ -2220,6 +2220,25 @@ raw provider payloads or environment values. The manual `Dokploy Target Inspect`
 workflow is the supported shared and production caller when operators need
 provider evidence without mutating Dokploy or Launchplane records.
 
+Callers may additionally provide an exact compose `service`, expected immutable
+`expected_image`, and the allow-listed structured `event` name. That bounded
+runtime-evidence mode resolves exactly one service container for both image and
+log evidence, reads only its state and immutable image identity, and searches at
+most 1,000 redacted candidate log lines from the last day for the exact JSON
+event field. It returns image-match state, event counts, and a `proof_ready`
+decision only; it never returns container IDs, container config, environment
+values, configured mutable image text, or raw log lines. Missing or ambiguous
+containers, invalid image identity, and provider failures fail closed. The
+manual workflow treats a requested runtime proof as failed unless the service is
+running, its immutable configured image exactly matches the operator-supplied
+expected image, and the requested event was observed.
+
+Runtime-event evidence remains under `dokploy_target.inspect` because the
+service accepts only code-owned allow-listed event names and returns counts, not
+log content. It is not an alternate arbitrary log-read surface; caller-selected
+log text and raw lines remain exclusively behind `target_logs.read` and exact
+context/instance authorization.
+
 The manual `Product Environment Evidence` workflow is the supported read-only
 caller for product environment read-model evidence. It uses GitHub OIDC and
 `product_environment.read` to call `GET

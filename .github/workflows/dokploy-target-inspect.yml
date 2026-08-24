@@ -24,13 +24,28 @@ name: Dokploy Target Inspect
         required: false
         default: ""
         type: string
+      service:
+        description: Optional exact compose service for bounded runtime evidence.
+        required: false
+        default: ""
+        type: string
+      event:
+        description: Optional structured event name that must be observed for runtime proof.
+        required: false
+        default: ""
+        type: string
+      expected_image:
+        description: Expected immutable image reference for runtime proof.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  group: dokploy-target-inspect-${{ inputs.context }}-${{ inputs.instance }}-${{ inputs.target_type }}-${{ inputs.target_id }}
+  group: dokploy-target-inspect-${{ inputs.context }}-${{ inputs.instance }}-${{ inputs.target_type }}-${{ inputs.target_id }}-${{ inputs.service }}
   cancel-in-progress: false
 
 jobs:
@@ -41,6 +56,9 @@ jobs:
       INSTANCE: ${{ inputs.instance }}
       TARGET_TYPE: ${{ inputs.target_type }}
       TARGET_ID: ${{ inputs.target_id }}
+      SERVICE: ${{ inputs.service }}
+      EVENT: ${{ inputs.event }}
+      EXPECTED_IMAGE: ${{ inputs.expected_image }}
     steps:
       - name: Validate inspect inputs
         shell: bash
@@ -74,6 +92,21 @@ jobs:
             echo "context/instance or target_type/target_id is required." >&2
             exit 1
           fi
+          if [ -n "$(printf '%s' "$EVENT" | xargs)" ] \
+            && [ -z "$(printf '%s' "$SERVICE" | xargs)" ]; then
+            echo "event requires an exact compose service." >&2
+            exit 1
+          fi
+          if [ -n "$(printf '%s' "$SERVICE" | xargs)" ] \
+            && [ -z "$(printf '%s' "$EXPECTED_IMAGE" | xargs)" ]; then
+            echo "runtime proof requires the expected immutable image." >&2
+            exit 1
+          fi
+          if [ -n "$(printf '%s' "$SERVICE" | xargs)" ] \
+            && [ -z "$(printf '%s' "$EVENT" | xargs)" ]; then
+            echo "runtime proof requires the structured event name." >&2
+            exit 1
+          fi
 
       - name: Build inspect request
         id: request
@@ -85,13 +118,19 @@ jobs:
             --arg instance "$INSTANCE" \
             --arg target_type "$TARGET_TYPE" \
             --arg target_id "$TARGET_ID" \
+            --arg service "$SERVICE" \
+            --arg event "$EVENT" \
+            --arg expected_image "$EXPECTED_IMAGE" \
             'def encpair($key; $value):
               select(($value | length) > 0) | "\($key)=\($value | @uri)";
             [
               encpair("context"; $context),
               encpair("instance"; $instance),
               encpair("target_type"; $target_type),
-              encpair("target_id"; $target_id)
+              encpair("target_id"; $target_id),
+              encpair("service"; $service),
+              encpair("event"; $event),
+              encpair("expected_image"; $expected_image)
             ] | join("&")')"
           echo "route_path=/v1/dokploy-targets/inspect?${query}" >> "$GITHUB_OUTPUT"
 
@@ -118,6 +157,11 @@ jobs:
             echo "Dokploy target inspect failed with HTTP ${STATUS_CODE}." >&2
             exit 1
           fi
+          if [ -n "$(printf '%s' "$SERVICE" | xargs)" ] \
+            && [ "$(jq -r '.inspect.runtime_evidence.proof_ready // false' "$response_file")" != "true" ]; then
+            echo "Dokploy target runtime evidence is not proof-ready." >&2
+            exit 1
+          fi
 
       - name: Upload inspect evidence
         if: always()
@@ -141,7 +185,8 @@ jobs:
                 trace_id,
                 target: .inspect.tracked_target,
                 provider_target_record: .inspect.provider_target_record,
-                provider: .inspect.provider
+                provider: .inspect.provider,
+                runtime_evidence: .inspect.runtime_evidence
               }' dokploy-target-inspect-response.json
             fi
           } >> "$GITHUB_STEP_SUMMARY"

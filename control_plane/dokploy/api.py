@@ -624,6 +624,19 @@ def _select_compose_log_container(
     return {}
 
 
+def select_dokploy_compose_container(
+    containers: list[JsonObject],
+    *,
+    app_name: str = "",
+    service_name: str = "",
+) -> JsonObject:
+    return _select_compose_log_container(
+        containers,
+        app_name=app_name,
+        service_name=service_name,
+    )
+
+
 def _compose_log_container_matches_service(
     container: JsonObject,
     *,
@@ -1315,6 +1328,10 @@ def _collect_object_items(raw_items: list[JsonValue]) -> list[JsonObject]:
         if item_as_object is not None:
             object_items.append(item_as_object)
     return object_items
+
+
+def collect_dokploy_object_items(raw_items: list[JsonValue]) -> list[JsonObject]:
+    return _collect_object_items(raw_items)
 
 
 def _wait_for_deployment_status(
