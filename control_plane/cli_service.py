@@ -1,6 +1,7 @@
 import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+import os
 from pathlib import Path
 import signal
 import socket
@@ -56,9 +57,28 @@ from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
     run_verireel_prod_backup_gate_operation_worker_loop,
     run_verireel_prod_backup_gate_operation_worker_once,
 )
+
 from control_plane.workflows.public_ingress_monitor import public_ingress_notification_drivers
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
+
+_PRIVILEGED_OPERATION_WORKER_SCHEMA_PROBE_EVIDENCE = (
+    b"launchplane-privileged-operation-worker-schema-probe-completed-v1\n"
+)
+
+
+def _consume_privileged_operation_worker_schema_probe_evidence(file_descriptor: int) -> None:
+    try:
+        with os.fdopen(file_descriptor, "rb", closefd=True) as evidence_file:
+            evidence = evidence_file.read(
+                len(_PRIVILEGED_OPERATION_WORKER_SCHEMA_PROBE_EVIDENCE) + 1
+            )
+    except OSError as error:
+        raise click.ClickException(
+            "Privileged-operation worker startup probe evidence is unavailable."
+        ) from error
+    if evidence != _PRIVILEGED_OPERATION_WORKER_SCHEMA_PROBE_EVIDENCE:
+        raise click.ClickException("Privileged-operation worker startup probe evidence is invalid.")
 
 
 _SERVICE_TARGET_TYPE_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_TYPE",)
@@ -511,6 +531,12 @@ def service_privileged_operation_workers_run_once(
 @click.option(
     "--max-consecutive-errors", type=click.IntRange(min=1, max=100), default=3, show_default=True
 )
+@click.option(
+    "--schema-probe-fd",
+    type=click.IntRange(min=3, max=255),
+    required=True,
+    hidden=True,
+)
 def service_privileged_operation_workers_run(
     state_dir: Path,
     database_url: str,
@@ -519,11 +545,13 @@ def service_privileged_operation_workers_run(
     limit: int,
     error_backoff_seconds: int,
     max_consecutive_errors: int,
+    schema_probe_fd: int,
 ) -> None:
     if not database_url.strip():
         raise click.ClickException(
             "Privileged-operation workers require --database-url or LAUNCHPLANE_DATABASE_URL."
         )
+    _consume_privileged_operation_worker_schema_probe_evidence(schema_probe_fd)
     generated_lease_owner = (
         f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
     )
@@ -571,6 +599,7 @@ def service_privileged_operation_workers_run(
                         PrivilegedOperationExecutionStore,
                         build_privileged_operation_worker_store(
                             database_url=database_url,
+                            schema_probe_completed=True,
                             on_schema_probe_succeeded=report_schema_probe_succeeded,
                         ),
                     )

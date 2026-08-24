@@ -1600,14 +1600,19 @@ run` is the foreground loop intended for an external process supervisor, and
   schema verification and health gate, this worker performs a bounded two-query
   compatibility probe: the exact runtime-compatible Alembic revision and the
   worker-domain tables and safety indexes required before claim or execution.
-  It does not repeat the API's catalog-wide schema audit. The startup probe runs
-  in an isolated child process with a hard wall-clock deadline, and both the
-  probe and runtime store use bounded PostgreSQL connect and per-statement
-  waits. A timed-out startup probe returns control to the supervised worker
-  retry/threshold-exit path; a timed-out runtime DB statement fails through the
-  existing reservation, transaction, retry, and reconciliation boundaries.
-  An unavailable or blocked startup probe or poll therefore cannot hang the
-  worker loop silently.
+  It does not repeat the API's catalog-wide schema audit. The container
+  entrypoint runs the startup probe as a separate process under a hard
+  wall-clock deadline before starting the worker process, then passes one-time
+  completion evidence through an inherited, unlinked file descriptor. The
+  continuous worker command requires that evidence and refuses arbitrary direct
+  startup outside the supervised entrypoint.
+  probe runs with only database, PostgreSQL/TLS, locale, and Python runtime
+  environment inputs. Both the probe and runtime store use bounded PostgreSQL
+  connect and per-statement waits. A failed or timed-out startup probe exits for
+  process-supervisor restart; a timed-out runtime DB statement fails through the
+  existing reservation, transaction, retry, and reconciliation boundaries. An
+  unavailable or blocked startup probe or poll therefore cannot hang the worker
+  loop silently.
   The one-time structured events
   `privileged_operation_worker_schema_probe_succeeded`,
   `privileged_operation_worker_store_initialized`, and
