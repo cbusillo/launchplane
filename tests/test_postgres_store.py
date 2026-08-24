@@ -221,7 +221,7 @@ from control_plane.tenant_repository_classification import (
 from control_plane.storage.factory import (
     PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS,
     PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS,
-    PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_MILLISECONDS,
+    PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS,
     PrivilegedOperationWorkerSchemaError,
     build_privileged_operation_worker_store,
     build_shared_record_store,
@@ -3710,13 +3710,16 @@ class PostgresRecordStoreTests(unittest.TestCase):
                         PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS
                     ),
                     postgres_statement_timeout_milliseconds=(
-                        PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_MILLISECONDS
+                        PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS
                     ),
                 ),
                 call(
                     database_url=database_url,
                     postgres_connect_timeout_seconds=(
                         PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS
+                    ),
+                    postgres_statement_timeout_milliseconds=(
+                        PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS
                     ),
                 ),
             ],
