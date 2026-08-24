@@ -117,6 +117,9 @@ from control_plane.provider_operations import (
     ProviderTargetSupersession,
     run_durable_provider_operation,
 )
+from control_plane.privileged_operation_worker import (
+    execute_approved_privileged_operations_once,
+)
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
     run_public_ingress_monitor_once,
@@ -138,6 +141,7 @@ from control_plane.storage.postgres import (
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
 )
+from control_plane.storage.factory import build_privileged_operation_worker_store
 from tests.support.durable_operations import durable_operation_cancellation_payload
 from tests.test_product_retirement import _Store as _RetirementStore
 from tests.test_product_retirement import _observation as _retirement_observation
@@ -971,6 +975,30 @@ def _owner_acceptance_system_event(
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_privileged_operation_worker_store_probes_schema_and_empty_poll(self) -> None:
+        with _isolated_postgres_database() as database_url:
+            _upgrade_empty_database_to_head(database_url)
+            store = build_privileged_operation_worker_store(database_url=database_url)
+            try:
+                records = execute_approved_privileged_operations_once(
+                    record_store=store,
+                    lease_owner="postgres-integration-worker",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(records, ())
+
+    def test_runtime_schema_compatibility_reports_missing_relation(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "launchplane_missing_worker_relation",
+            ):
+                store.verify_runtime_schema_compatibility(
+                    required_relations=("launchplane_missing_worker_relation",)
+                )
+
     def test_repository_human_admission_schema_has_postgres_types_and_partial_index(
         self,
     ) -> None:

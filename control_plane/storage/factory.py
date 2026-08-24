@@ -6,6 +6,30 @@ from control_plane.storage.postgres import PostgresRecordStore
 DATABASE_URL_ENV_VARS = ("LAUNCHPLANE_DATABASE_URL",)
 PRIVILEGED_OPERATION_WORKER_CONNECT_TIMEOUT_SECONDS = 10
 PRIVILEGED_OPERATION_WORKER_STARTUP_TIMEOUT_MILLISECONDS = 30_000
+PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS = (
+    "launchplane_privileged_operations",
+    "launchplane_privileged_operations_status_idx",
+    "launchplane_privileged_operations_descriptor_idx",
+    "launchplane_privileged_operation_events",
+    "launchplane_privileged_operation_events_operation_sequence_uidx",
+    "launchplane_privileged_operation_events_occurred_idx",
+    "launchplane_idempotency_records",
+    "launchplane_idempotency_scope_route_key_idx",
+    "launchplane_idempotency_state_lease_idx",
+    "launchplane_idempotency_active_reconciliation_idx",
+    "launchplane_authz_policies",
+    "launchplane_authz_policies_revision_uidx",
+    "launchplane_authz_policies_active_uidx",
+    "launchplane_secrets",
+    "launchplane_secrets_scope_name_idx",
+    "launchplane_secrets_lookup_idx",
+    "launchplane_secret_versions",
+    "launchplane_secret_versions_secret_idx",
+    "launchplane_secret_bindings",
+    "launchplane_secret_bindings_lookup_idx",
+    "launchplane_secret_audit_events",
+    "launchplane_secret_audit_events_secret_idx",
+)
 
 
 class PrivilegedOperationWorkerSchemaError(RuntimeError):
@@ -51,7 +75,9 @@ def build_privileged_operation_worker_store(
         ),
     )
     try:
-        startup_probe.verify_runtime_schema_invariants()
+        startup_probe.verify_runtime_schema_compatibility(
+            required_relations=PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS
+        )
     except RuntimeError as error:
         raise PrivilegedOperationWorkerSchemaError(
             "Launchplane privileged-operation worker schema is not runtime-compatible."
