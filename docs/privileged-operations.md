@@ -85,7 +85,11 @@ deployment reference as `expected_image`, and proceed only when
 container configuration, or environment values as canary evidence. The
 allow-listed `privileged_operation_worker_started` and
 `privileged_operation_worker_store_build_started` events are diagnostic-only
-localization markers and can never make the response proof-ready.
+localization markers and can never make the response proof-ready. Failed proof
+responses also include only structural JSON/non-JSON counts and a fixed
+provider-error classification; they never include a runtime log line. Any
+recognized provider error keeps the response fail-closed even if retained logs
+also contain a matching activation event.
 
 ## Records And Lifecycle
 

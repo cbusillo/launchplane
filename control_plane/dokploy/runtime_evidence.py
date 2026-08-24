@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Literal
+from typing import Literal, TypedDict
 
 import click
 
@@ -23,6 +23,13 @@ _ALLOWED_STRUCTURED_EVENTS = frozenset(
     }
 )
 _ACTIVATION_PROOF_STRUCTURED_EVENTS = frozenset({"privileged_operation_worker_poll_succeeded"})
+_RUNTIME_LOG_PROVIDER_ERROR_MARKERS = (
+    ("configured logging driver does not support reading", "unsupported_logging_driver"),
+    ("no such container", "container_not_found"),
+    ("error response from daemon:", "docker_daemon_error"),
+    ("remote command failed", "provider_command_failed"),
+    ("command execution failed", "provider_command_failed"),
+)
 type DokployEvidenceProviderOperation = Literal[
     "provider-config",
     "target-inspect",
@@ -32,6 +39,14 @@ type DokployEvidenceProviderOperation = Literal[
     "image-identity",
     "runtime-log-read",
 ]
+
+
+class RuntimeLogClassification(TypedDict):
+    structured_event_line_count: int
+    json_line_count: int
+    non_json_line_count: int
+    provider_error_line_count: int
+    provider_error_kind: str
 
 
 class DokployEvidenceProviderError(RuntimeError):
@@ -219,6 +234,41 @@ def count_structured_log_events(lines: tuple[str, ...], *, event_name: str) -> i
         if isinstance(payload, dict) and payload.get("event") == normalized_event_name:
             matching_events += 1
     return matching_events
+
+
+def summarize_runtime_log_lines(lines: tuple[str, ...]) -> RuntimeLogClassification:
+    structured_event_line_count = 0
+    json_line_count = 0
+    non_json_line_count = 0
+    provider_error_line_count = 0
+    provider_error_kind = ""
+    for line in lines:
+        object_start = line.find("{")
+        if object_start >= 0:
+            try:
+                payload, _ = json.JSONDecoder().raw_decode(line[object_start:])
+            except json.JSONDecodeError:
+                pass
+            else:
+                json_line_count += 1
+                if isinstance(payload, dict) and isinstance(payload.get("event"), str):
+                    structured_event_line_count += 1
+                continue
+        non_json_line_count += 1
+        normalized_line = line.lower()
+        for marker, error_kind in _RUNTIME_LOG_PROVIDER_ERROR_MARKERS:
+            if marker in normalized_line:
+                provider_error_line_count += 1
+                if not provider_error_kind:
+                    provider_error_kind = error_kind
+                break
+    return {
+        "structured_event_line_count": structured_event_line_count,
+        "json_line_count": json_line_count,
+        "non_json_line_count": non_json_line_count,
+        "provider_error_line_count": provider_error_line_count,
+        "provider_error_kind": provider_error_kind,
+    }
 
 
 def _normalize_container_config(

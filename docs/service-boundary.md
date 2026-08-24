@@ -2225,13 +2225,18 @@ Callers may additionally provide an exact compose `service`, expected immutable
 runtime-evidence mode resolves exactly one service container for both image and
 log evidence, reads only its state and immutable image identity, and searches at
 most 1,000 redacted candidate log lines from the last day for the exact JSON
-event field. It returns image-match state, event counts, and a `proof_ready`
-decision only; it never returns container IDs, container config, environment
-values, configured mutable image text, or raw log lines. Missing or ambiguous
-containers, invalid image identity, and provider failures fail closed. The
-manual workflow treats a requested runtime proof as failed unless the service is
-running, its immutable configured image exactly matches the operator-supplied
-expected image, and the requested event was observed.
+event field. It returns image-match state, event counts, bounded JSON/non-JSON
+line counts, fixed provider-error classification, and a `proof_ready` decision;
+it never returns container IDs, container config, environment values,
+configured mutable image text, or raw log lines. Provider-error kinds are
+`unsupported_logging_driver`, `container_not_found`, `docker_daemon_error`, and
+`provider_command_failed`. The first recognized non-JSON provider error sets the
+reported kind while every recognized provider-error line is counted. Missing or
+ambiguous containers, invalid image identity, and provider failures fail closed.
+The manual workflow treats a requested runtime proof as failed unless the
+service is running, its immutable configured image exactly matches the
+operator-supplied expected image, the requested event was observed, and no
+provider error was classified.
 
 Provider failures expose only a bounded operation stage such as
 `provider-config`, `target-inspect`, `container-list`, `service-select`,
